@@ -84,6 +84,11 @@ class CiLocal(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / 'cargo').write_text(RECORD)
         (self.bin / 'cargo').chmod(0o755)
+        native = self.bin / 'fractal'
+        native.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CI_LOCAL_TEST_LOG.admission"\n'
+                          'while [ "$1" != -- ]; do shift; done\nshift\n'
+                          'export FRACTAL_RESOURCE_PARENT=fixture\nexec "$@"\n')
+        native.chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
         # nix and the compat-binary script stand in for CI's test-build preparation (they record that they ran).
         # A path nix has valid is what CI_LOCAL_TEST_NIX_VALID names (none unless a test says so).
@@ -97,7 +102,7 @@ class CiLocal(unittest.TestCase):
         # The dev shell's real cargo: a wrapper script outside the account's home (never run here).
         self.devshell = root / 'devshell bin'
         self.devshell.mkdir()
-        (self.devshell / 'cargo').write_text('#!/bin/sh\nexec cargo-wrapped "$@"\n')
+        (self.devshell / 'cargo').write_text(RECORD)
         (self.devshell / 'cargo').chmod(0o755)
         # The recording stand-in first on PATH is the shim, and a cargo in the account's home: neither is the dev shell's.
         (self.home / '.local/bin/cargo').write_text('#!/bin/sh\n')
@@ -129,37 +134,15 @@ class CiLocal(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
-    def test_the_host_build_admission_is_named_from_the_account_s_home(self):
-        # Without the account's admission program the stages' HOME hides nothing to name: no variable is set.
+    def test_direct_call_names_one_native_profile_and_receipt(self):
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 0, done.stderr)
-        for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_LOG', 'BUILD_ADMISSION_FALLBACK_LOCK',
-                     'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS'):
+        argv = Path(str(self.log) + '.admission').read_text().splitlines()
+        self.assertEqual(argv[:8], ['resources', 'exec', '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        self.assertIn('--receipt-file', argv)
+        for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE',
+                     'BUILD_ADMISSION_LOG', 'BUILD_ADMISSION_FALLBACK_LOCK', 'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS'):
             self.assertNotIn(name, calls[-1]['env'])
-        program = self.home / '.local/bin/build-admission'
-        program.write_text('#!/bin/sh\n')
-        program.chmod(0o755)
-        (self.home / '.config').mkdir(exist_ok=True)
-        (self.home / '.config/cargo-priority').write_text('010 agent/*\n')
-        (self.home / '.config/cargo-heavy-slots').write_text('2\n')
-        self.log.unlink(missing_ok=True)
-        done, calls = self.run_local('mail-redelivery-canaries')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        env = calls[-1]['env']
-        self.assertNotEqual(env['HOME'], str(self.home))  # the stages still run in a home of their own
-        self.assertEqual({name: env.get(name) for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_LOG',
-                                                         'BUILD_ADMISSION_FALLBACK_LOCK', 'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS')},
-                         {'BUILD_ADMISSION_BIN': str(program),
-                          'BUILD_ADMISSION_CONFIG': f'{self.home}/.config/build-admission',
-                          'BUILD_ADMISSION_STATE': f'{self.home}/.local/state/st3/operations',
-                          'BUILD_ADMISSION_LOG': f'{self.home}/.local/state/st3/operations/build-admission.log',  # the cargo shim's slot waits
-                          'BUILD_ADMISSION_FALLBACK_LOCK': f'{self.home}/.local/state/st3/operations/build-admission-fallback.lock',
-                          'CARGO_PRIORITY_FILE': f'{self.home}/.config/cargo-priority',
-                          'CARGO_HEAVY_SLOTS': '2'})
-        self.log.unlink(missing_ok=True)
-        done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
-        self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
-        self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
     def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
         # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
@@ -216,7 +199,7 @@ class CiLocal(unittest.TestCase):
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
-            self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
+            self.assertEqual(env['PATH'].split(':')[0], str(self.devshell), 'the real dev-shell cargo wins over wrappers')
             # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
             self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '12', 'a shared host: twelve test threads, not nproc')
@@ -359,38 +342,11 @@ class CiLocal(unittest.TestCase):
                 self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
                 self.assertFalse(tmpdir.exists(), 'removed when the run ends')
 
-    def test_the_host_load_limit_is_waited_out_said_every_minute_and_never_silent(self):
-        loadavg = Path(self.tmp.name) / 'loadavg'
-        loadavg.write_text('34.00 20.00 10.00 1/100 1234\n')
-        for name, extra, expected in (('no limit', {}, 0),
-                                      ('under the limit', {'ST_TEST_MAX_LOAD': '40'}, 0)):
-            with self.subTest(name):
-                self.log.unlink(missing_ok=True)
-                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), **extra)
-                self.assertEqual(done.returncode, expected, done.stderr)
-                self.assertNotIn('waiting: load1', done.stderr)
-                self.assertTrue(calls)
-        self.log.unlink(missing_ok=True)
-        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_MAX_LOAD='20',
-                                     ST_TEST_LOAD_WAIT_MINUTES='0.01', CI_LOCAL_LOAD_POLL='0.1')
-        self.assertEqual(done.returncode, 3)
-        self.assertIn('ci-local: waiting: load1 34.00 > 20 (host limit)', done.stderr)
-        self.assertIn('the host stayed above its load limit: load1 34.00 > 20 (host limit)', done.stderr)
-        self.assertEqual(calls, [], 'nothing was started')
-        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [])
-        # the limit may be a file in the account's config, and a load that drops during the wait lets the run through
-        (self.home / '.config/st-test').mkdir(parents=True)
-        (self.home / '.config/st-test/max-load').write_text('20\n')
-        dropper = subprocess.Popen(['bash', '-c', f'sleep 0.6; echo "5.00 5.00 5.00 1/100 1" > {loadavg}'])
-        self.addCleanup(dropper.wait)
-        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_LOAD_WAIT_MINUTES='1',
-                                     CI_LOCAL_LOAD_POLL='0.1')
+    def test_legacy_load_limit_is_not_an_independent_veto(self):
+        done, calls = self.run_local('mail-redelivery-canaries', ST_TEST_MAX_LOAD='not-a-limit')
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('waiting: load1 34.00 > 20 (host limit)', done.stderr)
         self.assertTrue(calls)
-        done, _ = self.run_local('mail-redelivery-canaries', ST_TEST_MAX_LOAD='lots')
-        self.assertEqual(done.returncode, 2)
-        self.assertIn('must be a number', done.stderr)
+        self.assertNotIn('waiting: load1', done.stderr)
 
     def test_a_failing_property_test_cannot_leave_a_regressions_file_in_the_tree_the_signer_checks(self):
         done, calls = self.run_local('mail-redelivery-canaries')

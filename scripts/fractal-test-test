@@ -53,8 +53,8 @@ DATE = '2026-10-14T12:00:00Z'
 # XDG_RUNTIME_DIR is a private one: a run takes a tree only when a build slot is free, and the host's own cargo slots (busy while this
 # suite runs as a check on a build host) are no test's business; a test that wants slots makes its own.
 # Each fixture selects its own scheduling mode, independently of the enclosing signing run.
-GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN', 'ST_EVIDENCE_SERIAL', st_test.RUN_ADMITTED)},
-               XDG_RUNTIME_DIR=PRIVATE_TMPDIR, ST_EVIDENCE_GOVERN='off',
+GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN', 'ST_EVIDENCE_SERIAL', 'FRACTAL_RESOURCE_PARENT')},
+               XDG_RUNTIME_DIR=PRIVATE_TMPDIR,
                GIT_CONFIG_GLOBAL=str(PRIVATE_GIT_CONFIG), GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
                GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='gc.auto', GIT_CONFIG_VALUE_0='0', GIT_CONFIG_KEY_1='maintenance.auto', GIT_CONFIG_VALUE_1='false',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
@@ -695,8 +695,54 @@ class PoolIdentityTest(unittest.TestCase):
             self.assertEqual(git(tree, 'rev-parse', '--git-common-dir'), str(clone / '.git'))
 
 
-class GovernedTest(unittest.TestCase):
-    """Heavy checks take gate-slot when installed; standalone checks retain their kernel-verified cap selection."""
+class NativeAdmissionTest(unittest.TestCase):
+    """Light argv/clock contract tests; no daemon, build or native custody claim."""
+
+    def test_each_phase_names_one_profile_lane_and_durable_receipt(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            commands = [st_test.governed(['/bin/true'], phase, output=io.StringIO())
+                        for phase in ('linux-gate', 'rust-tests', 'fractal-web')]
+            for command, profile in zip(commands, ('st-test-build', 'st-test-run', 'st-test-build')):
+                self.assertEqual(command[:9], ['/native/fractal', 'resources', 'exec', '--lane', 'st-test',
+                                               '--class', 'check', '--profile', profile])
+                receipt = Path(command[command.index('--receipt-file') + 1])
+                self.assertEqual(receipt.parent, Path(home, '.cache/st-test/admission'))
+                self.assertEqual(command.count('resources'), 1)
+                self.assertNotIn('gate-slot', command)
+            self.assertEqual(len({command[10] for command in commands}), 3)
+
+    def test_missing_native_admission_refuses_even_with_old_opt_out(self):
+        with mock.patch.object(st_test, 'RESOURCE_EXEC', None), \
+                mock.patch.object(st_test.shutil, 'which', return_value=None), \
+                mock.patch.dict(os.environ, {'ST_EVIDENCE_GOVERN': 'off'}, clear=True):
+            with self.assertRaisesRegex(st_test.Failure, 'native-admission-unavailable'):
+                st_test.governed(['/bin/true'], 'linux-gate')
+
+    def test_payload_boundary_closes_only_the_admission_clock(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            command = st_test.governed([sys.executable, '-I', '-c', 'pass'], 'linux-gate', output=io.StringIO())
+            queue = Path(home, 'queue')
+            limit = st_test.Limit(30, queue, 60)
+            options = {'env': dict(os.environ)}
+            st_test.admission_clock(command, limit, options)
+            self.assertEqual(queue.read_text().split()[::3], ['wait'])
+            # Execute just the post-admission continuation, not a fake native host.
+            done = subprocess.run(command[command.index('--') + 1:], env=options['env'])
+            self.assertEqual(done.returncode, 0)
+            self.assertEqual([line.split()[0] for line in queue.read_text().splitlines()], ['wait', 'slot'])
+            self.assertGreater(limit.remaining(), 0)
+
+    def test_real_tool_path_excludes_the_legacy_shim_directory(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True):
+            shim = Path(home, '.local/bin')
+            shim.mkdir(parents=True)
+            self.assertNotIn(str(shim), st_test.check_path().split(os.pathsep))
+
+
+class MemoryCapsTest(unittest.TestCase):
+    """Cgroup diagnostics remain observational; native admission owns launches."""
 
     LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
@@ -718,91 +764,6 @@ class GovernedTest(unittest.TestCase):
                 cgroup.joinpath('cpu.max').write_text(cpu + '\n')
         Path(tmp, 'cgroup').write_text(f'0::/{leaf}\n')
 
-    def governed_in(self, leaf, limits, environment=None, lane=None, named=None):
-        """governed() for a caller in LEAF; LANE is (slice, limits) of a seat's lane beside it, and NAMED what a fake `st agents
-        lane` answers ((exit code, stdout)); its arguments are kept in self.asked, None when it was not run."""
-        self.asked = None
-        with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, 'bus').touch()
-            if lane:
-                self.tree(tmp, f'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/{lane[0]}', lane[1])
-            self.tree(tmp, leaf, limits)
-            environment = dict(environment or {}, XDG_RUNTIME_DIR=tmp)
-            if named:
-                st = Path(tmp, 'st')
-                st.write_text(f'#!/bin/sh\necho "$@" > {tmp}/asked\nprintf %s {shlex.quote(named[1])}\nexit {named[0]}\n')
-                st.chmod(0o755)
-                environment['ST3_BIN'] = str(st)
-            real, real_lane = st_test.own_cap, st_test.seat_lane
-            with mock.patch.dict(os.environ, environment, clear=True), \
-                    mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test, 'seat_lane', lambda: real_lane(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else f'/usr/bin/{program}'), \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                governed = st_test.governed(['check'], 'linux-gate')
-            if Path(tmp, 'asked').exists():
-                self.asked = Path(tmp, 'asked').read_text().split()
-            self.said = err.getvalue()
-            return governed
-
-    def assert_scoped(self, governed, why):
-        self.assertIn('--slice=builds.slice', governed, why)
-        self.assertEqual(governed[-1], 'check')
-
-    def assert_in_place(self, governed, why):
-        # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
-        self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
-        self.assertEqual(Path(governed[0]).name, 'env', why)
-
-    def test_gate_slot_heavy_argv_needs_no_optional_profile(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            gate = Path(tmp, 'gate-slot')
-            calls, ran = Path(tmp, 'calls'), Path(tmp, 'ran')
-            gate.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n'
-                            'echo "gate-slot: waiting: all heavy slots occupied" >&2\n'
-                            'while [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
-            gate.chmod(0o755)
-            argv = st_test.heavy_admission(['/bin/sh', '-c', f': > {shlex.quote(str(ran))}'], str(gate))
-            done = subprocess.run(argv, capture_output=True, text=True)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertTrue(ran.exists())
-            self.assertEqual(calls.read_text().splitlines(), ['--class', 'heavy', '--', '/bin/sh', '-c', f': > {shlex.quote(str(ran))}'])
-            self.assertIn('gate-slot: waiting: all heavy slots occupied', done.stderr)
-
-    def test_run_admission_is_not_reacquired_for_a_continuation_or_disabled_or_light_run(self):
-        for environment, checks in (({st_test.RUN_ADMITTED: '1'}, ['linux-gate']),
-                                    ({'ST_EVIDENCE_GOVERN': 'off'}, ['linux-gate']), ({}, ['ci-script-tests'])):
-            with self.subTest(environment=environment, checks=checks), \
-                    mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('must not acquire admission')):
-                self.assertIsNone(st_test.admit_run([], checks, environment))
-
-    def test_help_describes_run_wide_admission_and_standalone_behavior(self):
-        output = io.StringIO()
-        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
-            st_test.main(['--help'])
-        self.assertEqual(stopped.exception.code, 0)
-        self.assertIn('one gate-slot', output.getvalue())
-        self.assertIn('standalone use retains', output.getvalue())
-
-    def test_explicit_govern_off_preserves_the_unwrapped_command(self):
-        with mock.patch.dict(os.environ, {'ST_EVIDENCE_GOVERN': 'off'}, clear=True), \
-                mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('wrapping explicitly disabled')):
-            self.assertEqual(st_test.governed(['check'], 'linux-gate'), ['check'])
-
-    def test_a_capped_lane_or_build_scope_runs_in_place(self):
-        self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
-        self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
-
-    def test_a_memory_capped_gate_slot_and_its_descendants_run_in_place(self):
-        limits = {'app-capped-heavy.slice': ('17179869184', 'max 100000')}
-        self.assert_in_place(self.governed_in(self.HEAVY, limits), 'shared heavy memory cap, no CPU quota')
-        self.assert_in_place(self.governed_in(self.HEAVY + '/child', limits), 'descendant of heavy scope')
-        self.assert_in_place(self.governed_in(self.GATE, {'gate-slot-gate-123-456.scope': ('10737418240', None)}),
-                             'scope memory cap, no CPU controller')
-        self.assert_in_place(self.governed_in(self.GATE, {'app-capped.slice': ('17179869184', 'max 100000')}),
-                             'approved parent memory cap')
-        self.assert_in_place(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
-                             'heavy scope inherits the approved outer slice cap')
 
     def test_own_cap_accepts_the_gate_slot_namespace_only_in_the_approved_slice_chain(self):
         manager = 'user.slice/user-1000.slice/user@1000.service'
@@ -827,46 +788,6 @@ class GovernedTest(unittest.TestCase):
                 self.tree(tmp, leaf, {leaf.rsplit('/', 1)[1]: ('10737418240', None)})
                 self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
 
-    def test_gate_slot_names_and_environment_without_the_right_memory_cap_do_not_count(self):
-        self.assert_scoped(self.governed_in(self.HEAVY, {}), 'scope name without a cap')
-        markers = {'GATE_SLOT_ADMITTED': '1', 'GATE_SLOT_SCOPE_UNIT': 'gate-slot-heavy-123.scope', 'BUILDS_SLICE_ACTIVE': '1'}
-        self.assert_scoped(self.governed_in(self.SEAT, {}, markers), 'environment alone')
-        self.assert_scoped(self.governed_in(self.HEAVY, {'app.slice': ('17179869184', 'max 100000')}),
-                           'limit above the app-capped anchor')
-        self.assert_scoped(self.governed_in(self.HEAVY, {'app-capped-heavy.slice': (None, '100000 100000')}),
-                           'CPU alone without a memory controller')
-        misplaced = self.HEAVY.replace('app-capped.slice/', '')
-        self.assert_scoped(self.governed_in(misplaced, {'app-capped-heavy.slice': ('17179869184', 'max 100000')}),
-                           'heavy slice outside app-capped.slice')
-        daemon = self.SEAT.rsplit('/', 1)[0] + '/smalltalk.service'
-        self.assert_scoped(self.governed_in(daemon, {'smalltalk.service': ('9663676416', '100000 100000')}),
-                           'daemon memory cap is not a build cap')
-
-    def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
-        self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
-        # A seat's lane slice without its limits is not capped.
-        self.assert_scoped(self.governed_in(self.LANE, {}), 'name')
-        # Both limits are needed: memory alone, or CPU alone, is not a cap.
-        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', 'max 100000')}), 'memory only')
-        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('max', '100000 100000')}), 'cpu only')
-        # A cpu controller that is not enabled (no cpu.max) is no CPU limit.
-        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', None)}), 'no cpu controller')
-
-    def test_only_a_build_or_lane_cap_counts_never_an_unrelated_one(self):
-        # Limits on a cgroup above the cap, or on any other cgroup, are not the build cap.
-        self.assert_scoped(self.governed_in(self.SEAT, {'st3-seat-1-0.scope': ('268435456', '100000 100000')}), 'any capped scope')
-        self.assert_scoped(self.governed_in(self.SEAT, {'app.slice': ('68719476736', '1600000 100000')}), 'an ancestor')
-        self.assert_scoped(self.governed_in(self.LANE, {'app-lanes.slice': ('68719476736', '1600000 100000')}), 'above the lane')
-        unrelated = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/x.scope'
-        self.assert_scoped(self.governed_in(unrelated, {'app-lanes-seat_1_0a1b2c3d4e5f.slice': ('268435456', '100000 100000')}),
-                           'a lane-named slice outside app-lanes.slice')
-
-    def test_limits_on_different_levels_inside_the_cap_together_are_a_cap(self):
-        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
-        self.assert_in_place(self.governed_in(self.LANE, limits), 'memory and CPU on two levels')
-        # A level without a memory controller still caps CPU: each file is read on its own.
-        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
-        self.assert_in_place(self.governed_in(self.LANE, limits), 'no memory controller on the CPU level')
 
     UNIT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st-test-seat-1.service'
     CAPPED = {LANE_SLICE: ('268435456', '100000 100000')}
@@ -874,32 +795,6 @@ class GovernedTest(unittest.TestCase):
     def named(self, slice_name=LANE_SLICE):
         return 0, json.dumps({'agent': 'agent/seat-1', 'slice': slice_name})
 
-    def test_a_seat_unit_outside_its_lane_runs_the_check_in_its_capped_lane(self):
-        governed = self.governed_in(self.UNIT, {}, {'ST_AGENT': 'agent/seat-1'}, (self.LANE_SLICE, self.CAPPED), self.named())
-        self.assertEqual(self.asked[:4], ['agents', 'lane', 'agent/seat-1', '--json'])
-        self.assertIn(f'--slice={self.LANE_SLICE}', governed)
-        self.assertNotIn('--slice=builds.slice', governed)
-        self.assertIn('--property=OOMPolicy=continue', governed)
-        rest = governed[governed.index('--') + 1:]
-        self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}', 'check'])
-        self.assertEqual(Path(rest[0]).name, 'env')
-
-    def test_without_a_capped_lane_the_seat_unit_takes_builds_slice_and_says_why(self):
-        seat = {'ST_AGENT': 'agent/seat-1'}
-        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, None, self.named()), 'no such slice on this host')
-        self.assertIn('not on this host', self.said)
-        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, {}), self.named()), 'an uncapped slice')
-        self.assertIn('no memory and CPU limit', self.said)
-        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), (2, '')), 'st cannot name it')
-        self.assertIn('did not name its lane', self.said)
-        # The daemon's name decides, never one that only looks like a lane.
-        other = 'app-lanes-seat_2_ffffffffffff.slice'
-        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), self.named(other)), 'another name')
-
-    def test_a_caller_that_is_no_seat_never_asks_for_a_lane(self):
-        self.assert_scoped(self.governed_in(self.UNIT, {}, {}, (self.LANE_SLICE, self.CAPPED), self.named()), 'no ST_AGENT')
-        self.assertIsNone(self.asked)
-        self.assertEqual(self.said, '')
 
     def test_an_oom_kill_at_the_memory_limit_a_check_runs_under_is_named_at_the_innermost_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -953,163 +848,6 @@ class GovernedTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, 'cgroup').write_text('0::/\n')
             self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
-
-
-class LaneBurstTest(unittest.TestCase):
-    """A run raises its seat's lane through `fractal agents burst`, held while the holder's stdin is open (docs/st3/seat-lanes.md, Bursts)."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.calls = Path(self.tmp.name) / 'calls'
-        self.released = Path(self.tmp.name) / 'released'
-
-    def fractal(self, body):
-        """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
-        path = Path(self.tmp.name) / 'fractal'
-        # Publish complete records: existence is the reader's readiness signal.
-        path.write_text(
-            '#!/usr/bin/env bash\n'
-            'append_record() (\n'
-            '  exec 9>"$1.lock"\n'
-            '  flock -x 9\n'
-            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
-            '  mv "$1.tmp.$$" "$1"\n'
-            ')\n'
-            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
-            f'append_record {shlex.quote(str(self.released))} released\n')
-        path.chmod(0o755)
-        return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
-
-    def test_concurrent_fake_holders_preserve_every_call_and_release(self):
-        for fake in (LaneBurstTest.fractal, BurstAtTheTree.fractal):
-            with self.subTest(fake=fake.__qualname__):
-                for record in (self.calls, self.released):
-                    record.unlink(missing_ok=True)
-                env = fake(self, 'echo granted')
-                holders = [subprocess.Popen([env['ST3_BIN'], str(index)], stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE, text=True) for index in range(16)]
-                try:
-                    for holder in holders:
-                        self.assertEqual(holder.stdout.readline(), 'granted\n')
-                    self.assertEqual(sorted(self.calls.read_text().splitlines()), sorted(map(str, range(16))))
-                    for holder in holders:
-                        holder.stdin.close()
-                    for holder in holders:
-                        self.assertEqual(holder.wait(timeout=10), 0)
-                    self.assertEqual(self.released.read_text().splitlines(), ['released'] * len(holders))
-                finally:
-                    for holder in holders:
-                        if not holder.stdin.closed:
-                            holder.stdin.close()
-                        holder.wait(timeout=10)
-                        holder.stdout.close()
-
-    def burst(self, body, size=(8, '24G'), limit=10, env=None):
-        said = io.StringIO()
-        with mock.patch.dict(os.environ, env if env is not None else self.fractal(body)):
-            burst = st_test.Burst(size, limit, output=said)
-            burst.wait()
-            return burst, said.getvalue()
-
-    def test_the_size_follows_what_the_run_builds(self):
-        blob = json.dumps({'version': 1, 'build': {'cores': 8, 'memory': '24G'}}).encode()
-        with mock.patch.object(st_test, 'config_blob', return_value=blob) as read:
-            self.assertEqual(st_test.burst_size(['linux-gate', 'ci-script-tests']), (8, '24G'))
-            self.assertIsNone(st_test.burst_size(['ci-script-tests', 'genie-freshness']))  # builds nothing: no burst, and no read
-            self.assertEqual(read.call_count, 1)
-        with mock.patch.object(st_test, 'config_blob', return_value=None):
-            self.assertIsNone(st_test.burst_size(['linux-gate']))
-        with mock.patch.object(st_test, 'config_blob', return_value=b'{"build": {"cores": 8}}'):
-            with self.assertRaisesRegex(st_test.Failure, 'no usable build size'):
-                st_test.burst_size(['linux-gate'])
-        self.assertIn('"build"', (ROOT / '.st/lane-bursts.json').read_text())
-
-    def test_it_waits_in_line_says_each_reason_once_and_holds_until_released(self):
-        burst, said = self.burst('echo "waiting burst lane 8 cores/24.0G does not fit"; echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                                 'sleep 1; echo "waiting burst lane waits behind agent/crew/other"; echo granted')
-        self.assertEqual(burst.granted, (8, '24G'))
-        self.assertGreaterEqual(burst.waited, 1)
-        self.assertEqual(said.count('does not fit'), 1)
-        self.assertIn('waits behind agent/crew/other', said)
-        self.assertEqual(self.calls.read_text().split(), ['agents', 'burst', 'agent/crew/builder', '--cores', '8', '--memory', '24G',
-                                                          '--reason', 'st-test', '--as', 'agent/crew/builder'])
-        self.assertFalse(self.released.exists(), 'held while the run goes on')
-        burst.release()
-        self.assertEqual(self.released.read_text(), 'released\n')
-        record = burst.record()
-        self.assertEqual(record['burst'], {'cores': 8, 'memory': '24G'})
-        self.assertGreaterEqual(record['burst_wait_s'], 1)
-
-    def test_a_seat_without_a_lane_or_a_daemon_without_bursts_holds_none_and_says_why(self):
-        burst, said = self.burst('echo "none agent/crew/builder has no lane on this host"; exit 0')
-        self.assertIsNone(burst.granted)
-        self.assertEqual(burst.record()['burst_none'], 'agent/crew/builder has no lane on this host')
-        self.assertIn('the checks run in the lane as it is', said)
-        burst.release()  # nothing held: nothing to give back
-        older, said = self.burst("echo \"error: unrecognized subcommand 'burst'\" >&2; exit 2")
-        self.assertIsNone(older.granted)
-        self.assertEqual(older.why, "this host's fractal has no lane bursts")
-        self.assertIn('no lane burst', said)
-
-    def test_no_seat_or_nothing_to_build_asks_nothing(self):
-        burst, _ = self.burst('echo granted', env={'ST_AGENT': '', 'ST3_BIN': '/nonexistent/fractal'})
-        self.assertEqual(burst.why, 'no seat to raise the lane of')
-        burst, _ = self.burst('echo granted', size=None)
-        self.assertEqual(burst.record(), {'burst': None, 'burst_wait_s': 0})
-        self.assertFalse(self.calls.exists())
-
-    def test_a_refusal_or_a_holder_that_dies_without_an_answer_fails_the_run(self):
-        with self.assertRaisesRegex(st_test.Failure, 'refused: burst lane 64 cores/512.0G can never fit on this host'):
-            self.burst('echo "refused burst lane 64 cores/512.0G can never fit on this host"')
-        with self.assertRaisesRegex(st_test.Failure, 'ended without an answer: the daemon is not running'):
-            self.burst('echo "the daemon is not running" >&2; exit 1')
-
-    def test_a_wait_past_the_queue_limit_fails_and_ends_the_holder(self):
-        with self.assertRaisesRegex(st_test.Failure, r'waited 0.5s \(--queue-limit\) for a lane burst of 8 cores/24G: burst lane full'):
-            self.burst('echo "waiting burst lane full"; sleep 30', limit=0.5)
-
-    def test_each_ask_has_its_own_queue_limit_and_the_record_counts_every_wait(self):
-        with mock.patch.dict(os.environ, self.fractal('echo "waiting burst lane full"; sleep 1; echo granted')), \
-                contextlib.redirect_stderr(io.StringIO()):
-            burst = st_test.Burst((8, '24G'), 1.6)
-            for _ in range(2):  # granted, given back with no tree free, and asked again: the second ask is not failed for the first one's wait
-                burst.wait()
-                self.assertEqual(burst.granted, (8, '24G'))
-                burst.give_back()
-        self.assertGreaterEqual(burst.waited, 2)
-        self.assertEqual(self.released.read_text(), 'released\nreleased\n')
-
-    def test_a_granted_burst_its_holder_says_is_lost_is_read_without_waiting(self):
-        for body, why in (('echo granted; read -t 0.3; echo "lost burst lane 8 cores/24.0G waits behind agent/crew/other"; exit 1',
-                           'burst lane 8 cores/24.0G waits behind agent/crew/other'),
-                          # an older holder goes on after a grant and says only that its renewal waits
-                          ('echo granted; read -t 0.3; echo "waiting burst lane 8 cores/24.0G does not fit"', 'waiting burst lane 8 cores/24.0G does not fit'),
-                          ('echo granted; read -t 0.3; echo "renewing failed" >&2; exit 3', 'its holder ended: renewing failed')):
-            with self.subTest(body=body):
-                burst, _ = self.burst(body)
-                self.assertIsNone(burst.lost())  # still held: nothing to read, and no wait for it
-                deadline = time.monotonic() + 10
-                while (seen := burst.lost()) is None:
-                    self.assertLess(time.monotonic(), deadline, 'timed out')
-                    time.sleep(0.05)
-                self.assertEqual(seen, why)
-                burst.release()
-
-    def test_a_run_killed_outright_still_gives_its_burst_back(self):
-        env = self.fractal('echo granted')
-        script = (f'import importlib.machinery, importlib.util, os\n'
-                  f'loader = importlib.machinery.SourceFileLoader("st_test_kill", {str(ROOT / "scripts/st-test")!r})\n'
-                  f'st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)\n'
-                  f'burst = st.Burst((8, "24G"), 10)\nburst.wait()\nprint(burst.granted, flush=True)\nos.kill(os.getpid(), 9)\n')
-        done = subprocess.run([sys.executable, '-c', script], env=dict(os.environ, **env), capture_output=True, text=True, timeout=60)
-        self.assertEqual(done.returncode, -9, done.stderr)
-        self.assertIn("(8, '24G')", done.stdout)
-        for _ in range(100):  # the holder's stdin closed with its run: it gives the burst back by itself
-            if self.released.exists():
-                break
-            time.sleep(0.05)
-        self.assertEqual(self.released.read_text(), 'released\n')
 
 
 class StTest(unittest.TestCase):
@@ -1243,6 +981,12 @@ class StTest(unittest.TestCase):
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
         env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp), **(extra_env or {}))
+        native_bin = Path(self.tmp.name, 'native-bin')
+        native_bin.mkdir(exist_ok=True)
+        native = native_bin / 'fractal'
+        native.write_text('#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+        native.chmod(0o755)
+        env['PATH'] = f'{native_bin}:{env.get("PATH", os.defpath)}'
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -1341,15 +1085,6 @@ class StTest(unittest.TestCase):
         result, calls, _ = self.fetches_with_lock_errors([missing])
         self.assertEqual((calls, result), (1, 'failure: git fetch failed: ' + missing))  # only the compare-and-swap race is tried again
 
-    def test_a_runs_checks_carry_an_admission_run_of_the_accepted_form_a_new_one_per_run_replacing_the_callers(self):
-        seen = Path(self.tmp.name) / 'admission-run'
-        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'], extra_env={'ADMISSION_RUN': 'stale@1'})[0], 0)
-        self.commit('b.txt', 'two')
-        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'])[0], 0)
-        first, second = seen.read_text().split()
-        for value in (first, second):
-            self.assertRegex(value, r'^st-test-[0-9]+@[0-9]{19}$')        # the form build admission accepts: [A-Za-z0-9._-]{1,64}@<start-ns>
-        self.assertNotEqual(first, second)                                 # a caller's stale value is replaced, and each run has its own start
 
     def test_out_resolves_a_nested_relative_directory_and_does_not_import_or_claim_coverage(self):
         self.commit('b.txt', 'two')
@@ -1752,165 +1487,6 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '60'})
         self.assertEqual(code, 0, out[-300:] + err[-300:])
 
-    def test_the_member_step_s_limit_counts_its_own_running_not_its_build_admission_waits(self):
-        now = [0.0]
-        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
-        limit.observe(True)  # 20 minutes in the gate
-        now[0] = 1200
-        limit.observe(True)
-        now[0] = 1201
-        limit.observe(False)  # admitted: the gate execs the command
-        self.assertAlmostEqual(limit.waiting(), 1201)
-        now[0] = 1231
-        self.assertAlmostEqual(limit.remaining(), 20)  # 30 s of its own running
-        now[0] = 1252
-        self.assertLess(limit.remaining(), 0)  # a slow member step is still over its 50 s
-        # The waits have a limit of their own.
-        now[0] = 0.0
-        limit = st_test.MembersLimit(50, 600, clock=lambda: now[0])
-        limit.observe(True)
-        now[0] = 600
-        self.assertLessEqual(limit.remaining(), 0)
-
-    def test_a_member_step_waits_for_admission_exactly_while_its_process_is_the_gate_s_start(self):
-        proc = Path(self.tmp.name) / 'proc'
-        for pid, argv in ((1, ['python3', '/opt/admission/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
-                          (2, ['/nix/bin/nix', 'run', 'github:x/y#megarepo', '--', 'apply']),             # admitted: the gate exec'd nix
-                          (3, ['python3', '/opt/admission/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
-                          (4, ['sh', '-c', 'echo build-admission start'])):
-            (proc / str(pid)).mkdir(parents=True)
-            (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
-        self.assertEqual([st_test.admission_waiting(pid, proc) for pid in (1, 2, 3, 4, 5)], [True, False, False, False, False])
-
-    @contextlib.contextmanager
-    def members_clock(self, seconds, waiting):
-        """The member step's clock moves `seconds` on the first time it is seen waiting for admission (`waiting` True) or running (False):
-        simulated, so no wall clock decides the outcome."""
-        init, observe = st_test.MembersLimit.__init__, st_test.MembersLimit.observe
-        offset, moved = [0.0], []
-
-        def begin(limit, *args, **kwargs):
-            init(limit, *args, **kwargs)
-            limit.clock = lambda: time.monotonic() + offset[0]
-
-        def seen(limit, now_waiting):
-            observe(limit, now_waiting)
-            if now_waiting == waiting and not moved:
-                moved.append(True)
-                offset[0] += seconds
-
-        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'observe', seen):
-            yield
-
-    def test_a_member_step_s_build_admission_wait_does_not_count_against_its_limit_and_a_slow_one_still_does(self):
-        self.commit('.gitignore', '/repos/\n')
-        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
-        bin_dir = Path(self.tmp.name) / 'admission-bin'
-        bin_dir.mkdir()
-        gate = bin_dir / 'build-admission'  # as the host's gate does in `start`: wait, then exec the command
-        gate.write_text('#!/bin/sh\nshift 4\nsleep "${GATE_WAIT:-3}"\nexec "$@"\n')
-        gate.chmod(0o755)
-
-        def through_gate(script):
-            return lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', script]
-
-        # 80 s in the host's build admission, then a quick run: within a 50 s limit. Waits counted as running would stop it (#5068).
-        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('mkdir -p repos/x')):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'}, command=['test', '-d', 'repos/x'])
-        self.assertEqual(code, 0, out + err)
-        self.assertRegex(err, r'megarepo members materialized; waited (8\d|9\d)s for build admission \(not counted against ST_TEST_MEMBERS_LIMIT\)')
-        # 80 s of the member step's own running, once admitted, is over the same limit.
-        self.commit('b.txt', 'two')
-        with self.members_clock(80, False), mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'sleep 30']):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'})
-        self.assertEqual(code, 1, out + err)
-        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
-        # And a wait past --queue-limit is stopped.
-        self.commit('c.txt', 'three')
-        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('true')):
-            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_WAIT': '30'})
-        self.assertEqual(code, 1, out + err)
-        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
-        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
-
-    def test_the_gate_s_admission_notice_ends_the_wait_and_sets_how_long_it_was(self):
-        now = [0.0]
-        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
-        limit.observe(False)  # admitted between two samples: none saw the gate
-        now[0] = 81
-        limit.admitted(80.0)
-        self.assertAlmostEqual(limit.waiting(), 80)
-        limit.observe(True)  # the samples change nothing once the gate has said so
-        now[0] = 100
-        self.assertAlmostEqual(limit.waiting(), 80)
-        self.assertAlmostEqual(limit.remaining(), 30)
-        # A sampled wait ends at the notice, and the gate's figure is never more than the step has taken.
-        now[0] = 0.0
-        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
-        limit.observe(True)
-        now[0] = 40
-        limit.admitted(None)
-        now[0] = 45
-        self.assertAlmostEqual(limit.waiting(), 40)
-        now[0] = 0.0
-        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
-        now[0] = 10
-        limit.admitted(500.0)
-        self.assertAlmostEqual(limit.waiting(), 10)
-        self.assertEqual([st_test.admitted_waited(line) for line in (b'admitted 1793800000.125 80.0\n', b'admitted 1 x\n', b'admitted\n', b'other 1 2\n')],
-                         [80.0, None, None, None])
-
-    @contextlib.contextmanager
-    def admission_before_notice(self, seconds):
-        """The member step's clock moves `seconds` just before the gate's notice is read: a wait in a gate the samples never saw. The notice
-        is read a second late, so a quick command has already exited by then."""
-        init, admitted = st_test.MembersLimit.__init__, st_test.MembersLimit.admitted
-        offset = [0.0]
-
-        def begin(limit, *args, **kwargs):
-            init(limit, *args, **kwargs)
-            limit.clock = lambda: time.monotonic() + offset[0]
-
-        def said(limit, waited=None):
-            time.sleep(1)
-            offset[0] += seconds
-            admitted(limit, waited)
-
-        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'admitted', said):
-            yield
-
-    def test_a_member_step_reads_the_gate_s_admission_notice_from_the_fd_it_names(self):
-        self.commit('.gitignore', '/repos/\n')
-        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
-        bin_dir = Path(self.tmp.name) / 'notify-bin'
-        bin_dir.mkdir()
-        gate = bin_dir / 'notify-gate'  # not named build-admission, so no sample sees it wait: only its notice says so
-        gate.write_text(f'#!{sys.executable}\nimport os, sys\nfd = int(os.environ["BUILD_ADMISSION_NOTIFY_FD"])\n'
-                        'os.write(fd, ("admitted 1793800000.0 %s\\n" % os.environ["GATE_SAYS"]).encode())\nos.close(fd)\n'
-                        'os.execvp(sys.argv[5], sys.argv[5:])\n')
-        gate.chmod(0o755)
-        through_gate = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
-        # 80 s in the gate by its own notice: within a 50 s limit, and said.
-        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', through_gate):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'},
-                                              command=['test', '-d', 'repos/x'])
-        self.assertEqual(code, 0, out + err)
-        self.assertIn('megarepo members materialized; waited 80s for build admission (not counted against ST_TEST_MEMBERS_LIMIT)', err)
-        # The same 80 s that the gate says were not its wait are the step's own running, over the limit, even from a command that has
-        # already exited successfully: the limits are read as the notice leaves them before an exit is accepted.
-        quick = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
-        self.commit('b.txt', 'two')
-        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '0.0'})
-        self.assertEqual(code, 1, out + err)
-        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
-        # And 80 s of waiting by the notice is past a 60 s --queue-limit, likewise.
-        self.commit('c.txt', 'three')
-        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
-            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'})
-        self.assertEqual(code, 1, out + err)
-        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
-        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
 
     def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
@@ -2163,7 +1739,7 @@ class StTest(unittest.TestCase):
         self.assertTrue(record['parallel'])
         self.assertEqual([row['name'] for row in record['rows']], ['setup', 'demo', st_test.WEB, 'light'])
 
-    def test_serial_web_keeps_check_order_and_still_holds_one_stage_slot(self):
+    def test_serial_web_keeps_check_order_and_one_native_admission_per_heavy_phase(self):
         commands = []
 
         def run(argv, limit, **options):
@@ -2176,9 +1752,10 @@ class StTest(unittest.TestCase):
         self.assertFalse(record['parallel'])
         self.assertNotIn('----- fractal-test:', out)
         web = commands[1][1]
-        self.assertEqual(web.count('--stage-slot'), 1)
-        self.assertIn('BUILD_ADMISSION_HELD=1', web)
-        self.assertNotIn('--stage-slot', commands[0][1])  # Rust's detached guardian must never inherit the web slot
+        self.assertEqual(web.count('resources'), 1)
+        self.assertEqual(web[web.index('--profile') + 1], 'st-test-build')
+        self.assertNotIn('--stage-slot', web)
+        self.assertEqual(commands[0][1].count('resources'), 1)
         self.assertEqual([group for _, _, group in commands], [False, True, False])
 
     def test_web_and_client_installs_and_dependency_readers_share_the_worktree_lock(self):
@@ -2258,22 +1835,6 @@ class StTest(unittest.TestCase):
         self.assertRegex(out, r'fractal-web +FAILED \(lane exited\)')
         self.assertEqual(record['exit'], 1)
 
-    def test_the_web_wrapper_holds_one_counted_slot_until_the_check_exits_and_releases_on_failure(self):
-        shim = self.home / '.local/bin/cargo'
-        shim.parent.mkdir(parents=True)
-        shim.write_text('#!/usr/bin/env bash\nset -eu\n'
-                        'test "$1" = --stage-slot; test "$2" = fractal-web; test "$3" = --\n'
-                        'shift 3\nexec flock "$CI_WEB_SLOT_TEST_LOCK" "$@"\n')
-        shim.chmod(0o755)
-        lock = Path(self.tmp.name) / 'heavy0'
-        # A second heavy compile cannot start while the wrapped command runs. A failed check must still give the slot back.
-        check = ['sh', '-c', 'test "$BUILD_ADMISSION_HELD" = 1 || exit 8; '
-                 'if flock -n "$CI_WEB_SLOT_TEST_LOCK" true; then exit 9; fi; exit 7']
-        with mock.patch.dict(os.environ, HOME=str(self.home)):
-            command = st_test.web_slot(check)
-        ran = subprocess.run(command, env=dict(GIT_ENV, CI_WEB_SLOT_TEST_LOCK=str(lock)), capture_output=True, text=True)
-        self.assertEqual(ran.returncode, 7, ran.stderr)
-        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
 
     def test_a_timed_out_web_stage_stops_its_children_before_releasing_the_slot(self):
         lock = Path(self.tmp.name) / 'heavy0'
@@ -3495,32 +3056,6 @@ finally:
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
         self.assertEqual(len(self.statements()), 1, 'the completed round signed; no new copy ran')
 
-    def test_a_top_up_handover_keeps_the_run_s_burst_for_a_newer_copy_that_takes_it_over_and_gives_it_back_otherwise(self):
-        for takes in (True, False):
-            with self.subTest(takes=takes):
-                self.commit(f'b-{takes}.txt', 'feature\n')
-                order = []
-
-                def poll(burst, start=False, timeout=0.0):
-                    if start and burst.granted is None:
-                        burst.granted = burst.size
-                    return burst.granted is not None
-
-                def hand_off(burst):
-                    order.append('handed')
-                    return 'the holder'
-
-                runner = '# a newer base runner' + (' that reads ST_TEST_HANDOVER_BURST' if takes else '') + f' ({takes})\n'
-                with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), \
-                        mock.patch.object(st_test.Burst, 'poll', poll), mock.patch.object(st_test.Burst, 'hand_off', hand_off), \
-                        mock.patch.object(st_test.Burst, 'release', lambda burst: order.append('released')), \
-                        self.main_moves_during_the_run([('scripts/st-test', runner)]), self.assertRaises(st_test.Handover) as raised:
-                    self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_GOVERN': 'off'})
-                self.assertEqual((raised.exception.top_up, raised.exception.source), (1, runner.encode()))
-                if takes:  # handed over, then the unwind's release finds no holder left (Burst.hand_off), as the tree wait's handover does
-                    self.assertEqual((raised.exception.burst, order), ('the holder', ['handed', 'released']))
-                else:  # a copy that cannot take a burst over gets none: the unwind gives it back, and that copy asks for its own
-                    self.assertEqual((raised.exception.burst, order), (None, ['released']))
 
     def test_a_push_run_without_a_git_identity_fails_before_it_waits_for_a_tree(self):
         self.branch_behind(0)
@@ -3671,20 +3206,6 @@ finally:
         self.assertRegex(str(code), r'does not merge cleanly: merge origin/main into the branch first')
         self.assertEqual(self.statements(), [])
 
-    def test_a_branch_that_cannot_be_merged_with_main_fails_before_it_asks_for_a_burst_with_a_pool_tree_or_without(self):
-        self.branch_from_a_base_with_the_gate()
-        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(POLICY, indent=3))
-        git(self.work, 'add', '.')
-        git(self.work, 'commit', '-q', '-m', 'branch edits the policy too')
-        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
-        asked = []
-        for trees in ('', 'off'):
-            with self.subTest(trees=trees or 'pool'), mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), \
-                    mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), \
-                    mock.patch.object(st_test.Burst, 'poll', lambda burst, start=False, timeout=0.0: asked.append(start) or True):
-                code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_TREES': trees} if trees else None)
-                self.assertRegex(str(code), r'does not merge cleanly: merge origin/main into the branch first')
-                self.assertEqual(asked, [])  # not after a wait for a burst the run could never use
 
     def test_a_base_without_the_shared_rule_signs_the_head_as_before(self):
         self.commit('b.txt', 'two')  # the base of this fixture has no gate script at all
@@ -3854,50 +3375,6 @@ finally:
         self.assertIn('/usr/bin', first.split(':'))
         self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
 
-    def test_the_host_load_limit_comes_from_the_environment_or_a_file_outside_the_repo_and_no_limit_means_none(self):
-        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
-            self.assertIsNone(st_test.load_limit())  # no file, no variable
-            (self.home / '.config/st-test').mkdir(parents=True, exist_ok=True)
-            (self.home / '.config/st-test/max-load').write_text('20\n')
-            self.assertEqual(st_test.load_limit(), 20.0)
-            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MAX_LOAD': '12.5'}):
-                self.assertEqual(st_test.load_limit(), 12.5)  # the variable wins
-            (self.home / '.config/st-test/max-load').write_text('0\n')
-            self.assertIsNone(st_test.load_limit())  # 0 is no limit
-            (self.home / '.config/st-test/max-load').write_text('lots\n')
-            with self.assertRaises(st_test.Failure):
-                st_test.load_limit()
-
-    def test_a_run_waits_while_the_load_is_above_the_limit_says_why_and_proceeds_when_it_drops(self):
-        loads, now, slept = iter([34.0, 34.0, 30.0, 19.0]), [0.0], []
-
-        def sleep(seconds):
-            slept.append(seconds)
-            now[0] += 30.0
-        err = io.StringIO()
-        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), contextlib.redirect_stderr(err):
-            st_test.wait_for_load(20.0, read_load=lambda: next(loads), sleep=sleep, clock=lambda: now[0])
-        self.assertEqual(len(slept), 3)
-        said = err.getvalue().splitlines()
-        self.assertEqual(said[0], 'fractal-test: waiting: load1 34 > 20 (host limit)')
-        self.assertEqual(len(said), 2)  # once at the start, again after a minute: not every poll
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            st_test.wait_for_load(20.0, read_load=lambda: 5.0, sleep=sleep, clock=lambda: now[0])
-        self.assertEqual(err.getvalue(), '')  # under the limit: no wait, nothing said
-
-    def test_a_run_that_waits_past_the_deadline_fails_with_the_reason(self):
-        now = [0.0]
-
-        def sleep(seconds):
-            now[0] += 600.0
-        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(st_test.Failure, r'load1 40 > 20 \(host limit\) for 30 min; nothing was started'):
-                st_test.wait_for_load(20.0, read_load=lambda: 40.0, sleep=sleep, clock=lambda: now[0])
-            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_LOAD_WAIT_MINUTES': '5'}):
-                now[0] = 0.0
-                with self.assertRaisesRegex(st_test.Failure, 'for 5 min'):
-                    st_test.wait_for_load(20.0, read_load=lambda: 40.0, sleep=sleep, clock=lambda: now[0])
 
     def test_a_whole_run_on_an_overloaded_host_refuses_loudly_before_it_starts_anything(self):
         self.commit('b.txt', 'two')
@@ -4096,111 +3573,6 @@ finally:
                          ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat',
                           'fractal-web', 'rust-tests'])
 
-    def test_several_heavy_checks_share_one_admission_until_the_run_ends(self):
-        self.commit('b.txt', 'two')
-        gate = Path(self.tmp.name) / 'gate-slot'
-        gate.write_text('#!/bin/sh\nexit 99\n')  # the fake scoped-launch boundary below keeps fixture state in this process
-        gate.chmod(0o755)
-        calls, held, ran = [], [], []
-        checks = {name: ['sh', '-c', f'echo {name}'] for name in ('demo', 'second', 'third')}
-        real_run = st_test.run_limited
-
-        def launch(executable, command, env):
-            calls.append(command)
-            self.assertEqual(executable, str(gate))
-            self.assertEqual(command[:4], [str(gate), '--class', 'heavy', '--'])
-            self.assertEqual(command[4:6], [sys.executable, str(ROOT / 'scripts/st-test')])
-            self.assertEqual(env[st_test.RUN_ADMITTED], '1')
-            held.append(True)
-            try:
-                with mock.patch.dict(os.environ, env, clear=True):
-                    return st_test.main(command[6:])
-            finally:
-                held.pop()
-
-        def run(command, *args, **kwargs):
-            self.assertEqual(held, [True], 'every check must run while the single admission is held')
-            self.assertEqual(os.environ.get(st_test.RUN_ADMITTED), '1')
-            self.assertNotIn(str(gate), command, 'no per-check admission')
-            ran.append(command[command.index('--check') + 1])
-            return real_run(command, *args, **kwargs)
-
-        with mock.patch.dict(st_test.LOCAL, checks, clear=True), mock.patch.object(st_test, 'BUILDS', frozenset(checks)), \
-                mock.patch.object(st_test, 'own_cap', return_value='app-capped-heavy.slice'), \
-                mock.patch.object(st_test.os, 'execve', side_effect=launch), \
-                mock.patch.object(st_test, 'run_limited', side_effect=run):
-            code, out, err = self.run_st_test(extra_env={'PATH': f'{gate.parent}:{os.environ["PATH"]}',
-                                                       'ST_EVIDENCE_GOVERN': 'on', 'ST_EVIDENCE_SERIAL': '1'})
-        self.assertEqual(code, 0, out + err)
-        self.assertEqual(len(calls), 1)
-        self.assertCountEqual(ran, checks)
-        self.assertEqual(held, [])
-
-    def test_heavy_admission_refusal_is_reported_and_signs_nothing(self):
-        self.commit('b.txt', 'two')
-        tmp = Path(self.tmp.name)
-        bin_dir, ran = tmp / 'admission-bin', tmp / 'payload-ran'
-        bin_dir.mkdir()
-        reason = 'gate-slot: refusing admission: heavy queue wait expired'
-        gate = bin_dir / 'gate-slot'
-        gate.write_text(f'#!/bin/sh\nprintf "%s\\n" {shlex.quote(reason)} >&2\nexit 75\n')
-        gate.chmod(0o755)
-        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'ST_EVIDENCE_GOVERN': 'on'}
-        def launch(executable, command, env):
-            done = subprocess.run(command, env=env, capture_output=True, text=True)
-            sys.stderr.write(done.stderr)
-            return done.returncode
-
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), \
-                mock.patch.object(st_test.os, 'execve', side_effect=launch), \
-                mock.patch.object(st_test, 'fetch_base', side_effect=AssertionError('refuse before fetching or taking a pool tree')):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env=env,
-                                            command=['sh', '-c', f': > {shlex.quote(str(ran))}', 'scripts/ci-local'])
-        self.assertEqual(code, 75, out + err)
-        self.assertIn(reason, err)
-        self.assertFalse(ran.exists())
-        self.assertEqual(self.statements(), [])
-
-    def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
-        self.commit('b.txt', 'two')
-        tmp = Path(self.tmp.name)
-        calls = tmp / 'calls'
-        bin_dir, runtime = tmp / 'bin', tmp / 'runtime'
-        bin_dir.mkdir()
-        runtime.mkdir()
-        (runtime / 'bus').touch()
-        (self.home / '.local/bin').mkdir(parents=True)
-        # A shim that supports --stage-slot and a systemd-run: each records its arguments and runs what follows its `--`.
-        recorder = '#!/bin/sh\n# --stage-slot\nprintf "%s\\n" "$(basename "$0") $*" >> {calls}\nwhile [ "$1" != -- ]; do shift; done; shift; exec "$@"\n'
-        for path in (self.home / '.local/bin/cargo', bin_dir / 'systemd-run'):
-            path.write_text(recorder.format(calls=calls))
-            path.chmod(0o755)
-        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
-        # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
-        real_which = shutil.which
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None), \
-                mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else real_which(program)):
-            code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
-            self.assertEqual(code, 0, err)
-            # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
-            only, = calls.read_text().splitlines()
-            self.assertTrue(only.startswith('systemd-run --user --scope --quiet --collect --slice=builds.slice -- '), only)
-            self.assertIn('evidence-wrap --check demo', only)
-            statement, = self.statements()
-            self.assertEqual(statement['predicate']['observed']['checks']['demo']['command'], ['sh', '-c', 'echo ran'])  # what is signed is unchanged
-            calls.unlink()
-            self.commit('c.txt', 'three')
-            self.assertEqual(self.run_st_test('--check', 'demo', extra_env=dict(env, ST_EVIDENCE_GOVERN='off'))[0], 0)
-            self.assertFalse(calls.exists())
-            self.commit('d.txt', 'four')
-            (tmp / 'no-bus').mkdir()
-            code, out, err = self.run_st_test('--check', 'demo', extra_env=dict(env, XDG_RUNTIME_DIR=str(tmp / 'no-bus')))  # no user bus: runs anyway, and says so
-            self.assertEqual(code, 0, err)
-            self.assertIn('fractal-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
-            self.assertFalse(calls.exists())  # neither a scope nor a ticket
-        self.commit('e.txt', 'five')
-        self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
-        self.assertFalse(calls.exists())  # a check that builds nothing is not wrapped
 
     def test_fractal_web_is_not_relevant_when_no_web_input_changed_by_the_base_s_own_rules(self):
         (self.work / 'scripts').mkdir(exist_ok=True)
@@ -4417,42 +3789,7 @@ finally:
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
                                                          'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
 
-    def test_a_run_that_builds_asks_for_its_lane_burst_at_its_tree_records_it_and_gives_it_back(self):
-        self.commit('b.txt', 'two')
-        order, real_tree = [], st_test.acquire_tree
 
-        def poll(burst, start=False, timeout=0.0):
-            if start and burst.granted is None:
-                order.append(('burst', burst.size, burst.limit_s))
-                burst.granted, burst.waited = burst.size, 42.4
-            return burst.granted is not None
-
-        def tree(*args, **kwargs):
-            order.append(('tree', kwargs['burst'].granted))  # the wait for a tree begins with no burst held
-            return real_tree(*args, **kwargs)
-
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test.Burst, 'poll', poll), \
-                mock.patch.object(st_test.Burst, 'release', lambda burst: order.append(('released',))), \
-                mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), mock.patch.object(st_test, 'acquire_tree', side_effect=tree):
-            code, out, err = self.run_st_test('--queue-limit', '600', command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
-        self.assertEqual(code, 0, out + err)
-        self.assertEqual(order, [('tree', None), ('burst', (8, '24G'), 600.0), ('released',)])
-        record, = self.runs()
-        self.assertEqual((record['burst'], record['burst_wait_s']), ({'cores': 8, 'memory': '24G'}, 42))
-
-    def test_a_run_whose_burst_was_lost_while_it_held_it_fails_and_says_so(self):
-        self.commit('b.txt', 'two')
-
-        def poll(burst, start=False, timeout=0.0):
-            burst.granted = burst.size
-            return True
-
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test.Burst, 'poll', poll), \
-                mock.patch.object(st_test.Burst, 'release', lambda burst: None), mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), \
-                mock.patch.object(st_test.Burst, 'lost', lambda burst: 'burst lane 8 cores/24.0G waits behind agent/crew/other'):
-            code, out, err = self.run_st_test(command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'lane-burst +LOST .*the lane burst 8 cores/24G was lost while the run held it: burst lane 8 cores/24.0G waits behind')
 
     def test_a_check_killed_at_its_lane_s_memory_limit_says_so_in_the_summary(self):
         self.commit('b.txt', 'two')
@@ -4783,21 +4120,6 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(len(got), 1)
         got[0][1].close()
 
-    def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
-        queue = self.root / 'queue'
-        queue.mkdir(parents=True)
-        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
-        ready = [False]
-        got = []
-        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
-            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=lambda: (ready[0], 'no slot'))), daemon=True)
-            worse.start()
-            time.sleep(2.5)
-            self.assertEqual(got, [])                                           # free for longer than the fallback time, but a build would wait for a slot
-            ready[0] = True
-            worse.join(8)
-        self.assertEqual(len(got), 1)
-        got[0][1].close()
 
     def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
         self.root.mkdir(parents=True)
@@ -4955,8 +4277,8 @@ class PoolQueue(unittest.TestCase):
     def test_the_pool_rank_is_last_only_when_asked(self):
         with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': 'last'}, clear=True):
             self.assertEqual(st_test.pool_rank(), st_test.POOL_LAST_RANK)
-        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.object(st_test, 'priority_rank', return_value=12):
-            self.assertEqual(st_test.pool_rank(), 12)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
+            self.assertEqual(st_test.pool_rank(), 50)
         with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_RANK': '3'}, clear=True):
             with self.assertRaises(st_test.Failure):
                 st_test.pool_rank()                                             # a rank is the host's priority file's, not the caller's
@@ -4974,20 +4296,6 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual([name for _, _, name in st_test.tree_queue(queue, time.time_ns())], [own.name])
         self.assertFalse(stale.exists())
 
-    def test_the_rank_is_the_first_matching_line_of_the_priority_file_and_50_otherwise(self):
-        priority = Path(self.tmp.name) / 'cargo-priority'
-        priority.write_text('# rank glob\n3 agent/crew/hot/*/hot-builder*\n4 agent/crew/leads/*\n12 agent/*\n')
-        rank = lambda agent: st_test.priority_rank({'ST_AGENT': agent, 'CARGO_PRIORITY_FILE': str(priority)})
-        self.assertEqual(rank('agent/crew/hot/2026-10-26/hot-builder'), 3)
-        self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
-        self.assertEqual(rank('agent/other'), 12)
-        self.assertEqual(rank(''), 50)
-        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (fractal-test and ci-local stages run without ST_* variables).
-        by = lambda environment: st_test.priority_rank(dict(environment, CARGO_PRIORITY_FILE=str(priority)))
-        self.assertEqual(by({'CARGO_PRIORITY_CALLER': 'agent/crew/hot/2026-10-26/hot-builder'}), 3)
-        self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
-        self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
-        self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
 
     def test_a_free_tree_terminates_orphans_before_reuse(self):
         (self.root / 'tree-0').mkdir(parents=True)
@@ -5021,109 +4329,6 @@ class PoolQueue(unittest.TestCase):
         self.assertIn('a live st-test is in it', said.getvalue())
         self.assertNotIn('terminating', said.getvalue())
 
-    def test_a_waiter_that_gives_a_free_tree_back_for_a_build_slot_signals_nothing_in_it(self):
-        self.root.mkdir(parents=True)
-        looks, cleared = [], []
-
-        def slot_ready():
-            looks.append(True)
-            return len(looks) >= 3, 'test: 1 of 1 heavy slots busy'
-
-        with mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.01), \
-                mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
-                contextlib.redirect_stderr(io.StringIO()):
-            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready)
-        lock.close()
-        self.assertEqual((n, len(looks)), (0, 3))
-        self.assertEqual(cleared, ['tree-0'])  # once, as it took the tree: not on the two passes that gave it back
-
-    def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
-        self.root.mkdir(parents=True)
-        free, asked, waits = [False], [], {}
-
-        def slot_ready():
-            asked.append(time.monotonic())
-            return free[0], 'test: 1 of 1 heavy slots busy'
-
-        def next_pass(seconds):
-            self.assertEqual(seconds, st_test.POOL_WAIT_SECONDS)
-            self.assertLessEqual(len(asked), 3, 'the next pass takes a tree once the slot is free')
-            for n in range(2):
-                with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fcntl.flock(probe, fcntl.LOCK_UN)
-            free[0] = len(asked) == 3
-
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said), mock.patch.object(st_test.time, 'sleep', side_effect=next_pass):
-            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)
-        self.assertEqual(len(asked), 4, 'three passes leave both trees free; the fourth takes one')
-        lock.close()
-        self.assertEqual(n, 0)
-        self.assertGreaterEqual(waits['slot_wait_s'], 0)
-        self.assertLessEqual(waits['slot_wait_s'], waits['tree_wait_s'] + 1)
-        self.assertEqual(said.getvalue().count('waiting for one without holding a tree'), 1)  # said once, not on every look
-        self.assertIn('a build slot is free', said.getvalue())
-
-    def test_a_free_tree_is_taken_anyway_once_it_has_waited_the_slot_limit_and_a_tree_in_use_does_not_count(self):
-        self.root.mkdir(parents=True)
-        holder = open(self.root / 'tree-0.lock', 'w')
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        got, waits, said = [], {}, io.StringIO()
-        with mock.patch.object(st_test, 'TREE_SLOT_WAIT_LIMIT', 0.5), contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, waits=waits,
-                                                                                     slot_ready=lambda: (False, 'test: never'))))
-            waiter.start()
-            time.sleep(1.0)                                                     # twice the limit, but its only tree was in use
-            self.assertEqual(got, [])
-            holder.close()
-            waiter.join(5)
-        n, lock = got[0]
-        lock.close()
-        self.assertEqual(n, 0)
-        self.assertIn('taking tree-0 after', said.getvalue())                   # slow, never starved
-        self.assertGreaterEqual(waits['tree_wait_s'], 1)
-        self.assertLess(waits['slot_wait_s'], waits['tree_wait_s'])             # only the time the free tree waited counts
-
-    def test_a_build_slot_is_ready_only_while_more_heavy_slots_are_free_than_heavy_tickets_wait_and_the_gate_admits(self):
-        run = Path(self.tmp.name) / 'run'
-        slots = run / 'cargo-slots'
-        home = Path(self.tmp.name) / 'home'
-        (home / '.config').mkdir(parents=True)
-        (home / '.config/cargo-heavy-slots').write_text('1\n')
-        environment = {'HOME': str(home), 'XDG_RUNTIME_DIR': str(run), 'PATH': os.environ['PATH']}
-        with mock.patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(st_test.build_slot_ready()[0], True)               # no shim on this host: nothing to wait for
-            (slots / 'queue').mkdir(parents=True)
-            self.assertEqual(st_test.build_slot_ready(), (True, '1 of 1 heavy slots free'))
-            holder = open(slots / 'heavy0', 'w')                               # a build holds the one heavy slot
-            fcntl.flock(holder, fcntl.LOCK_EX)
-            ready, why = st_test.build_slot_ready()
-            self.assertEqual((ready, why), (False, '1 of 1 heavy slots busy, 0 heavy build(s) waiting for one'))
-            holder.close()
-            sleeper = subprocess.Popen(['sleep', '60'])
-            self.addCleanup(sleeper.wait)
-            self.addCleanup(sleeper.kill)
-            ticket = slots / 'queue' / f'heavy.050.{time.time_ns():019d}.{sleeper.pid}'
-            ticket.touch()                                                      # a heavy build waits there: the free slot is its
-            self.assertEqual(st_test.build_slot_ready(), (False, '0 of 1 heavy slots busy, 1 heavy build(s) waiting for one'))
-            with mock.patch.dict(os.environ, {'CARGO_HEAVY_SLOTS': '2'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)           # two free, one waiting
-            (slots / 'queue' / f'heavy.050.{time.time_ns():019d}.999999999').touch()  # a dead waiter is skipped
-            (slots / 'queue' / f'general.050.{time.time_ns():019d}.{sleeper.pid}').touch()  # and a light one does not count
-            sleeper.kill()
-            sleeper.wait()
-            self.assertEqual(st_test.build_slot_ready()[0], True)
-            self.assertEqual(len(os.listdir(slots / 'queue')), 3, "the shim's tickets are read, never removed")
-            gate = Path(self.tmp.name) / 'build-admission'
-            gate.write_text('#!/bin/sh\n[ "$1 $2" = "check heavy" ] || exit 9\nexit "$GATE_EXIT"\n')
-            gate.chmod(0o755)
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '1'}):
-                self.assertEqual(st_test.build_slot_ready(), (False, 'the build admission gate would not admit a heavy build now (load or memory)'))
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '2'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)           # a gate that cannot read the host stops nothing, as in the shim
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '0'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)
 
     def test_blocked_is_the_time_a_stage_waited_for_a_slot_while_no_stage_ran(self):
         log = Path(self.tmp.name) / 'linux-gate.queue'
@@ -5155,227 +4360,6 @@ class PoolQueue(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 st_test.acquire_tree(self.root, 1, rank=50)
         self.assertEqual(os.listdir(self.root / 'queue'), [])
-
-
-class BurstAtTheTree(unittest.TestCase):
-    """A run asks for its lane burst once it could take a pool tree, and takes the tree only once the burst is granted (acquire_tree): no run holds
-    a burst without a tree or a tree without its burst, and a handover keeps a waiting ask."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        tmp = Path(self.tmp.name)
-        self.root, self.calls, self.released, self.go = tmp / 'pool', tmp / 'calls', tmp / 'released', tmp / 'go'
-        speed = mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05)
-        speed.start()
-        self.addCleanup(speed.stop)
-
-    def fractal(self, body):
-        """A fake fractal: records each call, runs BODY (which prints the holder's answers), then holds until stdin closes."""
-        path = Path(self.tmp.name) / 'fractal'
-        # Publish complete records: existence is the reader's readiness signal.
-        path.write_text(
-            '#!/usr/bin/env bash\n'
-            'append_record() (\n'
-            '  exec 9>"$1.lock"\n'
-            '  flock -x 9\n'
-            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
-            '  mv "$1.tmp.$$" "$1"\n'
-            ')\n'
-            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
-            f'append_record {shlex.quote(str(self.released))} released\n')
-        path.chmod(0o755)
-        return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
-
-    def lines(self, path):
-        return path.read_text().splitlines() if path.exists() else []
-
-    def until(self, condition, seconds=10):
-        deadline = time.monotonic() + seconds
-        while not condition():
-            self.assertLess(time.monotonic(), deadline, 'timed out')
-            time.sleep(0.05)
-
-    def test_a_run_waiting_for_a_tree_holds_no_burst_and_asks_once_one_is_free(self):
-        self.root.mkdir(parents=True)
-        holder = open(self.root / 'tree-0.lock', 'w')
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        got = []
-        with mock.patch.dict(os.environ, self.fractal('echo granted')), contextlib.redirect_stderr(io.StringIO()):
-            burst = st_test.Burst((8, '24G'), 30)
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, burst=burst)), daemon=True)
-            waiter.start()
-            time.sleep(1)
-            self.assertEqual(got, [])
-            self.assertEqual(self.lines(self.calls), [])                    # every tree in use: nothing asked, nothing held
-            holder.close()
-            waiter.join(10)
-        self.assertEqual(len(got), 1)
-        self.assertEqual(burst.granted, (8, '24G'))
-        self.assertEqual(len(self.lines(self.calls)), 1)
-        self.assertEqual(self.lines(self.released), [])                     # held with the tree, for the run
-        burst.release()
-        got[0][1].close()
-        self.assertEqual(self.lines(self.released), ['released'])
-
-    def test_a_run_whose_burst_waits_leaves_the_free_tree_to_the_run_behind_and_gives_back_a_burst_granted_with_no_tree_free(self):
-        # The first ask waits until `go`, the next is granted at once.
-        body = (f'if [ "$(wc -l < {self.calls})" -eq 1 ]; then echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; fi; echo granted')
-        head, behind = [], []
-        said = io.StringIO()
-        with mock.patch.dict(os.environ, self.fractal(body)), mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), \
-                contextlib.redirect_stderr(said):
-            burst = st_test.Burst((8, '24G'), 60)
-            first = threading.Thread(target=lambda: head.append(st_test.acquire_tree(self.root, 1, rank=3, burst=burst)), daemon=True)
-            first.start()
-            self.until(lambda: self.lines(self.calls))                      # first in the order with tree-0 free: it asks, and holds no tree
-            second = threading.Thread(target=lambda: behind.append(st_test.acquire_tree(self.root, 1, rank=50)), daemon=True)
-            second.start()
-            second.join(10)
-            self.assertEqual([n for n, _ in behind], [0])                   # the run behind, which needs no burst, has it after the fallback
-            self.assertEqual(head, [])
-            self.go.touch()
-            self.until(lambda: self.lines(self.released))                   # granted while no tree is free: given back
-            self.assertEqual(head, [])
-            behind[0][1].close()
-            first.join(10)
-        self.assertEqual([n for n, _ in head], [0])
-        self.assertEqual(burst.granted, (8, '24G'))
-        self.assertEqual(len(self.lines(self.calls)), 2)                    # asked again once a tree was free
-        self.assertIn('granted while no pool tree was free; given back', said.getvalue())
-        self.assertEqual(self.lines(self.released), ['released'])
-        burst.release()
-        head[0][1].close()
-        self.assertEqual(self.lines(self.released), ['released', 'released'])
-
-    def test_a_waiter_behind_whose_ask_waits_takes_the_free_tree_once_its_burst_is_granted(self):
-        queue = self.root / 'queue'
-        queue.mkdir(parents=True)
-        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # best in the order, of this copy's rules, and never taking a tree
-        got = []
-        with mock.patch.dict(os.environ, self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                                                      f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; echo granted')), \
-                mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
-            burst = st_test.Burst((8, '24G'), 60)
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, burst=burst)), daemon=True)
-            waiter.start()
-            self.until(lambda: self.lines(self.calls))                      # past the fallback, it asks
-            time.sleep(1)                                                    # and its ask waits for longer than the fallback
-            self.go.touch()
-            waiter.join(10)
-        self.assertEqual([n for n, _ in got], [0])
-        self.assertEqual(burst.granted, (8, '24G'))
-        self.assertEqual((len(self.lines(self.calls)), self.lines(self.released)), (1, []))  # one ask, never given back
-        burst.release()
-        got[0][1].close()
-
-    def test_a_free_tree_given_back_while_the_burst_waits_is_cleared_only_as_it_is_taken(self):
-        for path in ('head', 'fallback'):
-            with self.subTest(path=path):
-                shutil.rmtree(self.root, ignore_errors=True)
-                for name in (self.calls, self.released, self.go):
-                    name.unlink(missing_ok=True)
-                queue = self.root / 'queue'
-                queue.mkdir(parents=True)
-                if path == 'fallback':  # best in the order and never taking a tree: this waiter tries the free one after the fallback
-                    st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')
-                got, cleared, slots = [], [], []
-                with mock.patch.dict(os.environ, self.fractal(f'echo "waiting burst lane 8 cores/24.0G does not fit"; '
-                                                              f'while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; do sleep 0.05; done; echo granted')), \
-                        mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.3), \
-                        mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
-                        contextlib.redirect_stderr(io.StringIO()):
-                    burst = st_test.Burst((8, '24G'), 60)
-                    slot_ready = lambda: slots.append(True) or (True, 'test: a slot is free')
-                    waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=slot_ready, burst=burst)),
-                                              daemon=True)
-                    waiter.start()
-                    self.until(lambda: self.lines(self.calls))              # tree-0 flocked and given back for the ask
-                    time.sleep(0.5)
-                    self.assertEqual((got, cleared), ([], []))              # nothing in a tree given back is signalled
-                    self.go.touch()
-                    waiter.join(10)
-                self.assertEqual([n for n, _ in got], [0])
-                self.assertEqual(cleared, ['tree-0'])                       # once, as the granted run took it
-                burst.release()
-                got[0][1].close()
-
-    def handover(self, body, granted):
-        """Hand this run's burst (granted first, or an ask that waits) over to a newer copy through hand_over, as acquire_tree's Handover does:
-        what the newer copy saw, in the same process."""
-        report = Path(self.tmp.name) / 'report.json'
-        newer = textwrap.dedent(f"""
-            import importlib.machinery, importlib.util, json, os, sys
-            loader = importlib.machinery.SourceFileLoader('st_test_newer', {str(ROOT / 'scripts/st-test')!r})
-            st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
-            burst = st.Burst.handed(os.environ[{st_test.HANDOVER_BURST!r}], (8, '24G'), 60)
-            alive, held = not os.path.exists({str(self.released)!r}), burst.granted
-            open({str(self.go)!r}, 'w').close()
-            ready = burst.poll(timeout=10)
-            json.dump({{'pid': os.getpid(), 'alive': alive, 'held': held, 'ready': ready, 'size': burst.granted, 'waited': burst.waited}},
-                      open({str(report)!r}, 'w'))
-            burst.release()
-        """)
-        driver = textwrap.dedent(f"""
-            import gc, importlib.machinery, importlib.util, os, sys, time
-            from pathlib import Path
-            loader = importlib.machinery.SourceFileLoader('st_test', {str(ROOT / 'scripts/st-test')!r})
-            st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)
-            burst = st.Burst((8, '24G'), 60)
-            assert burst.poll(start=True, timeout=1) is {granted!r}
-            handed = burst.hand_off()
-            burst.release()  # what the run's unwind does: nothing is held here any more
-            gc.collect()
-            print(os.getpid(), flush=True)
-            st.hand_over(st.Handover({newer.encode()!r}, 'c' * 40, Path('/q/050.1.' + str(os.getpid())), True, burst=handed), [])
-        """)
-        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True,
-                              env=dict(os.environ, TMPDIR=self.tmp.name, **self.fractal(body)), timeout=60)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        seen = json.loads(report.read_text())
-        self.assertEqual(seen['pid'], int(done.stdout.split()[0]))
-        self.assertTrue(seen['alive'], 'the holder kept its stdin open through the exec')
-        self.assertEqual((seen['ready'], seen['size']), (True, [8, '24G']))
-        self.assertEqual(len(self.lines(self.calls)), 1)                    # one ask, so one place in the host's order
-        self.until(lambda: self.lines(self.released))
-        return seen
-
-    def test_a_handover_keeps_a_waiting_ask_and_its_place(self):
-        """The holder is this process's child and keeps running through the exec: the newer copy reads its answer, and nothing asks again."""
-        seen = self.handover(f'echo "waiting burst lane 8 cores/24.0G does not fit"; while [ ! -e {self.go} ] && [ -d {self.tmp.name} ]; '
-                             'do sleep 0.05; done; echo granted', granted=False)
-        self.assertIsNone(seen['held'])
-        self.assertGreaterEqual(seen['waited'], 1)                          # the wait counts from the first copy's ask
-
-    def test_a_handover_keeps_a_granted_burst(self):
-        """main's st-test changing under a run must not drop the run back to its base lane: the newer copy holds the same burst, unasked."""
-        seen = self.handover('echo granted', granted=True)
-        self.assertEqual(seen['held'], [8, '24G'])
-
-    def test_a_newer_copy_that_cannot_take_an_ask_over_is_handed_none_and_the_ask_ends(self):
-        self.root.mkdir(parents=True)
-        with mock.patch.dict(os.environ, self.fractal('echo "waiting burst lane 8 cores/24.0G does not fit"; sleep 30')), \
-                contextlib.redirect_stderr(io.StringIO()):
-            for source, handed in ((b'# takes over ST_TEST_HANDOVER_TICKET only\n', False), (b'# ST_TEST_HANDOVER_TICKET ST_TEST_HANDOVER_BURST\n', True)):
-                burst = st_test.Burst((8, '24G'), 60)
-                self.assertFalse(burst.poll(start=True, timeout=0.5))      # an ask that waits
-                pid = burst.holder.pid
-                with self.assertRaises(st_test.Handover) as caught:
-                    st_test.acquire_tree(self.root, 1, rank=50, burst=burst, follow=lambda: (source, 'c' * 40))
-                self.assertIsNone(burst.holder)                             # nothing left for this run's unwind to give back
-                if handed:
-                    self.assertEqual(json.loads(caught.exception.burst)['pid'], pid)
-                    holder, errors = st_test.HANDED_HOLDERS.pop()
-                    holder.kill()
-                    holder.wait()
-                    holder.stdin.close()
-                    holder.stdout.close()
-                    errors.close()
-                else:
-                    self.assertIsNone(caught.exception.burst)
-                    with self.assertRaises(ProcessLookupError):           # the ask ended with the copy that made it
-                        os.kill(pid, 0)
 
 
 class PerCrate(StTest):

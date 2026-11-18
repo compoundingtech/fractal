@@ -2068,15 +2068,16 @@ together under the tree's lock, and are emptied together before a run when their
 Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
-**The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
---slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
-cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
-build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
-(`scripts/fractal_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
-when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
-killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
-records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the
-same.
+**Native resources govern heavy phases.** Member preparation and each heavy check run inside one
+`fractal resources exec --lane st-test --class check --profile KEY --receipt-file FILE -- COMMAND`.
+`st-test-build` covers preparation, Rust build/check suites and web; `st-test-run` covers the standalone Rust test phase.
+The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
+missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
+The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
+load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
+Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
+The queue log retains separate admission and payload budgets. Receipt `queue_wait_ms` and `wall_duration_ms` are the host's terminal measurements.
+Host disk seeds are warm-run estimates, not cold full-run measurements; configure their free-disk floor per host.
 
 **How long a run takes, and the objective.** A full warm run of the per-PR suite (`scripts/fractal-test` with no `--check` and no `--crate`,
 every default check including the per-crate `rust-tests` signing, on a pool tree whose kept target already holds a build) takes 12 minutes
@@ -2222,17 +2223,12 @@ and cache directories are a scratch directory that is removed afterwards, and no
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
-rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
-host's admission itself: the shims and the `build-admission` program look for their program, limits, priorities and queue state
-under the account's home, which the stages' `HOME` would hide (every build then took the shims' fallback cap under a lock of its own),
-so `scripts/ci-local` names them from the account's home (`BUILD_ADMISSION_BIN`, `BUILD_ADMISSION_CONFIG`, `BUILD_ADMISSION_STATE`,
-`BUILD_ADMISSION_FALLBACK_LOCK`, `CARGO_PRIORITY_FILE`, `CARGO_HEAVY_SLOTS`; a value the caller set is kept). The
-stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
-shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
-`ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
-`CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
-default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
-pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
+rustup homes (the dependency cache), `XDG_RUNTIME_DIR` and `FRACTAL_RESOURCE_PARENT` (native custody, not seat credentials).
+A direct `scripts/ci-local` call enters `st-test-build` itself; under st-test it inherits the enclosing native phase.
+All setup, parallel stages and their descendants stay in that one phase. Account-local admission shims are removed from PATH, and the
+dev shell's own cargo is selected first (`CI_LOCAL_CARGO`, or the first non-shim cargo outside the account's home).
+The stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own);
+there are no separate nice/ionice wrappers or host-load vetoes. The lane in `.st/required-lanes.json`
 holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake; for `linux-gate`
 also the clippy ratchet's baseline and splits and the pinned previous release fleet-compat runs against), so a tree that edits
 what decides what the stages run never skips on a local note. `linux-gate`'s tree inputs are the check's declared `inputs`, so an

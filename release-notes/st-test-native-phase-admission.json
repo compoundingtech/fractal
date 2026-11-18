@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Admit st-test heavy phases through native resource profiles and retain phase receipts",
+  "replay": {"status": "none", "detail": "No replicated claims or projection changes."},
+  "schema": {"status": "none", "detail": "No database changes. The local run ledger gains additive admission_receipts entries naming each phase, profile and terminal receipt file."},
+  "rules": {"status": "changed", "detail": "Member preparation and each heavy check take one native resources exec admission in lane st-test, class check. Independent load, cargo-slot, priority, lane-burst, builds.slice, gate-slot and nice/ionice admission paths are removed. Admission and payload clocks remain separate."},
+  "compatibility": {"status": "changed", "detail": "Requires native resources exec with --profile and --receipt-file; these flags remain provisional until the native profile contract merges. There is no legacy fallback or ST_EVIDENCE_GOVERN=off bypass. Unsupported hosts refuse heavy phases."},
+  "downtime": {"status": "none", "detail": "No daemon restart is performed by this change."},
+  "manual": {"status": "changed", "detail": "Before adoption, install the native resources CLI/daemon and provision st-test-build and st-test-run host profiles with cores, memory, a host-specific warm-run disk estimate and heavy IO. The default single member serializes the st-test lane. Receipts persist under ~/.cache/st-test/admission."},
+  "recovery": {"status": "none", "detail": "Revert the runner change to restore its previous admission policy. Existing signed evidence and terminal receipts are not rewritten."}
+}
