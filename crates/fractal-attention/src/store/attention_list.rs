@@ -14,7 +14,8 @@ mod tests;
 /// a view that stopped publishing must not stay served.
 pub const WITHDRAW_AFTER_MS: u64 = 30_000;
 
-/// More claims than this between two publications fold again rather than read them all.
+/// More potentially relevant claims than this between publications fold again. Unread
+/// telemetry and message traffic must not turn a bounded delta into a fleet-wide refold.
 const DELTA_LIMIT: usize = 10_000;
 
 /// Claim kinds that no attention source reads, whatever their subject: harness timelines and
@@ -492,14 +493,25 @@ impl AttentionListStore for Store {
             now: u128,
             due: &mut Option<u128>,
         ) -> Result<Option<String>> {
+        // Keep the future-acceptance fence for *all* claims, including the unread kinds
+        // filtered below. Their arrival used to contribute to this fence before filtering.
+        if let Some(earliest) = self.attention_future_since(after, through, now)? {
+            *due = Some(due.map_or(earliest, |due| due.min(earliest)));
+        }
+        static UNREAD_JSON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            serde_json::to_string(UNREAD_KINDS).expect("attention unread kinds serialize")
+        });
+        let unread = UNREAD_JSON.as_str();
         let claims = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(
                 "SELECT id, subject, kind, actor, CAST(accepted_at_unix_ms AS TEXT) FROM claims
-                 WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
+                 WHERE store_index>?1 AND store_index<=?2
+                   AND kind NOT IN (SELECT value FROM json_each(?4))
+                 ORDER BY store_index LIMIT ?3",
             )?;
             statement
-                .query_map(params![after, through, DELTA_LIMIT as u64 + 1], |row| {
+                .query_map(params![after, through, DELTA_LIMIT as u64 + 1, unread], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -517,9 +529,6 @@ impl AttentionListStore for Store {
             let accepted = accepted.parse::<u128>().unwrap_or(0);
             if accepted > now {
                 *due = Some(due.map_or(accepted, |due: u128| due.min(accepted)));
-            }
-            if UNREAD_KINDS.contains(&kind.as_str()) {
-                continue;
             }
             let matters = if kind == "work.progress" {
                 // Work by a seat counts as its activity in the login fold: it can only clear a
