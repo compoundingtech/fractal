@@ -23,6 +23,8 @@ pub struct StartJobs {
     application: Mutex<()>,
     results: tokio::sync::mpsc::UnboundedSender<StartResult>,
     completions: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<StartResult>>,
+    #[cfg(test)]
+    pub(super) completion_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl Default for StartJobs {
     fn default() -> Self {
@@ -33,6 +35,8 @@ impl Default for StartJobs {
             application: Mutex::new(()),
             results,
             completions: tokio::sync::Mutex::new(completions),
+            #[cfg(test)]
+            completion_hook: Mutex::default(),
         }
     }
 }
@@ -405,17 +409,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut completions = self.start_jobs.completions.lock().await;
         while let Some(result) = completions.recv().await {
             self.blocking(move |this| {
-                match this.apply_start_result(&result.id, &result.subject) {
-                    Err(error) => eprintln!(
-                        "st3: failed to apply runtime start completion {}: {error:#}", result.id
+                match this.isolate_start_completion(&result.subject, || {
+                    this.apply_start_result(&result.id, &result.subject)
+                }) {
+                    None => eprintln!(
+                        "st3: failed to apply runtime start completion {}; see start-completion fault", result.id
                     ),
-                    Ok(true) => tracing::info!(
+                    Some(true) => tracing::info!(
                         operation = %result.id,
                         subject = %result.subject,
                         result_to_adoption_ms = result.finished_at.elapsed().as_secs_f64() * 1_000.0,
                         "runtime start result adopted"
                     ),
-                    Ok(false) => {}
+                    Some(false) => {}
                 }
             }).await;
         }
@@ -428,6 +434,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if operation.id != id || !operation.finished || operation.applied {
             return Ok(false);
+        }
+        #[cfg(test)]
+        {
+            let hook = self.start_jobs.completion_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
         }
         let _capture = self.store.capture_runtime_observations()?;
         self.reconcile_start_operation(operation, &PassPtySnapshot::new())?;
@@ -455,21 +468,28 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
-            if reconcile_decision_admitted(&subject) {
-                self.isolate("start-completion", &subject, || {
-                    self.reconcile_start_operation(operation, snapshot)
-                });
-            } else {
-                // Gate operations are not admitted reconciliation-fault subjects.
-                // Keep a distinct daemon fault scope for each exact operation.
-                self.isolate(
-                    &format!("start-completion:{subject}"),
-                    &format!("daemon/{}", self.host),
-                    || self.reconcile_start_operation(operation, snapshot),
-                );
-            }
+            self.isolate_start_completion(&subject, || {
+                self.reconcile_start_operation(operation, snapshot)
+            });
         }
         Ok(())
+    }
+
+    fn isolate_start_completion<T>(
+        &self,
+        subject: &str,
+        apply: impl FnOnce() -> Result<T>,
+    ) -> Option<T> {
+        if reconcile_decision_admitted(subject) {
+            self.isolate("start-completion", subject, apply)
+        } else {
+            // Gates are not admitted reconciliation-fault subjects.
+            self.isolate(
+                &format!("start-completion:{subject}"),
+                &format!("daemon/{}", self.host),
+                apply,
+            )
+        }
     }
 
     pub(super) fn reconcile_start_operation(

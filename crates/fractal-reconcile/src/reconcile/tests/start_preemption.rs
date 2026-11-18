@@ -408,6 +408,64 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
 }
 
 #[tokio::test]
+async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/held-next\" { workspace \"/tmp\"; command \"true\" }",
+        "completion-panic-isolation",
+    );
+    let first = "agent/example/worker";
+    let second = "agent/example/held-next";
+    assert!(launch(&reconciler, first));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+    let (pass_release, pass_held) = std::sync::mpsc::channel();
+    let pass_release = ReleaseOnDrop(pass_release);
+    *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+        pass_entered.send(()).unwrap();
+        pass_held.recv().unwrap();
+    }));
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("fixture completion application panic");
+    }));
+    let task = tokio::spawn(reconciler.clone().run());
+    tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if store.observations_for(first, "reconcile.fault").unwrap().iter().any(|claim| {
+                claim.body["fields"]["scope"] == "start-completion"
+                    && claim.body["fields"]["status"] == "faulted"
+                    && claim.body["fields"]["reason"].as_str()
+                        .is_some_and(|reason| reason.contains("fixture completion application panic"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion panic was not recorded as an isolated item fault");
+    assert!(!task.is_finished(), "the completion panic dropped the running broad pass");
+    // A later result must still be consumed while that same broad pass remains held.
+    assert!(launch(&reconciler, second));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !store.observations_for(second, "runtime.action.succeeded").unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion consumer stopped after an item panic");
+    assert!(!task.is_finished(), "the original broad pass must remain active");
+    task.abort();
+    let _ = task.await;
+    pass_release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+}
+
+#[tokio::test]
 async fn start_results_are_adopted_while_the_broad_pass_is_held() {
     for stale in [false, true] {
         // A superseded producer deliberately ignores its launch guard, so this
