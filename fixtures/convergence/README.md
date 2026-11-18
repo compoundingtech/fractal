@@ -485,6 +485,8 @@ and final commit; that writer generates no further commits. Dependency-free auth
 draws seed these inputs through ordinary schedule writes rather than hidden fixture appends.
 The focused `the_corpus_generates_valid_native_capture_inputs` regression validates and admits
 all four kinds, checks the commit chain and stopped frontier, and replicates them to the oracle.
+The admission check also verifies the stored `/fields/record` envelope. Capture dependency
+lookups use that same path as the production projection, not the flat body of native missions.
 The full registry-kind coverage assertion remains intact.
 
 Adding kinds changes the shared seeded schedule. The v35 observations above are historical,

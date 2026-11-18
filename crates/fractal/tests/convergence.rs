@@ -242,6 +242,7 @@ fn the_corpus_generates_valid_native_capture_inputs() {
         let input = world.claim_of(spec, 0).expect("generate native capture input");
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        assert_eq!(claim.body.pointer("/fields/record"), input.fields.get("record"));
         if kind == COMMIT_KIND {
             let commit: CaptureCommit = serde_json::from_value(input.fields["record"].clone()).unwrap();
             assert_eq!(commit.authority_grant, written[AUTHORITY_KIND]);
@@ -1347,16 +1348,17 @@ impl World {
         };
         let source_subject = format!("{AUTHORITY_FAMILY}/{}", source.id);
         let held = claims(&self.nodes[index].store);
+        let source_record = json!(source);
         let records = |wanted: &str| {
             held.values().filter(|claim| {
                 claim.kind == wanted
-                    && claim.body.get("record").is_some_and(|record| record["source"] == json!(source))
+                    && claim.body.pointer("/fields/record").is_some_and(|record| record["source"] == source_record)
             }).collect::<Vec<_>>()
         };
         let grants = records(AUTHORITY_KIND);
         let commits = records(COMMIT_KIND);
         let previous = commits.iter().max_by_key(|claim| {
-            claim.body["record"]["sequence"].as_u64().expect("generated capture sequence")
+            claim.body["fields"]["record"]["sequence"].as_u64().expect("generated capture sequence")
         });
         let now = u64::try_from(self.now()).expect("positive simulation clock");
         let (subject, record) = match kind {
@@ -1383,11 +1385,11 @@ impl World {
                 let grant = grants.first()?;
                 let facts = records(FACT_KIND);
                 let claim = facts.last()?;
-                let fact: ObservedFact = serde_json::from_value(claim.body["record"].clone()).unwrap();
+                let fact: ObservedFact = serde_json::from_value(claim.body["fields"]["record"].clone()).unwrap();
                 let (_, repository, _) = fact.fact.identity();
                 let commit = CaptureCommit {
                     version: VERSION, source: source.clone(), epoch: 1, authority_grant: grant.id.clone(),
-                    sequence: previous.map_or(1, |claim| claim.body["record"]["sequence"].as_u64().unwrap() + 1),
+                    sequence: previous.map_or(1, |claim| claim.body["fields"]["record"]["sequence"].as_u64().unwrap() + 1),
                     predecessor: previous.map(|claim| claim.id.clone()),
                     facts: vec![FactReference { claim_id: claim.id.clone(), digest: fact.digest().unwrap() }],
                     checkpoint: Some(ScanCheckpoint {
