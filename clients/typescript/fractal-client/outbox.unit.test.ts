@@ -4,7 +4,7 @@ import { appliedAnswer } from './errors.ts';
 import {
   createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxRecord, restoreOutboxEntries, isAllowedOutboxTransition, outboxDeploymentId,
   type OutboxEntry, type OutboxIntent, type OutboxObservation, type OutboxPreparedRecord, type OutboxReceipt, type OutboxRecord,
-} from './outbox.ts';
+} from '@fractal/client/outbox';
 
 it('deployment IDs encode issuer tuples without comma or quote collisions', () => {
   const tuples = [
