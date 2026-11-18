@@ -21,6 +21,7 @@ pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
 pub mod idle_residency;
+mod residency_evidence;
 pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;

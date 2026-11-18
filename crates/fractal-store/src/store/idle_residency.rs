@@ -1,6 +1,7 @@
 //! Owner-writer admission for automatic suspension and wake. Runtime actions remain the
 //! durable authority; preflight evidence is usable only at an unchanged writer frontier.
 use super::*;
+use super::residency_evidence::append_residency_claim_tx;
 use crate::model::MemberSpec;
 pub use fractal_telemetry::residency::UnroutedKind;
 
@@ -28,7 +29,7 @@ fn evidence(tx: &Transaction<'_>, origin: &str, seat: &str, episode: &str, key: 
     let subject = format!("residency/{origin}/{episode}/{}", id.trim_start_matches("op/"));
     fields["host"] = json!(origin);
     fields["seat"] = json!(seat);
-    append_receipt_claim_tx(tx, origin, &subject, kind, None, &json!({"fields":fields}), &[], None, &key)?;
+    append_residency_claim_tx(tx, origin, &subject, kind, None, &json!({"fields":fields}), &[], None, &key)?;
     Ok(())
 }
 
@@ -67,18 +68,20 @@ pub fn end_sleep_tx(
     ended_at_unix_ms: u128,
     end_class: &str,
 ) -> Result<(), FractalError> {
+    if suspension.suspended_at_unix_ms.is_none() { return Ok(()); }
     if declared_admission::validate_fleet(transaction, origin, &FEATURE).is_err() { return Ok(()); }
-    let operation = suspension.suspend_operation_id.as_deref()
+    let suspension_operation = suspension.suspend_operation_id.as_deref()
         .unwrap_or(&suspension.operation_id);
-    let key = format!("runtime-residency:sleep:{operation}");
-    let id = operation_id_for_key(operation);
+    let key = format!("runtime-residency:sleep:{suspension_operation}");
+    if operation(transaction, &key).map_err(internal)?.is_some() { return Ok(()); }
+    let id = operation_id_for_key(suspension_operation);
     let subject = format!("residency/{origin}/sleep/{}", id.trim_start_matches("op/"));
     let threshold: Option<u64> = transaction.query_row(
         "SELECT json_extract(body,'$.fields.idle_after_ms') FROM claims WHERE id=?1",
-        [operation], |row| row.get(0)).optional().map_err(internal)?.flatten();
+        [suspension_operation], |row| row.get(0)).optional().map_err(internal)?.flatten();
     let short_sleep = suspension.suspended_at_unix_ms.zip(threshold)
         .is_some_and(|(suspended, threshold)| ended_at_unix_ms.saturating_sub(suspended) < u128::from(threshold)) as i64;
-    append_receipt_claim_tx(transaction, origin, &subject, "residency.sleep-ended", None,
+    append_residency_claim_tx(transaction, origin, &subject, "residency.sleep-ended", None,
         &json!({"fields": {"suspended_at": suspension.suspended_at_unix_ms, "ended_at": ended_at_unix_ms,
             "short_sleep": short_sleep, "end_class": end_class, "host": origin, "seat": seat}}),
         &[], None, &key).map_err(internal)?;
@@ -241,7 +244,7 @@ impl Store {
                 let refusal_key = format!("idle-refused:{key}");
                 if operation(tx, &refusal_key)?.is_none() {
                     let reason = if demand.oldest.is_some() { "wake-pending" } else { "wake-frontier-lag" };
-                    append_receipt_claim_tx(tx, &self.origin, subject, "runtime.action.failed", Some(subject),
+                    append_residency_claim_tx(tx, &self.origin, subject, "runtime.action.failed", Some(subject),
                         &json!({"evidence":[declaration],"fields":{"action":"suspend","cause":"idle",
                             "operation_status":"refused","operation_id":key,"code":reason,"reason":reason}}),
                         &[], None, &refusal_key)?;
@@ -252,7 +255,7 @@ impl Store {
             }
             if !frontier_matches(self, tx, &demand.frontier)? { return Ok(None); }
             if let Some(id) = operation(tx, &key)? { return Ok(Some(id)); }
-            let claim = append_receipt_claim_tx(tx, &self.origin, subject, "runtime.action.requested", Some(subject),
+            let claim = append_residency_claim_tx(tx, &self.origin, subject, "runtime.action.requested", Some(subject),
                 &json!({"evidence":[declaration], "fields": {"action":"suspend", "cause":"idle", "incarnation_id":incarnation,
                     "idle_declaration":declaration, "idle_after_ms":after_ms, "idle_enabled_at_unix_ms":enabled_at,
                     "idle_eligible_since_unix_ms":residency.eligible_since_unix_ms,
@@ -308,7 +311,7 @@ impl Store {
                 fields.insert("action".into(), json!("suspend"));
                 let key = crate::suspension::suspend_snapshot_key(request);
                 if operation(tx, &key)?.is_none() {
-                    append_receipt_claim_tx(tx, &self.origin, subject, "runtime.action.succeeded", Some(subject),
+                    append_residency_claim_tx(tx, &self.origin, subject, "runtime.action.succeeded", Some(subject),
                         &json!({"fields":fields,"evidence":[request]}), &[], None, &key)?;
                 }
             }
@@ -382,7 +385,7 @@ impl Store {
             let key = format!("idle-wake:{subject}:{lineage}:{attempt}");
             let id = if let Some(id) = operation(tx, &key)? { id } else {
                 let declaration = owned(tx, &self.origin, subject)?.expect("owner checked in this transaction");
-                append_receipt_claim_tx(tx, &self.origin, subject, "runtime.action.requested", Some(subject),
+                append_residency_claim_tx(tx, &self.origin, subject, "runtime.action.requested", Some(subject),
                     &json!({"evidence":[declaration,lineage], "fields":{"action":"resume", "cause":"idle", "suspend_operation_id":lineage,
                         "idle_wake_lineage":lineage,"idle_wake_attempt":attempt,
                         "idle_frontier":frontier_fields(&demand.frontier)}}), &[], None, &key)?.id
@@ -434,7 +437,7 @@ mod tests {
         let store = fixture(&path, root.path());
         assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
         let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
-        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.succeeded", Some(SEAT),
             &json!({"evidence":[suspend],"fields":{"action":"suspend","operation_status":"suspended"}}),
             &[], None, &crate::suspension::suspend_completed_key(&suspend))).unwrap().unwrap();
@@ -459,7 +462,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = fixture(&root.path().join("graph.sqlite"), root.path());
         let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
-        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.succeeded", Some(SEAT),
             &json!({"evidence":[suspend],"fields":{"action":"suspend","operation_status":"suspended"}}),
             &[], None, &crate::suspension::suspend_completed_key(&suspend))).unwrap().unwrap();
@@ -520,7 +523,7 @@ mod tests {
         let path = root.path().join("graph.sqlite");
         let store = fixture(&path, root.path());
         let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
-        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.succeeded", Some(SEAT),
             &json!({"evidence":[suspend],"fields":{"action":"suspend","operation_status":"suspended"}}),
             &[], None, &crate::suspension::suspend_completed_key(&suspend))).unwrap().unwrap();
@@ -539,7 +542,7 @@ mod tests {
         assert_eq!(demand_at, accepted, "local demand starts at message acceptance, not admission");
         let resume = store.admit_idle_wake(SEAT, 1, i64::MAX as u128).unwrap().operation_id.unwrap();
         assert_eq!(store.admit_idle_wake(SEAT, 1, i64::MAX as u128).unwrap().operation_id.as_deref(), Some(resume.as_str()));
-        let failed = store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        let failed = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.failed", Some(SEAT),
             &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"failed","code":"fixture-failure","reason":"retry later"}}),
             &[], None, &crate::suspension::resume_failed_key(&resume))).unwrap().unwrap();
@@ -557,7 +560,7 @@ mod tests {
              WHERE subject=?1 AND kind='residency.wake-demand'", [&episode],
             |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!((count, retried_at), (1, demand_at), "retry cannot restart the demand clock");
-        reopened.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        reopened.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.failed", Some(SEAT),
             &json!({"evidence":[retry],"fields":{"action":"resume","operation_status":"failed","code":"native-session-mismatch","reason":"wrong session"}}),
             &[], None, &crate::suspension::resume_failed_key(&retry))).unwrap().unwrap();
@@ -565,7 +568,7 @@ mod tests {
     }
 
     fn complete_suspend(store: &Store, seat: &str, request: &str) {
-        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", seat,
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", seat,
             "runtime.action.succeeded", Some(seat),
             &json!({"evidence":[request],"fields":{"action":"suspend","operation_status":"suspended"}}),
             &[], None, &crate::suspension::suspend_completed_key(request))).unwrap().unwrap();
@@ -580,7 +583,7 @@ mod tests {
             "version 2\nagent \"orchard\" { workspace \".\"; command \"true\"; }", "alder").unwrap();
         store.apply(&intent, &BTreeMap::from([(orchard.into(), Vec::new())]), "orchard").unwrap();
         let declaration = store.selected_desired_token(orchard).unwrap().unwrap();
-        let suspend = store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", orchard,
+        let suspend = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
             "runtime.action.requested", Some(orchard),
             &json!({"evidence":[declaration],"fields":{"action":"suspend","cause":"idle","incarnation_id":"two"}}),
             &[], None, "orchard-suspend")).unwrap().unwrap();
@@ -594,7 +597,7 @@ mod tests {
         assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_none());
         let resume = store.admit_idle_wake(orchard, 1, 9_000_000_000_000).unwrap().operation_id.unwrap();
         assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_none());
-        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", orchard,
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
             "runtime.action.succeeded", Some(orchard),
             &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"resumed","incarnation_id":"three"}}),
             &[], None, &crate::suspension::resume_completed_key(&resume))).unwrap().unwrap();
@@ -649,7 +652,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = fixture(&root.path().join("graph.sqlite"), root.path());
         let declaration = store.selected_desired_token(SEAT).unwrap().unwrap();
-        let manual = store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+        let manual = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
             "runtime.action.requested", Some("person/avery"),
             &json!({"evidence":[declaration],"fields":{"action":"suspend","incarnation_id":"one"}}),
             &[], None, "manual-suspend")).unwrap().unwrap();
@@ -692,5 +695,38 @@ mod tests {
         let lagging = Store::open(&root.path().join("graph.sqlite"),"alder").unwrap();
         assert!(!lagging.idle_residency_mail_summary().unwrap().0,
             "a reader without its configured source cannot prove a zero backlog");
+    }
+    #[test]
+    fn automatic_boundary_is_visible_to_the_real_reducer_and_replays_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.sqlite");
+        let store = fixture(&path, root.path());
+        let request = store.admit_idle_suspend(SEAT,Some(0),Some(0),i64::MAX as u128)
+            .unwrap().unwrap();
+        assert!(store.admit_idle_suspend(SEAT,Some(0),Some(0),i64::MAX as u128)
+            .unwrap().is_none(),"the existing hold suppresses a duplicate request");
+        let fields: BTreeMap<String,Value> = serde_json::from_value(json!({
+            "operation_status":"snapshotting","harness":"omp","native_session_id":"native-one",
+            "source_host":"alder","incarnation_id":"one"
+        })).unwrap();
+        assert!(store.commit_idle_stop_boundary(SEAT,&request,Some(0),Some(0),fields.clone()).unwrap());
+        let boundary = store.operation_claim(&crate::suspension::suspend_snapshot_key(&request))
+            .unwrap().expect("the ordinary operation reader must see the owner-fenced boundary");
+        assert_eq!(crate::suspension::current(&store,SEAT).unwrap().unwrap().phase,"snapshotting");
+        assert!(store.commit_idle_stop_boundary(SEAT,&request,Some(0),Some(0),fields).unwrap());
+        assert_eq!(store.operation_claim(&crate::suspension::suspend_snapshot_key(&request))
+            .unwrap().unwrap().id,boundary.id);
+        // The ordinary reconciler completion writer must compose with the fenced boundary.
+        store.append_claim(&ClaimInput {
+            subject:SEAT.into(),kind:"runtime.action.succeeded".into(),actor:Some(SEAT.into()),
+            fields:serde_json::from_value(json!({"action":"suspend","operation_status":"suspended"})).unwrap(),
+            evidence:vec![request.clone()],expected_subject:None,
+            idempotency_key:Some(crate::suspension::suspend_completed_key(&request)),
+        }).unwrap();
+        assert_eq!(crate::suspension::current(&store,SEAT).unwrap().unwrap().phase,"suspended");
+        let reopened = Store::open(&path,"alder").unwrap();
+        assert_eq!(crate::suspension::current(&reopened,SEAT).unwrap().unwrap().phase,"suspended");
+        assert_eq!(reopened.operation_claim(&crate::suspension::suspend_snapshot_key(&request))
+            .unwrap().unwrap().id,boundary.id);
     }
 }

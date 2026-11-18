@@ -7105,12 +7105,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                         && let Some(declaration) = self.store.claim_by_id(&token)?
                         && let Some(hold) = crate::suspension::current_at(&self.store, &subject.subject,
                             Some(declaration.store_index.saturating_sub(1)))?
-                            .filter(|hold| hold.cause() == "idle")
+                            .filter(|hold| hold.cause() == "idle" && hold.suspended_at_unix_ms.is_some())
                     {
                         let end_class = if declaration.body.get("owned_set").is_some() { "retire" } else { "stop" };
                         self.idle_residency_evidence.lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .end_sleep(&self.store, &subject.subject, &hold, now_ms(), end_class)?;
+                            .end_sleep(&self.store, &subject.subject, &hold, declaration.accepted_at_unix_ms, end_class)?;
                     }
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))

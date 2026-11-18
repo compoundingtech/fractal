@@ -36,15 +36,11 @@ fn common(host: &str, seat: &str, values: Value) -> BTreeMap<String, Value> {
 
 /// Unlike record_once's newest-value deduplication, this is a permanent operation receipt.
 fn receipt(store: &Store, subject: &str, kind: &str, fields: BTreeMap<String, Value>, evidence: Vec<String>, key: String) -> Result<bool> {
-    if store.idle_residency_enabled().is_err() {
-        // Reader-first: evidence kinds stay unwritten until every active member reads them.
-        return Ok(false);
-    }
-    match store.append_claim_outcome(&ClaimInput {
+    match store.append_residency_evidence(&ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: None, fields, evidence,
         expected_subject: None, idempotency_key: Some(key),
     }) {
-        Ok((_, inserted)) => Ok(inserted),
+        Ok(inserted) => Ok(inserted),
         Err(error) if error.code == "claim-checkpointed" => Ok(false),
         Err(error) => Err(error.into()),
     }
@@ -185,6 +181,10 @@ impl RuntimeEvidence {
     }
 
     fn sleep_end(&mut self, store: &Store, host: &str, seat: &str, request: &ClaimRecord, suspended: &ClaimRecord, requests: &[ClaimRecord], succeeded: &[ClaimRecord]) -> Result<()> {
+        let subject = episode(host, "sleep", &request.id);
+        if store.latest_claim(&subject, Some("residency.sleep-ended"))?.is_some() {
+            return Ok(());
+        }
         // Failed resume attempts do not end a sleep. A successful manual resume, stop, or retire
         // does; the first end remains the same across later requests and daemon restarts.
         let end = requests.iter().filter_map(|candidate| {
@@ -201,7 +201,7 @@ impl RuntimeEvidence {
         let short = class == "wake" && fields(request)["idle_after_ms"].as_u64()
             .is_some_and(|ttl| ended.saturating_sub(suspended_at) < u128::from(ttl));
         let key = format!("runtime-residency:sleep:{}", request.id);
-        if receipt(store, &episode(host, "sleep", &request.id), "residency.sleep-ended", common(host, seat, json!({
+        if receipt(store, &subject, "residency.sleep-ended", common(host, seat, json!({
             "suspended_at":suspended_at,"ended_at":ended,"short_sleep":u8::from(short),"end_class":class,
         })), vec![request.id.clone(), suspended.id.clone(), completed.id.clone()], key)? && short {
             self.activate().short_sleep();
@@ -214,16 +214,22 @@ impl RuntimeEvidence {
     pub(super) fn end_sleep(&mut self, store: &Store, seat: &str,
         suspension: &crate::suspension::Suspension, ended: u128, end_class: &str,
     ) -> Result<()> {
+        // An idle request may have failed or been cancelled before the process stopped.
+        // Such an attempt has no sleep episode for a later explicit stop to end.
+        let Some(suspended_at) = suspension.suspended_at_unix_ms else { return Ok(()); };
         let host = store.origin();
         let requests = store.claims_for(seat, Some("runtime.action.requested"))?;
         let Some(request) = requests.iter().rev().find(|claim|
             claim.id == suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id))
         else { return Ok(()); };
-        let suspended_at = suspension.suspended_at_unix_ms.unwrap_or(request.accepted_at_unix_ms);
+        let subject = episode(host, "sleep", &request.id);
+        if store.latest_claim(&subject, Some("residency.sleep-ended"))?.is_some() {
+            return Ok(());
+        }
         let short = end_class == "wake" && fields(request)["idle_after_ms"].as_u64()
             .is_some_and(|ttl| ended.saturating_sub(suspended_at) < u128::from(ttl));
         let key = format!("runtime-residency:sleep:{}", request.id);
-        if receipt(store, &episode(host, "sleep", &request.id), "residency.sleep-ended", common(host, seat, json!({
+        if receipt(store, &subject, "residency.sleep-ended", common(host, seat, json!({
             "suspended_at":suspended_at,"ended_at":ended,"short_sleep":u8::from(short),"end_class":end_class,
         })), vec![request.id.clone()], key)? && short {
             self.activate().short_sleep();
@@ -333,6 +339,101 @@ mod tests {
         let claims = store.claims_for(&subject, Some("residency.outcome")).unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(fields(&claims[0])["observed_at"], 100);
+    }
+
+    fn action_claim(store: &Store, kind: &str, values: Value, evidence: Vec<String>) -> ClaimRecord {
+        store.append_claim(&ClaimInput {
+            subject: "agent/amber.worker".into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(values).unwrap(), evidence,
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }
+
+    #[test]
+    fn explicit_sleep_end_keeps_its_first_time_after_restart_for_stop_and_retire() {
+        for end_class in ["stop", "retire"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("graph.db");
+            let store = signed(&path);
+            let request = action_claim(&store, "runtime.action.requested",
+                json!({"action":"suspend","cause":"idle","idle_after_ms":100}), vec![]);
+            let suspended = action_claim(&store, "runtime.action.succeeded",
+                json!({"action":"suspend","operation_status":"suspended"}), vec![request.id.clone()]);
+            let hold = crate::suspension::Suspension {
+                action: "suspend".into(), cause: Some("idle".into()), phase: "suspended".into(),
+                operation_id: request.id.clone(), suspended_at_unix_ms: Some(suspended.accepted_at_unix_ms),
+                ..Default::default()
+            };
+            let ended = suspended.accepted_at_unix_ms + 10;
+            RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold, ended, end_class).unwrap();
+            drop(store);
+            let store = Store::open(&path, "amber").unwrap();
+            RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold, ended + 1000, end_class).unwrap();
+            let claims = store.claims_for(&episode("amber", "sleep", &request.id), Some("residency.sleep-ended")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(fields(&claims[0])["ended_at"], json!(ended));
+            assert_eq!(fields(&claims[0])["end_class"], end_class);
+        }
+    }
+
+    #[test]
+    fn cancelled_or_failed_idle_attempt_followed_by_explicit_stop_has_no_sleep_end() {
+        for code in ["idle-cancelled", "driver-unsupported"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = signed(&root.path().join("graph.db"));
+            let request = action_claim(&store, "runtime.action.requested",
+                json!({"action":"suspend","cause":"idle"}), vec![]);
+            action_claim(&store, "runtime.action.failed",
+                json!({"action":"suspend","code":code,"reason":"suspension did not complete"}), vec![request.id.clone()]);
+            let hold = crate::suspension::Suspension {
+                action: "suspend".into(), cause: Some("idle".into()), phase: "failed".into(),
+                operation_id: request.id.clone(), code: Some(code.into()), ..Default::default()
+            };
+            RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold,
+                request.accepted_at_unix_ms + 1000, "stop").unwrap();
+            RuntimeEvidence::default().evaluate_subject(&store, "agent/amber.worker",
+                request.accepted_at_unix_ms + 2000).unwrap();
+            assert!(store.claims_for(&episode("amber", "sleep", &request.id),
+                Some("residency.sleep-ended")).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn manual_resume_and_retire_replay_preserve_the_original_sleep_end() {
+        for (action, end_class) in [("resume", "manual"), ("retire", "retire")] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("graph.db");
+            let store = signed(&path);
+            let request = action_claim(&store, "runtime.action.requested",
+                json!({"action":"suspend","cause":"idle","idle_after_ms":100}), vec![]);
+            let suspended = action_claim(&store, "runtime.action.succeeded",
+                json!({"action":"suspend","operation_status":"suspended"}), vec![request.id.clone()]);
+            let end_request = action_claim(&store, "runtime.action.requested",
+                json!({"action":action}), vec![]);
+            let completed = action_claim(&store, "runtime.action.succeeded",
+                json!({"action":action,"operation_status":if action == "resume" {"resumed"} else {"stopped"}}),
+                vec![end_request.id.clone()]);
+            RuntimeEvidence::default().evaluate_subject(&store, "agent/amber.worker",
+                completed.accepted_at_unix_ms).unwrap();
+            drop(store);
+            let store = Store::open(&path, "amber").unwrap();
+            let requests = store.claims_for("agent/amber.worker", Some("runtime.action.requested")).unwrap();
+            let succeeded = store.claims_for("agent/amber.worker", Some("runtime.action.succeeded")).unwrap();
+            RuntimeEvidence::default().sleep_end(&store, "amber", "agent/amber.worker",
+                &request, &suspended, &requests, &succeeded).unwrap();
+            let hold = crate::suspension::Suspension {
+                action: "resume".into(), cause: Some("idle".into()), phase: "resumed".into(),
+                operation_id: end_request.id.clone(), suspend_operation_id: Some(request.id.clone()),
+                suspended_at_unix_ms: Some(suspended.accepted_at_unix_ms), ..Default::default()
+            };
+            RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold,
+                completed.accepted_at_unix_ms + 1000, "stop").unwrap();
+            let claims = store.claims_for(&episode("amber", "sleep", &request.id), Some("residency.sleep-ended")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(fields(&claims[0])["ended_at"], json!(completed.accepted_at_unix_ms));
+            assert_eq!(fields(&claims[0])["end_class"], end_class);
+            assert_eq!(fields(&claims[0])["short_sleep"], 0);
+        }
     }
 
     #[test]
