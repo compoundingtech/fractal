@@ -1909,9 +1909,22 @@ pub fn consumed_delivery_filenames(
     identity: &str,
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
+    Ok(delivery_receipts(state_dir, identity, runtime_id)?
+        .into_iter()
+        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
+        .map(|entry| entry.filename)
+        .collect())
+}
+
+/// Validated durable evidence; acceptance clocks are never inferred from consumption.
+pub fn delivery_receipts(
+    state_dir: &Path,
+    identity: &str,
+    runtime_id: &str,
+) -> Result<Vec<delivery_ledger::Entry>> {
     let path = state_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(BTreeSet::new());
+        return Ok(Vec::new());
     }
     let ledger = delivery_ledger::Ledger::open(
         &path,
@@ -1923,12 +1936,7 @@ pub fn consumed_delivery_filenames(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("Codex delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger
-        .entries()
-        .iter()
-        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
-        .map(|entry| entry.filename.clone())
-        .collect())
+    Ok(ledger.entries().to_vec())
 }
 
 fn codex_delivery_request(
