@@ -678,6 +678,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// True only after the exact exec generation has exited and its entire work scope is
+    /// proven closed. Missing records, logical containment and delivered signals are not proof.
+    fn leftovers_settled(&self, _runtime_id: &str, _incarnation: &str) -> Result<bool> {
+        Ok(false)
+    }
     /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
@@ -1165,6 +1170,9 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.end_leftovers_later(runtime_id);
         }
+    }
+    fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+        self.exec.retired_if(runtime_id, incarnation)
     }
 
     fn end_lane(&self, runtime_id: &str) {
@@ -7840,10 +7848,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
-            // A harness that ended before the stop, or a stop that could not finish, can leave
-            // processes in the runtime's work scope. They end with it.
-            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
-            self.runtime.end_leftovers(runtime_id, terminal);
+            // A stopped leader can leave descendants. Retry until native whole-scope proof
+            // is finalized durably; never infer settlement from a stopped observation alone.
+            let settled = if let Some(incarnation) = incarnation.filter(|_| !terminal) {
+                self.store.runtime_cleanup_settled(runtime_id, incarnation)?
+            } else {
+                false
+            };
+            if !settled {
+                evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
+                self.runtime.end_leftovers(runtime_id, terminal);
+                if let Some(incarnation) = incarnation.filter(|_| !terminal)
+                    && self.runtime.leftovers_settled(runtime_id, incarnation).unwrap_or(false)
+                {
+                    self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?;
+                }
+            }
             let desired = self.store.selected_desired_token(subject)?;
             let stop = match &desired {
                 Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {

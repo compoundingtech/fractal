@@ -767,6 +767,16 @@ impl RuntimeStartsStore for Store {
                     /* sqlite-large-value: allow-for-now lv-ha13d8dc7b51f owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
+                if result["verification"] == "operation-incarnation"
+                    && let (Some(runtime_id), Some(incarnation)) = (
+                        operation.body["member"]["runtime_id"].as_str(),
+                        result["incarnation"].as_str(),
+                    )
+                {
+                    fractal_store::store::runtime_cleanup::apply_generation(
+                        tx, &operation.subject, runtime_id, incarnation,
+                    )?;
+                }
                 Ok(true)
             })
             .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -1357,6 +1367,49 @@ mod tests {
     use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn cleanup_receipts_are_reclaimed_only_by_a_fenced_start_result() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/current";
+        let historical = "agent/example/history";
+        publish(&store, "version 2\nagent \"example/current\" { command \"true\" }\nagent \"example/history\" { command \"true\" }\n", "cleanup-generations");
+        let desired = store.desired_subjects_named(&[subject.into()]).unwrap().remove(0);
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let mut start = operation("cleanup-forward", subject, store.selected_desired_token(subject).unwrap());
+        start.body["subject"] = serde_json::to_value(&desired).unwrap();
+        start.body["member"] = serde_json::to_value(desired.member.as_ref().unwrap()).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "incarnation":"new", "verification":"operation-incarnation",
+        })).unwrap();
+        store.settle_runtime_cleanup(subject, &runtime_id, "old").unwrap();
+        store.settle_runtime_cleanup(historical, &runtime_id, "historical").unwrap();
+        store.settle_runtime_cleanup("agent/forgotten", &runtime_id, "forgotten").unwrap();
+        let mut observed = ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("starting")),
+                ("runtime_id".into(), json!(runtime_id)),
+                ("terminal".into(), json!(true)),
+                ("incarnation_id".into(), json!("wrong")),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("cleanup-forward-observed".into()),
+        };
+        assert!(!store.apply_runtime_start_result(&start.id, &[observed.clone()]).unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
+        observed.fields.insert("incarnation_id".into(), json!("new"));
+        assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), observed]).unwrap());
+        assert!(!store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
+        assert!(!store.runtime_cleanup_settled(&runtime_id, "forgotten").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
+        store.settle_runtime_cleanup(subject, &runtime_id, "new").unwrap();
+        // Replaying the already-receipted result is not another generation transition.
+        assert!(store.apply_runtime_start_result(&start.id, &[]).unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "new").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
+    }
 
     #[test]
     fn initially_unverified_launch_retains_later_producer_closure_and_ends_trace() {

@@ -119,6 +119,22 @@ subject/meta values rather than introduce new variable payloads. Encoded key
 sizes remain unproven; future reference/keyed reclamation work must preserve
 these exact fixture assertions and the production one-time marker semantics.
 
+### Historical runtime cleanup receipts (PR #6690)
+
+The `fractal_store::store::runtime_cleanup` maintainer owns `lv-haba524422e8c`,
+`lv-h355a9421263e`, `lv-h3a3c620624e1`, `lv-he32bd26469c5` and `lv-hf597e11eb8de`.
+The node-local table stores runtime ID, incarnation and subject TEXT values with
+an exact-generation primary key and a subject index. These are existing runtime
+identities, not payload copies; their encoded sizes remain unproven. The reader
+returns only an existence flag. Writes publish an exact cleanup proof; removal
+uses subject or runtime/generation equality and preserves receipts belonging to
+other retained desired subjects. Keeping these small logical records inline
+preserves atomic proof publication and fenced reclamation, but is not a size
+bound. The owning maintainer must reference variable identity columns and index
+keys and stage keyed reclamation without losing exact-generation equality or
+whole-scope proof semantics. These inventory entries record that representation
+debt; they do not waive the guard or assert bounded storage work.
+
 ### Custom-shell first work claim (PR #6692)
 
 `fractal_api_core::api::work_incarnation_tests` owns `lv-hc143d361eb67`,
