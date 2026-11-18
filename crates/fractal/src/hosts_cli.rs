@@ -52,7 +52,9 @@ pub(super) enum HostsCommand {
 
 #[derive(Subcommand)]
 pub(super) enum LaunchFreezeCommand {
+    /// Inspect the active launch freeze and deferred starts before replacing the daemon.
     Show,
+    /// Drain earlier spawns and temporarily defer new launches for safe daemon replacement.
     Set {
         #[arg(long)]
         id: String,
@@ -67,6 +69,7 @@ pub(super) enum LaunchFreezeCommand {
         #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
         actor: Option<String>,
     },
+    /// Release an owned launch freeze so deferred runtime starts can resume.
     Clear {
         #[arg(long)]
         id: String,

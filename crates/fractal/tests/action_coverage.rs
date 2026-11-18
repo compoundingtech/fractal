@@ -126,6 +126,49 @@ async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_launch_freeze_sets_shows_and_clears_owned_barriers() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let server = daemon.server.take().unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    std::fs::remove_file(daemon.socket()).unwrap();
+    daemon.state.owning_person = Some(PERSON.into());
+    daemon.serve().await;
+    let initial = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert!(initial["freeze"].is_null());
+    let placed = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "set", "--id", "daemon-replacement",
+        "--reason", "Replace daemon", "--duration-ms", "60000", "--wait-ms", "0",
+        "--as", PERSON,
+    ]).await);
+    assert_eq!(placed["id"], "daemon-replacement");
+    assert_eq!(placed["owner"], PERSON);
+    assert_eq!(placed["reason"], "Replace daemon");
+    assert!(placed["expires_at_unix_ms"].is_u64());
+    let shown = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert_eq!(shown["freeze"], placed);
+    assert_eq!(shown["deferred"], json!([]));
+    for (id, actor) in [("wrong-id", PERSON), ("daemon-replacement", "person/other")] {
+        assert!(!daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "clear", "--id", id, "--as", actor,
+        ]).await.status.success());
+        assert_eq!(cli_value(daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "show",
+        ]).await)["freeze"], placed);
+    }
+    let cleared = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "clear", "--id", "daemon-replacement", "--as", PERSON,
+    ]).await);
+    assert_eq!(cleared["cleared"], true);
+    assert!(cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "show",
+    ]).await)["freeze"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated() {
     if fractal_daemon::test_support::supervise_test() {
         return;
