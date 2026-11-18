@@ -262,7 +262,9 @@ mod tests {
         let path = directory.path().join("store.db");
         let store = Store::open(&path, "host-a").unwrap();
         let mut request = command("secret");
+        request.environment = std::env::vars().collect();
         request.environment.insert("SECRET".into(), ENV_SENTINEL.into());
+        request.environment.insert("ST3_START_OPERATION".into(), ENV_SENTINEL.into());
         assert!(!format!("{request:?}").contains(ENV_SENTINEL));
         let mut execution = store.submit_shell_resource(request.clone(), 10).unwrap();
         assert!(execution.command.environment.is_empty());
@@ -271,10 +273,23 @@ mod tests {
         request.environment.insert("SECRET".into(), "replacement".into());
         assert!(store.submit_shell_resource(request, 11).is_err());
         let environment = store.take_shell_environment("secret").unwrap();
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", "test \"$SECRET\" = shell-environment-security-regression-sentinel"])
-            .env_clear().envs(environment).status().unwrap();
-        assert!(status.success());
+        let runtime = fractal_runtime::ExecRuntime::new(directory.path().join("exec"), directory.path().join("logs"));
+        let generation = runtime.spawn_in_lane_checked("secret",
+            &fractal_runtime::Launch::Argv(vec!["/bin/sh".into(), "-c".into(),
+                "test \"$SECRET\" = shell-environment-security-regression-sentinel && test \"$ST3_START_OPERATION\" = \"$SECRET\"".into()]),
+            directory.path(), &environment,
+            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, require_enforced: false },
+            &|| Ok(())).unwrap();
+        assert!(generation.start_operation.is_none());
+        let exited = runtime.wait_for_exit("secret", &generation.generation_id).unwrap();
+        assert_eq!(exited.exit_code, Some(0));
+        for entry in std::fs::read_dir(directory.path().join("exec")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                assert!(!bytes.windows(ENV_SENTINEL.len()).any(|value| value == ENV_SENTINEL.as_bytes()));
+            }
+        }
         assert!(store.take_shell_environment("secret").is_none());
         execution.state = "completed".into();
         execution.exit_code = Some(0);
@@ -300,6 +315,10 @@ mod tests {
             execution.started_at = Some(12);
             execution.ended_at = Some(20);
             execution.exit_code = Some(37);
+            execution.result = Some(PayloadResult {
+                head_start: None, head_end: None, clean_start: None, clean_end: None,
+                exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
+            });
             store.update_shell_resource(&execution).unwrap();
         }
         let legacy = Connection::open(&path).unwrap();

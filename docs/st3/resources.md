@@ -87,6 +87,9 @@ A daemon restart loses pending launch environments, including explicitly empty o
 that has not launched refuses with `environment-unavailable` when it reaches launch; resubmit it
 with its live environment. Existing native generations keep their execution facts and custody and
 are observed/retired without relaunching or substituting the daemon's environment.
+The runtime's durable launch-operation identity is passed separately as typed control-plane
+metadata. Payload keys such as `ST3_START_OPERATION` are never parsed into generation receipts,
+start-rejection evidence, producer custody, or runtime operation tracing.
 
 On first upgraded store open, historical shell command environments are cleared in place while
 execution history, outcomes, receipts, and membership custody remain readable. The writer enables
