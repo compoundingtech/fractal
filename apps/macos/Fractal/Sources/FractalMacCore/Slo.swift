@@ -10,7 +10,7 @@ public struct SloEntry: Identifiable, Sendable, Equatable {
   public let target: String
   public let current: String
   public let window: String
-  /// `met`, `missed`, `no-data` or `stale`.
+  /// Server status, including operational `burning` and `exhausted` budgets.
   public let status: String
   public let explain: String
   public let tone: SloTone
@@ -41,7 +41,7 @@ public struct SloEntry: Identifiable, Sendable, Equatable {
 }
 
 /// How urgent a row is. Fractal serves it as `SloRow.tone` (fractal-ui-model `slo.rs`); rows
-/// from servers without it use the same rule: missed, or a budget at most 10% left, is red.
+/// from servers without it use the same rule: missed/exhausted or nearly spent is red.
 public enum SloTone: Int, Sendable, Comparable {
   case red, yellow, green, quiet
 
@@ -55,12 +55,12 @@ public enum SloTone: Int, Sendable, Comparable {
     case "quiet": self = .quiet
     case .some: self = .quiet
     case nil:
-      if status == "missed"
+      if status == "missed" || status == "exhausted"
         || (kind == .budget && remainingPercent.map { $0 <= Self.nearlySpentPercent } == true)
       {
         self = .red
       } else {
-        self = status == "met" ? .green : status == "stale" ? .yellow : .quiet
+        self = status == "met" ? .green : (status == "stale" || status == "burning") ? .yellow : .quiet
       }
     }
   }
