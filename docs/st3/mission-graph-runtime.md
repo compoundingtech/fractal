@@ -1595,6 +1595,7 @@ is expected by:
 | gh watch | the watched issue or pull request | the watch's `--until` |
 | person ask | the person step an asking step waits on | none |
 | gate | a submitted step that is verifying, or a step with a predicate `depends-on` | none |
+| declared wait | the step paused with `work wait --for` | the current declared wait deadline |
 | scheduled retry | the step | the retry's not-before time |
 | depends-on | a step another seat holds that one of the seat's steps waits for | none |
 | report-to | an open run that reports to the seat | none |
@@ -1604,6 +1605,10 @@ A wait holds until its expected-by time when it has one. Otherwise it holds for 
 clock. A delivered event wakes the seat anyway, which ends its idle period. A movement the source
 saw but did not deliver never extends a hold: a merge queue reordering, a new head with no check
 verdict yet, or another seat's progress on a step this seat depends on.
+
+Renewing a declared work wait extends its hold to the new deadline. At that deadline the
+existing step deadline wake re-evaluates the seat; an otherwise idle holder can be nudged again,
+without an additional quiet window.
 
 After 30 minutes idle-holding, Fractal sends the seat one message from `daemon/runtime`. The message
 names each held step with its title, goals and last progress line, says how long the seat has been

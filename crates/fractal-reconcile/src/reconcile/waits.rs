@@ -10,10 +10,10 @@
 //! and the seat is nudged then.
 //!
 //! The sources are read from facts st already records: a GitHub watch, a person ask, a gate, a
-//! scheduled retry, a step another seat holds that one of this seat's steps depends on, and a run
-//! that reports to this seat. A new source, such as a watch on any subject, adds one more reader.
-//! Expected-by times are only what a source states today (a watch's deadline, a retry's time);
-//! forecasts from a stage's history can fill it in later.
+//! declared work wait, a scheduled retry, a step another seat holds that one of this seat's steps
+//! depends on, and a run that reports to this seat. A new source adds one more reader.
+//! Expected-by times are only what a source states today (a watch's deadline, a declared wait's
+//! deadline, a retry's time); forecasts from a stage's history can fill it in later.
 use crate::MissionsStore;
 use super::*;
 use crate::IdleHoldsStore;
@@ -28,6 +28,7 @@ pub enum WaitSource {
     GithubWatch,
     PersonAsk,
     Gate,
+    DeclaredWait,
     Retry,
     DependsOn,
     ReportTo,
@@ -39,6 +40,7 @@ impl WaitSource {
             Self::GithubWatch => "gh watch",
             Self::PersonAsk => "person ask",
             Self::Gate => "gate",
+            Self::DeclaredWait => "declared wait",
             Self::Retry => "scheduled retry",
             Self::DependsOn => "depends-on",
             Self::ReportTo => "report-to",
@@ -107,7 +109,7 @@ impl Wait {
 }
 
 /// The waits that come from the seat's own steps, which the wake evaluation has already read:
-/// asks, gates and scheduled retries. Steps that depend on others are read separately.
+/// asks, gates, declared work waits and scheduled retries. Dependencies are read separately.
 pub fn step_waits(agent: &str, work: &[StepRunView], now: u128) -> Vec<Wait> {
     work.iter()
         .filter(|step| {
@@ -126,6 +128,16 @@ pub fn step_waits(agent: &str, work: &[StepRunView], now: u128) -> Vec<Wait> {
                 "verifying" => (WaitSource::Gate, step.subject.clone(), None),
                 "completed" | "failed" | "cancelled" => return None,
                 _ => {
+                    if let Some(until) = step.execution_paused_until_unix_ms.filter(|at| *at > now) {
+                        return Some(Wait {
+                            source: WaitSource::DeclaredWait,
+                            subject: step.subject.clone(),
+                            last_moved_unix_ms: step.progress_at_unix_ms,
+                            last_move: step.progress_summary.clone(),
+                            expected_by_unix_ms: Some(until),
+                            action: None,
+                        });
+                    }
                     let not_before = step.not_before_unix_ms.filter(|at| *at > now)?;
                     (WaitSource::Retry, step.subject.clone(), Some(not_before))
                 }

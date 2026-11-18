@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Honor declared work waits before sending idle-holder nudges",
+  "replay": { "status": "none", "detail": "Reads the existing folded work wait deadline; no replay changes." },
+  "schema": { "status": "none", "detail": "No persisted schema or migration changes." },
+  "rules": { "status": "changed", "detail": "A future work wait --for deadline holds the idle-holder nudge. Renewing the wait extends the hold. At expiry the existing step deadline wake re-evaluates normal nudge eligibility." },
+  "compatibility": { "status": "none", "detail": "Existing work wait claims and operator hold views are unchanged." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "No configuration changes required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores previous nudge behavior." }
+}
