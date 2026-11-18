@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an inert, shard-aware pending wake-demand projection with source frontiers.",
+  "replay": {"status": "none", "detail": "No authoritative claim or replay semantics change. Source triggers queue disposable metadata folds."},
+  "schema": {"status": "changed", "detail": "Adds versioned local wake-demand and pending-work tables, an indexed per-recipient demand read, source triggers and restartable 64-subject startup backfill from graph and mirrored shard sends. No bodies are copied into the projection."},
+  "rules": {"status": "none", "detail": "Uses existing silent-tag and always-wakes classification. No new claim kinds, suspend decisions or wake actions."},
+  "compatibility": {"status": "none", "detail": "No wire or client changes. Older writers maintain the durable pending queue through SQL triggers; returning readers refuse absence proof until queued work is folded. Independent source cursors are not compared across databases."},
+  "downtime": {"status": "changed", "detail": "First open performs the historical metadata backfill in bounded transactions. Subsequent opens resume any interrupted cursor and drain queued folds."},
+  "manual": {"status": "none", "detail": "No configuration or manual migration is needed. This reader has no suspend or wake consumer."},
+  "recovery": {"status": "none", "detail": "Only disposable local state is added. Original claims and shard lifecycle remain authoritative; an unavailable or lagging shard reports incomplete coverage instead of empty demand."}
+}
