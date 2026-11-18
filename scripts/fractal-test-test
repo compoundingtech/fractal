@@ -3663,11 +3663,18 @@ finally:
         code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
         self.assertEqual(code, 0, err)
         seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
-        self.assertEqual(seen['ST3_ENDPOINT'], 'e')
+        self.assertNotIn('ST3_ENDPOINT', seen, 'light checks have no native phase context')
         for name in ('ST_MISSION', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
             self.assertNotIn(name, seen)
         for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
             self.assertIn(name, seen)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, _, err = self.run_st_test('--check', 'demo', '--rerun', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        admitted = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        self.assertEqual(admitted['ST3_ENDPOINT'], 'e')
+        for name in ('ST_MISSION', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
+            self.assertNotIn(name, admitted)
 
     def test_a_check_sees_no_pty_session_of_the_seat(self):
         self.commit('b.txt', 'two')
@@ -3679,15 +3686,20 @@ finally:
         for name in seat:
             self.assertNotIn(name, seen)
 
-    def test_a_check_keeps_native_endpoint_but_no_other_fractal_variable_of_the_seat(self):
+    def test_only_a_native_phase_keeps_the_endpoint_not_other_fractal_variables_of_the_seat(self):
         self.commit('b.txt', 'two')
         seat = {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': GIT_ENV.get('FRACTAL_AGENT', 'agent/x'), 'FRACTAL_BIN': '/seat/st3'}
         out = Path(self.tmp.name) / 'seen'
         code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
         self.assertEqual(code, 0, err)
         seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
-        self.assertEqual({name: value for name, value in seen.items() if name.startswith('FRACTAL_')},
-                         {'FRACTAL_ENDPOINT': '/seat/st3.sock'})
+        self.assertEqual([name for name in seen if name.startswith('FRACTAL_')], [])
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, _, err = self.run_st_test('--check', 'demo', '--rerun', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        admitted = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        self.assertEqual({name: value for name, value in admitted.items() if name.startswith('FRACTAL_')},
+                         {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': seat['FRACTAL_AGENT']})
 
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
