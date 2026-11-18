@@ -4646,7 +4646,7 @@ impl MissionsStore for Store {
         }
         let predecessors =
             mission_definition_token_tx(transaction, mission_id).map_err(internal)?;
-        let body = serde_json::to_value(&retired).map_err(internal)?;
+        let body = fractal_store::store::mission_publication_body(&retired).map_err(internal)?;
         let claim = if matches!(gate, owned_sets::Gate::Force(_)) {
             fractal_store::store::append_source_forced_receipt_claim_tx(
                 transaction,

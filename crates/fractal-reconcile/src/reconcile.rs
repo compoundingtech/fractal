@@ -13051,6 +13051,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(expected) = &step.produces_mission else {
             return Ok(true);
         };
+        let expected = crate::mission::resolve_produced_mission(
+            expected,
+            view.run.strip_prefix("mission-run/").unwrap_or(&view.run),
+        )?;
         let Some(output) =
             self.store
                 .mission_output(&view.subject, view.attempt, &view.definition_hash)?
@@ -13067,7 +13071,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         Ok(self
             .store
-            .mission_spec(expected, Some(&output.revision))?
+            .mission_spec(&expected, Some(&output.revision))?
             .is_some_and(|mission| mission.state == MissionState::Ready))
     }
 

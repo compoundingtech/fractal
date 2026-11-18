@@ -3570,6 +3570,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("state", string()),
             ("body", object()),
+            ("per_run_missions", integer()),
         ],
         "mission.provenance" => &[
             ("mission", required_reference_to(&["mission"])),
@@ -5398,6 +5399,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.get_mut("operational.failure").unwrap().fields.remove("objective").unwrap();
+        current.claims.get_mut("mission.published").unwrap().fields.remove("per_run_missions").unwrap();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();

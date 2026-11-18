@@ -176,6 +176,7 @@ pub const AUTHORITY_FEATURE: &str = "mission_authority";
 pub const PROGRAM_FEATURE: &str = "mission_program";
 /// The `daemon.started` feature of a build that reads finite execution resource lanes.
 pub const RESOURCE_LANE_FEATURE: &str = "mission_resource_lane";
+pub const PER_RUN_MISSIONS_FEATURE: &str = "per_run_missions";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
 /// refusal code, and what to do once every member is upgraded.
@@ -187,7 +188,7 @@ struct Barrier {
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 5] = [
+const BARRIERS: [Barrier; 6] = [
     Barrier {
         feature: FEATURE,
         minimum_version: 1,
@@ -222,6 +223,13 @@ const BARRIERS: [Barrier; 5] = [
         code: "mission-resource-lane-unavailable",
         declares: declares_extended_resource_lane,
         later: "declare resource lane classes, disk reservations or IO-heavy admission",
+    },
+    Barrier {
+        feature: PER_RUN_MISSIONS_FEATURE,
+        minimum_version: 1,
+        code: "per-run-missions-unavailable",
+        declares: crate::mission::declares_per_run_missions,
+        later: "declare a run-scoped produced mission",
     },
 ];
 
@@ -582,6 +590,36 @@ mission "plain" state="ready" {
         sync(&peer, &store);
         assert!(publish(&store, LANED, "upgraded").unwrap().is_empty());
         assert_eq!(store.mission_spec("laned", None).unwrap().unwrap().capacity, mission.capacity);
+    }
+
+    #[test]
+    fn run_scoped_outputs_wait_for_every_reader_and_carry_a_closed_schema_marker() {
+        const SOURCE: &str = r#"version 2
+mission "producer" state="ready" {
+  goal "Publish isolated work."
+  step "compile" { produces-mission "consent/${ST_MISSION_RUN}"; }
+}
+"#;
+        let (store, peer) = two_members();
+        let refusal = publish(&store, SOURCE, "older").unwrap_err();
+        assert_eq!(refusal.code, "per-run-missions-unavailable");
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status":"running", "features":{PER_RUN_MISSIONS_FEATURE:1}}));
+        sync(&peer, &store);
+        publish(&store, SOURCE, "upgraded").unwrap();
+        let mission = store.mission_spec("producer", None).unwrap().unwrap();
+        let publication = store.latest_claim("mission/producer", Some("mission.published")).unwrap().unwrap();
+        assert_eq!(publication.body["fields"]["per_run_missions"], 1);
+        let fields = super::super::schema_fields_for_body("mission.published", &publication.body).unwrap();
+        assert_eq!(fields["per_run_missions"], 1);
+        let mut downgraded = fractal_schema::registry().clone();
+        downgraded.claims.get_mut("mission.published").unwrap().fields.remove("per_run_missions");
+        let refusal = downgraded.validate_replicated_claim(
+            "mission/producer", "mission.published", &fields,
+        ).unwrap_err();
+        assert_eq!(refusal.code, "unknown-claim-field");
+        sync(&store, &peer);
+        assert_eq!(peer.mission_spec("producer", None).unwrap().unwrap().revision, mission.revision);
     }
 
     #[test]
