@@ -378,8 +378,10 @@ fn parse_properties(bytes: &[u8], expected: &[String]) -> Result<BTreeMap<String
         let load = required("LoadState")?;
         let active = required("ActiveState")?;
         let sub = required("SubState")?;
-        ensure!(valid_load(load) && load != "not-found" && !active.is_empty() && !sub.is_empty(),
-            "loaded unit disappeared or has incomplete properties: {id}");
+        // A unit enumerated as loaded can be collected before show runs. Its
+        // complete current state is an observation, not a transport failure.
+        ensure!(valid_load(load) && !active.is_empty() && !sub.is_empty(),
+            "unit has incomplete or unknown properties: {id}");
         let main_pid = if id.ends_with(".service") {
             required("MainPID")?.parse().context("invalid systemd MainPID")?
         } else {
@@ -737,7 +739,7 @@ mod tests {
             let incomplete = complete.lines().filter(|line| !line.starts_with(&format!("{key}="))).collect::<Vec<_>>().join("\n");
             assert!(parse_properties(incomplete.as_bytes(), &expected).is_err(), "{key}");
         }
-        for state in ["", "unknown", "not-found"] {
+        for state in ["", "unknown"] {
             let text = complete.replace("LoadState=loaded", &format!("LoadState={state}"));
             assert!(parse_properties(text.as_bytes(), &expected).is_err());
         }
@@ -951,6 +953,34 @@ mod tests {
         ]));
         assert!(monitor.snapshot().is_err());
         assert_eq!(monitor.runner.count(), 1);
+    }
+
+    #[test]
+    fn collection_between_list_and_show_preserves_complete_current_state() {
+        let gone = properties("st3-work.scope")
+            .replace("LoadState=loaded", "LoadState=not-found")
+            .replace("ActiveState=active", "ActiveState=inactive")
+            .replace("SubState=running", "SubState=dead")
+            .replace("MainPID=123", "MainPID=0")
+            .replace("ControlGroup=/user.slice/st3-work.scope", "ControlGroup=");
+        let rows = serde_json::json!([
+            {"unit":"st3-work.scope","load":"loaded","active":"active","sub":"running"},
+            {"unit":"fractal.service","load":"loaded","active":"active","sub":"running"},
+        ]);
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Ok(success(&rows.to_string())),
+            Ok(success(&format!("{}\n{gone}", properties("fractal.service")))),
+        ]));
+        let snapshot = monitor.snapshot().unwrap();
+        let unit = &snapshot.units["st3-work.scope"];
+        assert_eq!(unit.load, "not-found");
+        assert_eq!(unit.active, "inactive");
+        assert!(unit.control_group.is_none());
+        assert_eq!(snapshot.units["fractal.service"].load, "loaded");
+        assert!(monitor.lock_state().health.unresponsive.is_none());
+        assert_eq!(monitor.runner.count(), 2);
+        assert!(monitor.snapshot().is_ok());
+        assert_eq!(monitor.runner.count(), 2, "collection needs no command retry");
     }
 
     #[test]
