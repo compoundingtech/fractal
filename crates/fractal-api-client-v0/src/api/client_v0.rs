@@ -383,10 +383,13 @@ const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
+    State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
-    let mut latency = super::request_latency_windows();
+    let mut latency = blocking_store(move || {
+        super::request_latency_windows_with_store(&state.store, client_now_ms() as u64)
+    }).await?;
     latency["routes"] = json!(super::request_latency_snapshot());
     latency["cost_counters"] = crate::profile::cost_snapshot();
     Ok(Json(latency))
@@ -10742,17 +10745,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_latency_keeps_scope_and_routes_with_a_memory_only_cost_snapshot() {
+    async fn request_latency_keeps_scope_routes_and_cost_snapshot_with_graph_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
         let mut session = ClientSession::for_tests("person/ada", "person/ada", "local");
-        assert_eq!(request_latency(Extension(session.clone())).await.unwrap_err().status, StatusCode::FORBIDDEN);
+        assert_eq!(request_latency(State(state.clone()), Extension(session.clone())).await.unwrap_err().status, StatusCode::FORBIDDEN);
         session.scopes.insert("read.projections".into());
-        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
-        let Json(value) = request_latency(Extension(session)).await.unwrap();
-        assert_eq!(work.finish(), smallclaims::sqlite::work::SqliteWork::default(), "the counter handler must not execute SQLite statements");
+        let Json(value) = request_latency(State(state), Extension(session)).await.unwrap();
         assert!(value["routes"].is_array());
         assert!(value["cost_counters"]["state"].is_string());
         assert!(value["cost_counters"]["as_of_unix_ms"].is_number());
         assert!(value["cost_counters"].get("window").is_some());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_http_reads_graph_minutes_after_reopen_and_pairing_rotation() {
+        use sha2::{Digest as _, Sha256};
+        use tower::ServiceExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let fleet = "diagnostic-fixture-fleet";
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        state.store.bind_fleet(fleet).unwrap();
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+        state.store.set_member_key(Some(key.clone())).unwrap();
+        state.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+        for (grant, credential) in [("original", "original-token"), ("replacement", "replacement-token")] {
+            state.store.append_client_operation_claim(&ClaimInput {
+                subject: format!("custom/client/{grant}"),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/example".into()),
+                fields: serde_json::from_value(json!({
+                    "credential_hash":hex::encode(Sha256::digest(credential.as_bytes())),
+                    "session_actor":"client/example-phone", "person_id":"person/example",
+                    "device_id":"example-phone-device-key", "scopes":["read.projections"],
+                    "expires_at_unix_ms":u64::MAX
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let app = super::super::router(state.clone());
+        let get = |app: Router, token: &str| app.oneshot(Request::builder()
+            .uri("/v1/client/request-latency")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty()).unwrap());
+        let response = get(app.clone(), "original-token").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let empty: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let phone = |value: &Value| value["value"]["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "ios-connect").unwrap()["windows"]["5m"]["count"].as_u64().unwrap();
+        assert_eq!(phone(&empty), 0);
+        let share = empty["value"]["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "ios-live-share").unwrap();
+        assert!(share["windows"]["1m"]["live_share"].is_null(), "missing phone time stays unknown");
+        let now = client_now_ms() as u64;
+        let start = now / 60_000 * 60_000 - 60_000;
+        let timestamp = |ms| chrono::DateTime::from_timestamp_millis(ms as i64).unwrap().to_rfc3339();
+        let wire = serde_json::to_vec(&json!({
+            "report_id":"33333333-3333-4333-8333-333333333333",
+            "samples":[{"kind":"latency","target":"ios-connect","carrier":"lan",
+                "interval_start":timestamp(start),"interval_end":timestamp(start+60_000),
+                "count":1,"over_target":0,"max_ms":100,
+                "buckets":[[smallclaims::windows::histogram_upper_ms(100),1]]}]
+        })).unwrap();
+        let send = |app: Router, token: &str| app.oneshot(Request::builder()
+            .method("POST").uri("/v1/client/observations")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(wire.clone())).unwrap());
+        assert_eq!(send(app.clone(), "original-token").await.unwrap().status(), StatusCode::OK);
+        let accepted = state.store.index().unwrap();
+        for token in ["original-token", "replacement-token"] {
+            assert_eq!(send(app.clone(), token).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(state.store.index().unwrap(), accepted, "rotation and replay append no claims");
+        }
+        let response = get(app.clone(), "replacement-token").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let before: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(phone(&before), 1);
+        drop(app);
+        drop(state);
+        let reopened = test_state(root.path());
+        let app = super::super::router(reopened.clone());
+        assert_eq!(send(app.clone(), "replacement-token").await.unwrap().status(), StatusCode::OK);
+        assert_eq!(reopened.store.index().unwrap(), accepted);
+        let response = get(app, "replacement-token").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let after: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(phone(&after), 1, "diagnostic evidence survives a store reopen");
+        let exchange = reopened.store.export_replication_exchange(fleet, &Default::default()).unwrap();
+        let receiver_root = tempfile::tempdir().unwrap();
+        let receiver = test_state_named(receiver_root.path(), "diagnostic-receiver");
+        receiver.store.pin_fleet_anchor(key.public()).unwrap();
+        receiver.store.receive_replication_exchange("terminal-test", fleet, &exchange).unwrap();
+        receiver.store.validate_replication_backlog().unwrap();
+        receiver.store.project_replication_backlog().unwrap();
+        let app = super::super::router(receiver.clone());
+        let response = get(app.clone(), "replacement-token").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let replicated: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(phone(&replicated), 1, "diagnostic reads replicated graph evidence without a local upload");
+        let received = receiver.store.index().unwrap();
+        assert_eq!(send(app.clone(), "replacement-token").await.unwrap().status(), StatusCode::OK);
+        assert_eq!(receiver.store.index().unwrap(), received);
+        drop(app);
+        drop(receiver);
+        let receiver = test_state_named(receiver_root.path(), "diagnostic-receiver");
+        let response = get(super::super::router(receiver), "replacement-token").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let replicated_reopened: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(phone(&replicated_reopened), 1);
     }
 
     fn agent_queue_history_fixture(root: &std::path::Path, observations: usize) -> AppState {

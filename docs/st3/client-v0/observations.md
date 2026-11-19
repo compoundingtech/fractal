@@ -98,26 +98,28 @@ Only minutes with valid native phone-admission receipts occupy report replay, mi
 or once-only cardinality keys. Merely replicated claims, including signed claims without
 matching phone/person provenance, cannot block authentic admission or enter native evidence.
 
-The graph is the only authority for native objective rows and doctor lines. Native reads seek
-a numeric minute-time index for the last hour; report replay seeks the source/report index
+The graph is the only authority for native objective rows, doctor lines and the client diagnostic.
+Reads seek a numeric minute-time index for the last hour; report replay seeks the source/report index
 and minute replay seeks the subject. Folds retain 60 minute slots per target and merge exact
 foreground/disconnected counts and canonical sparse latency histograms. The one-billion
 aggregate slot bound fails closed, never truncating evidence or presenting overflow as good.
 
-## Frozen member-local diagnostic compatibility
+## Held diagnostic cutover
 
-The existing `GET /v1/client/request-latency` diagnostic remains under the client-v0 freeze.
-Its original process-local phone window accumulator, bounded Admission cache and rotating
-`state-dir/client-observations.jsonl` history remain unchanged. The endpoint commits durable
-claims first, then runs that legacy diagnostic admission before acknowledging the report.
-Those local files and counters are never read by native objective or doctor evaluation.
-The legacy diagnostic can still be empty after restart or on another receiving member; that
-does not erase durable native evidence. Its cache scope uses the old local directory/grant
-key only for diagnostic compatibility, never for durable source identity.
-Its grant-specific local deduplication can still refuse the same UUID after a grant change
-on the same process even when durable graph admission correctly recognizes an exact retry.
+`GET /v1/client/request-latency` attaches phone windows using the same durable graph
+fold as native SLO rows and doctor. The held delta adds the request state extractor
+and a store-aware blocking read; existing route and cost-counter diagnostics remain.
+Phone target rows survive replication and store reopen. Member-local phone path rows,
+the process-local Admission cache and rotating JSONL writer are removed, not retained
+as fallback authority. A report is acknowledged after graph admission alone.
 
-Removing this legacy diagnostic path and switching its held reader to the graph requires a
-separate client-v0 freeze exemption. Legacy JSONL is not imported as fleet evidence because
-it lacks stable authenticated source provenance. Missing historical minutes remain unknown;
-neither local history nor delayed phone reports are re-timestamped as current phone time.
+Exact same-device replay through a replacement pairing returns success without
+double-counting; changed report content and overlapping minutes still conflict.
+The ObservationReport request and acknowledgment wire are unchanged.
+
+This separately stacked cutover **needs an FPL client-v0 freeze exemption** before
+landing or activation. The first-PR release fragment describes its original local
+diagnostic behavior and remains historical truth, not the cutover contract.
+Existing JSONL is left on disk but never read or imported because it lacks stable
+authenticated source provenance. Missing historical minutes remain unknown; neither
+local history nor delayed reports are re-timestamped as current phone time.

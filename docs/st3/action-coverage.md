@@ -81,6 +81,14 @@ destination-pairing identity and all seven native objective rows. Missing minute
 disconnected foreground remains in the live-share denominator. Store query-plan controls pin
 indexed source/report, minute-subject and live-hour reads. The unchanged response has no
 snapshot or action receipt, and a committed report does not promise that every peer has received it.
+The stacked diagnostic cutover adds
+`diagnostic_http_reads_graph_minutes_after_reopen_and_pairing_rotation`, covering
+the actual request-latency HTTP read, missing unknown evidence, exact endpoint retry,
+same-process replacement pairing, signed replication and store reopen without a second population.
+The replication fixture reads the same store-aware diagnostic helper and checks
+all seven rows after signed replication and reopen. The cutover removes obsolete
+local Admission/history/meter controls and needs an FPL freeze exemption before
+landing or activation.
 
 The sidebar's existing optional `resources.list` read is covered by
 `observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`

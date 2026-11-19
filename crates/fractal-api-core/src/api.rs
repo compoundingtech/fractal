@@ -1719,6 +1719,14 @@ pub fn request_latency_windows() -> Value {
     snapshot.finish()
 }
 
+/// Every diagnostic window, with phone evidence folded from durable replicated claims.
+/// Call outside the request meter lock and on the blocking store boundary.
+pub fn request_latency_windows_with_store(store: &Store, now: u64) -> anyhow::Result<Value> {
+    let mut report = request_latency_windows();
+    client_observations::attach(store, &mut report, now)?;
+    Ok(report)
+}
+
 /// Note what keeps this minute of the member's CPU from being idle.
 fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);

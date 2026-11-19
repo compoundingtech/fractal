@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepared held iOS diagnostic cutover: client request-latency, native SLO rows and doctor fold the same durable replicated phone minutes; needs FPL freeze exemption before landing or activation",
+  "replay": {"status": "changed", "detail": "Observation acknowledgment now follows durable graph admission alone. Exact same-device report replay through a replacement pairing succeeds without appending claims or double-counting; changed report content and overlapping minutes still conflict. Durable graph evidence survives replication and store reopen. Historical local JSONL is not imported because it lacks authenticated stable-source provenance."},
+  "schema": {"status": "none", "detail": "No schema, storage version, registry digest, convergence corpus, codegen or ObservationReport wire change. Reuses the first PR's canonical minute claims and seek indexes."},
+  "rules": {"status": "none", "detail": "Checkpoint and graph authority rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Held GET /v1/client/request-latency gains a state extractor and store-aware blocking minute fold. Phone target windows are graph-backed; member-local phone path rows, the original Admission cache, JSONL writer and in-memory phone meter are removed. Existing route and cost-counter diagnostics remain. Missing minutes and absent live-share denominators remain unknown. This separately stacked patch needs an FPL client-v0 freeze exemption before landing or activation; preparation grants neither."},
+  "downtime": {"status": "none", "detail": "No new startup migration or replay. No live activation is authorized by this fragment."},
+  "manual": {"status": "changed", "detail": "Parent owns proof and the separate PR. Obtain the FPL freeze exemption before landing; live daemon rollout, app installation and phone interaction still require explicit operator activation approval. The immutable ios-durable-minute-summaries fragment remains the historical first-PR contract."},
+  "recovery": {"status": "changed", "detail": "Retain graph claims and phone pending reports on rollback. Existing local JSONL is left untouched but unread. Rolling back to the first PR restores local-only diagnostic windows and its possible same-process replacement-pairing legacy 409; native evidence still comes from graph claims."}
+}
