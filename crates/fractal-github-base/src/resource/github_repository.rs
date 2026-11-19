@@ -1404,8 +1404,9 @@ async fn observe_poll(
     let cache_for = if cursor.tombstones.is_empty() { cache_for } else { Duration::ZERO };
     // Explicit refreshes (including webhook refreshes) retry unavailable identities. A failed
     // resolution will tombstone them again; restored access or a transfer back can recover.
-    let mut recovered = request.refresh && !cursor.tombstones.is_empty();
+    let mut recovered = BTreeSet::new();
     if request.refresh {
+        recovered.extend(cursor.tombstones.keys().cloned());
         cursor.identities.append(&mut cursor.tombstones);
     }
     // A cursor an earlier build moved past its look's start reads on from now instead.
@@ -1472,7 +1473,7 @@ async fn observe_poll(
                 && let Some(identity) = cursor.tombstones.remove(id)
             {
                 cursor.identities.insert(id.into(), identity);
-                recovered = true;
+                recovered.insert(id.to_owned());
             }
         }
         if !cursor.already_seen("items", listing_digest(&listing)) {
@@ -1573,7 +1574,7 @@ async fn observe_poll(
                 ) {
                     if let Some(identity) = cursor.tombstones.remove(id) {
                         cursor.identities.insert(id.into(), identity);
-                        recovered = true;
+                        recovered.insert(id.to_owned());
                     }
                     cursor.identities.entry(id.into()).or_insert(ItemIdentity {
                         number,
@@ -1693,7 +1694,7 @@ async fn observe_poll(
             cache_for,
             &request.locator,
             current_location,
-            request.refresh || recovered,
+            request.refresh || !recovered.is_empty(),
             request.webhook_covered,
             changed_open_pull
                 || !cursor.seen.contains_key("pull-requests")
@@ -1793,7 +1794,9 @@ async fn observe_poll(
                         {
                             continue;
                         }
-                        cursor.tombstones.remove(id);
+                        if cursor.tombstones.remove(id).is_some() {
+                            recovered.insert(id.to_owned());
+                        }
                         cursor
                             .identities
                             .entry(id.into())
@@ -1838,6 +1841,14 @@ async fn observe_poll(
     let mut issues = Vec::new();
     for (_, item) in items {
         let mut item_facts = item.facts;
+        // Recovery reopens the subject, not its old unavailable resolution. Every acquisition
+        // path must explicitly clear the reason so the stored partial-fact overlay removes it.
+        if !recovered.is_empty()
+            && item_facts.get("state").and_then(Value::as_str) == Some("open")
+            && item_facts.get("node_id").and_then(Value::as_str).is_some_and(|id| recovered.contains(id))
+        {
+            item_facts.insert("state_reason".into(), Value::Null);
+        }
         if !item.listed {
             item_facts.insert("new".into(), Value::Bool(false));
         }
