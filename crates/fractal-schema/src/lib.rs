@@ -5540,6 +5540,12 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in ["resource-admission", "gate-admission"] {
+            current.subjects.remove(family).unwrap();
+        }
         for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
             github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
             current.claims.remove(kind).unwrap();
