@@ -30,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/mailbox/acceptance-frontier", post(acceptance_frontier))
         .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
@@ -39,6 +40,61 @@ pub struct ReceiptRequest {
     receipt: Receipt,
     #[serde(default)]
     native_receipt: Option<crate::conversation_delivery::NativeReceipt>,
+    #[serde(default)]
+    input_acceptance: Option<InputAcceptance>,
+}
+
+#[derive(serde::Deserialize)]
+struct InputAcceptance {
+    accepted_at_unix_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AcceptanceFrontierRequest {
+    #[serde(flatten)]
+    fence: Fence,
+    observed_through_unix_ms: u64,
+}
+
+/// A native producer's sealed, drained source cut. It is not a per-message lifecycle event.
+pub async fn acceptance_frontier(
+    State(state): State<AppState>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    Json(mut request): Json<AcceptanceFrontierRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    request.fence = storage_fence(&state, request.fence)?;
+    authorize(&request.fence, peer.as_ref().map(|peer| &peer.0))?;
+    if request.fence.component != "delivery" {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance-frontier",
+            "only the delivery component publishes acceptance frontiers")));
+    }
+    let peer = peer.expect("authorize checked the native peer").0;
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request.fence),
+    ).await.map_err(ApiError::internal)?;
+    let checked_state = state.clone();
+    let ((record, changed), _) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &request.fence, &peer, None, || {
+            if checked_state.store.has_mailbox_lease(&request.fence)? {
+                authority::with_authority(&checked_state, &request.fence, &peer, || {}, |owner, validate| {
+                    validate()?;
+                    if !checked_state.store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    checked_state.store.record_mail_acceptance_frontier(
+                        &request.fence, request.observed_through_unix_ms,
+                    )
+                })
+            } else {
+                checked_state.store.record_mail_acceptance_frontier(
+                    &request.fence, request.observed_through_unix_ms,
+                )
+            }
+        })
+    }).await?;
+    if changed { signal_local_change(&state); }
+    Ok(Json(record))
 }
 
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
@@ -299,11 +355,11 @@ pub async fn receipt(
     request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
-        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
+        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read" | "accepted")
     {
         return Err(ApiError::bad(FractalError::new(
             "invalid-mailbox-receipt",
-            "only the delivery component can publish staged, delivered or read",
+            "only the delivery component can publish staged, delivered, read or accepted",
         )));
     }
     if payload.native_receipt.as_ref().is_some_and(|proof| !proof.valid())
@@ -312,6 +368,10 @@ pub async fn receipt(
     {
         return Err(ApiError::bad(FractalError::new("invalid-native-receipt",
             "a native record identity requires a Claude consumption receipt")));
+    }
+    if (request.lifecycle == "accepted") != payload.input_acceptance.is_some() {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance",
+            "accepted requires an input acceptance timestamp; other lifecycle receipts cannot carry one")));
     }
     let input = ClaimInput {
         subject: request.message.clone(),
@@ -366,6 +426,15 @@ pub async fn receipt(
         };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
+                if let Some(acceptance) = &payload.input_acceptance {
+                    validate()?;
+                    if !store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    return store.record_mail_input_acceptance(
+                        &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+                    );
+                }
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -376,6 +445,10 @@ pub async fn receipt(
                 store.append_native_mailbox_receipt_outcome(&input, &request.fence,
                     payload.native_receipt.as_ref())
             })?
+        } else if let Some(acceptance) = &payload.input_acceptance {
+            store.record_mail_input_acceptance(
+                &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+            )?
         } else if stream.is_some() {
             record_stream()?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
