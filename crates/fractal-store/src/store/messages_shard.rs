@@ -404,6 +404,21 @@ fn record_lifecycle_checked(
     // admitted step is recorded wherever the item stands, as the graph appends its claim, so the
     // receipt it names exists.
     if checked && rank <= current && !custody_reread && !late_consumption {
+        // A native re-offer of pre-upgrade staging acquires incarnation custody
+        // without creating a second lifecycle step. Only the frozen identities
+        // present at the first capable open can use this upgrade reader arm.
+        if kind == "message.staged" && current == 1
+            && let Some(incarnation) = fields.get("native_mail_incarnation").and_then(Value::as_str)
+        {
+            transaction.execute(
+                "UPDATE stream_lifecycle SET fields=json_set(fields,'$.native_mail_incarnation',?2)
+                 WHERE subject=?1 AND kind='message.staged'
+                   AND json_extract(fields,'$.native_mail_incarnation') IS NULL
+                   AND EXISTS(SELECT 1 FROM local_native_mail_legacy_staging legacy WHERE legacy.message=stream_lifecycle.subject AND legacy.consumer=stream_lifecycle.actor)",
+                rusqlite::params![subject, incarnation],
+            ).map_err(|error| internal(error.into()))?;
+            transaction.commit().map_err(internal)?;
+        }
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
@@ -757,6 +772,7 @@ impl Runtime for MessagesRuntime {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
+        super::native_mail_staging::stream_boundary(connection)?;
         Ok(())
     }
 

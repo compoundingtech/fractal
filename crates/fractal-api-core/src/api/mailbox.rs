@@ -39,7 +39,7 @@ pub fn offered_since(
     message: &crate::model::MessageView,
     floor: (u128, u64),
 ) -> anyhow::Result<bool> {
-    if !matches!(message.status.as_str(), "staged" | "delivered")
+    if message.status != "staged"
         || store.native_mail_boot_floor(&message.to)? != Some(floor)
     {
         return Ok(false);
@@ -53,9 +53,11 @@ pub fn offered_since(
     if mailbox_reads::is_stream_item(message) {
         return mailbox_reads::native_staged(store, message, incarnation);
     }
-    Ok(store.readers.get().prepare_cached(
+    let proven = store.readers.get().prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM local_native_mail_staging WHERE message=?1 AND consumer=?2 AND incarnation=?3)",
-    )?.query_row(rusqlite::params![message.subject, message.to, incarnation], |row| row.get(0))?)
+    )?.query_row(rusqlite::params![message.subject, message.to, incarnation], |row| row.get::<_, bool>(0))?;
+    Ok(proven || message.status == "staged"
+        && crate::store::native_mail_staging::legacy_graph_staged(&store.readers.get(), &message.subject, &message.to)?)
 }
 
 /// Polling has no native binding. Preserve its existing timestamp-based local offer

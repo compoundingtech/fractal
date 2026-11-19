@@ -25,10 +25,13 @@ pub fn native_staged(graph: &crate::store::Store, message: &MessageView, incarna
     };
     let connection = shard.readers.get();
     let mut statement = connection.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM stream_lifecycle WHERE subject=?1 AND kind='message.staged'
-         AND actor=?2 AND json_extract(fields,'$.native_mail_incarnation')=?3)",
+        "SELECT EXISTS(SELECT 1 FROM stream_lifecycle staged
+         WHERE staged.subject=?1 AND staged.kind='message.staged' AND staged.actor=?2
+           AND (json_extract(staged.fields,'$.native_mail_incarnation')=?3
+             OR (?4='staged' AND json_extract(staged.fields,'$.native_mail_incarnation') IS NULL
+                 AND EXISTS(SELECT 1 FROM local_native_mail_legacy_staging legacy WHERE legacy.message=staged.subject AND legacy.consumer=staged.actor))))",
     )?;
-    Ok(statement.query_row(rusqlite::params![message.subject, message.to, incarnation], |row| row.get(0))?)
+    Ok(statement.query_row(rusqlite::params![message.subject, message.to, incarnation, message.status], |row| row.get(0))?)
 }
 
 /// Mail in canonical order by `keys`, the graph's mail first. A stream item has no graph claim

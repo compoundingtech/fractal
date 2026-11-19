@@ -317,6 +317,7 @@ pub mod subagents;
 pub mod idle_mail;
 pub mod wake_demand;
 pub mod message_marks;
+pub mod native_mail_staging;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -24825,6 +24826,17 @@ pub fn append_claim_with_commit_context(
                 if input.kind == "message.staged" && !rollouts::message_allowed(transaction, &message)? {
                     return Err(FractalError::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
                 }
+                // A checked re-offer promotes only staging frozen below the one-time
+                // upgrade boundary. Do it before operation/transition dedup: the old
+                // daemon may have used this very fence and idempotency key.
+                if input.kind == "message.staged" && message.status == "staged"
+                    && native_mail_staging::legacy_graph_staged(transaction, &input.subject, &fence.subject).map_err(internal)?
+                {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO local_native_mail_staging(message,consumer,incarnation) VALUES(?1,?2,?3)",
+                        params![input.subject, fence.subject, fence.incarnation],
+                    ).map_err(internal)?;
+                }
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
                     && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
@@ -24995,7 +25007,7 @@ pub fn append_claim_with_commit_context(
             }
             // A receipt time is not custody proof. Record the checked native incarnation
             // atomically with its first staging, including when staging becomes a local mark.
-            // Idempotent historical staging has already returned above and cannot acquire it.
+            // Repeated staging returned above; only the frozen upgrade arm may promote it.
             if input.kind == "message.staged" && let Some(fence) = fence {
                 transaction.execute(
                     "INSERT OR IGNORE INTO local_native_mail_staging(message,consumer,incarnation) VALUES(?1,?2,?3)",

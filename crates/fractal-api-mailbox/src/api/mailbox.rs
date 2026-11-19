@@ -1893,11 +1893,126 @@ mod tests {
             // Custody survives a daemon store reopen, but never a new incarnation.
             let reopened = Store::open(&root.path().join("graph.db"), "node").unwrap();
             let _reopened_shard = crate::store::messages_shard::open(&reopened, root.path()).unwrap();
+            for historical in ["message/0000000000000001", "message/0000000000000002"] {
+                let historical = reopened.message(historical).unwrap().unwrap();
+                assert!(!offered_since(&reopened, &historical, floor).unwrap(), "{storage}: reopen widened the frozen legacy set");
+            }
             let message = reopened.message(subject).unwrap().unwrap();
             assert!(offered_since(&reopened, &message, floor).unwrap(), "{storage}: lost durable native custody");
             crate::store::mailbox_tests::ready(&reopened, "next-native-provenance");
             let next_floor = reopened.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
             assert!(!offered_since(&reopened, &message, next_floor).unwrap(), "{storage}: crossed incarnation");
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_recovers_legacy_staging_and_unoffered_mail_once() {
+        for storage in ["graph-claims", "graph-marks", "stream"] {
+            let root = tempfile::tempdir().unwrap();
+            let database = root.path().join("graph.db");
+            let old = Store::open(&database, "node").unwrap();
+            if storage == "graph-marks" {
+                let intent = crate::graph::parse_intent(
+                    "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }", "node",
+                ).unwrap();
+                old.apply_internal(&intent, "declare-upgrade-worker").unwrap();
+                assert_eq!(old.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+            }
+            crate::store::mailbox_tests::ready(&old, "upgrade");
+            let fence = old.bind_mailbox(&Fence::new("agent/eval.worker", "upgrade", "delivery")).unwrap();
+            let shard = crate::store::messages_shard::open(&old, root.path()).unwrap();
+            for ordinal in 1..=3 {
+                let subject = format!("message/{ordinal:016x}");
+                let target = if storage == "stream" { &*shard } else { &old.graph };
+                target.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: "message.sent".into(), actor: Some("person/eval".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                        ("to".into(), json!(fence.subject)), ("content".into(), json!("Synthetic upgrade fixture")),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                if ordinal == 2 {
+                    continue; // The old daemon never admitted this send.
+                }
+                for lifecycle in if ordinal == 1 { &["staged"][..] } else { &["staged", "delivered"][..] } {
+                    let input = ClaimInput {
+                        subject: subject.clone(), kind: format!("message.{lifecycle}"), actor: Some(fence.subject.clone()),
+                        fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some(format!("upgrade:{subject}:{lifecycle}")),
+                    };
+                    if storage == "stream" {
+                        crate::store::messages_shard::record_fenced_lifecycle(
+                            &old, &fence, &subject, &input.kind, input.actor.as_deref(), &input.fields,
+                        ).unwrap();
+                    } else {
+                        old.append_mailbox_receipt(&input, &fence).unwrap();
+                    }
+                }
+            }
+            // Model old on-disk bytes: fenced staging exists, but the old writer
+            // knew neither custody provenance nor the first-capable-open marker.
+            old.connection.write().execute_batch(
+                "DELETE FROM local_native_mail_staging;
+                 DELETE FROM local_native_mail_legacy_boundary;",
+            ).unwrap();
+            shard.connection.write().execute_batch(
+                "UPDATE stream_lifecycle SET fields=json_remove(fields,'$.native_mail_incarnation');
+                 DELETE FROM local_native_mail_legacy_boundary;",
+            ).unwrap();
+            drop(shard);
+            drop(old);
+
+            let mut state = crate::api::tests_shared::state(root.path());
+            state.store = Arc::new(Store::open(&database, "node").unwrap());
+            let reopened_shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+            let floor = state.store.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+            let (mut first, messages) = controlled_stream_with_initial(
+                state.clone(), &fence, &root.path().join("upgrade-first.sock"), None,
+            ).await;
+            let expected = ["message/0000000000000001", "message/0000000000000002"];
+            assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected, "{storage}");
+            // Settle one native admission for each send. Repeated staging with the
+            // old key must promote custody before dedup, without a second step.
+            for subject in expected {
+                for lifecycle in ["staged", "delivered", "read"] {
+                    let input = ClaimInput {
+                        subject: subject.into(), kind: format!("message.{lifecycle}"), actor: Some(fence.subject.clone()),
+                        fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some(format!("upgrade:{subject}:{lifecycle}")),
+                    };
+                    if storage == "stream" {
+                        crate::store::messages_shard::record_fenced_lifecycle(
+                            &state.store, &fence, subject, &input.kind, input.actor.as_deref(), &input.fields,
+                        ).unwrap();
+                    } else {
+                        state.store.append_mailbox_receipt(&input, &fence).unwrap();
+                    }
+                    if lifecycle == "staged" {
+                        let message = state.store.message(subject).unwrap().unwrap();
+                        assert!(offered_since(&state.store, &message, floor).unwrap(), "{storage}: custody not promoted");
+                        if storage != "stream" {
+                            assert!(!crate::store::native_mail_staging::legacy_graph_staged(
+                                &state.store.readers.get(), subject, &fence.subject,
+                            ).unwrap(), "{storage}: promotion still uses legacy fallback");
+                        } else {
+                            let native: String = reopened_shard.readers.get().query_row(
+                                "SELECT json_extract(fields,'$.native_mail_incarnation') FROM stream_lifecycle WHERE subject=?1 AND kind='message.staged'",
+                                [subject], |row| row.get(0),
+                            ).unwrap();
+                            assert_eq!(native, fence.incarnation);
+                        }
+                    }
+                }
+            }
+            first.socket.close(None).await.unwrap();
+            let (mut second, messages) = controlled_stream_with_initial(
+                state.clone(), &fence, &root.path().join("upgrade-second.sock"), None,
+            ).await;
+            assert!(messages.is_empty(), "{storage}: delivered legacy mail or settled recovery was reoffered");
+            second.socket.close(None).await.unwrap();
         }
     }
 
