@@ -214,7 +214,9 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   Fractal says, and each target as a link), **Chat about this**, **Go to** its mission or agent,
   and **Remind me in 3h** (`attention.snooze`): Fractal keeps the snooze, so the item leaves Now
   on every device of the person until then, and its deadline does not move. On an item already
-  put off (its `snoozed_until` still ahead) the same key brings it back (`until: null`). Home
+  put off (its `snoozed_until` still ahead or `snoozed_indefinitely` true) the same key brings it
+  back (`until: null`, with no indefinite flag). Manual-return rows stay off Now without a wake
+  time. Home
   counts what is put off in a note below the list.
 - Cards per kind:
   - **review** (human gate): question, because, what to look at, step; Approve, or Request
@@ -312,7 +314,7 @@ use Ctrl+A then t from the conversation, or Enter on an already detached termina
 Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
 split's tab and adding the replaced content to place history. Agent-blocking questions
 come first, then decisions, failures, and other items; each class is oldest first.
-Closed and snoozed (`snoozed_until` still ahead) items are excluded. The flash gives `n/m · reason`; after the last item,
+Closed and snoozed (`snoozed_until` still ahead or `snoozed_indefinitely` true) items are excluded. The flash gives `n/m · reason`; after the last item,
 `all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch

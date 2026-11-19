@@ -6614,6 +6614,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             id: id.into(),
             tier: Tier::Stopped,

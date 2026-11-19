@@ -283,6 +283,7 @@ mod tests {
             item("snoozed", decision(), "2026-10-01T00:00:00Z"),
             item("woke", decision(), "2026-10-01T00:00:00Z"),
             item("open", failure(), "2026-10-01T00:00:00Z"),
+            item("manual", question(), "2026-10-01T00:00:00Z"),
         ]);
         ui.closed.insert("attention/closed".into());
         // st says the person put one off past now, and another until a time already gone.
@@ -290,6 +291,8 @@ mod tests {
         if let Load::Ready(items) = &mut ui.world.attention {
             items[1].snoozed_until = Some(at + chrono::TimeDelta::hours(1));
             items[2].snoozed_until = Some(at - chrono::TimeDelta::minutes(1));
+            items[4].snoozed_indefinitely = true;
+            assert!(items[4].snoozed_until.is_none(), "manual return has no fabricated wake time");
         }
         ui.triage_next(true);
         focused(&ui, "woke", "1/2 · decision");
