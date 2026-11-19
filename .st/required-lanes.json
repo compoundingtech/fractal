@@ -13,6 +13,7 @@
       "definition_paths": [
         ".buckconfig",
         ".buckroot",
+        ".cargo/config.toml",
         "BUCK",
         "apps/fractal-web/package.json",
         "apps/fractal-web/scripts/ci",
@@ -28,7 +29,6 @@
         "packages/fractal-ui/package.json",
         "packages/fractal-ui/scripts",
         "pnpm-lock.yaml",
-        "pnpm-source-inputs.json",
         "pnpm-workspace.yaml",
         "scripts/check-public-repo",
         "scripts/ci-fractal-web",
