@@ -102,6 +102,9 @@ over their accounting horizon, or `null` when unavailable; their explanation sta
 same coverage explicitly. Coverage of observation time does not prove every viewer or
 attempt was instrumented. Missing coverage is unknown, never an invented zero or success.
 An hour without new events does not erase a verdict supported by retained eligible history.
+After a restart, an empty process-local diagnostic histogram is not evidence of an empty
+hour: retained hourly events remain visible, with the diagnostic p99 explicitly unavailable
+in the new process rather than mislabeled as no qualifying events.
 
 Synthetic probes are not organic attachment or fresh-read traffic. Any future availability
 probe must have its own separately named objective rather than filling these sparse rows.

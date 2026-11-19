@@ -159,9 +159,17 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
         if no_events { "no-qualifying-events" } else { "no-data" },
     );
     let diagnostic_target = row["target"].as_str().unwrap_or_default().to_owned();
-    let diagnostic_current = row["current"].as_str().unwrap_or_default().to_owned();
-    let sparse_empty = matches!(row["id"].as_str(), Some("terminal-attach" | "person-read-fresh"))
+    let sparse_diagnostic_empty = matches!(row["id"].as_str(), Some("terminal-attach" | "person-read-fresh"))
         && row["status"] == "no-data";
+    let retained_hour_events = window(3_600_000).and_then(|window| window["eligible"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let retained_hour_has_events = retained_hour_events.is_some_and(|events| events > 0.0);
+    let diagnostic_current = if let Some(events) = retained_hour_events.filter(|events| sparse_diagnostic_empty && *events > 0.0) {
+        format!("p99 unavailable in this process; {events} qualifying events retained in the last hour")
+    } else {
+        row["current"].as_str().unwrap_or_default().to_owned()
+    };
+    let sparse_empty = sparse_diagnostic_empty && !retained_hour_has_events;
     let unit = if cadence_ms == 0 { "events" } else { "covered milliseconds" };
     let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64())
         .filter(|_| evidence["available"] == true);
@@ -817,9 +825,12 @@ mod tests {
 
     #[test]
     fn a_quiet_terminal_hour_preserves_eligible_accounting_history() {
+        let mut evidence = retained_budget(100, 0);
+        evidence["windows"]["1h"]["eligible"] = json!(0);
+        evidence["windows"]["1h"]["samples"] = json!(0);
         let report = json!({"targets": [{
             "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
-            "budget": retained_budget(100, 0),
+            "budget": evidence,
         }]});
         let rendered = rows(&report, &[], 0, 0);
         let row = by_id(&rendered, "terminal-attach");
@@ -827,6 +838,27 @@ mod tests {
         assert_eq!(row["remaining_percent"], 100.0);
         assert_eq!(row["coverage"], 1.0);
         assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+    }
+
+    #[test]
+    fn a_restart_does_not_erase_retained_hourly_qualifying_events() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            // The process-local histogram starts empty, but the durable hour still has events.
+            let report = json!({"targets": [{
+                "name": name, "p99_ms": 200, "windows": windows(0, 0.0, 0),
+                "budget": retained_budget(100, 0),
+            }]});
+            let rendered = rows(&report, &[], 0, 0);
+            let row = by_id(&rendered, name);
+            assert_eq!(row["status"], "met");
+            assert_eq!(row["remaining_percent"], 100.0);
+            assert_eq!(row["coverage"], 1.0);
+            for field in ["current", "explain"] {
+                let text = row[field].as_str().unwrap();
+                assert!(text.contains("100 qualifying events retained in the last hour"), "{text}");
+                assert!(!text.contains("No qualifying events"), "{text}");
+            }
+        }
     }
 
     #[test]
