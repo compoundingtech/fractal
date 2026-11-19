@@ -122,6 +122,14 @@ export interface HostContextV1 {
     readonly pr: number
     readonly head: string
   }): Promise<ProgramExit>
+  /** Observes the newest owner-origin daemon announcement; journaled under `key`. */
+  awaitDaemon(request: {
+    readonly key: string
+    readonly host: string
+    readonly feature: string
+    readonly minVersion: number
+    readonly version?: string
+  }): Promise<ProgramExit>
   /** Runs a command as its own process group, which the host ends on cancel. */
   spawn(argv: readonly string[], options?: CommandOptions): Promise<CommandResult>
   /** Host-authoritative admission, execution and confirmed retirement; never local spawn. */

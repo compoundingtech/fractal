@@ -3,6 +3,8 @@ import { Data, Effect, Schedule, Schema } from 'effect'
 
 import {
   AskCancelled,
+  AwaitDaemonFailed,
+  AwaitDaemonResult,
   AwaitPrFailed,
   AwaitPrOutcome,
   ChildFailed,
@@ -153,6 +155,198 @@ describe('pull request waits', () => {
         message: 'Head changes are successful dequeues, not errors.',
       }))
       expect(decoded._tag).toBe('Failure')
+    }),
+  )
+})
+
+describe('daemon lifecycle waits', () => {
+  const request = { host: 'worker-1', feature: 'program.await-daemon', minVersion: 2 }
+  const key = 'await-daemon/worker-1/program.await-daemon'
+  const result: AwaitDaemonResult = {
+    host: request.host, claim: 'claim-1', version: 'build-exact',
+    feature: request.feature, featureVersion: 3,
+  }
+  const waiting = Fractal.mission(
+    {
+      meta, id: 'factory/test', goal: 'Observe daemon capability.', reportTo, input: Change,
+      output: AwaitDaemonResult, error: AwaitDaemonFailed,
+    },
+    (): Effect.Effect<AwaitDaemonResult, AwaitDaemonFailed, ProgramServices> =>
+      Fractal.awaitDaemon(request),
+  )
+
+  it.effect('ends the parent wait on cancellation without journaling or a cancel request', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const { promise: pending } = Promise.withResolvers<ProgramExit>()
+      const host = fakeHost({
+        awaitDaemon: (value) => {
+          requests.push(value)
+          host.cancel()
+          return pending
+        },
+      })
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'Interrupted' },
+      })
+      expect(requests).toEqual([{ ...request, key }])
+      expect(host.started).toEqual([])
+      expect(host.recorded).toEqual([])
+    }),
+  )
+
+  it.effect('stays suspended until native resolution and replays without another request', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const exit: ProgramExit = { _tag: 'Success', value: result }
+      const { promise: requested, resolve: entered } = Promise.withResolvers<void>()
+      const { promise: pending, resolve: resolveWait } = Promise.withResolvers<ProgramExit>()
+      let completed = false
+      const host = fakeHost({
+        awaitDaemon: (value) => {
+          requests.push(value)
+          entered()
+          return pending
+        },
+      })
+      const [resolved] = yield* Effect.all([
+        start(waiting, host).pipe(Effect.tap(() => Effect.sync(() => { completed = true }))),
+        Effect.promise(async () => {
+          await requested
+          expect(completed).toBe(false)
+          expect(requests).toEqual([{ ...request, key }])
+          expect(host.recorded).toEqual([])
+          expect(host.started).toEqual([])
+          resolveWait(exit)
+        }),
+      ], { concurrency: 'unbounded' })
+      expect(resolved).toEqual(exit)
+      expect(host.recorded).toEqual([])
+      const replay = fakeHost({ journal: [[key, exit]] })
+      expect(yield* start(waiting, replay)).toEqual(exit)
+      expect(replay.recorded).toEqual([])
+      expect(replay.started).toEqual([])
+    }),
+  )
+
+  it.effect('preserves ordered repeated default keys and caller ids with exact optional versions', () =>
+    Effect.gen(function* () {
+      const outcomes = [result, { ...result, claim: 'claim-2', version: 'older-looking-build' }, result]
+      const repeated = Fractal.mission(
+        {
+          meta, id: 'factory/test', goal: 'Observe announcements.', reportTo, input: Change,
+          output: Schema.Array(AwaitDaemonResult),
+        },
+        () => Effect.gen(function* () {
+          const first = yield* Fractal.awaitDaemon(request)
+          const second = yield* Fractal.awaitDaemon({ ...request, version: 'older-looking-build' })
+          const third = yield* Fractal.awaitDaemon({ ...request, id: 'caller-wait', version: 'build-exact' })
+          return [first, second, third]
+        }),
+      )
+      const requests: unknown[] = []
+      const journal: [string, ProgramExit][] = []
+      const host = fakeHost({
+        awaitDaemon: async (value) => {
+          const exit: ProgramExit = { _tag: 'Success', value: outcomes[requests.length]! }
+          requests.push(value)
+          journal.push([value.key, exit])
+          return exit
+        },
+      })
+      expect(yield* start(repeated, host)).toEqual({ _tag: 'Success', value: outcomes })
+      expect(requests).toEqual([
+        { ...request, key },
+        { ...request, key: `${key}#2`, version: 'older-looking-build' },
+        { ...request, key: 'caller-wait', version: 'build-exact' },
+      ])
+      expect(yield* start(repeated, fakeHost({ journal }))).toEqual({
+        _tag: 'Success', value: outcomes,
+      })
+    }),
+  )
+
+  it.effect('decodes native invalid-request errors live and on replay', () =>
+    Effect.gen(function* () {
+      const error = {
+        _tag: 'AwaitDaemonFailed', code: 'invalid-request', message: 'Invalid native wait.',
+      } as const
+      const exit: ProgramExit = { _tag: 'Failure', error }
+      const caught = Fractal.mission(
+        {
+          meta, id: 'factory/test', goal: 'Handle invalid wait.', reportTo,
+          input: Change, output: Schema.String,
+        },
+        () => Fractal.awaitDaemon(request).pipe(
+          Effect.catchTag('AwaitDaemonFailed', (failure) => {
+            expect(failure).toBeInstanceOf(AwaitDaemonFailed)
+            expect(failure.code).toBe('invalid-request')
+            return Effect.succeed(failure.message)
+          }),
+        ),
+      )
+      expect(yield* start(waiting, fakeHost({ awaitDaemon: async () => exit }))).toEqual(exit)
+      for (const host of [
+        fakeHost({ awaitDaemon: async () => exit }),
+        fakeHost({ journal: [[key, exit]] }),
+      ]) {
+        expect(yield* start(caught, host)).toEqual({ _tag: 'Success', value: error.message })
+      }
+    }),
+  )
+
+  it.effect('rejects invalid request identifiers and feature versions without host side effects', () =>
+    Effect.gen(function* () {
+      for (const invalid of [
+        { ...request, host: '' },
+        { ...request, host: '-worker' },
+        { ...request, host: 'worker/path' },
+        { ...request, host: 'x'.repeat(129) },
+        { ...request, feature: '' },
+        { ...request, feature: 'feature name' },
+        { ...request, feature: '.feature' },
+        { ...request, feature: 'x'.repeat(129) },
+        { ...request, version: '' },
+        { ...request, version: ' \t\n' },
+        ...[0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]
+          .map((minVersion) => ({ ...request, minVersion })),
+      ]) {
+        const invalidWait = Fractal.mission(
+          {
+            meta, id: 'factory/test', goal: 'Reject invalid wait.', reportTo,
+            input: Change, output: AwaitDaemonResult, error: AwaitDaemonFailed,
+          },
+          () => Fractal.awaitDaemon(invalid),
+        )
+        const host = fakeHost()
+        expect(yield* start(invalidWait, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'AwaitDaemonFailed', code: 'invalid-request' },
+        })
+        expect(host.recorded).toEqual([])
+        expect(host.started).toEqual([])
+      }
+    }),
+  )
+
+  it.effect('validates native results and error codes at the deferred schema boundary', () =>
+    Effect.gen(function* () {
+      for (const value of [
+        { ...result, host: undefined },
+        { ...result, claim: undefined },
+        { ...result, version: 1 },
+        { ...result, feature: undefined },
+        ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]
+          .map((featureVersion) => ({ ...result, featureVersion })),
+      ]) {
+        expect((yield* Effect.result(Schema.decodeUnknownEffect(AwaitDaemonResult)(value)))._tag)
+          .toBe('Failure')
+      }
+      expect((yield* Effect.result(Schema.decodeUnknownEffect(AwaitDaemonFailed)({
+        _tag: 'AwaitDaemonFailed', code: 'unknown-host', message: 'Not a request failure.',
+      })))._tag).toBe('Failure')
+      expect((yield* Schema.decodeUnknownEffect(AwaitDaemonResult)({
+        ...result, featureVersion: Number.MAX_SAFE_INTEGER,
+      })).featureVersion).toBe(Number.MAX_SAFE_INTEGER)
     }),
   )
 })

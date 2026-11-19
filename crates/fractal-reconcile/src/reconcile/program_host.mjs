@@ -162,6 +162,7 @@ const main = () => {
         case 'run':
         case 'ask':
         case 'await-pr':
+        case 'await-daemon':
         case 'resource':
         case 'resource-cancel':
           // The daemon decides; the worker waits for its answer.
@@ -267,6 +268,7 @@ const worker = async () => {
       child: (child) => request({ t: 'run', key: child.key, mission: child.mission, input: child.input }),
       ask: (ask) => request({ t: 'ask', ...ask }),
       awaitPr: (wait) => request({ t: 'await-pr', ...wait }),
+      awaitDaemon: (wait) => request({ t: 'await-daemon', ...wait }),
       resource: (resource, signal) => {
         const pending = request({ t: 'resource', ...resource })
         const n = seq

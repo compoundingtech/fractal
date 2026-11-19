@@ -7936,6 +7936,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
+                    "mission_await_daemon": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
@@ -22004,8 +22005,8 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if state()?.done() {
-                    let complete = state()?;
+                let complete = state()?;
+                if complete.done() && !complete.references_pending {
                     if !initial.done() { stderr_message("fractal", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();

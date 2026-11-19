@@ -35,7 +35,7 @@ pub(crate) fn settle(store: &Store, engine: &ProgramEngine, request: &Request, r
     let observer_subject = thread.observer();
     let current = observers.iter().find(|(subject, _)| subject == &observer_subject).map(|(_, spec)| spec);
     let resource = store.standing_resource(&thread.locator(), &observer_subject, current, &observers)?;
-    let registration = engine.register_pr(request, &subject, json!({
+    let registration = engine.register_wait(request, &subject, "await-pr", json!({
         "repo": repo, "pr": pr, "head": head,
     }))?;
     if registration["repo"] != repo || registration["pr"] != pr || registration["head"] != head {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Program missions can await a replicated daemon startup capability with Fractal.awaitDaemon({ host, feature, minVersion, version? }): the newest owner-origin daemon.started claim resolves the durable wait without polling.",
+  "replay": {"status": "changed", "detail": "The await-daemon host request adopts a durable registration and journals its exact startup claim result under the caller key. Completed keys replay without rereading capabilities; resumed open attempts retain their tuple."},
+  "schema": {"status": "none", "detail": "No client schema, generated code, table or migration changes. Internal program.step claims hold registrations and results."},
+  "rules": {"status": "none", "detail": "The wait observes an owner-origin startup fact; it grants no authority and performs no upgrade, service restart or health probe."},
+  "compatibility": {"status": "changed", "detail": "New bundles using awaitDaemon need execution daemons and bundled hosts supporting await-daemon. Existing run, ask and awaitPr contracts retain their meaning."},
+  "downtime": {"status": "none", "detail": "No runtime deployment is performed. Normal host replacement adopts open registrations."},
+  "manual": {"status": "changed", "detail": "Update execution daemons before publishing bundles using this primitive. minVersion orders numeric feature versions; optional version matches the exact advertised build string, not Git ancestry."},
+  "recovery": {"status": "none", "detail": "Cancellation removes the attempt's in-memory interest without an external watch. daemon.started is not proof of current liveness, readiness or completion of a particular activation; those need separate run-bound facts."}
+}

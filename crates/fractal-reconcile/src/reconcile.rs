@@ -15584,6 +15584,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
                 program::Wait::AwaitPr { repo, pr, head } =>
                     program::await_pr::settle(&self.store, engine, &request, repo, *pr, head)?,
+                program::Wait::AwaitDaemon { host, feature, min_version, version } =>
+                    program::await_daemon::settle(&self.store, engine, &request, host, feature, *min_version, version.as_deref())?,
                 program::Wait::Resource { operation, payload, cancelled } =>
                     self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
