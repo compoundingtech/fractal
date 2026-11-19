@@ -247,7 +247,7 @@ fn merged_fact(store: &Store, name: &str, merged_at: u64, duration: u64, source:
         "admittedAt": merged_at - duration * 1000,
         "mergedAt": merged_at, "goAt": merged_at - duration * 1000,
         "goSource": source,
-        "goComment": if source == "route-a-exact-head" { Some("https://github.com/example/project/pull/1#issuecomment-1") } else { None },
+        "goEvidence": if source == "route-a-exact-head" { "https://github.com/example/project/pull/1#issuecomment-1" } else { name },
         "durationSeconds": duration,
     });
     // Separate accepted claims for one completion must not add denominator weight.

@@ -360,14 +360,17 @@ The queue-derived producer ingests existing custom claims through `fractal claim
   UTF-8 compact JSON array `[repo,pr,head,admission,merge]`. Preserve producer-normalized
   tuple values on retries; do not derive identity from ingestion time.
 - Fields: `schema: "fractal.merge-latency/v1"`, `repo`, `pr`, `head`, `admission`,
-  `merge`, `admittedAt`, `mergedAt`, `goAt`, `goSource`, `goComment`, `durationSeconds`.
+  `merge`, `admittedAt`, `mergedAt`, `goAt`, `goSource`, `goEvidence`, `durationSeconds`.
   `head` is the admitted full head; `merge` is the completed merge commit. Times are
   RFC 3339 or Unix milliseconds. `durationSeconds = (mergedAt - goAt) / 1000`
   must be finite and nonnegative, without rounding at the threshold.
-- `goSource: "route-a-exact-head"` requires independent Route-A GO evidence bound to
-  that admitted head; `goComment` is its durable comment URL. Preparation/candidate
-  timestamps are not GO. Without such evidence, `goSource: "admission-proxy"` uses
-  admission time and `goComment: null`; both objectives explicitly exclude it.
+- `goSource: "route-a-exact-head"` requires an unedited exact-full-head
+  `q19-go v1 head=<40hex> verdict=GO` comment with one valid v3 footer identifying
+  a reviewer different from the PR body's owner; `goEvidence` is its durable URL.
+  These are self-asserted footer semantics, not independent authentication.
+  Preparation/candidate timestamps and free-form review prose are not promoted to GO.
+  Without qualifying evidence, `goSource: "admission-proxy"` uses admission time and
+  `goEvidence` holds the admission ID; both objectives explicitly exclude it.
 - Pass each field as `--field KEY=JSON`, plus `--actor "$FRACTAL_AGENT"` and a stable
   `--idempotency-key`. The command parses JSON before its raw-string fallback, so encode
   strings as JSON too. Retry the identical accepted fact, including its original
