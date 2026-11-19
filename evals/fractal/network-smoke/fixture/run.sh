@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/st3-network-smoke.XXXXXX")"
+root="$(mktemp -d "${TMPDIR:-/tmp}/fractal-network-smoke.XXXXXX")"
 state="$root/state"
 socket="$root/st3.sock"
 pty_root="$root/p"

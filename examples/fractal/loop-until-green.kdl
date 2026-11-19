@@ -15,9 +15,9 @@ version 2
 //
 //   /bin/bash -n examples/fractal/test-pushed-branch.sh
 //   /bin/cp examples/fractal/test-pushed-branch.sh /srv/example/app/
-//   st apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
-//   st apply examples/fractal/loop-until-green.kdl --as person/operator
-//   st missions start example/loop-until-green --id example/loop-until-green/1 \
+//   fractal apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
+//   fractal apply examples/fractal/loop-until-green.kdl --as person/operator
+//   fractal missions start example/loop-until-green --id example/loop-until-green/1 \
 //     --workspace /srv/example/app --as person/operator --follow
 //
 // For GitHub checks instead of a local test run, see wait-for-green-checks.kdl.
