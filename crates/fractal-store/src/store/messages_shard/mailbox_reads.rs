@@ -17,6 +17,20 @@ pub fn is_stream_item(message: &MessageView) -> bool {
     message.created_index >= STREAM_INDEX_BASE
 }
 
+/// Staging admitted by a native binding, not merely a receipt recorded after boot.
+/// Legacy lifecycle fields carry no custody proof.
+pub fn native_staged(graph: &crate::store::Store, message: &MessageView, incarnation: &str) -> anyhow::Result<bool> {
+    let Some(shard) = shard(graph) else {
+        return Ok(false);
+    };
+    let connection = shard.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM stream_lifecycle WHERE subject=?1 AND kind='message.staged'
+         AND actor=?2 AND json_extract(fields,'$.native_mail_incarnation')=?3)",
+    )?;
+    Ok(statement.query_row(rusqlite::params![message.subject, message.to, incarnation], |row| row.get(0))?)
+}
+
 /// Mail in canonical order by `keys`, the graph's mail first. A stream item has no graph claim
 /// to key it, so it follows in shard order, as a page lists it.
 pub fn mail_order<K: Ord>(keys: &BTreeMap<String, K>, left: &MessageView, right: &MessageView) -> Ordering {

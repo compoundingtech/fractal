@@ -1416,6 +1416,12 @@ CREATE TABLE IF NOT EXISTS local_mailbox_bindings (
     incarnation TEXT NOT NULL,
     epoch INTEGER NOT NULL
 );
+-- Native staging custody is local, additive, and absent for legacy/unfenced receipts.
+CREATE TABLE IF NOT EXISTS local_native_mail_staging (
+    message TEXT PRIMARY KEY,
+    consumer TEXT NOT NULL,
+    incarnation TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_mailbox_argv_bindings (
     token TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -24986,6 +24992,15 @@ pub fn append_claim_with_commit_context(
                         )
                     })?;
                 return Ok((latest, false));
+            }
+            // A receipt time is not custody proof. Record the checked native incarnation
+            // atomically with its first staging, including when staging becomes a local mark.
+            // Idempotent historical staging has already returned above and cannot acquire it.
+            if input.kind == "message.staged" && let Some(fence) = fence {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO local_native_mail_staging(message,consumer,incarnation) VALUES(?1,?2,?3)",
+                    params![input.subject, fence.subject, fence.incarnation],
+                ).map_err(internal)?;
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and

@@ -32,9 +32,35 @@ pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyh
             .is_none())
 }
 
-/// A pending offer made to this incarnation, including pre-boot mail it recovered.
-/// Transport replacement must not demote that staging to historical mail.
+/// A pending offer proven to belong to this native incarnation. Receipt timestamps
+/// alone cannot distinguish historical/unfenced mail from native admission.
 pub fn offered_since(
+    store: &Store,
+    message: &crate::model::MessageView,
+    floor: (u128, u64),
+) -> anyhow::Result<bool> {
+    if !matches!(message.status.as_str(), "staged" | "delivered")
+        || store.native_mail_boot_floor(&message.to)? != Some(floor)
+    {
+        return Ok(false);
+    }
+    let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
+        return Ok(false);
+    };
+    let Some(incarnation) = runtime.body.pointer("/fields/incarnation_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if mailbox_reads::is_stream_item(message) {
+        return mailbox_reads::native_staged(store, message, incarnation);
+    }
+    Ok(store.readers.get().prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM local_native_mail_staging WHERE message=?1 AND consumer=?2 AND incarnation=?3)",
+    )?.query_row(rusqlite::params![message.subject, message.to, incarnation], |row| row.get(0))?)
+}
+
+/// Polling has no native binding. Preserve its existing timestamp-based local offer
+/// policy independently of the socket's durable native-custody requirement.
+fn poll_offered_since(
     store: &Store,
     message: &crate::model::MessageView,
     floor: (u128, u64),
@@ -201,7 +227,7 @@ pub fn hold_pre_boot_mail(
         let after_boot = message.created_index > through && sent.accepted_at_unix_ms >= since;
         let recent = recovery_backlog(sent.accepted_at_unix_ms, since) == Some(false);
         let recovered = admitted.contains(&message.subject);
-        let current_offer = (recent || recovered) && offered_since(store, message, (since, through))?;
+        let current_offer = (recent || recovered) && poll_offered_since(store, message, (since, through))?;
         if !after_boot && !((recent || recovered) && (never_offered(store, message)? || current_offer)) {
             message.status = "closed".into();
         }

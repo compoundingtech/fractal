@@ -544,8 +544,10 @@ fn retain_live_mail(
     for (accepted_at, _, message, keep) in &mut candidates {
         // `through` is a graph boot index and a stream item's is past them all,
         // so the stream item's original send time decides whether it is post-boot.
-        let after_connection = through.is_none_or(|index| message.created_index > index)
-            && *accepted_at >= since;
+        let after_connection = message.status == "sent"
+            && through.is_none_or(|index| message.created_index > index)
+            && *accepted_at >= since
+            && never_offered(store, message)?;
         if after_connection || recovered.admitted.contains(&message.subject)
             || offered_since(store, message, (since, through.unwrap_or(0)))?
         {
@@ -1725,9 +1727,21 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_reoffers_staged_graph_and_shard_mail_in_send_order() {
+        reconnect_reoffers_staged_graph_and_shard_mail_with(false).await;
+        reconnect_reoffers_staged_graph_and_shard_mail_with(true).await;
+    }
+
+    async fn reconnect_reoffers_staged_graph_and_shard_mail_with(marks: bool) {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
         state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        if marks {
+            let intent = crate::graph::parse_intent(
+                "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }", "node",
+            ).unwrap();
+            state.store.apply_internal(&intent, "declare-reconnect-worker").unwrap();
+            assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+        }
         crate::store::mailbox_tests::ready(&state.store, "reconnect");
         let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
         let fence = state.store.bind_mailbox(
@@ -1764,13 +1778,13 @@ mod tests {
         assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected);
         for subject in expected {
             if subject == expected[0] {
-                assert!(crate::store::messages_shard::record_lifecycle(
-                    &state.store, subject, "message.staged", Some(&fence.subject),
+                assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                    &state.store, &fence, subject, "message.staged", Some(&fence.subject),
                     &BTreeMap::from([("status".into(), json!("staged"))]),
                 ).unwrap());
                 continue;
             }
-            state.store.append_claim(&ClaimInput {
+            state.store.append_mailbox_receipt(&ClaimInput {
                 subject: subject.into(),
                 kind: "message.staged".into(),
                 actor: Some(fence.subject.clone()),
@@ -1778,7 +1792,7 @@ mod tests {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(format!("reconnect-stage:{subject}")),
-            }).unwrap();
+            }, &fence).unwrap();
         }
         first.socket.close(None).await.unwrap();
         // No new send, turn end, idle proof or timer tick: opening a replacement
@@ -1791,6 +1805,100 @@ mod tests {
         assert!(messages[0].created_index > messages[1].created_index);
         assert_eq!(state.store.native_mail_boot_floor(&fence.subject).unwrap(), Some(floor));
         second.socket.close(None).await.unwrap();
+    }
+
+    #[test]
+    fn native_replay_requires_fenced_staging_provenance() {
+        for storage in ["graph-claims", "graph-marks", "stream"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(&root.path().join("graph.db"), "node").unwrap();
+            if storage == "graph-marks" {
+                let intent = crate::graph::parse_intent(
+                    "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }", "node",
+                ).unwrap();
+                store.apply_internal(&intent, "declare-native-provenance-worker").unwrap();
+                assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+            }
+            crate::store::mailbox_tests::ready(&store, "native-provenance");
+            let floor = store.native_mail_boot_floor("agent/eval.worker").unwrap().unwrap();
+            let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+            let target = if storage == "stream" { &*shard } else { &store.graph };
+            for (ordinal, status) in [(1, "staged"), (2, "delivered")] {
+                let subject = format!("message/{ordinal:016x}");
+                target.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: "message.sent".into(),
+                    actor: Some("person/eval".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                        ("to".into(), json!("agent/eval.worker")), ("content".into(), json!("Synthetic provenance fixture")),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                for step in ["staged", status] {
+                    let kind = format!("message.{step}");
+                    let fields = BTreeMap::from([("status".into(), json!(step))]);
+                    if storage == "stream" {
+                        crate::store::messages_shard::record_lifecycle(
+                            &store, &subject, &kind, Some("agent/eval.worker"), &fields,
+                        ).unwrap();
+                    } else {
+                        store.append_claim(&ClaimInput {
+                            subject: subject.clone(), kind, actor: Some("agent/eval.worker".into()), fields,
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap();
+                    }
+                }
+            }
+            let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "native-provenance", "delivery")).unwrap();
+            let mut messages = store.messages(Some(&fence.subject), false).unwrap();
+            assert_eq!(messages.len(), 2);
+            for message in &messages {
+                assert!(!offered_since(&store, message, floor).unwrap(), "{storage}: timestamp is not custody");
+            }
+            // Even a repeated fenced staging cannot relabel a historical receipt.
+            let staged = &messages.iter().find(|m| m.status == "staged").unwrap().subject;
+            let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+            if storage == "stream" {
+                assert!(!crate::store::messages_shard::record_fenced_lifecycle(
+                    &store, &fence, staged, "message.staged", Some(&fence.subject), &fields,
+                ).unwrap());
+            } else {
+                store.append_mailbox_receipt(&ClaimInput {
+                    subject: staged.clone(), kind: "message.staged".into(), actor: Some(fence.subject.clone()), fields,
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }, &fence).unwrap();
+            }
+            retain_live_mail(&store, &mut messages, floor.0, Some(floor.1), &mut MailRecovery::default(), true).unwrap();
+            assert!(messages.is_empty(), "{storage}: historical staging/delivery entered native recovery");
+            let subject = "message/0000000000000003";
+            target.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "message.sent".into(), actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(fence.subject)), ("content".into(), json!("Synthetic native custody")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+            if storage == "stream" {
+                assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                    &store, &fence, subject, "message.staged", Some(&fence.subject), &fields,
+                ).unwrap());
+            } else {
+                store.append_mailbox_receipt(&ClaimInput {
+                    subject: subject.into(), kind: "message.staged".into(), actor: Some(fence.subject.clone()), fields,
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }, &fence).unwrap();
+            }
+            // Custody survives a daemon store reopen, but never a new incarnation.
+            let reopened = Store::open(&root.path().join("graph.db"), "node").unwrap();
+            let _reopened_shard = crate::store::messages_shard::open(&reopened, root.path()).unwrap();
+            let message = reopened.message(subject).unwrap().unwrap();
+            assert!(offered_since(&reopened, &message, floor).unwrap(), "{storage}: lost durable native custody");
+            crate::store::mailbox_tests::ready(&reopened, "next-native-provenance");
+            let next_floor = reopened.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+            assert!(!offered_since(&reopened, &message, next_floor).unwrap(), "{storage}: crossed incarnation");
+        }
     }
 
     #[tokio::test]
@@ -1840,15 +1948,15 @@ mod tests {
                 for message in &messages {
                     let fields = BTreeMap::from([("status".into(), json!("staged"))]);
                     if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
-                        assert!(crate::store::messages_shard::record_lifecycle(
-                            &state.store, &message.subject, "message.staged", Some(&fence.subject), &fields,
+                        assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                            &state.store, &fence, &message.subject, "message.staged", Some(&fence.subject), &fields,
                         ).unwrap());
                     } else {
-                        state.store.append_claim(&ClaimInput {
+                        state.store.append_mailbox_receipt(&ClaimInput {
                             subject: message.subject.clone(), kind: "message.staged".into(),
                             actor: Some(fence.subject.clone()), fields,
                             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-                        }).unwrap();
+                        }, &fence).unwrap();
                     }
                 }
                 // An earlier late import must not take a slot before reconstruction.
