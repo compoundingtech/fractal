@@ -100,21 +100,22 @@ approval; do not replace a TODO with a permanent exemption.
 
 ### Native fleet roll receipt source
 
-The `fractal_api_core::roll_completion` maintainer owns schema
-`lv-h965d880bf5ba` and append `lv-h5d4b16b81b87`. This separate local authority
-retains immutable versioned JSON receipt bodies and JSON-encoded receipt keys;
-the unique receipt-key index is a variable-sized key too. Inline storage keeps
-one ordered transactional append and lossless restart reconstruction for
-declarations and observations; no replicated graph digest or canonical claim
-table is changed. Neither the API body boundary nor one-row insertion proves
-encoded-byte or SQL-work bounds.
+The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
+`lv-h854866002229`, append `lv-h781e5c867fe7`, and rebuild
+`lv-h84af57247816`. The separate local index retains authenticated graph claim
+IDs and JSON-encoded receipt keys; it does not duplicate receipt bodies or make
+unsigned files authoritative. The unique receipt-key index remains a
+variable-sized key. One ordered transaction preserves immutable conflict checks
+and source order. Rebuild revalidates each retained claim's canonical signature,
+declaration role, host identity and dependency chain before admitting it again;
+revoked authority cannot retain cached good adoption.
 
-The schema TODO is to chunk/reference variable bodies and keys while preserving
-immutable conflict checks and source order. The append TODO is to establish
-complete value/key costs and lossless retention/reclamation before replacing
-the current authoritative receipt representation. Owner review must retain
-the version-1 reader, historical accounting, declaration-before-observation
-ordering and crash-safe publication; it must not cap or discard valid receipts.
+The schema work is to establish complete key/value costs and lossless
+retention/reclamation, not to cap or discard valid signed facts. Append and
+rebuild work must retain dependency ordering and atomic replacement. The native
+graph remains the durable signed authority and supports restart reconstruction;
+the earlier unsigned local ledger is deliberately not replayed as trusted data.
+Neither one-row insertion nor the API body boundary alone proves SQL-work bounds.
 
 ### GitHub capture rebuildable projection
 
