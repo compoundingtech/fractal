@@ -907,6 +907,69 @@ class NativeAdmissionTest(unittest.TestCase):
                 cancel.assert_called_once()
             self.assertEqual(st_test.native_records(directory=target), [])
 
+    def test_another_checkouts_scratch_root_does_not_abort_this_runs_recovery(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            first = st_test.NativePhase(command, options)
+            root_b = home / 'root-b'
+            root_b.mkdir()
+            tree_b = home / 'tree-b'
+            tree_b.mkdir()
+            with mock.patch.object(st_test, 'NATIVE_TEMP_ROOT', root_b), \
+                    mock.patch.object(st_test, 'TEMP_DIRS', set()), \
+                    mock.patch.object(st_test, 'TEMP_IDENTITIES', {}), \
+                    st_test.temporary_directory(dir=root_b, prefix='st-test-') as scratch_b:
+                second = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()), {'cwd': tree_b})
+                with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                    st_test.recover_native_tree(tree_b)
+                    cancel.assert_called_once_with(second.command, mock.ANY)
+                self.assertTrue(first.path.exists())
+                self.assertTrue(scratch.exists())
+                self.assertFalse(second.path.exists())
+                self.assertFalse(Path(scratch_b).exists())
+                with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                    with self.assertRaises(st_test.NativeRetirementFailure):
+                        st_test.recover_native_tree(tree)
+                    cancel.assert_not_called()
+                self.assertEqual(st_test.native_records(directory=tree), [(first.path, first.entry)])
+
+    def test_concurrent_scratch_registration_cannot_split_a_phase_snapshot(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            added = home / 'st-test.added000'
+            added.mkdir()
+            snapped, changed = threading.Barrier(2), threading.Barrier(2)
+            snapshot = st_test.native_scratch_snapshot
+            errors = []
+            def concurrent_change():
+                try:
+                    snapped.wait(timeout=10)
+                    st_test.untrack_native_scratch(scratch)
+                    st_test.track_native_scratch(added)
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    changed.wait(timeout=10)
+            def paused_snapshot():
+                result = snapshot()
+                snapped.wait(timeout=10)
+                changed.wait(timeout=10)
+                return result
+            worker = threading.Thread(target=concurrent_change)
+            worker.start()
+            try:
+                with mock.patch.object(st_test, 'native_scratch_snapshot', side_effect=paused_snapshot):
+                    phase = st_test.NativePhase(command, options)
+            finally:
+                worker.join(timeout=15)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(phase.entry['scratch'], [str(scratch)])
+            self.assertEqual(set(phase.entry['scratch']), set(phase.entry['scratch_identity']))
+            self.assertEqual(set(snapshot()), {str(added)})
+            self.assertEqual(st_test.native_records(directory=tree), [(phase.path, phase.entry)])
+            next_phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()), options)
+            self.assertEqual(next_phase.entry['scratch'], [str(added)])
+            self.assertEqual(set(next_phase.entry['scratch']), set(next_phase.entry['scratch_identity']))
+
     def test_record_schema_rejects_old_versions_missing_fields_and_wrong_types(self):
         with self.crash_fixture() as (home, scratch, tree, target, command, options):
             phase = st_test.NativePhase(command, options)

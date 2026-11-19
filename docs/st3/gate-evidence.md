@@ -2090,12 +2090,15 @@ Its strict version-2 schema contains the request ID, owner, allowlisted endpoint
 and creation device/inode identities, checkout, and supervisor PID/start time, not an executable command or arbitrary environment.
 The record directory is 0700; records are 0600 and published with file fsync, rename and directory fsync before launch.
 That record is also the scratch preservation authority: there is no second scratch-marker or tree/target journal to reconcile.
+Scratch registration, removal and record snapshots share one lock; each record derives both scratch paths and identities from one snapshot.
 A later owner matches the exact tree/target pins (including caller `CARGO_TARGET_DIR`) and rebuilds cancel argv from trusted code.
 Caller `CARGO_TARGET_DIR` is resolved once from the payload tree, following symlinks; that identical absolute path is used for recovery,
 request recording and the payload environment, including across pool-tree changes.
 Caller targets also hold an exclusive target lock for the complete run, including light checks' member preparation.
 Recovery refuses any request whose PID still has the recorded process start time; an unverifiable supervisor is not presumed dead.
 Scratch paths must have generated names below configured scratch roots, with no traversal or symlink components.
+All records receive structural validation; configured-root policy applies only when a selected record is about to be recovered.
+An unrelated checkout's valid record under a different configured scratch root cannot abort this run.
 Deletion opens parents without following symlinks and verifies the directory's creation device/inode identity before removal.
 Recovery cancels/confirms retirement once per record, removes unshared scratch (already missing is success), then deletes the
 record last. Every step is safe to repeat across a crash. Other checkouts' requests are not recovered by the scratch sweep.

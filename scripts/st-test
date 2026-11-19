@@ -1022,13 +1022,26 @@ ADMISSION_RECEIPTS = []
 QUARANTINED = False
 TEMP_DIRS = set()
 TEMP_IDENTITIES = {}
+TEMP_LOCK = threading.Lock()
 NATIVE_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
 
 
 def track_native_scratch(path):
     status = path.lstat()
-    TEMP_IDENTITIES[str(path.resolve())] = {'dev': status.st_dev, 'ino': status.st_ino}
-    TEMP_DIRS.add(path)
+    with TEMP_LOCK:
+        TEMP_IDENTITIES[str(path.resolve())] = {'dev': status.st_dev, 'ino': status.st_ino}
+        TEMP_DIRS.add(path)
+
+
+def untrack_native_scratch(path):
+    with TEMP_LOCK:
+        TEMP_DIRS.discard(path)
+        TEMP_IDENTITIES.pop(str(path.resolve()), None)
+
+
+def native_scratch_snapshot():
+    with TEMP_LOCK:
+        return {str(path.resolve()): dict(TEMP_IDENTITIES[str(path.resolve())]) for path in TEMP_DIRS}
 
 
 def native_command(executable, environment=None):
@@ -1059,8 +1072,7 @@ def temporary_directory(**options):
     try:
         yield str(path)
     finally:
-        TEMP_DIRS.discard(path)
-        TEMP_IDENTITIES.pop(str(path.resolve()), None)
+        untrack_native_scratch(path)
         if not QUARANTINED:
             shutil.rmtree(path, ignore_errors=True)
 
@@ -1105,7 +1117,7 @@ def native_scratch_path(value):
     return path
 
 
-def validate_native_record(path, record):
+def validate_native_record(path, record, scratch_policy=True):
     """Persisted data is not authority to select arbitrary environment keys or deletion paths."""
     try:
         keys = {'version', 'request_id', 'owner', 'endpoints', 'pins', 'scratch', 'scratch_identity', 'checkout', 'supervisor'}
@@ -1148,7 +1160,10 @@ def validate_native_record(path, record):
                 len(scratch) != len(set(scratch)) or set(scratch) != set(identities)):
             raise ValueError('invalid scratch identities')
         for value in scratch:
-            native_scratch_path(value)
+            if not isinstance(value, str) or not Path(value).is_absolute() or '..' in Path(value).parts or str(Path(value)) != value:
+                raise ValueError('invalid scratch path')
+            if scratch_policy:
+                native_scratch_path(value)
             identity = identities[value]
             if (not isinstance(identity, dict) or set(identity) != {'dev', 'ino'} or
                     any(type(identity[key]) is not int or identity[key] < 0 for key in identity)):
@@ -1204,7 +1219,7 @@ def native_records(directory=None, scratch=None):
             continue  # another owner already completed recovery
         except (ValueError, UnicodeError) as error:
             raise NativeRetirementFailure(f'unrecognized native request record: {path}: {error}') from error
-        validate_native_record(path, record)
+        validate_native_record(path, record, scratch_policy=False)
         if directory is not None and directory not in record['pins']:
             continue
         if scratch is not None and scratch not in record['scratch']:
@@ -1273,12 +1288,13 @@ class NativePhase:
         if target:
             pins.add(target)  # shared_target resolved the payload-relative path once
         self.path = native_record_root() / f'{self.request}.json'
+        scratch = native_scratch_snapshot()
         self.entry = {
             'version': 2, 'request_id': self.request, 'owner': native_owner(self.environment),
             'endpoints': {key: self.environment[key] for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT') if key in self.environment},
-            'pins': sorted(pins), 'scratch': sorted(str(path.resolve()) for path in TEMP_DIRS),
+            'pins': sorted(pins), 'scratch': sorted(scratch),
             'checkout': str(Path.cwd().resolve()),
-            'scratch_identity': {str(path.resolve()): TEMP_IDENTITIES[str(path.resolve())] for path in TEMP_DIRS},
+            'scratch_identity': scratch,
             'supervisor': {'pid': os.getpid(), 'started_ns': process_started_ns(os.getpid())},
         }
         self.command = native_cancel_command(self.entry, argv[0])
@@ -1679,8 +1695,7 @@ def run_tmpdir(keep=False):
         elif not QUARANTINED:
             remove_tree(path)
         os.close(fd)
-        TEMP_DIRS.discard(path)
-        TEMP_IDENTITIES.pop(str(path.resolve()), None)
+        untrack_native_scratch(path)
 
 
 def pool_max_gb():
