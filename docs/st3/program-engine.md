@@ -591,10 +591,15 @@ Registration is a `program.step` `started` entry whose `child` is a deterministi
 baseline. It is not a completed result and is not handed to the program as one. Registration
 interest lasts only while that step and attempt are live and the key has no terminal result;
 ending, cancelling or retrying the step releases it without creating a seat-owned watch.
-For an unseen target, the repository observer reads that PR directly to acquire its node identity,
-then uses its ordinary tracked-node observations. An explicit targeted 404 is absence evidence;
-an incremental listing omitting the PR is not. GitHub also uses 404 to hide inaccessible objects,
-so an unknown-repository/PR failure can require correcting the daemon credential's access.
+Each repository observation conditionally revalidates active targets directly, including closed
+or previously unseen PRs, within the observer's existing cadence. The acquired head, merged flag
+and merge commit travel together with the durable registration claim IDs in one item fact.
+Only evidence bound to the current registration can resolve the wait; a lagging observer or an
+older cached GraphQL head cannot produce a false dequeue or pair an old head with a new merge.
+A targeted 404 likewise binds its absence evidence to those registration IDs; incremental listing
+absence is not evidence. Repository lookup failures cite the registration claims in the observer
+state's native evidence. GitHub also uses 404 to hide inaccessible objects, so an unknown
+repository/PR failure can require correcting the daemon credential's access.
 
 | PR observation | Exit |
 |---|---|

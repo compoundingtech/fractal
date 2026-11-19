@@ -683,7 +683,9 @@ impl ProgramEngine {
             fields["attempt"] == request.attempt && fields["key"] == request.key
                 && fields["child"] == child && fields["value"]["type"] == kind
         }) {
-            return Ok(claim.body["fields"]["value"].clone());
+            let mut value = claim.body["fields"]["value"].clone();
+            value["registration"] = Value::from(claim.id);
+            return Ok(value);
         }
         value["type"] = Value::from(kind);
         value["step"] = Value::from(request.step.clone());
@@ -692,7 +694,9 @@ impl ProgramEngine {
         value["member"] = Value::from(self.store.origin.clone());
         let registration = self.write_journal(&request.step, request.attempt, &request.program, &request.key,
             "started", &json!({"value": value}), Some(child))?;
-        Ok(registration.body["fields"]["value"].clone())
+        let mut value = registration.body["fields"]["value"].clone();
+        value["registration"] = Value::from(registration.id);
+        Ok(value)
     }
 
     /// Every journal entry of `step`, in store order.

@@ -24,6 +24,13 @@ use sha2::{Digest as _, Sha256};
 
 use crate::github_http::GithubAuth;
 
+/// A native PR observation interest and the durable registrations its acquisition proves.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct AwaitPrTarget {
+    pub pr: u64,
+    pub registrations: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ObservationRequest {
     pub provider: String,
@@ -44,7 +51,7 @@ pub struct ObservationRequest {
     /// Claim-backed history acquisition, independent of operational collection fields.
     pub github_capture: Option<Arc<dyn crate::github_capture::GitHubCaptureLedger>>,
     /// Exact PRs owned by live program waits, including closed or previously unseen PRs.
-    pub await_prs: Vec<u64>,
+    pub await_prs: Vec<AwaitPrTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

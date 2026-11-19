@@ -57,11 +57,13 @@ pub const COMPACT_FACTS: &[&str] = &[
     "required_checks",
 ];
 
-/// The facts outside the compact set that a wake or a delivery reads. A change to any of them
-/// is still recorded as a full snapshot in compact mode, so a poller without the mirror, as after
-/// a move, compares with exact knowledge and delivers nothing twice. `required_checks` counts
-/// through its `execution` only; its state is compact.
-pub const DELIVERY_FACTS: &[&str] = &["recent_comments", "comments", "last_comment", "mentions", "reactions", "reviews"];
+/// Facts outside the compact set consumed by wakes, deliveries or native program waits.
+/// Changes retain a full snapshot so replay and a poller without the mirror retain exact
+/// knowledge. `required_checks` counts through its `execution` only; its state is compact.
+pub const DELIVERY_FACTS: &[&str] = &[
+    "recent_comments", "comments", "last_comment", "mentions", "reactions", "reviews",
+    "await_pr_observation",
+];
 
 /// Whether `facts` differ from `prior` in a fact a wake or a delivery reads: one of
 /// [`DELIVERY_FACTS`], or `required_checks.execution`. A new item, with no prior, does.
@@ -335,6 +337,21 @@ mod tests {
         assert_eq!(observed["evidence"], json!(["claim-1"]));
         let snapshot = json!({"fields": {"kind": "vcs.issue", "facts": {"state": "open"}}});
         assert_eq!(observed_body("resource.observed", "resource/x/issue/1", &snapshot), snapshot);
+    }
+
+    #[test]
+    fn native_pr_acquisition_proof_requires_a_full_snapshot_when_it_changes() {
+        let prior = json!({"state": "open", "head_sha": "a"});
+        let acquired = json!({"state": "open", "head_sha": "a",
+            "await_pr_observation": {"registrations": ["claim-1"], "head": "a",
+                "merged": false, "merge_commit_sha": null}});
+        assert!(delivery_facts_changed(prior.as_object(), acquired.as_object().unwrap()));
+        assert!(!delivery_facts_changed(acquired.as_object(), acquired.as_object().unwrap()));
+        assert!(delivery_facts_changed(acquired.as_object(), prior.as_object().unwrap()));
+        let compact = compact_item_state("vcs.pull-request", "observer/github/acme/garden",
+            acquired.as_object().unwrap()).unwrap();
+        assert!(!compact.contains_key("await_pr_observation"),
+            "opaque causal proof is retained by the full snapshot, not a new compact schema field");
     }
 
     #[test]
