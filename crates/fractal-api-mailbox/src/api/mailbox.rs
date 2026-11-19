@@ -2738,6 +2738,8 @@ mod tests {
             assert!(store.wake_demand(&fence.subject).unwrap().oldest.is_none());
             // Resume with no independent waking mail must retain the silent-only rule.
             let mut silent = offered;
+            // Person messages always wake, even with a silent tag; model an ordinary agent FYI.
+            silent[0].from = "agent/peer".into();
             silent[0].tags = vec![crate::silent::SILENT_TAG.into()];
             release_mailbox_offer(&store, &fence, &mut silent).unwrap();
             assert!(silent.is_empty());

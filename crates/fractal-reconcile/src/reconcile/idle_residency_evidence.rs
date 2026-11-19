@@ -147,10 +147,10 @@ impl RuntimeEvidence {
                 let due = resumed.accepted_at_unix_ms.saturating_add(OUTCOME_MS);
                 if receipt(store, &outcome_subject, "residency.outcome", common(host, seat, json!({
                     "observed_at":due,"resume_failed":0,"useless":u8::from(!turn),"reason":if turn {"turn"} else {"no-turn"},
-                })), vec![request.id.clone(), resumed.id.clone(), demand.id.clone()], format!("runtime-residency:outcome:{}", request.id))? {
-                    if let Some(source) = source(store, &demand)? {
-                        self.activate().wake(source, if turn { WakeOutcome::Turn } else { WakeOutcome::NoTurn });
-                    }
+                })), vec![request.id.clone(), resumed.id.clone(), demand.id.clone()], format!("runtime-residency:outcome:{}", request.id))?
+                    && let Some(source) = source(store, &demand)?
+                {
+                    self.activate().wake(source, if turn { WakeOutcome::Turn } else { WakeOutcome::NoTurn });
                 }
             } else {
                 smallclaims::touched::note_due(resumed.accepted_at_unix_ms.saturating_add(OUTCOME_MS));
@@ -249,10 +249,10 @@ impl RuntimeEvidence {
         let mut manual = 0;
         for seat in seats {
             self.evaluate_subject(store, &seat, now)?;
-            if let Some(state) = crate::suspension::current(store, &seat)? {
-                if state.phase == "suspended" || (state.action == "resume" && state.phase == "failed") {
-                    if state.cause() == "idle" { idle += 1; } else { manual += 1; }
-                }
+            if let Some(state) = crate::suspension::current(store, &seat)?
+                && (state.phase == "suspended" || (state.action == "resume" && state.phase == "failed"))
+            {
+                if state.cause() == "idle" { idle += 1; } else { manual += 1; }
             }
         }
         if !enabled {
