@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose declared/live model drift and safely return transient fallback seats at idle boundaries",
+  "replay": {"status": "changed", "detail": "Model fallback observations and bridge restart admissions are retained as internal claims. Reconciliation uses durable incarnation, episode and declaration fences; replaying an observation or admission does not create another restart."},
+  "schema": {"status": "changed", "detail": "Adds internal model-return claims and optional declaration/config policy fields. Shared agent cards add optional declared_model and model_drift fields under freeze exemption E3. No client-v0 schema, generated client or SDK artifact changes."},
+  "rules": {"status": "changed", "detail": "The interim model-return bridge defaults on. Only positively classified transient drift older than ten minutes can request the supported idle-gated restart action; quota, auth, unknown, stale, busy, exhausted hourly budgets and occupied host admission never authorize a bridge restart."},
+  "compatibility": {"status": "changed", "detail": "Existing card decoders continue accepting cards with or without the additive model metadata. Missing model evidence is unknown rather than healthy. Legacy harnesses without fallback cause evidence cannot authorize a restart."},
+  "downtime": {"status": "changed", "detail": "An admitted transient return replaces the idle seat process through the existing restart lifecycle and resumes its conversation. No forced timeout restart or provider probe is added."},
+  "manual": {"status": "changed", "detail": "Policy supports fleet, persona and agent overrides. Disable the interim bridge after pinning an OMP release with native next-turn fallback return. No live configuration changes or restarts are part of this source change."},
+  "recovery": {"status": "changed", "detail": "Disable bridge policy to stop new automatic return admissions; drift observation remains available. Preserve internal claim history so hourly budgets and admission receipts survive daemon replacement."}
+}
