@@ -155,7 +155,8 @@ can run an effect to its end but can never journal it.
 | host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
-| daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
+| host → daemon | `await-pr` | `step`, `attempt`, `seq`, `key`, `repo`, `pr`, `head` | register or adopt a native pull-request outcome wait for `key` (§6) |
+| daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run, ask or pull-request wait for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
 | host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and began termination; the failure is visible before actual worker exit (DQ8) |
 | daemon → host / host → daemon | `ping` / `pong` | `seq` | host liveness (DQ8) |
@@ -271,7 +272,8 @@ every exact host-incarnation/step/attempt termination independently of its outco
 removing an attempt from the running map or failing its step cannot erase that fence.
 Daemon-initiated failure registers its cancellation proof under the same mutex that
 removes the running entry, before persisting failure. The worker-message forwarding
-path accepts only `journal`, `run`, and `ask`, not host lifecycle notifications.
+path accepts only program operation messages (`journal`, `run`, `ask`, `await-pr`, and native
+resource requests), not host lifecycle notifications.
 
 A replacement fences only its own supersession lineage: itself, every superseded
 predecessor, and their descendants across all generations. Both pending worker
@@ -460,12 +462,12 @@ Each inner step writes registered `program.step` claims on the program's step ru
 | Field | Type | Meaning |
 |---|---|---|
 | `key` | string | step identity in this execution: `id`, then `id#2`, `id#3`… for repeats |
-| `status` | `started` / `completed` / `failed` | `started` is for visibility only and never replayed |
+| `status` | `started` / `completed` / `failed` | `started` is not a replayable result; native waits may retain adoption metadata in it |
 | `attempt` | integer | the program step's attempt that wrote it |
 | `program` | string | the bundle sha256 that wrote it |
-| `value` / `error` | any | the encoded success value, or the typed error with `_tag` and fields |
+| `value` / `error` | any | the encoded success value, typed error with `_tag` and fields, or a native wait's `started` registration payload |
 | `ms` | integer | effect duration |
-| `child` | string, optional | the child `mission-run/…` or ask subject the key waits on (§6) |
+| `child` | string, optional | the child `mission-run/…`, ask, or native `program-await-pr/…` subject the key waits on (§6) |
 
 Idempotency key: `program:STEP:ATTEMPT:KEY:result` for both `completed` and `failed`, so a key has
 one result per attempt whatever its status, and a double execution that produces a different
@@ -489,16 +491,17 @@ fail the step (a bug), interrupts (host or daemon gone) are never journaled and 
 Long-lived loops do not grow one journal forever: a recurring program is a schedule of finite runs,
 and an iterative program that needs more than a few thousand steps runs rounds as child runs (§6).
 
-### 6. Linked child runs, worker turns and asks
+### 6. Linked child runs, worker turns, asks and pull requests
 
-A program waits on two kinds of things the daemon owns: a linked child run (`run`, from
-`Fractal.run` and worker turns) and a native person ask (`ask`, from `Fractal.ask`). The engine
+A program waits on three kinds of things the daemon owns: a linked child run (`run`, from
+`Fractal.run` and worker turns), a native person ask (`ask`, from `Fractal.ask`), and a
+pull-request outcome (`await-pr`, from `Fractal.awaitPr`). The engine
 journals a `started` entry for the key when the request arrives, and the program's run evaluation
-does the rest: it starts or adopts what the key waits on, journals a second `started` entry whose
-`child` names it, and, once it ends, journals the result under the key (with `child` set) and sends
+starts or adopts what the key waits on. Child runs and asks receive a second `started` entry whose
+`child` names them. Once a wait ends, the daemon journals its result under the key and sends
 `resolved`. Everything the evaluation looks at is a noted read, so the store transition that ends a
-child run or answers an ask evaluates the parent run again; nothing polls. A replayed key never
-asks again; a resumed attempt that asks for an open key adopts what that key already waits on. A
+child run, answers an ask or records a changed PR observation evaluates the parent run again;
+nothing polls. A replayed key never registers again; a resumed attempt adopts its open wait. A
 request the daemon refuses (an unknown mission, inputs the mission does not accept, an ask without
 a person) fails the program step with the reason, as a defect would; a store failure leaves the
 step as it is, and the next evaluation tries again. A child run or ask is journaled as `child` even
@@ -569,6 +572,42 @@ the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries an
 handling rather than resuming the step as ready.
 
 An ask that ends with its run is never resolved: the program ended with it.
+
+**Pull requests.** `Fractal.awaitPr({ id, repo, pr, head })` waits for the outcome of one
+pull request at an exact head. `repo` is `owner/name`, `pr` is its number, and `head` is the
+commit the caller verified and enqueued. The caller chooses the journal key with `id`; use
+the same key when replacing a worker-turn wait with this native wait (for example,
+`await-outcome`). It does not verify approval, enqueue, merge, bypass checks, or send messages.
+
+The daemon registers the PR with its existing GitHub observation machinery. Its run evaluation
+reads those observations through noted reads: committing a changed observation reevaluates the
+waiting program, without a timer or polling inside the program or its engine. A completed key
+replays its journaled outcome without registering again. A resumed attempt adopts the existing
+registration and its queue-exit baseline, rather than starting a new wait.
+
+Registration is a `program.step` `started` entry whose `child` is a deterministic
+`program-await-pr/…` subject and whose `value` holds the PR, requested head and observation
+baseline. It is not a completed result and is not handed to the program as one. Registration
+interest lasts only while that step and attempt are live and the key has no terminal result;
+ending, cancelling or retrying the step releases it without creating a seat-owned watch.
+For an unseen target, the repository observer reads that PR directly to acquire its node identity,
+then uses its ordinary tracked-node observations. An explicit targeted 404 is absence evidence;
+an incremental listing omitting the PR is not. GitHub also uses 404 to hide inaccessible objects,
+so an unknown-repository/PR failure can require correcting the daemon credential's access.
+
+| PR observation | Exit |
+|---|---|
+| merged at the requested head | Success `{ outcome: 'merged', mergeCommit }` |
+| left the merge queue without merging | Success `{ outcome: 'dequeued', reason: 'merge-queue-exit' }` |
+| head differs from the requested head | Success `{ outcome: 'dequeued', reason: 'head-changed' }` |
+| repository or PR is unknown | Failure `{ _tag: 'AwaitPrFailed', code: 'unknown-repo' \| 'unknown-pr', repo, pr, message }` |
+
+Being outside the queue before an observed entry is not itself a dequeue. An old queue exit must
+not resolve a newly registered wait. Typed lookup failures may be handled with `Effect.catchTag`;
+transport or store failures are not successful outcomes. Once resolved, later GitHub observations
+do not replace the journaled result.
+The exit reason names the observed transition; it does not infer GitHub's underlying rejection
+cause when the observation does not contain one.
 
 **Cancellation.** Cancelling the parent run cancels its children through
 `cancel_descendant_mission_runs_tx` (R08), and its asks end with the run. When a program step ends,
@@ -738,7 +777,8 @@ command (`Fractal.command(argv, { priority: 'background' })`); this is the progr
 The author-facing API is the `Fractal` namespace of the `fractal` package's `fractal/effect` entry
 point (`import { Fractal } from 'fractal/effect'`, D7), on `effect/workflow`. The entry point's other
 named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `ChildFailed`,
-`AskAnswer`, `AskCancelled`) are the host contract a bundle implements and the exits it decodes.
+`AskAnswer`, `AskCancelled`, `AwaitPrOutcome`, `AwaitPrFailed`) are the host contract a bundle
+implements and the exits it decodes.
 
 | `Fractal` | `effect/workflow` | Engine |
 |---|---|---|
@@ -747,6 +787,7 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 | `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | `DurableDeferred.make` named by the key | a worker turn: `ctx.child` (protocol `run`) of `mission` with `input`; the value is the child's product `resource/RUN/PRODUCT` decoded with `success` (§6) |
 | `Fractal.ask({ id, for, title, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | `ctx.ask` (protocol `ask`): a native person ask on the program step; the answer is journaled under the key, `AskCancelled` when it is withdrawn (§6) |
 | `Fractal.run(mission, input, { id })` | `DurableDeferred.make` named by the key (default: the mission's id) | `ctx.child` (protocol `run`): a linked child run; its end is journaled under the key, `ChildFailed` when it does not complete (§6) |
+| `Fractal.awaitPr({ id, repo, pr, head })` | `DurableDeferred.make` named by the key | `ctx.awaitPr` (protocol `await-pr`): a native GitHub observation wait at an exact head; merged/dequeued outcomes or typed `AwaitPrFailed` are journaled under the key (§6) |
 | — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal, else waits for the daemon's `resolved` |
 
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
@@ -756,8 +797,8 @@ value. The success value is encoded with `intent.output` and journaled under the
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
 
-A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
-program to the same wait.
+A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
+A replaced host replays the program to the same wait.
 
 In a lane-bound run, `Fractal.command` inherits the native membership and uses command keys scoped
 to its durable activity (`resource.command/<activity-key>`, then `#2`, `#3`, … for same-fiber

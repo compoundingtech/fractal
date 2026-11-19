@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Program missions can await an exact-head pull request with Fractal.awaitPr({ id, repo, pr, head }): the daemon resolves merged and merge-queue-exit outcomes from its existing GitHub observations, without a polling worker turn.",
+  "replay": {"status": "changed", "detail": "The await-pr host request journals its merged/dequeued outcome or typed AwaitPrFailed under the caller's key. Completed keys replay without registering again; resumed attempts adopt the durable registration and queue-exit baseline."},
+  "schema": {"status": "none", "detail": "No client protocol, generated client, table or migration changes. Native wait registration uses internal durable claims."},
+  "rules": {"status": "none", "detail": "Waiting does not approve, enqueue or merge a PR and grants no GitHub write authority."},
+  "compatibility": {"status": "changed", "detail": "New bundles using awaitPr require a daemon and bundled program host that understand await-pr. Update every member eligible to execute those programs before publishing such bundles. Existing program bundles and journaled run/ask results retain their contracts."},
+  "downtime": {"status": "none", "detail": "Normal daemon replacement resumes open waits by adopting their existing registration."},
+  "manual": {"status": "changed", "detail": "Roll compatible daemons before publishing or starting a program that calls awaitPr; no production program is started by this change."},
+  "recovery": {"status": "none", "detail": "The current attempt retains its registered PR, requested head and baseline across host or daemon restarts. A moved head resolves as dequeued with reason head-changed; an observed merge queue exit resolves with reason merge-queue-exit, not an inferred GitHub rejection cause."}
+}

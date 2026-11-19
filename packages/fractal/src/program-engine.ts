@@ -7,8 +7,8 @@
  * value, or fails again with its recorded typed error, without running. A new step runs, and the
  * program continues only once the daemon has acknowledged its result. Typed failures are journaled
  * with their `_tag` and fields; defects and interrupts are not, so a resumed attempt runs that step
- * again. Asks and child runs wait in the host until the daemon resolves them; it journals their
- * result under the same key.
+ * again. Asks, child runs and pull request waits wait in the host until the daemon resolves them;
+ * it journals their result under the same key.
  */
 import { Cause, Context, Effect, Exit, Option, Schema, SchemaGetter, SchemaIssue } from 'effect'
 import { Workflow, WorkflowEngine } from 'effect/workflow'
@@ -115,13 +115,20 @@ export interface HostContextV1 {
     readonly deadline?: string
     readonly default?: 'approve' | 'reject'
   }): Promise<ProgramExit>
+  /** Watches a pull request head until merge or dequeue; journaled under `key`. */
+  awaitPr(request: {
+    readonly key: string
+    readonly repo: string
+    readonly pr: number
+    readonly head: string
+  }): Promise<ProgramExit>
   /** Runs a command as its own process group, which the host ends on cancel. */
   spawn(argv: readonly string[], options?: CommandOptions): Promise<CommandResult>
   /** Host-authoritative admission, execution and confirmed retirement; never local spawn. */
   resource(request: ResourceRequest, signal?: AbortSignal): Promise<ProgramExit>
 }
 
-/** One running program attempt: its host, the keys taken so far and its open asks and runs. */
+/** One running program attempt: its host, the keys taken so far and its open deferred requests. */
 export class Program extends Context.Service<
   Program,
   {
@@ -245,7 +252,7 @@ const hostEngine = (
           WorkflowEngine.WorkflowInstance,
           WorkflowEngine.WorkflowInstance.initial(workflow, options.executionId),
         ),
-        // Asks and child runs wait in the host, so nothing can resume a suspended program.
+        // Durable deferred requests wait in the host, so nothing can resume a suspended program.
         Effect.flatMap((result) =>
           result._tag === 'Suspended'
             ? Effect.die(new Error('the program suspended on a wait the host cannot resume'))

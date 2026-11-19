@@ -131,6 +131,48 @@ pub trait WatchesStore {
     fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, FractalError>;
 }
 
+/// Native program waits retain observation interest through their existing durable journals.
+pub trait ProgramPrWatchesStore {
+    fn program_pr_watches(&self) -> Result<Vec<Value>>;
+}
+
+impl ProgramPrWatchesStore for Store {
+    fn program_pr_watches(&self) -> Result<Vec<Value>> {
+        use crate::MissionsStore as _;
+        smallclaims::touched::note_read(|| "kind:program.step".into());
+        let candidates = {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT DISTINCT json_extract(body,'$.fields.value') FROM claims registration
+                 WHERE kind='program.step' AND json_extract(body,'$.fields.status')='started'
+                 AND json_extract(body,'$.fields.value.type')='await-pr'
+                 AND json_extract(body,'$.fields.child') LIKE 'program-await-pr/%'
+                 AND json_extract(body,'$.fields.value.step')=registration.subject
+                 AND json_extract(body,'$.fields.value.attempt')=json_extract(body,'$.fields.attempt')
+                 AND NOT EXISTS (SELECT 1 FROM claims result WHERE result.subject=registration.subject
+                   AND result.kind='program.step'
+                   AND json_extract(result.body,'$.fields.attempt')=json_extract(registration.body,'$.fields.attempt')
+                   AND json_extract(result.body,'$.fields.key')=json_extract(registration.body,'$.fields.key')
+                   AND json_extract(result.body,'$.fields.status') IN ('completed','failed'))",
+            )?;
+            statement.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut active = Vec::new();
+        for candidate in candidates {
+            let registration: Value = serde_json::from_str(&candidate)?;
+            let step = registration["step"].as_str().ok_or_else(|| anyhow::anyhow!("PR registration has no step"))?;
+            if self.step_run(step)?.is_some_and(|view| {
+                registration["attempt"].as_u64() == Some(u64::from(view.attempt))
+                    && matches!(view.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
+            }) {
+                active.push(registration);
+            }
+        }
+        Ok(active)
+    }
+}
+
 impl WatchesStore for Store {
     fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "kind:intent.desired".into());

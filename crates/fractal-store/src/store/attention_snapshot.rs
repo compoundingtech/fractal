@@ -1167,6 +1167,7 @@ impl Store {
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
+                    "github-repository-not-found" => ObserverCondition::RepositoryNotFound(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]

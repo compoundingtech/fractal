@@ -43,6 +43,8 @@ pub struct ObservationRequest {
     pub workflow_runs: Option<Arc<dyn WorkflowRunLedger>>,
     /// Claim-backed history acquisition, independent of operational collection fields.
     pub github_capture: Option<Arc<dyn crate::github_capture::GitHubCaptureLedger>>,
+    /// Exact PRs owned by live program waits, including closed or previously unseen PRs.
+    pub await_prs: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +118,20 @@ impl std::fmt::Display for ProviderForbidden {
 }
 
 impl std::error::Error for ProviderForbidden {}
+
+/// The repository lookup returned 404: missing or hidden from this credential.
+#[derive(Debug)]
+pub struct ProviderRepositoryNotFound {
+    pub locator: String,
+}
+
+impl std::fmt::Display for ProviderRepositoryNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GitHub cannot find or expose repository {}", self.locator)
+    }
+}
+
+impl std::error::Error for ProviderRepositoryNotFound {}
 
 fn github_retry_at(headers: &reqwest::header::HeaderMap, now: u128) -> u128 {
     let retry_after = headers
@@ -1502,6 +1518,7 @@ mod tests {
             webhook_covered: false,
             workflow_runs: None,
             github_capture: None,
+            await_prs: Vec::new(),
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1550,6 +1567,7 @@ mod tests {
                 webhook_covered: false,
                 workflow_runs: None,
                 github_capture: None,
+                await_prs: Vec::new(),
             })
             .await
             .unwrap();
@@ -1628,6 +1646,7 @@ mod tests {
                 webhook_covered: false,
                 workflow_runs: None,
                 github_capture: None,
+                await_prs: Vec::new(),
             })
             .await
             .unwrap();
@@ -1653,6 +1672,7 @@ mod tests {
                 webhook_covered: false,
                 workflow_runs: None,
                 github_capture: None,
+                await_prs: Vec::new(),
             })
             .await
             .unwrap();
@@ -1710,6 +1730,7 @@ mod tests {
             webhook_covered: false,
             workflow_runs: None,
             github_capture: None,
+            await_prs: Vec::new(),
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1745,7 +1766,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None, github_capture:None };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None, github_capture:None, await_prs:Vec::new() };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1841,6 +1862,7 @@ mod tests {
                     webhook_covered: false,
                     workflow_runs: None,
                     github_capture: None,
+                    await_prs: Vec::new(),
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),

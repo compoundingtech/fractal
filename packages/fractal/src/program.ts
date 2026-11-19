@@ -1,7 +1,7 @@
 /**
  * The program form of a mission, `Fractal.mission(intent, program)`, and what its body calls:
- * `Fractal.step` (an `Activity`), worker turns, `Fractal.ask` and `Fractal.run` (`DurableDeferred`s
- * the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
+ * `Fractal.step` (an `Activity`), worker turns, `Fractal.ask`, `Fractal.run` and `Fractal.awaitPr`
+ * (`DurableDeferred`s the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
  * See docs/st3/program-engine.md §11.
  */
 import { Context, Effect, Layer, Option, Schedule, Schema, SchemaAST } from 'effect'
@@ -71,6 +71,21 @@ export type AskAnswer = typeof AskAnswer.Type
 /** The ask was withdrawn while the run went on. */
 export class AskCancelled extends Schema.TaggedError<AskCancelled>()('AskCancelled', {
   ask: Schema.String,
+}) {}
+
+/** The observed end of waiting for one pull request head. */
+export const AwaitPrOutcome = Schema.Union([
+  Schema.Struct({ outcome: Schema.Literal('merged'), mergeCommit: Schema.String }),
+  Schema.Struct({ outcome: Schema.Literal('dequeued'), reason: Schema.String }),
+])
+export type AwaitPrOutcome = typeof AwaitPrOutcome.Type
+
+/** The requested repository or pull request is not known to the daemon. */
+export class AwaitPrFailed extends Schema.TaggedError<AwaitPrFailed>()('AwaitPrFailed', {
+  code: Schema.Literals(['unknown-repo', 'unknown-pr']),
+  repo: Schema.String,
+  pr: Schema.Number,
+  message: Schema.String,
 }) {}
 
 /** The intent of a program mission; `input` fields become its native text inputs. */
@@ -334,6 +349,25 @@ export const ask = (options: {
     program.requests.set(key, () => program.host.ask({ ...request, key, for: person.subject }))
     return DurableDeferred.await(
       DurableDeferred.make(key, { success: AskAnswer, error: AskCancelled }),
+    ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
+  })
+
+/**
+ * Waits for a pull request head to merge or leave the queue, journaled under `id` (then `id#2`…
+ * for repeats). A changed head resolves as dequeued with reason `head-changed`. Replay returns
+ * the recorded outcome without registering another wait.
+ */
+export const awaitPr = (options: {
+  readonly id: string
+  readonly repo: string
+  readonly pr: number
+  readonly head: string
+}): Effect.Effect<AwaitPrOutcome, AwaitPrFailed, ProgramServices> =>
+  keyed(options.id, (key, program) => {
+    const { id: _, ...request } = options
+    program.requests.set(key, () => program.host.awaitPr({ ...request, key }))
+    return DurableDeferred.await(
+      DurableDeferred.make(key, { success: AwaitPrOutcome, error: AwaitPrFailed }),
     ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
   })
 
