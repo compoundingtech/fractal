@@ -19,6 +19,51 @@ fn exec_card(store: &Store) -> Value {
         .into_iter().find(|card| card["id"] == "agent/example/workers").unwrap()
 }
 
+#[test]
+fn launched_root_becoming_inert_discards_historical_runtime_and_session() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    declare_exec_card(store, r#"host "node"; harness "omp" { model "test-model"; }"#, "launched");
+    roster_fixture_append(store, "agent/example/workers", "runtime.observed", json!({
+        "status":"running", "runtime_id":"old-primary", "host":"node",
+        "incarnation_id":"old-incarnation", "terminal":true,
+    }));
+    roster_fixture_append(store, "agent/example/workers", "harness.observed", json!({
+        "state":"idle", "driver":"omp", "incarnation_id":"old-incarnation",
+    }));
+    let launched = exec_card(store);
+    assert_eq!(launched["runtime_ids"], json!(["runtime/old-primary"]));
+    assert!(launched["current_session_id"].is_string());
+
+    declare_exec_card(store, r#"
+        host "node"
+        name "Budget owner"
+        description "Own service burn episodes"
+    "#, "inert");
+    for delayed in [false, true] {
+        if delayed {
+            roster_fixture_append(store, "agent/example/workers", "runtime.observed", json!({
+                "status":"running", "runtime_id":"old-primary", "host":"node",
+                "incarnation_id":"old-incarnation", "terminal":true,
+            }));
+        }
+        let card = exec_card(store);
+        assert_eq!(card["state"], "stopped");
+        assert_eq!(card["runtime_ids"], json!([]));
+        assert_eq!(card["host_id"], "host/node");
+        assert_eq!(card["name"], "Budget owner");
+        for field in ["driver", "harness_state", "incarnation_id", "current_session_id"] {
+            assert!(card[field].is_null(), "{field}: {card}");
+        }
+        let uncached = client_agent_resources_uncached(store, false, store.index().unwrap()).unwrap();
+        let uncached = uncached.iter().find(|card| card["id"] == "agent/example/workers").unwrap();
+        assert_eq!(uncached["runtime_ids"], card["runtime_ids"]);
+        assert_eq!(uncached["current_session_id"], card["current_session_id"]);
+        assert!(store.desired_subjects_named(&["agent/example/workers".into()]).unwrap()[0].member.is_none());
+    }
+}
+
 const TWO_TASKS: &str = r#"
     host "node"
     workspace "/work/project"
@@ -110,10 +155,12 @@ fn exec_only_card_placement_does_not_guess_from_overridden_children() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = &state.store;
-    // Nested authored tasks inherit placement today; exercise divergent normalized
-    // members too, without pretending that task-local host syntax is supported.
+    // Historical declarations did not persist inherited placement. Such roots still
+    // cannot guess their host from divergent normalized child members.
     let source = format!("version 2\nagent \"example/workers\" {{ {} }}", TWO_TASKS.replace("host \"node\"", ""));
     let mut intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+    intent.subjects.get_mut("agent/example/workers").unwrap().desired["children"]
+        .as_array_mut().unwrap().retain(|child| child["name"] != "host");
     for (task, host) in [("first", "east"), ("second", "west")] {
         let child = intent.subjects.get_mut(&format!("exec/example/workers/{task}")).unwrap();
         child.member.as_mut().unwrap().host = host.into();

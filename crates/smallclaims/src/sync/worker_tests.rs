@@ -2834,7 +2834,7 @@ async fn legacy_hmac_only_receipt_ack_cannot_complete_leave() {
             .completed
             .is_empty()
     );
-    let (legacy, _): (Value, bool) = post_signed_to(
+    let (legacy, _, _): (Value, bool, Option<String>) = post_signed_to(
         &http,
         &peer,
         "b",
@@ -2959,6 +2959,7 @@ async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() 
         &replay,
         None,
         Default::default(),
+        Some(fixture.key.public()),
     )
     .await
     .unwrap();
@@ -3060,6 +3061,7 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         &ordinary,
         None,
         Default::default(),
+        Some(&key),
     )
     .await
     .unwrap();
@@ -3186,6 +3188,7 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
             &exchange,
             None,
             Default::default(),
+            Some(fixture.key.public()),
         )
         .await
         .unwrap();
@@ -4777,10 +4780,11 @@ impl Backend for SlowExport {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
         let result = self
             .local
-            .receive(peer, fleet_id, exchange, round_trip, carrier)
+            .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
             .await?;
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4953,7 +4957,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     ));
     let server = tokio::spawn(axum::serve(listener, app).into_future());
     let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
-    let (answer, _) = post_signed(
+    let (answer, _, authenticated_member_key) = post_signed(
         &replication_http_client(),
         &Local(left.clone()),
         &peer,
@@ -4972,7 +4976,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
     Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None, Default::default())
+        .receive("cedar", fleet_id, &answer, None, Default::default(), authenticated_member_key.as_deref())
         .await
         .unwrap();
     for store in [&left, &right] {

@@ -62,10 +62,17 @@ must be at least one minute; supported units are `s`, `m`, `h`, and `d`.
 `idle_resume_concurrency` defaults to `2` and must be a positive integer,
 including when the threshold is off.
 
-**This release evaluates idle residency for diagnostics only.** Setting a
-threshold does not suspend seats or automatically resume suspended seats. The
-threshold and concurrency limit configure the policy without activating an
-automatic suspension producer.
+Setting a threshold enables automatic idle suspension only after every active
+fleet member's current incarnation has signed `features.idle_residency = 1` in
+its latest `daemon.started` advertisement. Missing or withdrawn support fails
+closed. Only OMP seats with a confirmed native delivery channel are eligible.
+The same cutover provides bounded, person-first wake admission and strict
+native-session resume before held wake mail can be offered.
+
+The kill switch is `idle_suspend_after = "off"`. It prevents new automatic
+stops but keeps waking existing idle suspensions. An agent declaration's
+`idle-suspend "never"` has the same no-new-stops behavior for that agent.
+Manual suspensions never auto-wake.
 
 Enabling the threshold starts a new local policy epoch: prior idle time does not
 count toward it. An enabled threshold edit retains that epoch; turning the

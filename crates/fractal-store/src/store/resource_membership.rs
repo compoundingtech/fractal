@@ -249,6 +249,7 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
         rusqlite::params![member.request.id,member.request.host,member.request.name,member.state,member.queued_at,
             member.request.capacity.map_or(0, |c| c.memory),serde_json::to_string(member)?])?;
     if changed == 0 { return Ok(()); }
+    super::resource_admission_objectives::observe(connection, member)?;
     // Durable feed invalidation commits with custody; a diagnostic note alone cannot wake IVM.
     // This observation references custody, never carries a replayable grant.
     insert_local_observation_tx(connection, &member.request.host, &ClaimInput {
@@ -470,9 +471,14 @@ impl Store {
     pub fn start_resource_authority(&self, host: &str, epoch: &str) -> Result<()> {
         anyhow::ensure!(!host.is_empty() && !epoch.is_empty(), "empty resource authority identity");
         anyhow::ensure!(host == self.origin, "only the execution host may own resource authority");
-        let connection = self.connection.write();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
+        super::resource_admission_objectives::recover(&transaction, host, epoch)?;
+        transaction.commit()?;
+        self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 

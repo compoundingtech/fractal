@@ -84,6 +84,7 @@ mod schedule_standby_selection_tests;
 mod schedule_admission_tests;
 mod schedule_replication_block;
 pub mod member_admission;
+mod idle_residency_evidence;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 pub use crate::config::{IdleResidencyPolicy, IdleResidencySettings};
@@ -1524,8 +1525,9 @@ pub struct Reconciler<R = NativeRuntime> {
     start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
-    /// Off-by-default residency diagnostics; never author a suspension here.
+    /// Owner-fenced residency stop and wake policy; see `idle_nudge` and `store::idle_residency`.
     idle_residency: Mutex<IdleResidencyPolicy>,
+    idle_residency_evidence: Mutex<idle_residency_evidence::RuntimeEvidence>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
     /// `run_report`.
     default_stall_reports_since: Mutex<Option<u128>>,
@@ -1806,6 +1808,7 @@ impl Reconciler<NativeRuntime> {
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
             idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -2041,6 +2044,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
             idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -2723,10 +2727,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .iter()
             .filter(|subject| {
                 subject.kind == "agent"
-                    && subject
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.host == self.host)
+                    && crate::graph::canonical_child_value(&subject.desired, "host")
+                        .and_then(Value::as_str)
+                        .filter(|host| *host != "local")
+                        // Older launch declarations already retained their resolved placement.
+                        .or_else(|| subject.member.as_ref().map(|member| member.host.as_str()))
+                        == Some(self.host.as_str())
             })
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
@@ -2888,6 +2894,57 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .1 = false;
+        Ok(())
+    }
+
+    /// Raise one host item while the current replication worker is missing, stale, or has not
+    /// exchanged with a current peer past the grace period. Stored envelope history is not
+    /// evidence: only what this daemon has observed about the live worker is.
+    fn reconcile_replication_health(&self) -> Result<()> {
+        let configured = self.store.bound_fleet()?.is_some();
+        let health = self.store.replication_health(configured)?;
+        let daemon = format!("daemon/{}", self.host);
+        let title = format!("Replication is not healthy on {}", self.host);
+        let pending = self
+            .store
+            .pending_operational_failures(RECONCILER_ACTOR, &self.host)?
+            .into_iter()
+            .filter(|request| request.title == title && request.targets == [daemon.as_str()])
+            .collect::<Vec<_>>();
+        if health.status() == "fail" {
+            if pending.is_empty() {
+                let key = format!("replication-unhealthy:{}:{}", self.host, self.store.index()?);
+                let digest = hex::encode(sha2::Sha256::digest(key.as_bytes()));
+                self.store.record_operational_failure(
+                    &format!("attention/{}", &digest[..32]),
+                    &AttentionRequest {
+                        reviewer: "person/operator".into(),
+                        title,
+                        reason: format!(
+                            "On {}, {}: {}. This item closes once a live worker exchanges \
+                             successfully with a current peer again.",
+                            self.host,
+                            health,
+                            health.message(),
+                        ),
+                        severity: "error".into(),
+                        targets: vec![daemon],
+                        actor: RECONCILER_ACTOR.into(),
+                        idempotency_key: key,
+                    },
+                )?;
+                self.signal_changed();
+            }
+            return Ok(());
+        }
+        for request in pending {
+            self.store.recover_operational_failure(
+                &request.subject,
+                "the replication worker is live and a current peer exchanged successfully",
+                &format!("replication-recovered:{}", request.request),
+            )?;
+            self.signal_changed();
+        }
         Ok(())
     }
 
@@ -3343,6 +3400,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
+        self.reconcile_item("residency", "residency:host", true, || {
+            smallclaims::touched::note_read(|| "policy:idle-residency".into());
+            let enabled = self.idle_residency.lock()
+                .unwrap_or_else(PoisonError::into_inner).settings.after_ms.is_some();
+            self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                .evaluate_host(&self.store, enabled, now_ms())
+        })?;
         // Recovery is readback-only; use per-effect changes and lease deadlines,
         // never a full durable-history walk on unrelated daemon wakes.
         self.reconcile_effects()?;
@@ -3922,6 +3986,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             // Continue using the original desired subject, runtime ID and
                             // incarnation for every native/PTY operation below.
                             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                            let mut evidence = self.idle_residency_evidence.lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            evidence.evaluate_subject(&self.store, &subject.subject, now_ms())?;
                         }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
@@ -4411,6 +4478,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
+        });
+        self.isolate("stage/replication-health", &daemon, || {
+            self.reconcile_replication_health()
         });
         self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
@@ -7088,6 +7158,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(Some(caught(|| -> Result<()> {
                     self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
+                    if subject.kind == "stop"
+                        && let Some(token) = self.store.selected_desired_token(&subject.subject)?
+                        && let Some(declaration) = self.store.claim_by_id(&token)?
+                        && let Some(hold) = crate::suspension::current_at(&self.store, &subject.subject,
+                            Some(declaration.store_index.saturating_sub(1)))?
+                            .filter(|hold| hold.cause() == "idle" && hold.suspended_at_unix_ms.is_some())
+                    {
+                        let end_class = if declaration.body.get("owned_set").is_some() { "retire" } else { "stop" };
+                        self.idle_residency_evidence.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .end_sleep(&self.store, &subject.subject, &hold, declaration.accepted_at_unix_ms, end_class)?;
+                    }
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
             })
@@ -8911,6 +8993,36 @@ impl<R: RuntimeControl> Reconciler<R> {
             ]),
         )
     }
+    /// Read the driver's channel fence for this incarnation, never process liveness.
+    fn idle_channel_ready(&self, agent: &str, incarnation: &str) -> Result<bool> {
+        Ok(self.store.newest_claim_where(agent, "harness.diagnostic", |claim| {
+            claim_incarnation(claim) == Some(incarnation)
+                && matches!(claim.body.pointer("/fields/code").and_then(Value::as_str),
+                    Some("omp-channel-ready" | "omp-channel-unready"))
+        })?.is_some_and(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str) == Some("omp-channel-ready")
+        }))
+    }
+
+    /// A demand observed before the stop boundary cancels the idle operation. A missing
+    /// projection frontier is not proof of silence and must cancel it as well.
+    fn idle_stop_refusal(&self, agent: &str, incarnation: &str, operation: &str) -> Result<Option<&'static str>> {
+        let demand = self.store.wake_demand(agent)?;
+        if demand.oldest.is_some() || !demand.frontier.caught_up {
+            return Ok(Some("wake-pending"));
+        }
+        if !self.idle_channel_ready(agent, incarnation)? {
+            return Ok(Some("channel-unready"));
+        }
+        let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.store.recheck_idle_suspend(agent, operation, policy.settings.after_ms,
+            policy.enabled_at_unix_ms)?
+        {
+            return Ok(Some("eligibility-changed"));
+        }
+        Ok(None)
+    }
+
 
     /// Drive a seat's suspend or resume one step. A suspended seat has no process, and nothing
     /// but its resume starts one: not its restart policy, not a restart request.
@@ -8956,6 +9068,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 self.record_member_as(subject, member, observation, true)?;
                 let incarnation = observation.incarnation_id.as_deref().unwrap_or_default();
+                if suspension.cause() == "idle"
+                    && let Some(code) = self.idle_stop_refusal(agent, incarnation, &suspension.operation_id)?
+                {
+                    return self.fail_suspension(agent, suspension, code,
+                        "idle suspension cancelled before the stop boundary".into(), Vec::new());
+                }
                 let blocking = suspended::blockers(&self.store, agent, incarnation)?;
                 if !blocking.is_empty() {
                     return self.fail_suspension(
@@ -8982,12 +9100,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !blocking.is_empty() {
                     return self.fail_suspension(agent, suspension, "not-quiescent", "the seat became active while its workspace was captured".into(), blocking);
                 }
-                self.record_suspension_phase(
-                    agent,
-                    suspension,
-                    "runtime.action.succeeded",
-                    suspended::suspend_snapshot_key(&suspension.operation_id),
-                    BTreeMap::from([
+                if suspension.cause() == "idle"
+                    && let Some(code) = self.idle_stop_refusal(agent, incarnation, &suspension.operation_id)?
+                {
+                    return self.fail_suspension(agent, suspension, code,
+                        "idle suspension cancelled while capturing the workspace".into(), Vec::new());
+                }
+                let fields = BTreeMap::from([
                         (
                             "operation_status".into(),
                             Value::String("snapshotting".into()),
@@ -9002,14 +9121,36 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                     ]).into_iter().chain(
                         (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
-                    ).collect(),
-                )?;
+                    ).collect();
+                if suspension.cause() == "idle" {
+                    let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !self.store.commit_idle_stop_boundary(agent, &suspension.operation_id,
+                        policy.settings.after_ms, policy.enabled_at_unix_ms, fields)?
+                    {
+                        return self.fail_suspension(agent, suspension, "wake-pending",
+                            "idle suspension lost its final owner or demand fence".into(), Vec::new());
+                    }
+                } else {
+                    self.record_suspension_phase(agent, suspension, "runtime.action.succeeded",
+                        suspended::suspend_snapshot_key(&suspension.operation_id), fields)?;
+                }
+                if suspension.cause() == "idle" {
+                    let root = self.runtime.start_process_identity(member, incarnation).ok().flatten();
+                    self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                        .before_suspend(&suspension.operation_id, root);
+                }
                 stop(observation)?;
                 Ok(())
             }
             "snapshotting" => {
                 if let Some(observation) = running {
                     self.record_member_as(subject, member, observation, true)?;
+                    if suspension.cause() == "idle" {
+                        let root = observation.incarnation_id.as_deref().and_then(|incarnation|
+                            self.runtime.start_process_identity(member, incarnation).ok().flatten());
+                        self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                            .before_suspend(&suspension.operation_id, root);
+                    }
                     stop(observation)?;
                     return Ok(());
                 }
@@ -9080,6 +9221,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                         member.shutdown_timeout_ms,
                         None,
                     )?;
+                    if suspension.cause() == "idle" && suspension.phase == "suspended" {
+                        let concurrency = self.idle_residency.lock()
+                            .unwrap_or_else(PoisonError::into_inner).settings.resume_concurrency;
+                        let admission = self.store.admit_idle_wake(agent, concurrency, now_ms())?;
+                        if let Some(due) = admission.retry_at_unix_ms {
+                            smallclaims::touched::note_due(due);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -9199,6 +9348,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let incarnation = observation.incarnation_id.as_deref().unwrap_or_default();
                     match suspended::bound_session(&self.store, agent, incarnation)? {
                         Some((_, live)) if Some(&live) == suspension.native_session_id.as_ref() => {
+                            if suspension.cause() == "idle" && !self.idle_channel_ready(agent, incarnation)? {
+                                if overdue {
+                                    return self.fail_suspension(agent, suspension, "channel-unready",
+                                        "the resumed native session did not establish its channel".into(), Vec::new());
+                                }
+                                self.arm_deadline_at(agent, due,
+                                    crate::reconcile_telemetry::WakeCause::TimerResumeVerification);
+                                return Ok(());
+                            }
                             self.record_suspension_phase(
                                 agent,
                                 suspension,
@@ -13161,6 +13319,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    fn record_workspace_refusal(
+        &self,
+        subject: &str,
+        error: &crate::model::FractalError,
+    ) -> Result<()> {
+        self.record_diagnostic_once(subject, BTreeMap::from([
+            ("severity".into(), Value::String("error".into())),
+            ("status".into(), Value::String("failed".into())),
+            ("code".into(), Value::String(error.code.into())),
+            ("reason".into(), Value::String(error.to_string())),
+        ]))?;
+        Ok(())
+    }
+
     fn evaluate_used_mission(
         &self,
         run: &MissionRunView,
@@ -13262,6 +13434,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             self.note_mission_capacity_holders(&mission)?;
                             return Ok((false, UsedMissionOutcome::Pending));
                         }
+                        if error.code == "mission-workspace-in-worktree" {
+                            self.record_workspace_refusal(&view.subject, &error)?;
+                            return Ok((false, UsedMissionOutcome::Failed(error.to_string())));
+                        }
                         return Err(error.into());
                     }
                 };
@@ -13295,6 +13471,26 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_loop_step(
+        &self,
+        run: &MissionRunView,
+        step: &RuntimeStep<'_>,
+        view: &crate::model::StepRunView,
+        loop_spec: &LoopSpec,
+    ) -> Result<bool> {
+        match self.evaluate_loop_step_inner(run, step, view, loop_spec) {
+            Err(error) if error.downcast_ref::<crate::model::FractalError>()
+                .is_some_and(|error| error.code == "mission-workspace-in-worktree") =>
+            {
+                let refusal = error.downcast_ref::<crate::model::FractalError>()
+                    .expect("the workspace refusal was checked");
+                self.record_workspace_refusal(&view.subject, refusal)?;
+                Ok(self.store.set_step_state(&view.subject, "failed", Some(&refusal.to_string()))?)
+            }
+            result => result,
+        }
+    }
+
+    fn evaluate_loop_step_inner(
         &self,
         run: &MissionRunView,
         step: &RuntimeStep<'_>,
@@ -17836,87 +18032,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )?;
                 continue;
             };
-            if on_standby {
-                // Do not take over a primary's already-reached or mid-run request.
-                if request.origin != self.host { continue; }
-                if self.store.selected_desired_revision(&schedule.subject)?.as_deref() != field("revision") {
-                    self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
-                    continue;
-                }
-                // Whole history: it compares occurrence values from both hosts, which order does not bound.
-                let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-                let other_reached = history.iter().any(|claim| claim.origin != self.host
-                    && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
-                let prior = history.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64())
-                    .filter(|known| *known < occurrence).max();
-                if other_reached || self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some()
-                    || !Self::standby_candidate_current(&spec, occurrence, prior, now_ms() as i64)? {
-                    self.fail_schedule_work(schedule, &request.id, "standby-occurrence-unavailable", "the occurrence is already reached, already run, or outside the current catch-up selection")?;
-                    continue;
-                }
-                let current_revision = self.store.selected_desired_revision(&schedule.subject)?.unwrap_or_default();
-                match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec,
-                    &current_revision, occurrence, self.started_at_unix_ms, now_ms())? {
-                    crate::schedule_standby::Readiness::Ready(_) => {},
-                    crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
-                    crate::schedule_standby::Readiness::Held => continue,
-                }
-                if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
-                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
-                    continue;
-                }
-            }
-            let retry = self
-                .schedule_workspace_retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&schedule.subject)
-                .cloned();
-            if let Some((pending, until)) = retry
-                && pending == request.id
-                && until > now_ms()
-            {
-                self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
-                break;
-            }
             let occurrence_subject =
                 Store::scheduled_mission_run_subject(&schedule.subject, occurrence);
             let suffix = &occurrence_subject.trim_start_matches("mission-run/")[..16];
             let workspace = Path::new(root).join(suffix);
-            if let Err(error) = fs::create_dir_all(&workspace) {
-                if on_standby {
-                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
-                        &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
-                    continue;
-                }
-                let until = now_ms().saturating_add(SCHEDULE_WORKSPACE_RETRY_MS);
-                self.schedule_workspace_retries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(schedule.subject.clone(), (request.id.clone(), until));
-                self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
-                self.record_diagnostic_once(
-                    &schedule.subject,
-                    BTreeMap::from([
-                        ("severity".into(), Value::String("error".into())),
-                        ("status".into(), Value::String("unavailable".into())),
-                        ("code".into(), Value::String("workspace-unavailable".into())),
-                        (
-                            "reason".into(),
-                            Value::String(format!(
-                                "schedule {} workspace {}: {error}",
-                                schedule.subject,
-                                workspace.display()
-                            )),
-                        ),
-                    ]),
-                )?;
-                break;
-            }
-            self.schedule_workspace_retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&schedule.subject);
             let inputs = serde_json::from_value(fields.get("inputs").cloned().unwrap_or_default())
                 .unwrap_or_default();
             let request_value = MissionRunRequest {
@@ -17933,9 +18052,110 @@ impl<R: RuntimeControl> Reconciler<R> {
             let legacy_subject = self
                 .store
                 .mission_run_subject_for_idempotency_key(&request_value.idempotency_key);
-            let created = if let Some(run) = self.store.mission_run(&legacy_subject)? {
+            let existing = match self.store.mission_run(&occurrence_subject)? {
+                Some(run) => Some(run),
+                None => self.store.mission_run(&legacy_subject)?,
+            };
+            let created = if let Some(run) = existing {
                 Ok(run)
             } else {
+                if on_standby {
+                    // Do not take over a primary's already-reached or mid-run request.
+                    if request.origin != self.host { continue; }
+                    if self.store.selected_desired_revision(&schedule.subject)?.as_deref() != field("revision") {
+                        self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
+                        continue;
+                    }
+                    // Whole history: it compares occurrence values from both hosts, which order does not bound.
+                    let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
+                    let other_reached = history.iter().any(|claim| claim.origin != self.host
+                        && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
+                    let prior = history.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64())
+                        .filter(|known| *known < occurrence).max();
+                    if other_reached
+                        || !Self::standby_candidate_current(&spec, occurrence, prior, now_ms() as i64)? {
+                        self.fail_schedule_work(schedule, &request.id, "standby-occurrence-unavailable", "the occurrence is already reached or outside the current catch-up selection")?;
+                        continue;
+                    }
+                    let current_revision = self.store.selected_desired_revision(&schedule.subject)?.unwrap_or_default();
+                    match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec,
+                        &current_revision, occurrence, self.started_at_unix_ms, now_ms())? {
+                        crate::schedule_standby::Readiness::Ready(_) => {},
+                        crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
+                        crate::schedule_standby::Readiness::Held => continue,
+                    }
+                    if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
+                        self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
+                        continue;
+                    }
+                }
+                let retry = self
+                    .schedule_workspace_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&schedule.subject)
+                    .cloned();
+                if let Some((pending, until)) = retry
+                    && pending == request.id
+                    && until > now_ms()
+                {
+                    self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
+                    break;
+                }
+                let workspace_check = Store::validate_mission_run_workspace(&workspace);
+                if let Err(error) = &workspace_check
+                    && error.code == "mission-workspace-in-worktree"
+                {
+                    self.record_diagnostic_once(
+                        &schedule.subject,
+                        BTreeMap::from([
+                            ("severity".into(), Value::String("error".into())),
+                            ("status".into(), Value::String("unavailable".into())),
+                            ("code".into(), Value::String(error.code.into())),
+                            ("reason".into(), Value::String(error.to_string())),
+                        ]),
+                    )?;
+                    self.fail_schedule_work(
+                        schedule, &request.id, "unsafe-workspace", &error.to_string(),
+                    )?;
+                    continue;
+                }
+                if let Err(error) = workspace_check.map_err(anyhow::Error::from)
+                    .and_then(|()| fs::create_dir_all(&workspace).map_err(anyhow::Error::from))
+                {
+                    if on_standby {
+                        self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
+                            &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
+                        continue;
+                    }
+                    let until = now_ms().saturating_add(SCHEDULE_WORKSPACE_RETRY_MS);
+                    self.schedule_workspace_retries
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(schedule.subject.clone(), (request.id.clone(), until));
+                    self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
+                    self.record_diagnostic_once(
+                        &schedule.subject,
+                        BTreeMap::from([
+                            ("severity".into(), Value::String("error".into())),
+                            ("status".into(), Value::String("unavailable".into())),
+                            ("code".into(), Value::String("workspace-unavailable".into())),
+                            (
+                                "reason".into(),
+                                Value::String(format!(
+                                    "schedule {} workspace {}: {error}",
+                                    schedule.subject,
+                                    workspace.display()
+                                )),
+                            ),
+                        ]),
+                    )?;
+                    break;
+                }
+                self.schedule_workspace_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&schedule.subject);
                 match &schedule.owner_run {
                     Some(owner) => match self.store.mission_run(owner)? {
                         Some(parent) => start(

@@ -4,6 +4,8 @@
 name: Nix
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: 17 1 * * *
   workflow_dispatch: {}
@@ -16,6 +18,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  publish-x86_64-linux:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Require the repository-owned binary cache
+        env:
+          CACHE_NAME: ${{ vars.FRACTAL_CACHIX_CACHE_NAME }}
+        run: '[[ "$CACHE_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::Configure FRACTAL_CACHIX_CACHE_NAME with the repository-owned cache"; exit 1; }'
+      - name: Build the exact consumer package
+        run: |
+          producer="git+file://$GITHUB_WORKSPACE?rev=$GITHUB_SHA&shallow=1#packages.x86_64-linux.fractal"
+          nix build "$producer" --no-update-lock-file --max-jobs 1 --cores 2 --print-build-logs --out-link "$RUNNER_TEMP/fractal-native"
+          nix build --inputs-from . nixpkgs#cachix --no-link --print-out-paths > "$RUNNER_TEMP/cachix-path"
+      - name: Publish and prove the complete package closure
+        env:
+          CACHE_NAME: ${{ vars.FRACTAL_CACHIX_CACHE_NAME }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.FRACTAL_CACHIX_AUTH_TOKEN }}
+        run: |
+          : "${CACHIX_AUTH_TOKEN:?Configure the repository-scoped FRACTAL_CACHIX_AUTH_TOKEN write secret}"
+          output=$(readlink -f "$RUNNER_TEMP/fractal-native")
+          "$(cat "$RUNNER_TEMP/cachix-path")/bin/cachix" push "$CACHE_NAME" "$output"
+          nix path-info --store "https://$CACHE_NAME.cachix.org" --recursive --json "$output" > "$RUNNER_TEMP/fractal-native-closure.json"
+          printf "source=%s\noutput=%s\ncache=https://%s.cachix.org\n" "$GITHUB_SHA" "$output" "$CACHE_NAME" > "$RUNNER_TEMP/fractal-native-publication.txt"
+          cat "$RUNNER_TEMP/fractal-native-publication.txt" >> "$GITHUB_STEP_SUMMARY"
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fractal-native-publication
+          path: |
+            ${{ runner.temp }}/fractal-native-publication.txt
+            ${{ runner.temp }}/fractal-native-closure.json
+          if-no-files-found: error
+          retention-days: 30
   nix-release-x86_64-linux:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     runs-on: ci1

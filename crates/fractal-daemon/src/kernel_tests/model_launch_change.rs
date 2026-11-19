@@ -12,7 +12,7 @@ fn claude(settings: &str, model: &str) -> MemberSpec {
         .member
         .clone()
         .unwrap();
-    // Stand in for another st build's hook registration.
+    // Stand in for another Fractal build's hook registration.
     if let LaunchSpec::Argv(argv) = &mut member.launch {
         let at = argv.iter().position(|item| item == "--settings").unwrap();
         argv[at + 1] = settings.into();
@@ -23,7 +23,7 @@ fn claude(settings: &str, model: &str) -> MemberSpec {
 #[test]
 fn only_what_the_author_declares_changes_a_launch() {
     let launched = claude("{\"hooks\":{}}", "example-model");
-    // Another st build's hook settings, a new run generation's environment and a new
+    // Another Fractal build's hook settings, a new run generation's environment and a new
     // restart policy launch the same harness.
     let mut same = claude("{\"hooks\":{\"Stop\":[]}}", "example-model");
     same.environment

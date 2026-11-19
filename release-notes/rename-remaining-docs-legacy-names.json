@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal naming in engineering documentation and canonical CLI examples.",
+  "replay": {"status": "none", "detail": "Documentation only; no graph replay changes."},
+  "schema": {"status": "none", "detail": "Wire strings, durable identifiers and generated contracts are unchanged."},
+  "rules": {"status": "none", "detail": "No authority or permission changes."},
+  "compatibility": {"status": "none", "detail": "Legacy executable aliases, host paths and compatibility bridges remain unchanged. The engineering documentation directory remains in place during the client contract freeze."},
+  "downtime": {"status": "none", "detail": "No runtime changes."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No state or configuration changes."}
+}

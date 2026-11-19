@@ -73,7 +73,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // who and why.
         if let Some(request) = request.filter(|request| request.body["fields"]["ignore_fit"] == true) {
             eprintln!(
-                "st3: {} starts despite its lane's fit at {}'s request ({}): {}",
+                "fractal: {} starts despite its lane's fit at {}'s request ({}): {}",
                 subject.subject, request.actor.as_deref().unwrap_or("an unknown actor"), request.id,
                 request.body["fields"]["reason"].as_str().unwrap_or("no reason given"),
             );

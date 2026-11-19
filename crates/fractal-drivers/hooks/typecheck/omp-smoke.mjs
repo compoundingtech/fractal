@@ -106,11 +106,12 @@ const handlers = new Map();
 const handedOver = [];
 const sessionMessages = [];
 let handoffWait;
+let handoffSend;
 const pi = {
   on: (name, handler) => handlers.set(name, handler),
   sendUserMessage: (content, options) => {
     handedOver.push(options === undefined ? { content } : { content, options });
-    return handoffWait;
+    return handoffSend ? handoffSend(content, options) : handoffWait;
   },
   sendMessage: (message, options) => sessionMessages.push({ message, options }),
 };
@@ -625,6 +626,111 @@ for (const newerBoundary of ["batch", "ask"]) {
   await handlers.get("agent_end")(successfulEnd, holdCtx);
   fs.rmSync(outboxPath, { force: true });
 }
+// Model OMP's idle promise: it resolves only AFTER the tool_result awaited by
+// this run returns. A matching user message_start must release admission first.
+for (const heldBy of ["batch", "ask"]) {
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  let endRun;
+  let failRun;
+  const run = new Promise((resolve, reject) => { endRun = resolve; failRun = reject; });
+  let runEnded = false;
+  handoffSend = (_content, options) => options ? undefined : run;
+  const initialId = `message/hold-${mailSequence + 1}`;
+  const initialContent = `idle run with ${heldBy}`;
+  const before = handedOver.length;
+  sendMail(initialContent);
+  await pause(150);
+  assert.strictEqual(handedOver.length, before + 1);
+  assert.ok(!acknowledged().includes(initialId), "pending admission is not delivered");
+  await handlers.get("message_start")({ message: { role: "assistant", content: initialContent } }, holdCtx);
+  await handlers.get("message_start")({ message: { role: "user", content: "unrelated" } }, holdCtx);
+  await pause(30);
+  assert.ok(!acknowledged().includes(initialId), "unrelated events are not admission receipts");
+  holdIdle = false;
+  await handlers.get("agent_start")({}, holdCtx);
+  await handlers.get("message_start")({ message: {
+    role: "user", content: [{ type: "text", text: initialContent }],
+  } }, holdCtx);
+  await awaitAcknowledgement(initialId);
+  await toolCall("idle-run-a");
+  await toolCall("idle-run-b");
+  if (heldBy === "ask") {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "idle-run-ask",
+      input: { questions: [{ question: "Continue?" }] } }, holdCtx);
+  }
+  const nextIds = [`message/hold-${mailSequence + 1}`, `message/hold-${mailSequence + 2}`];
+  sendMail(`second mail ${heldBy}`);
+  sendMail(`third mail ${heldBy}`);
+  await pause(150);
+  await toolResult("idle-run-a");
+  assert.strictEqual(handedOver.length, before + 1, "batch holds until the final result");
+  const deadline = setTimeout(() => assert.fail("tool_result waited for its own run"), 1000);
+  try {
+    await toolResult("idle-run-b");
+    if (heldBy === "ask") {
+      assert.strictEqual(handedOver.length, before + 1, "ask still holds the batch");
+      await handlers.get("tool_result")({ toolName: "ask", toolCallId: "idle-run-ask" }, holdCtx);
+    }
+  } finally {
+    clearTimeout(deadline);
+  }
+  assert.strictEqual(runEnded, false);
+  assert.deepStrictEqual(handedOver.slice(before + 1), [{
+    content: `second mail ${heldBy}\n\nthird mail ${heldBy}`, options: { deliverAs: "steer" },
+  }], "the FIFO batch is admitted before the idle-started run ends");
+  for (const id of nextIds) await awaitAcknowledgement(id);
+  // A post-admission run failure cannot turn an honest receipt into failed mail.
+  const errors = [];
+  const reportError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    if (heldBy === "ask") failRun(new Error("run failed after admission"));
+    else endRun();
+    await pause(30);
+  } finally {
+    console.error = reportError;
+  }
+  assert.strictEqual(errors.length, heldBy === "ask" ? 1 : 0,
+    "a post-admission run rejection is observable without revoking delivery");
+  assert.ok(!readFrames().some(frame => frame.type === "failed" && frame.meta?.messageId === initialId));
+  runEnded = true;
+  handoffSend = undefined;
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Failure before the matching message starts remains a failed admission. Replay
+// retries it, whereas an admitted replay is acknowledged without another send.
+if (process.argv[2]?.includes("st-omp-channel")) {
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  const frame = { type: "message", content: "retry rejected admission", deliverAs: "steer",
+    meta: { messageId: "message/admission-retry" } };
+  let rejectAdmission;
+  handoffSend = () => new Promise((_resolve, reject) => { rejectAdmission = reject; });
+  const before = handedOver.length;
+  fs.appendFileSync(outboxPath, JSON.stringify(frame) + "\n");
+  await pause(150);
+  fs.appendFileSync(outboxPath, JSON.stringify(frame) + "\n");
+  await pause(150);
+  assert.strictEqual(handedOver.length, before + 1, "pending replay is not injected twice");
+  assert.ok(!acknowledged().includes(frame.meta.messageId), "pending replay cannot fabricate a receipt");
+  rejectAdmission(new Error("admission rejected"));
+  await pause(100);
+  assert.strictEqual(readFrames().filter(item => item.type === "failed" &&
+    item.meta?.messageId === frame.meta.messageId).length, 1);
+  assert.ok(!acknowledged().includes(frame.meta.messageId));
+  handoffSend = undefined;
+  fs.appendFileSync(outboxPath, JSON.stringify(frame) + "\n");
+  await awaitAcknowledgement(frame.meta.messageId);
+  fs.appendFileSync(outboxPath, JSON.stringify(frame) + "\n");
+  await pause(150);
+  assert.strictEqual(handedOver.length, before + 2, "admitted replay does not start another run");
+  assert.strictEqual(acknowledged().filter(id => id === frame.meta.messageId).length, 2);
+  fs.rmSync(outboxPath, { force: true });
+}
+holdIdle = false;
 
 // A channel that dies during a hold must be replaced. The successor re-sends the unacknowledged
 // message; the retired channel's held copy must never be handed off or acknowledged.
@@ -719,7 +825,7 @@ fs.rmSync(delayedHelloPath, { force: true });
 // omp loads this extension into every in-process subagent, as a second instance sharing the
 // process-wide stash (compoundingtech/fractal#852). A subagent's lifecycle must leave the seat's
 // channel alone: no channel of its own, and its shutdown does not close the seat's channel. Mail
-// that arrives afterwards still reaches the top-level session. st's asset reports the subagent's
+// that arrives afterwards still reaches the top-level session. Fractal's asset reports the subagent's
 // runs on the seat's channel and nothing else of it; the legacy asset sends no frame at all.
 const subHandlers = new Map();
 const subHandedOver = [];
@@ -765,8 +871,8 @@ assert.deepStrictEqual(
     : [],
   "a subagent's events reach the channel only as its runs",
 );
-// While its runs last, st's asset reports each minute every subagent omp says is busy, as in a long
-// tool call. A subagent whose session went idle without its end reports nothing, so st ends it once
+// While its runs last, Fractal's asset reports each minute every subagent omp says is busy, as in a long
+// tool call. A subagent whose session went idle without its end reports nothing, so Fractal ends it once
 // it has been quiet long enough.
 const heartbeats = [];
 const realSetInterval = globalThis.setInterval;
@@ -910,7 +1016,7 @@ assert.deepStrictEqual(readFrames().slice(framesBeforeMain), [expectedState("act
 await handlers.get("agent_end")(successfulEnd, mainCtx);
 fs.rmSync(outboxPath, { force: true });
 
-// st3's dedicated todo observation is deliberately absent from the legacy st2 asset.
+// Fractal's dedicated todo observation is deliberately absent from the legacy st2 asset.
 if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo")) {
   const totals = (pending = 0, in_progress = 0, completed = 0, blocked = 0, abandoned = 0) =>
     ({ pending, in_progress, completed, blocked, abandoned });

@@ -313,7 +313,7 @@ export default function (pi: ExtensionAPI) {
           } else {
             await pi.sendUserMessage(frame.content, { deliverAs: frame.deliverAs ?? "steer" });
           }
-          send({ type: "delivered", meta: frame.meta });
+          send({ type: "delivered", meta: frame.meta, acceptedAtUnixMs: Date.now() });
         } catch (error) {
           send({ type: "failed", meta: frame.meta, error: String(error) });
         }

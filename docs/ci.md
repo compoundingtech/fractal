@@ -219,8 +219,15 @@ A failed-jobs-only rerun can inherit the earlier successful producer output; its
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
 target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
 and dependency boundary, and builds the gateway binary with its standalone production features.
-Its Cargo JSON and binary hash are retained alongside the archive; the VM does not substitute
-the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
+Its Cargo JSON and compressed binary hash are retained alongside the archive; the VM does not substitute
+the workspace-unified test binary. Manifest version 3 carries the gateway as `sekrets-st3.gz`;
+consumers verify its compressed bytes before decompressing outside the upload directory.
+Nextest uses its supported Zstandard level 10 to compress repeated code and symbol
+names more densely without changing archive contents. All executable symbols are
+retained for panic backtraces; local compiler profiles are unchanged. The outer artifact
+ZIP uses storage-only mode because both large payloads are already compressed.
+No build caches, incremental directories or raw gateway copy belong in this transfer.
+A failed producer explicitly fails consumer checks and the gate.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
 Manifest/fixture paths
@@ -1543,10 +1550,22 @@ nix flake check --no-build
 The same input supplies `otelite`, so updating its pin changes the collector used by
 release-integration and the default shell.
 
+`nix.yml` also publishes the exact `packages.x86_64-linux.fractal` output on protected
+main pushes and main-only manual dispatch. This separate hosted Linux job does not
+enable the disabled persistent-store verification job or occupy merge-serving workers.
+Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
+`FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
+Only the main publication step receives the write token; PRs never execute it.
+The producer uploads the complete output closure, including already-cached references,
+then queries the remote store recursively and retains the exact source/output/cache
+receipt and closure manifest as `fractal-native-publication`. Consumers must configure
+read access and trust for that same cache through their fleet cache-client declarations;
+no consumer should substitute an unrelated installed binary when this output is absent.
+
 | Workflow | What it runs |
 | --- | --- |
 | `fleet.yml` | Workspace CI on pull requests, merge groups and manual dispatch; required checks use the selected source and evidence policy. |
-| `nix.yml` | Defines the persistent-store Nix release check. Its job is disabled in the generated workflow; schedule or manual dispatch does not qualify a native check. |
+| `nix.yml` | Publishes the exact Linux native package closure on main pushes or main-only dispatch. The separate persistent-store release check remains disabled; publication is not a native check qualification. |
 | `release-fractal.yml` | Release archives on main pushes, tags, dispatch and relevant PRs. Linux builds use the selected owned priority pool outside PR validation; macOS and installer/assembly/publish jobs use their declared hosted runners. This workflow is separate from required merge checks. |
 | `debug-assertions-daily.yml` | Scheduled and manually dispatched test coverage with dev/test debug assertions enabled; reports failures through its daily issue. |
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |

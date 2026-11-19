@@ -218,12 +218,12 @@ pub fn render_prepare(reason: &str, deadline_unix_ms: Option<u128>, now_unix_ms:
         ),
     );
     format!(
-        "st is about to restart this seat: {reason}. {timing}, and the session after this one \
+        "Fractal is about to restart this seat: {reason}. {timing}, and the session after this one \
          will not remember this conversation.\n\n\
-         Write your handoff now with `st agents handoff write --as \"$ST_AGENT\"` (stdin or a \
+         Write your handoff now with `fractal agents handoff write --as \"$ST_AGENT\"` (stdin or a \
          file): what you were doing, open pull requests and branches, what you wait on, the next \
          steps, and anything running that you started. Writing it is the acknowledgement. If the \
-         handoff you already have is current, run `st agents handoff ready --as \"$ST_AGENT\"` \
+         handoff you already have is current, run `fractal agents handoff ready --as \"$ST_AGENT\"` \
          instead. Take no new work in the meantime.\n"
     )
 }
@@ -329,12 +329,12 @@ pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
         if context.work.len() > MAX_WORK_LINES {
             let _ = writeln!(
                 out,
-                "\n{} more steps: run `st work ls --as \"$ST_AGENT\"`.",
+                "\n{} more steps: run `fractal work ls --as \"$ST_AGENT\"`.",
                 context.work.len() - MAX_WORK_LINES
             );
         }
         out.push_str(
-            "\nClaim a step that is ready with `st work claim STEP --as \"$ST_AGENT\"`; a step \
+            "\nClaim a step that is ready with `fractal work claim STEP --as \"$ST_AGENT\"`; a step \
              still claimed by your last session is released when its lease runs out.\n",
         );
     }
@@ -352,14 +352,14 @@ pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
         if context.mail.len() > MAX_MESSAGE_LINES {
             let _ = writeln!(
                 out,
-                "- and {} more: `st conversations ls`",
+                "- and {} more: `fractal conversations ls`",
                 context.mail.len() - MAX_MESSAGE_LINES
             );
         }
     }
     out.push_str(
-        "\nKeep your handoff current: `st agents handoff write` replaces it with what the next session \
-         needs. `st agents handoff show` prints it.\n",
+        "\nKeep your handoff current: `fractal agents handoff write` replaces it with what the next session \
+         needs. `fractal agents handoff show` prints it.\n",
     );
     Some(out)
 }
@@ -512,7 +512,7 @@ mod tests {
         assert!(text.contains("goal: The widget builds."));
         assert!(text.contains("last progress note, 1 min ago: tests pass locally"));
         assert!(text.contains("`message/1` from agent/garden/birch: Question"));
-        assert!(text.contains("st agents handoff write"));
+        assert!(text.contains("fractal agents handoff write"));
     }
 
     #[test]
@@ -532,8 +532,8 @@ mod tests {
         let text = render_prepare("the declared model changed", Some(130_000), 10_000);
         assert!(text.contains("the declared model changed"), "{text}");
         assert!(text.contains("in 120 s"));
-        assert!(text.contains("st agents handoff write"));
-        assert!(text.contains("st agents handoff ready"));
+        assert!(text.contains("fractal agents handoff write"));
+        assert!(text.contains("fractal agents handoff ready"));
     }
 
     #[test]
@@ -542,7 +542,7 @@ mod tests {
         assert!(text.contains("only once you acknowledge"), "{text}");
         assert!(text.contains("never restarts without your acknowledgement"), "{text}");
         assert!(!text.contains("whichever comes first"), "{text}");
-        assert!(text.contains("st agents handoff write"), "{text}");
+        assert!(text.contains("fractal agents handoff write"), "{text}");
     }
 
     #[test]

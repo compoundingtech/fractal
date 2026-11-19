@@ -349,7 +349,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let persisted = match store.finish_runtime_start(&id, &result) {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
+                    eprintln!("fractal: failed to persist runtime start completion {id}: {error:#}");
                     false
                 }
             };
@@ -432,7 +432,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     this.apply_start_result(&result.id, &result.subject)
                 }) {
                     None => eprintln!(
-                        "st3: failed to apply runtime start completion {}; see start-completion fault", result.id
+                        "fractal: failed to apply runtime start completion {}; see start-completion fault", result.id
                     ),
                     Some(true) => tracing::info!(
                         operation = %result.id,

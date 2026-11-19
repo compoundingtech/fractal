@@ -150,7 +150,7 @@ impl Capacity {
         match value.parse() {
             Ok(capacity) => Some(capacity),
             Err(error) => {
-                eprintln!("st3: WARN ignoring an unreadable seat capacity `{value}`: {error:#}");
+                eprintln!("fractal: WARN ignoring an unreadable seat capacity `{value}`: {error:#}");
                 None
             }
         }
@@ -599,19 +599,19 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
         return Ok(None);
     };
     if !enforced() {
-        eprintln!("st3: {runtime_id} declares capacity {capacity}, not enforced: lanes are off on this host");
+        eprintln!("fractal: {runtime_id} declares capacity {capacity}, not enforced: lanes are off on this host");
         return Ok(None);
     }
     if crate::isolation_mode() != crate::Isolation::Scope {
         eprintln!(
-            "st3: WARN {runtime_id} declares capacity {capacity}, not enforced: this host has no systemd user scopes \
+            "fractal: WARN {runtime_id} declares capacity {capacity}, not enforced: this host has no systemd user scopes \
              (macOS has no per-tree CPU or memory cap for a user process)"
         );
         return Ok(None);
     }
     if !crate::isolate::systemd_254() {
         eprintln!(
-            "st3: WARN {runtime_id} declares capacity {capacity}, not enforced: a lane needs systemd 254 or newer \
+            "fractal: WARN {runtime_id} declares capacity {capacity}, not enforced: a lane needs systemd 254 or newer \
              (OOMPolicy on a scope)"
         );
         return Ok(None);

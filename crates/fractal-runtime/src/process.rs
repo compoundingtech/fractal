@@ -405,7 +405,7 @@ impl ExecRuntime {
             if self.finite_lane.is_some() {
                 return Err(error.context("finite execution replacement retains previous containment custody"));
             }
-            eprintln!("st3: WARN what the last generation of {id} left running did not end: {error:#}");
+            eprintln!("fractal: WARN what the last generation of {id} left running did not end: {error:#}");
         }
         self.rotate_generation(id)?;
         let log_path = self.log_path(id, false);
@@ -922,7 +922,7 @@ impl ExecRuntime {
                     tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
                 }
                 Err(error) => eprintln!(
-                    "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
+                    "fractal: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
             }
         }

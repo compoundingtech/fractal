@@ -1549,6 +1549,19 @@ fn residency_report(store: &Store, quiet: bool) {
 fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocker() {
     let _clock = Clock::at(START);
     let (store, runtime, reconciler, _) = stopping();
+    // A mature deadline now reaches the owner writer, so model the signed reader barrier.
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    store.bind_fleet(fleet).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key.clone())).unwrap();
+    store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"daemon/node".into(),kind:"daemon.started".into(),actor:None,
+        fields:serde_json::from_value(serde_json::json!({"status":"running","features":{"idle_residency":1}})).unwrap(),
+        evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.replication_snapshot().unwrap();
     let intent = parse_intent(
         "version 2\nagent \"garden\" { workspace \".\"; command \"true\"; idle-suspend \"member\" }",
         "node",

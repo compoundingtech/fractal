@@ -3,6 +3,7 @@
     "cpu",
     "cpu/idle",
     "database",
+    "database-archive",
     "ios-connect",
     "ios-conversation-open",
     "ios-live-share",

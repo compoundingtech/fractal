@@ -1795,7 +1795,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             Arc::new(Notify::new()),
         );
         // Exercise NativeRuntime's producer boundary directly through the durable jobs.
-        // The ordinary exec member preparation wraps its command in the st3 driver;
+        // The ordinary exec member preparation wraps its command in the Fractal driver;
         // a missing command inside that wrapper is a later readiness failure.
         let dispatch = |desired: &DesiredSubject| {
             let member = desired.member.as_ref().unwrap().clone();

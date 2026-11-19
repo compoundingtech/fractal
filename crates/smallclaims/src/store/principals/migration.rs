@@ -101,6 +101,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
         }
     }
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hdffe34d55f09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ PRINCIPAL_SCHEMA)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h175963f1dc4a owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ dependencies::SCHEMA)?;
     // Compatibility with the earlier unpublished candidate-schema revision.
     let has_model: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='serving_legacy')", [], |row| row.get(0))?;
     if !has_model {
@@ -129,7 +130,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
     initialize_selection(&transaction)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a3a869aa34 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET started_at_unix_ms=?1,advanced_at_unix_ms=?1 WHERE id=1 AND started_at_unix_ms=0",[i64::try_from(now_ms())?])?;
     // Reader-first rollout keeps the default v20 format. Never downgrade the marker
-    // of an explicitly activated v21 store while installing its reference reader.
+    // of an explicitly activated reference/dependency store while installing readers.
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < CURRENT_SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
