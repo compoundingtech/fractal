@@ -679,7 +679,7 @@ impl Content {
                     }
                     let mut all = vec![first.clone()];
                     all.extend(spans);
-                    all.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+                    all.push(Span::decoration(" ".repeat(inner.saturating_sub(used)), ratatui::style::Style::default()));
                     all.push(last.clone());
                     Line::from(all)
                 }
@@ -697,16 +697,18 @@ impl Content {
             };
             let action = self.action(&key);
             let head = format!(
-                "   ▣ {} · {media} · {} KB{pixels}  ",
+                "{} · {media} · {} KB{pixels}",
                 image_name(image),
                 size.div_ceil(1024)
             );
-            let open = unicode_width::UnicodeWidthStr::width(head.as_str()) as u16;
+            let open = unicode_width::UnicodeWidthStr::width(head.as_str()) as u16 + 7;
             if let Some(row) = doc.lines.get_mut(line) {
                 *row = framed(vec![
+                    Span::decoration("   ▣ ", theme::fg(theme::TEXT)),
                     Span::styled(head, theme::fg(theme::TEXT)),
-                    Span::styled("open", theme::fg(theme::LAVENDER)),
-                    Span::styled(format!(" · {action}"), theme::dim()),
+                    Span::decoration("  ", theme::fg(theme::TEXT)),
+                    Span::decoration("open", theme::fg(theme::LAVENDER)),
+                    Span::decoration(format!(" · {action}"), theme::dim()),
                 ]);
             }
             doc.targets.retain(|target| target.line != line);
@@ -740,8 +742,12 @@ impl Content {
                         *start += IMAGE_ROWS;
                     }
                 }
+                for range in &mut doc.copy_blocks {
+                    if range.start >= at { range.start += IMAGE_ROWS; }
+                    if range.end >= at { range.end += IMAGE_ROWS; }
+                }
                 doc.lines
-                    .splice(at..at, std::iter::repeat_n(framed(Vec::new()), IMAGE_ROWS));
+                    .splice(at..at, std::iter::repeat_n(framed(Vec::new()).decoration(), IMAGE_ROWS));
                 // The image sits inside the frame, two columns in like any other.
                 doc.targets.push(Target {
                     line: at,
@@ -1018,7 +1024,7 @@ impl Content {
                 .first()
                 .and_then(|line| doc.lines.get(*line))
                 .and_then(|line| line.spans.first().cloned())
-                .unwrap_or_else(|| Span::raw("  "));
+                .unwrap_or_else(|| Span::decoration("  ", ratatui::style::Style::default()));
             let mut extra = Doc::new();
             let mut replace = false;
             for group in groups {
@@ -1139,8 +1145,8 @@ impl Content {
                                     extra.lines(text::wrap(
                                         &[text::run(text::sanitize(text), theme::fg(theme::TEXT))],
                                         width,
-                                        &[text::run("  ", theme::dim())],
-                                        &[text::run("  ", theme::dim())],
+                                        &[text::decoration("  ", theme::dim())],
+                                        &[text::decoration("  ", theme::dim())],
                                         None,
                                     ));
                                 }
@@ -1187,7 +1193,7 @@ impl Content {
                 extra.line(Line::from(Span::styled(
                     "  collapse full content · Ctrl+Enter",
                     theme::dim(),
-                )));
+                )).decoration());
             }
             // What the new lines take the place of: the whole entry for typed content, a
             // message's own image lines, or nothing (they follow the entry).
@@ -1219,6 +1225,20 @@ impl Content {
                     range.end = range.end.saturating_add_signed(shift);
                 }
             }
+            doc.copy_blocks.retain(|range| !(start <= range.start && range.end <= at));
+            for range in &mut doc.copy_blocks {
+                if range.start >= at {
+                    range.start = range.start.saturating_add_signed(shift);
+                } else if range.start >= start {
+                    range.start = start;
+                }
+                if range.end >= at {
+                    range.end = range.end.saturating_add_signed(shift);
+                } else if range.end > start {
+                    range.end = start;
+                }
+            }
+            doc.copy_blocks.extend(extra.copy_blocks.into_iter().map(|range| range.start + start..range.end + start));
             doc.lines.splice(start..at, extra.lines);
             doc.targets
                 .extend(extra.targets.into_iter().map(|mut target| {

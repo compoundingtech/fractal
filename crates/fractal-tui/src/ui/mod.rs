@@ -13,6 +13,7 @@ mod availability;
 mod clickable;
 mod content;
 mod context;
+mod selection;
 #[cfg(test)]
 mod contract;
 pub mod conversation;
@@ -112,6 +113,7 @@ struct FramePane {
     total: usize,
     lines: Rc<Vec<Line<'static>>>,
     entries: Vec<(String, usize)>,
+    copy_blocks: Vec<std::ops::Range<usize>>,
     images: Vec<(content::Key, usize)>,
     layer: usize,
 }
@@ -490,6 +492,8 @@ pub struct Ui {
     /// The closable target owning a middle-button press until release.
     middle_close: Option<clickable::CloseTarget>,
     dragging: bool,
+    /// A content action waits for release so dragging its full-width row selects text.
+    pending_content_click: Option<Hit>,
     demo: Option<Demo>,
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
@@ -637,20 +641,19 @@ pub struct Ui {
     stalled: HashMap<String, String>,
 }
 
-/// What clicking a link says it did: an address is pasted in a browser; a path names a file on the
-/// machine the writer works on, which Fractal TUI cannot open.
+/// What a written clipboard request contains: a browser address or a path on the writer's machine.
 fn link_note(target: &str) -> String {
     let shown = text::truncate(target, 60);
     if target.starts_with('/') || target.starts_with("~/") {
-        format!("Copied {shown} · a file on the writer's machine")
+        format!("Clipboard request sent (OSC 52) for {shown} · a file on the writer's machine")
     } else {
-        format!("Copied {shown} · paste it in a browser")
+        format!("Clipboard request sent (OSC 52) for {shown} · paste it in a browser")
     }
 }
 
 /// What clicking a web address did when it also opened the browser here.
 fn link_opened_note(target: &str) -> String {
-    format!("Opened {} in your browser · also copied", text::truncate(target, 60))
+    format!("{} · opened in browser · clipboard request sent", text::truncate(target, 60))
 }
 
 /// The program that opens a web address in the browser of the machine Fractal TUI runs on, when that is
@@ -935,6 +938,7 @@ impl Ui {
             context_button: None,
             middle_close: None,
             dragging: false,
+            pending_content_click: None,
             demo: None,
             quit: false,
             live: false,
@@ -3211,6 +3215,7 @@ impl Ui {
             total,
             lines,
             entries: doc.entries,
+            copy_blocks: doc.copy_blocks,
             images: doc.targets.iter().filter_map(|target| {
                 if let Hit::ContentImage(key) = &target.hit {
                     Some((key.clone(), target.line))
@@ -3422,6 +3427,7 @@ impl Ui {
                 total: usize::from(body.height) + scrolled,
                 lines: Rc::new(Vec::new()),
                 entries: Vec::new(),
+                copy_blocks: Vec::new(),
                 images: Vec::new(),
                 layer,
             });
@@ -3866,6 +3872,8 @@ impl Ui {
                 ("x", "Missions: show Fractal's own missions"),
                 ("n", "Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
+                ("y / Copy text", "copy the focused card body when not answering or typing"),
+                ("drag", "copy semantic text without borders or soft wraps"),
                 ("x", "Inbox: dismiss a request, update or message"),
                 (
                     "o",
@@ -4390,6 +4398,7 @@ impl Ui {
             self.hover.clear();
             self.hover.pressed.set(false);
             self.dragging = false;
+            self.pending_content_click = None;
             self.middle_close = None;
             self.terminal_selecting = false;
             self.cancel_drag();
@@ -4998,6 +5007,9 @@ impl Ui {
                     edit::edit(draft, &self.cursor, &key_id, key);
                 }
             }
+            return;
+        }
+        if self.copy_body_key(key) {
             return;
         }
         // The keys of what has them: Now's list and card over the space, or the focused pane.
@@ -6112,8 +6124,7 @@ impl Ui {
                 self.find_in(&agent, "");
             }
             ('c', None) => {
-                copy(&agent);
-                self.flash(format!("Copied {agent}"));
+                self.copy_text(&agent);
             }
             _ => {}
         }
@@ -6479,14 +6490,32 @@ impl Ui {
                         .iter()
                         .rev()
                         .find(|(rect, _)| contains(*rect, mouse.column, mouse.row))
-                        .map(|(_, hit)| hit.clone())
+                        .map(|(rect, hit)| {
+                            let full_width = info.panes.iter().rev()
+                                .find(|pane| contains(pane.rect, mouse.column, mouse.row))
+                                .is_some_and(|pane| rect.width >= pane.rect.width.saturating_sub(2));
+                            (full_width, hit.clone())
+                        })
                 };
                 self.conversation_state.selection = None;
-                if let Some(hit) = hit.filter(|hit| !matches!(hit, Hit::Message | Hit::Subject)) {
-                    self.click(hit);
+                let point = self.pane_point(mouse.column, mouse.row);
+                let (full_width, action) = hit.map_or((false, None), |(full_width, hit)| {
+                    (full_width, (!matches!(hit, Hit::Message | Hit::Subject)).then_some(hit))
+                });
+                if action.as_ref().is_some_and(|hit| !full_width || matches!(hit,
+                    Hit::Composer | Hit::ChatComposer | Hit::Field(_) | Hit::ResourceFilter
+                )) {
+                    self.click(action.unwrap());
                     return;
                 }
-                if let Some((key, line, column)) = self.pane_point(mouse.column, mouse.row) {
+                if point.is_none() {
+                    if let Some(hit) = action {
+                        self.click(hit);
+                    }
+                    return;
+                }
+                self.pending_content_click = action;
+                if let Some((key, line, column)) = point {
                     self.conversation_state.selection = Some(Selection {
                         pane: key,
                         anchor: (line, column),
@@ -6496,6 +6525,7 @@ impl Ui {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                self.pending_content_click = None;
                 let edge = {
                     let info = self.frame.borrow();
                     self.conversation_state
@@ -6531,20 +6561,19 @@ impl Ui {
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.dragging = false;
+                let click = self.pending_content_click.take();
                 if let Some(selection) = &self.conversation_state.selection {
-                    // A drag over nothing copies nothing (and does not say "Copied 0 lines").
+                    // A drag over nothing copies nothing and requests no clipboard write.
                     if selection.anchor == selection.head {
                         self.conversation_state.selection = None;
+                        if let Some(hit) = click {
+                            self.click(hit);
+                        }
                     } else if let Some(copied) = self
                         .selected_text()
                         .filter(|copied| !copied.trim().is_empty())
                     {
-                        let count = copied.lines().count();
-                        copy(&copied);
-                        self.flash(format!(
-                            "Copied {count} line{}",
-                            if count == 1 { "" } else { "s" }
-                        ));
+                        self.copy_text(&copied);
                     }
                 }
             }
@@ -6678,8 +6707,7 @@ impl Ui {
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && let Some(link) = native.hyperlink(column as u16, row as u16)
         {
-            copy(&link);
-            self.flash("Copied link destination");
+            self.copy_text(&link);
             return true;
         }
         if inside
@@ -6726,12 +6754,7 @@ impl Ui {
                 let copied = native.selected();
                 self.terminal_selecting = false;
                 if let Some(copied) = copied {
-                    let count = copied.lines().count();
-                    copy(&copied);
-                    self.flash(format!(
-                        "Copied {count} line{}",
-                        if count == 1 { "" } else { "s" }
-                    ));
+                    self.copy_text(&copied);
                 }
                 true
             }
@@ -6747,12 +6770,7 @@ impl Ui {
             return;
         };
         if let Some(copied) = asked.copied {
-            let count = copied.lines().count().max(1);
-            copy(&copied);
-            self.flash(format!(
-                "The terminal copied {count} line{}",
-                if count == 1 { "" } else { "s" }
-            ));
+            self.forward_clipboard(&copied, &mut io::stdout());
         } else if asked.bell && !self.terminal_focused() {
             self.flash("🔔 The terminal rang its bell");
         }
@@ -6777,12 +6795,12 @@ impl Ui {
                 self.availability_press(letter);
             }
             Hit::Link(url) => {
-                copy(&url);
+                let copied = send_clipboard(&url, &mut io::stdout());
                 let opened = open_in_browser(&url);
-                self.flash(if opened {
-                    link_opened_note(&url)
-                } else {
-                    link_note(&url)
+                self.flash(match copied {
+                    Err(error) => format!("Clipboard request failed: {error}"),
+                    Ok(()) if opened => link_opened_note(&url),
+                    Ok(()) => link_note(&url),
                 });
             }
             Hit::Split(right) => self.split(right),
@@ -7153,11 +7171,11 @@ fn simplified(prefs: &prefs::Prefs) -> bool {
     prefs.simple != Some(false)
 }
 
-/// Copy through OSC 52, which kitty, iTerm2, WezTerm and tmux (with set-clipboard) accept.
-fn copy(text: &str) {
+/// Request a clipboard write; OSC 52 has no delivery acknowledgement.
+fn send_clipboard(text: &str, writer: &mut impl Write) -> io::Result<()> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = text.as_bytes();
-    let mut encoded = String::new();
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let n = (chunk[0] as u32) << 16
             | (*chunk.get(1).unwrap_or(&0) as u32) << 8
@@ -7170,9 +7188,8 @@ fn copy(text: &str) {
             }
         }
     }
-    let mut stdout = io::stdout();
-    let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
-    let _ = stdout.flush();
+    write!(writer, "\x1b]52;c;{encoded}\x07")?;
+    writer.flush()
 }
 
 // ------------------------------------------------------------------------ run
@@ -7383,12 +7400,9 @@ fn dump(args: &[String]) -> Result<()> {
         terminal.draw(|frame| ui.render(frame))?;
         let mut parts = click.split(',').filter_map(|v| v.parse::<u16>().ok());
         if let (Some(column), Some(row)) = (parts.next(), parts.next()) {
-            ui.mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            });
+            for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+                ui.mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+            }
         }
     }
     // `--pane KEY` draws that one pane alone, at the given size.
@@ -7563,6 +7577,7 @@ mod tests {
             top: 0,
             total: 6,
             lines: Rc::new(Vec::new()),
+            copy_blocks: Vec::new(),
             entries: vec![
                 ("one".into(), 0),
                 ("ordinary".into(), 1),
@@ -8449,11 +8464,11 @@ mod tests {
     fn clicking_a_link_says_whether_it_copied_an_address_or_a_file_path() {
         assert_eq!(
             link_note("https://example.com/a"),
-            "Copied https://example.com/a · paste it in a browser"
+            "Clipboard request sent (OSC 52) for https://example.com/a · paste it in a browser"
         );
         assert_eq!(
             link_note("/srv/repo/spec.md"),
-            "Copied /srv/repo/spec.md · a file on the writer's machine"
+            "Clipboard request sent (OSC 52) for /srv/repo/spec.md · a file on the writer's machine"
         );
         assert!(link_note("~/notes/a.md").contains("a file on the writer's machine"));
     }
@@ -8473,7 +8488,7 @@ mod tests {
         assert_eq!(browser_opener("/srv/repo/spec.md", none, true), None);
         assert_eq!(browser_opener("file:///etc/passwd", none, true), None);
         assert_eq!(browser_opener("javascript:alert(1)", none, true), None);
-        assert!(link_opened_note(url).contains("also copied"));
+        assert_eq!(link_opened_note(url), format!("{url} · opened in browser · clipboard request sent"));
     }
 
     #[test]
@@ -9884,6 +9899,12 @@ mod tests {
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         });
+        ui.mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: rect.x + 2,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
         assert_eq!(
             ui.selected_id().as_deref(),
             Some("agent/example/atlas/builder")
@@ -10202,6 +10223,12 @@ mod tests {
             row: rect.y,
             modifiers: KeyModifiers::NONE,
         });
+        ui.mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
         assert_eq!(ui.tab(), 2);
         assert!(ui.popover.is_some());
         let screen = frame(&ui, 150, 60).join("\n");
@@ -10425,6 +10452,12 @@ mod tests {
             .unwrap();
         ui.mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        ui.mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
             column: rect.x,
             row: rect.y,
             modifiers: KeyModifiers::NONE,
