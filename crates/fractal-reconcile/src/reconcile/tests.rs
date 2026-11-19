@@ -1760,10 +1760,9 @@ mission "shell-owner" state="ready" {{
         // finalization: recovery still reads the execution's generation slice.
         assert!(runtime.retire_resource_lane(&store, &request).unwrap());
         reconciler.prepare_shell_resource_recovery().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
         execution = store.shell_resource(&id).unwrap();
-        reconciler.drive_shell_resource(&mut execution).unwrap();
         assert_eq!(execution.state, "completed", "{}", execution.reason);
-        store.update_shell_resource(&execution).unwrap();
         let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource(&id).unwrap());
         assert!(fields["oom_kills"].as_u64().unwrap() >= 1, "{fields:?}");
         assert_eq!(fields["oom_killed"], true);
