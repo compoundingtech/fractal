@@ -653,7 +653,7 @@ fn link_note(target: &str) -> String {
 
 /// What clicking a web address did when it also opened the browser here.
 fn link_opened_note(target: &str) -> String {
-    format!("Opened {} in your browser · also copied", text::truncate(target, 60))
+    format!("{} · opened in browser · clipboard request sent", text::truncate(target, 60))
 }
 
 /// The program that opens a web address in the browser of the machine Fractal TUI runs on, when that is
@@ -6770,7 +6770,7 @@ impl Ui {
             return;
         };
         if let Some(copied) = asked.copied {
-            self.copy_text(&copied);
+            self.forward_clipboard(&copied, &mut io::stdout());
         } else if asked.bell && !self.terminal_focused() {
             self.flash("🔔 The terminal rang its bell");
         }
@@ -8488,7 +8488,7 @@ mod tests {
         assert_eq!(browser_opener("/srv/repo/spec.md", none, true), None);
         assert_eq!(browser_opener("file:///etc/passwd", none, true), None);
         assert_eq!(browser_opener("javascript:alert(1)", none, true), None);
-        assert!(link_opened_note(url).contains("also copied"));
+        assert_eq!(link_opened_note(url), format!("{url} · opened in browser · clipboard request sent"));
     }
 
     #[test]
