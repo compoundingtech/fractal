@@ -30,7 +30,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h56821e2a865f owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -66,7 +66,7 @@ CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_added AFTER INSERT ON cla
     ON CONFLICT(claim_id) DO UPDATE SET candidates=candidates+1;
 END;
 CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_removed AFTER DELETE ON claim_signature_candidates BEGIN
-    DELETE FROM claim_signature_sources WHERE claim_id=OLD.claim_id AND signature=OLD.signature;
+    DELETE FROM claim_signature_sources WHERE claim_id=OLD.claim_id AND (signature=OLD.signature OR signature=(SELECT reference FROM claim_signature_originals WHERE claim_id=OLD.claim_id AND signature=OLD.signature));
     UPDATE claim_signature_counts SET candidates=candidates-1 WHERE claim_id=OLD.claim_id;
     DELETE FROM claim_signature_counts WHERE claim_id=OLD.claim_id AND candidates=0;
 END;
@@ -204,12 +204,12 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
         .map(Position))
 }
 
-fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
+pub(super) fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h072ee9f3dbb6 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, SqlValue>(0))
         .optional()?;
-    text.map(|text| Ok(serde_json::from_str(&text)?))
+    text.map(|value| Ok(serde_json::from_str(&references::resolve(connection, claim_id, value)?)?))
         .transpose()
 }
 
@@ -253,7 +253,7 @@ pub(super) fn store_inventory_signature_tx(
     writer: Option<&str>,
 ) -> Result<()> {
     let origin = if writer.is_none() {
-        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h134e5aef5050 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
+        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
     } else {
         None
     };
@@ -279,15 +279,17 @@ fn store_candidate_tx(
         legacy::store_claim_signature_tx(connection, claim_id, signature)?;
     }
     let text = serde_json::to_string(signature)?;
-    let added = connection
-        .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h16586c1e56da owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce)
-         VALUES (?1,?2,?3,?4)",
-        )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h7609ad2c9eca owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, signature.key, signature.nonce])?;
+    let (added, reference) = references::insert_candidate(
+        connection, claim_id, &text, &signature.key, &signature.nonce,
+    )?;
+    // Contract an inline provenance row in the same transaction as its newest-format
+    // write, so an exact duplicate never inflates the carrying writer's count.
+    connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-hd090f46fc316 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2 AND writer=?3",
+    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, writer])?;
     connection.prepare_cached(
         /* sqlite-large-value: allow-for-now lv-h8b1d8ca0d39f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
-    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,text,writer])?;
+    )?.execute(/* sqlite-large-value: allow-for-now lv-h0d79b0cd4af5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,reference,writer])?;
     if added == 0 {
         return Ok(());
     }
@@ -317,12 +319,12 @@ fn store_candidate_tx(
             /* sqlite-large-value: allow-for-now lv-h3ef3e2963c54 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signatures(claim_id,signer,key,nonce,signature)
          VALUES (?1,?2,?3,?4,?5)",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h3d338a6f6764 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h202b43b80de5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             signature.signer,
             signature.key,
             signature.nonce,
-            text
+            reference
         ])?;
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h974754085cbf owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
@@ -353,6 +355,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
 mod judging;
 mod legacy;
 mod migration;
+mod references;
 pub(crate) use migration::SignatureEnvelopeWork;
 pub(crate) use migration::initialize_schema;
 pub use migration::{
@@ -907,11 +910,11 @@ fn write_verdict_tx(
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h5f8142f84899 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h63d55e8c184c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h7ddd430627d9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             signature.signer,
             signature.key,
             signature.nonce,
-            serde_json::to_string(signature)?,
+            references::encode(connection, claim_id, &serde_json::to_string(signature)?)?,
             claim_id
         ])?;
     // Candidate pages have already committed their dependency links. Publishing the
@@ -975,6 +978,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_verdict_links",
         "claim_verdict_queue",
         "claim_verdict_fresh",
+        "claim_signature_originals",
     ] {
         rows += connection
             .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-hf6676f3ba393 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
