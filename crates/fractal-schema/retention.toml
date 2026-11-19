@@ -26,6 +26,9 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"resource.admission.observed" = { class = "durable" }
+"resource.admission.coverage" = { class = "durable" }
+"gate.admission.observed" = { class = "durable" }
 "harness.invocation" = { class = "durable" }
 "effect.intended" = { class = "durable" }
 "effect.in-flight" = { class = "durable" }
