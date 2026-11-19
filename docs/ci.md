@@ -222,8 +222,8 @@ and dependency boundary, and builds the gateway binary with its standalone produ
 Its Cargo JSON and compressed binary hash are retained alongside the archive; the VM does not substitute
 the workspace-unified test binary. Manifest version 3 carries the gateway as `sekrets-st3.gz`;
 consumers verify its compressed bytes before decompressing outside the upload directory.
-Nextest uses Zstandard level 10 and its native 128 MiB long-distance window to share
-repeated code and symbol names across archived content. All executable symbols are
+Nextest uses its supported Zstandard level 10 to compress repeated code and symbol
+names more densely without changing archive contents. All executable symbols are
 retained for panic backtraces; local compiler profiles are unchanged. The outer artifact
 ZIP uses storage-only mode because both large payloads are already compressed.
 No build caches, incremental directories or raw gateway copy belong in this transfer.

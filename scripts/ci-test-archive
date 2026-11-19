@@ -343,7 +343,7 @@ def main():
     if args.action == 'build':
         directory.mkdir(parents=True, exist_ok=True)
         subprocess.run(['cargo', 'nextest', 'archive', '--workspace', '--locked',
-                        '--profile', 'ci', '-E', 'all()', '--zstd-level', '10', '--zstd-long',
+                        '--profile', 'ci', '-E', 'all()', '--zstd-level', '10',
                         '--archive-file', str(directory / FILES[0])], check=True)
         # Keep the original no-default-features unit/integration/doc tests and dependency gate,
         # using the producer's compiler cache instead of rebuilding in the runtime consumer.

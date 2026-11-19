@@ -125,7 +125,8 @@ else:
     assert not (scratch / 'ci-test-archives/sekrets-st3').exists(), 'do not upload an uncompressed gateway'
     import gzip
     assert gzip.decompress((scratch / 'ci-test-archives/sekrets-st3.gz').read_bytes()) == b'#!/bin/sh\nexit 0\n'
-    assert groups[0][groups[0].index('--zstd-level') + 1] == '10' and '--zstd-long' in groups[0]
+    assert groups[0][groups[0].index('--zstd-level') + 1] == '10'
+    assert '--zstd-long' not in groups[0], 'the pinned nextest does not support this flag'
     environment['GITHUB_RUN_ATTEMPT'] = '3'  # failed-only rerun inherits this exact attempt-2 producer
     subprocess.run([sys.executable, 'scripts/ci-test-archive', 'consume'], cwd=ROOT, env=environment, check=True, capture_output=True)
     assert os.access(scratch / 'ci-test-extracted/sekrets-st3', os.X_OK)
