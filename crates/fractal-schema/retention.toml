@@ -53,6 +53,8 @@
 "agent.launcher-bound" = { class = "durable", log = "local" }
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
+# Completed client minute summaries are durable history, not local observation samples.
+"custom.client.observation-minute" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }

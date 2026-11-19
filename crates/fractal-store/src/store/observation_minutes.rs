@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const KIND: &str = "custom.client.observation-minute";
 const REPORT_LOOKUP: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='custom.client.observation-minute' AND json_extract(body,'$.fields.source')=?1 AND json_extract(body,'$.fields.report_id')=?2";
 const MINUTE_LOOKUP: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.observation-minute'";
-const LIVE_MINUTES: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='custom.client.observation-minute' AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)>=?1 AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)<=?2 ORDER BY subject";
+const LIVE_MINUTES: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims INDEXED BY claims_observation_minute_time_index WHERE kind='custom.client.observation-minute' AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)>=?1 AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)<=?2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +233,8 @@ mod tests {
         assert!(store.accept_observation_minutes("person/example", std::slice::from_ref(&minute)).unwrap());
         let append_independent = |origin: &str, member: Arc<smallclaims::fleet::MemberKey>, minute: &ObservationMinute| {
             let independent = Store::open_memory(origin).unwrap();
+            // Membership alone does not configure the local fleet used to sign exports.
+            independent.bind_fleet(fleet).unwrap();
             independent.pin_fleet_anchor(key.public()).unwrap();
             independent.set_member_key(Some(member.clone())).unwrap();
             independent.receive_replication_exchange("minute-fold", fleet, &baseline).unwrap();
@@ -242,10 +244,19 @@ mod tests {
                 smallclaims::fleet::Window::Keyed(keys) if keys.contains(member.public())));
             assert!(independent.accept_observation_minutes("person/example", std::slice::from_ref(minute)).unwrap());
             assert_eq!(independent.observation_minutes(120_000).unwrap(), vec![minute.clone()]);
+            let claim = independent.latest_claim(&minute.subject(), Some(KIND)).unwrap().unwrap();
             let exchange = independent.export_replication_exchange(fleet, &Default::default()).unwrap();
+            assert!(exchange.envelopes.iter().any(|envelope| envelope.writer == origin
+                && envelope.member_key.as_deref() == Some(member.public()) && envelope.signature.is_some()),
+                "{origin}: phone evidence must travel in a member-signed envelope");
             store.receive_replication_exchange(origin, fleet, &exchange).unwrap();
             store.validate_replication_backlog().unwrap();
             store.project_replication_backlog().unwrap();
+            assert!(store.claim_by_id(&claim.id).unwrap().is_some(),
+                "{origin}: replicated minute must be projected; rejected records: {:?}",
+                store.replica_records(true).unwrap());
+            assert!(admitted_minute(&store.readers.get(), &claim).unwrap().is_some(),
+                "{origin}: replicated admission must retain its signer and phone-source authority");
         };
         // Disconnected receivers admit against the same pre-report graph, then send
         // independently signed batches to the receiver through normal replication.
@@ -256,7 +267,7 @@ mod tests {
         conflict.count = 2;
         conflict.buckets = vec![(103, 2)];
         append_independent("minute-fold-conflict", conflict_key, &conflict);
-        assert!(store.observation_minutes(120_000).unwrap().is_empty());
+        assert_eq!(store.observation_minutes(120_000).unwrap(), Vec::<ObservationMinute>::new());
     }
 
     #[test]
