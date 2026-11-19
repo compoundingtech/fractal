@@ -12,6 +12,8 @@
 //! evidence. This API observes only; it never stops a process or unloads a scope.
 
 mod environment;
+mod exec_receipt;
+pub use exec_receipt::{argv_sha256, PayloadLaunchSnapshot, RepositoryObservation};
 pub mod host;
 pub mod host_envelope;
 mod isolate;

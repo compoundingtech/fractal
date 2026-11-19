@@ -8,6 +8,13 @@ use fractal_daemon::store::shell_resources::{self, Execution, PayloadResult};
 pub(super) enum ResourcesCommand {
     /// Wait for host admission, execute argv, and await confirmed retirement.
     Exec(ExecArgs),
+    /// Read one exact retired payload receipt; never selects the latest successful execution.
+    ExecReceipt {
+        #[arg(long)] step_run: String,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))] attempt: u32,
+        #[arg(long)] generation: Option<String>,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
+    },
     /// List shell executions and their host custody.
     Ls {
         #[arg(long)] host: Option<String>,
@@ -125,6 +132,7 @@ impl ResourcesCommand {
         match self {
             Self::Exec(args) => args.actor.as_deref(),
             Self::Ls { actor, .. } | Self::Show { actor, .. } | Self::Cancel { actor, .. }
+                | Self::ExecReceipt { actor, .. }
                 | Self::MemberScope { actor, .. } | Self::Hold { actor, .. } | Self::Release { actor, .. } => actor.as_deref(),
             Self::InMember { .. } => None,
         }
@@ -134,6 +142,12 @@ impl ResourcesCommand {
 pub(super) async fn run(client: &Client, person: Option<&str>, command: ResourcesCommand, json_output: bool) -> Result<()> {
     match command {
         ResourcesCommand::Exec(args) => execute(client, args).await,
+        ResourcesCommand::ExecReceipt { step_run, attempt, generation, .. } => {
+            let mut path = format!("/v1/internal/resources/exec-receipt?stepRun={}&attempt={attempt}", urlencoding::encode(&step_run));
+            if let Some(generation) = generation { path.push_str(&format!("&generation={}", urlencoding::encode(&generation))); }
+            let receipt: fractal_daemon::store::resource_exec_receipts::ReceiptReference = client.get(&path).await?;
+            print_value(&serde_json::to_value(receipt)?, json_output)
+        }
         ResourcesCommand::Ls { host, class, head, .. } => {
             let mut query = Vec::new();
             if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
@@ -503,7 +517,7 @@ mod tests {
         assert!(receipt["receipt_subject"].is_null());
         assert!(receipt["exit_code"].is_null());
         assert_eq!(receipt["argv"], json!(["tools/check", "unit"]));
-        assert_eq!(receipt["argv_sha256"], fractal_daemon::store::resource_exec_receipts::argv_sha256(&root.command.argv));
+        assert_eq!(receipt["argv_sha256"], fractal_runtime::argv_sha256(&root.command.argv));
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
         let mut completed = refused;
         completed.state = "completed".into();

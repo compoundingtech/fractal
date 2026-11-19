@@ -467,6 +467,34 @@ There is no independent indexed host/class filter in `claims ls`. These examples
 one page: continue an ascending query with `--after-index` set to the response's `next_cursor`
 until it is absent. Filter every page, including pages with no matching host/class rows.
 
+### Direct DSL/program proof lookup
+
+Direct DSL and program resource roots append the same `resource.exec-receipt` kind in the
+transaction confirming their owning membership's whole execution tree has retired. Their
+`state` is `retired`; `runtime_generation` and `retired_at` bind the exact physical attempt.
+Subjects are `resource/exec/{hex(head_start) or _}/root/{hex(host)}/{hex(runtime_id)}/{hex(generation)}`.
+Payload argv and the NUL-separated, no-trailing-NUL `argv_sha256` are frozen in the durable
+runtime launch before the payload gate opens, excluding daemon/credential/isolation wrappers.
+Repository observations are optional facts, not assertions inferred from current desired state.
+Historical launches without this snapshot, missing runtime outcomes, and nonlaunch refusals
+never manufacture a direct-root proof receipt. Existing shell receipt semantics are unchanged.
+
+Read one exact proof step and attempt (not the finalizer's own step ID):
+
+```sh
+fractal --json resources exec-receipt --step-run "$proof_step_run" --attempt "$proof_attempt"
+# Add --generation "$runtime_generation" when that step legitimately has multiple roots.
+```
+
+The typed store read is `Store::resource_exec_receipt(&ReceiptQuery) -> ReceiptReference`;
+HTTP is `GET /v1/internal/resources/exec-receipt?stepRun=...&attempt=...[&generation=...]`.
+The response includes `claimId`, `subject`, `origin`, and typed bound `fields`, never grants.
+Missing/ineligible binding, ambiguity and stale generation return typed
+`resource-receipt-*` errors. There is no latest-success selection. Run-bound callers may read
+other proof steps of their own run, so a light finalizer can execute after the resource scope
+closes. It must explicitly compare the proof's owner/attempt, expected host, argv digest,
+head/clean observations, class/profile and exit outcome before accepting evidence.
+
 ## Coverage and boundaries
 
 Linux uses systemd user scopes in named slices with process placement/readback before the payload

@@ -585,7 +585,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
         self.start(member)
     }
     /// A finite resource grant must never silently fall back to an ordinary detached start.
-    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _payload: &LaunchSpec, _operation: Option<&fractal_runtime::LaunchOperation>, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
     }
     fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
@@ -1002,10 +1002,10 @@ impl RuntimeControl for NativeRuntime {
     fn start_guarded(&self, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, operation, Some(guard))
     }
-    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, payload: &LaunchSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
         let mut backend_entered = false;
-        self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request)))
+        self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request, payload)))
     }
     fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
@@ -1223,7 +1223,7 @@ impl NativeRuntime {
         operation: Option<&fractal_runtime::LaunchOperation>,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
-        resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
+        resource: Option<(&Store, &crate::store::resource_membership::LaneRequest, &LaunchSpec)>,
     ) -> Result<()> {
         let exec = self.exec.clone().with_launch_operation(operation.cloned());
         let executable = launch_executable()?;
@@ -1241,6 +1241,16 @@ impl NativeRuntime {
                 }
             }
         }
+        let exec = if let Some((_, _, payload)) = resource {
+            let mut payload = fractal_runtime::Launch::from(payload);
+            match &mut payload {
+                fractal_runtime::Launch::Shell(source) => fractal_runtime::expand_path_placeholder(source, &environment),
+                fractal_runtime::Launch::Argv(argv) => {
+                    for value in argv { fractal_runtime::expand_path_placeholder(value, &environment); }
+                }
+            }
+            exec.with_payload_launch(payload)
+        } else { exec };
         // Resolve before crossing the PTY/isolation boundary; service-manager PATH is
         // unrelated to the environment captured from the account's login shell.
         match &mut launch {
@@ -1329,7 +1339,7 @@ impl NativeRuntime {
                 )
             }
         } else {
-            if let Some((store, request)) = resource {
+            if let Some((store, request, _)) = resource {
                 use crate::store::resource_membership::{Admission, Coverage};
                 let now = || u64::try_from(now_ms()).unwrap_or(u64::MAX);
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {

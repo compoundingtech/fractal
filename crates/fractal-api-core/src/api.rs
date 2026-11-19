@@ -663,6 +663,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/health", get(health))
         .route("/v1/internal/resources", get(resources::list))
         .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/exec-receipt", get(resources::exec_receipt))
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))

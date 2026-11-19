@@ -287,7 +287,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 backend_entered = true;
                 let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
-                    runtime.start_resource_guarded(&store, &prepared.launch_member, Some(&operation), &guard)?;
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, &prepared.member.launch, Some(&operation), &guard)?;
                 } else {
                     runtime.start_guarded(&prepared.launch_member, Some(&operation), &guard)?;
                 }
