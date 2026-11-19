@@ -52,3 +52,52 @@ fn newest_claim_reads_sort_only_the_newest_millisecond() {
     assert!(plan.contains("USE TEMP B-TREE FOR LAST"), "{plan}");
 }
 
+#[test]
+fn runtime_membership_decodes_only_the_status_it_needs_as_history_grows() {
+    let store = Store::open_memory("alder").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"declared\" { command \"true\" }", "alder",
+    ).unwrap();
+    declare(&store, &intent, "declared-seat");
+    let subjects = ["agent/alder.declared", "agent/stray-live", "agent/stray-stopped"]
+        .map(str::to_owned);
+    let mut written = 0;
+    for history in [8, 80] {
+        for sequence in written..history {
+            for subject in &subjects {
+                running(&store, subject, &format!("incarnation-{sequence}"));
+            }
+        }
+        written = history;
+        append(&store, &subjects[2], "runtime.observed", Some(&subjects[2]),
+            json!({"status": "stopped", "incarnation_id": format!("incarnation-{}", history - 1)}));
+        let index = store.index().unwrap();
+        let connection = store.readers.get();
+        let expected = subjects.iter().map(|subject| (
+            subject.clone(), runtime_view_entry(&connection, subject, index, true).unwrap(),
+        )).collect::<HashMap<_, _>>();
+
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let mut full = card_fold::CardReads::new(index);
+        store.agent_card_statuses(&connection, &subjects, index, &mut full).unwrap();
+        let full_bodies = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+        assert!(full_bodies >= history * subjects.len(), "{full_bodies}");
+
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let mut reads = card_fold::CardReads::new(index);
+        let views = store.runtime_view_entries(
+            &connection, &subjects, index, true, &mut reads,
+        ).unwrap();
+        let membership_bodies = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+        assert_eq!(membership_bodies, 2, "history={history}; full={full_bodies}");
+        for subject in &subjects {
+            let (actual, expected) = (&views[subject], &expected[subject]);
+            assert_eq!((actual.head, actual.history, actual.declared, &actual.owners),
+                (expected.head, expected.history, expected.declared, &expected.owners), "{subject}");
+        }
+        assert!(!views[&subjects[0]].history);
+        assert!(!views[&subjects[1]].history);
+        assert!(views[&subjects[2]].history);
+    }
+}
+

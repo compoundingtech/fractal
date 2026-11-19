@@ -591,7 +591,14 @@ fn a_claim_whose_signing_key_changes_after_preparation_is_signed_with_the_new_ke
             chain: vec!["claim/replacement-grant".into()],
         });
     });
-    assert_eq!(seal(&store), 1);
+    // The changed agent key belongs to the second batch. Keep both batches in one loan
+    // so this assertion measures invalidation, not whether a timed yield preceded it.
+    SEALS_PREPARED_AGAIN.with(|count| count.set(0));
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    while store.seal_local_batch_chunk_with_loan_budget(
+        target, usize::MAX, std::time::Duration::MAX,
+    ).unwrap() {}
+    assert_eq!(SEALS_PREPARED_AGAIN.with(Cell::get), 1);
     let payloads = payloads(&store.readers.get());
     let signature = &payloads["note/by-an-agent"].claim_signatures[&claim.id];
     assert_ne!(signature.key, minted.key.public());
@@ -611,12 +618,16 @@ fn a_keyring_change_in_progress_at_the_loan_prepares_again() {
     let mut connection = store.connection.write();
     let written = store.keyring.changing_while(|| {
         let transaction = connection.transaction().unwrap();
-        store.seal_prepared_tx(&transaction, &prepared).unwrap()
+        store.seal_prepared_tx(
+            &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+        ).unwrap()
     });
-    assert!(!written, "keys being changed are not a settled keyring");
+    assert!(written.is_none(), "keys being changed are not a settled keyring");
     let transaction = connection.transaction().unwrap();
     assert!(
-        store.seal_prepared_tx(&transaction, &prepared).unwrap(),
+        store.seal_prepared_tx(
+            &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+        ).unwrap().is_some(),
         "once the change completes without touching these claims' keys, the chunk is current"
     );
 }
@@ -656,10 +667,9 @@ fn keys_added_for_other_principals_before_every_loan_do_not_hold_sealing_back() 
     before_the_loan(add_a_bystander_key);
     assert_eq!(seal(&store), 0);
     SEAL_BEFORE_LOAN.with(|hook| hook.borrow_mut().take());
-    assert_eq!(
-        BYSTANDERS.with(Cell::get),
-        3,
-        "a key arrived before each loan"
+    assert!(
+        BYSTANDERS.with(Cell::get) >= 3,
+        "a key arrived before each loan; elapsed-time yields may split a count-bounded chunk"
     );
     assert_eq!(
         store.seeded_batch_rowid.load(Ordering::Acquire),
@@ -680,7 +690,15 @@ fn the_writer_selects_each_distinct_signer_once_however_many_claims_share_it() {
     // 60 notes and the node's grant of each agent's key: 62 batches, one chunk.
     assert_eq!(claims(&store.readers.get()).len(), 62);
     SIGNERS_SELECTED.with(|count| count.set(0));
-    assert_eq!(seal(&store), 0);
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let prepared = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(store.seal_prepared_tx(
+        &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+    ).unwrap(), Some(target));
+    transaction.commit().unwrap();
+    drop(connection);
     // The notes without an actor, each agent's notes, and the two grants, which the node issues
     // with its own key: four signer inputs, each selected once under the writer.
     assert_eq!(SIGNERS_SELECTED.with(Cell::get), 4);
@@ -726,7 +744,16 @@ fn two_key_grants_by_one_actor_with_different_issuers_are_selected_apart() {
         grant("agent/scribe", agent.key.public()),
     );
     SIGNERS_SELECTED.with(|count| count.set(0));
-    assert_eq!(seal(&store), 0);
+    // Selection is deduplicated per loan, so publish once without a timed boundary.
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let prepared = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(store.seal_prepared_tx(
+        &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+    ).unwrap(), Some(target));
+    transaction.commit().unwrap();
+    drop(connection);
     // The agent's note, the node's grants (the minted key's and `by_node`, the same input), and
     // `by_agent`.
     assert_eq!(SIGNERS_SELECTED.with(Cell::get), 3);
@@ -760,16 +787,93 @@ fn a_preparation_is_written_only_to_the_store_it_was_prepared_from() {
     keyed(&other);
     let mut connection = other.connection.write();
     let transaction = connection.transaction().unwrap();
-    assert!(!other.seal_prepared_tx(&transaction, &prepared).unwrap());
+    assert!(other.seal_prepared_tx(
+        &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+    ).unwrap().is_none());
     drop(transaction);
     drop(connection);
     let mut connection = prepared_on.connection.write();
     let transaction = connection.transaction().unwrap();
     assert!(
         prepared_on
-            .seal_prepared_tx(&transaction, &prepared)
-            .unwrap()
+            .seal_prepared_tx(
+                &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+            )
+            .unwrap().is_some()
     );
+}
+
+#[test]
+fn sealing_yields_between_atomic_batches_and_preserves_every_sealed_row() {
+    let store = node("budgeted");
+    let key = keyed(&store);
+    for index in 0..4 {
+        note(&store, &format!("note/yield-{index}"), BTreeMap::new());
+    }
+    // Fix nonce-bearing claim signatures so byte-for-byte comparison is meaningful.
+    for claim in claims(&store.readers.get()) {
+        let signature = store.sign_unsealed(&unsealed(&claim)).unwrap();
+        principals::store_claim_signature_tx(
+            &store.connection.write(), &claim.id, &signature,
+        ).unwrap();
+    }
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let expected = sealed_by_the_old_passes(&store, sealed_rows);
+    let mut previous = store.seeded_batch_rowid.load(Ordering::Acquire);
+    for count in 1..=4 {
+        assert!(store.seal_local_batch_chunk_with_loan_budget(
+            target, usize::MAX, std::time::Duration::ZERO,
+        ).unwrap());
+        let through = store.seeded_batch_rowid.load(Ordering::Acquire);
+        assert!(through > previous);
+        // Exactly one batch progresses per exhausted loan, not the whole prepared page.
+        // The returned loan also permits a foreground transaction before the next seal.
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let envelopes: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(envelopes, count);
+        let durable: String = transaction.query_row(
+            "SELECT value FROM meta WHERE key='seeded_batch_rowid'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(durable, through.to_string());
+        transaction.commit().unwrap();
+        previous = through;
+    }
+    assert_eq!(previous, target);
+    assert!(!store.seal_local_batch_chunk_with_loan_budget(
+        target, usize::MAX, std::time::Duration::ZERO,
+    ).unwrap());
+    assert_eq!(sealed_rows(&store.readers.get()), expected);
+    assert_eq!(envelopes_signed_by(&store.readers.get(), &key, FLEET), 4);
+}
+
+#[test]
+fn an_uncommitted_seal_prefix_leaves_no_partial_envelope_or_signatures() {
+    let store = node("rolled-back");
+    keyed(&store);
+    for index in 0..2 {
+        note(&store, &format!("note/rollback-{index}"), BTreeMap::new());
+    }
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let before = sealed_rows(&store.readers.get());
+    let frontier = store.seeded_batch_rowid.load(Ordering::Acquire);
+    let prepared = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let through = store.seal_prepared_tx(
+            &transaction, &prepared, std::time::Instant::now(), std::time::Duration::ZERO,
+        ).unwrap().unwrap();
+        assert!(through < target);
+        assert_ne!(sealed_rows(&transaction), before);
+        // Dropping the transaction models interruption before the atomic publication commit.
+    }
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), frontier);
+    assert_eq!(sealed_rows(&store.readers.get()), before);
+    assert_eq!(seal(&store), 0);
+    assert_eq!(payloads(&store.readers.get()).len(), 2);
 }
 
 #[test]

@@ -12,9 +12,9 @@
 # test-archive setup does.
 #
 # The stages start daemons and harnesses, so they run with a home of their own: HOME and the XDG state, config, data and cache
-# directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
-# nothing they start can read or write this account's st state, harness configuration or credentials, and no PATH entry
-# inside the account's st state (a seat's command recorder) stays. Two things are kept:
+# directories are a scratch directory that is removed afterwards, and no Fractal, GitHub or SSH agent variable reaches them, so
+# nothing they start can read or write this account's Fractal state, harness configuration or credentials, and no PATH entry
+# inside the account's Fractal state (a seat's command recorder) stays. Two things are kept:
 # the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
 # admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
 #
@@ -113,12 +113,12 @@ while IFS='=' read -r -d '' name value; do
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
-# A seat's PATH can start with directories inside the account's st state (a command recorder); those leave it too.
-st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
+# A seat's PATH can start with directories inside the account's Fractal state (a command recorder); those leave it too.
+fractal_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 kept=()
 IFS=':' read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
+  case "$entry" in "$fractal_state"|"$fractal_state"/*) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 # Cargo looks for a subcommand (clippy, fmt) in $CARGO_HOME/bin before PATH unless PATH names that directory, and an account's

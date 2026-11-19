@@ -363,7 +363,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut member = member;
             resource_lanes::set_request(&mut member, &record.request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
                 let current = self.store.step_run(&request.step)?.context("program step disappeared before payload release")?;
                 anyhow::ensure!(current.attempt == request.attempt && program::RUNNING_STATES.contains(&current.status.as_str()),
                     "program attempt was cancelled before payload release");

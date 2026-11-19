@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through Fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 // Some fleet commands historically print prose even with --json. Keep those bytes
@@ -446,7 +446,7 @@ async fn lock_fleet_admission(
     let mut state_identity = if client.get::<Value>("/v1/health").await.is_ok() {
         anyhow::ensure!(
             services,
-            "stop the running st3 daemon first: nothing may write while this machine {verb}"
+            "stop the running fractal daemon first: nothing may write while this machine {verb}"
         );
         fractal_daemon::service::stop()?;
         fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await?
@@ -821,7 +821,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             if use_services {
                 fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
                 if !json_output {
-                    println!("The st services now run as a fleet member.");
+                    println!("The fractal services now run as a fleet member.");
                 }
                 if !args.no_wait {
                     match wait_for_first_sync(&client, Duration::from_secs(30 * 60), !json_output)
@@ -987,6 +987,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 status.node
             );
             println!("TRANSPORTS  {}", status.transports.join(","));
+            println!(
+                "REPLICATION  {}  {}",
+                status.replication_health.status(),
+                status.replication_health.message(),
+            );
             if let Some(protocol) = &status.fabric_protocol {
                 println!("FABRIC-PROTOCOL  {protocol}");
             }
@@ -1496,7 +1501,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         )?;
         state_identity.record_fleet_found(&founded)?;
         println!(
-            "{} is the anchor of fleet {}. It admits itself and signs its history when st3 starts.",
+            "{} is the anchor of fleet {}. It admits itself and signs its history when fractal starts.",
             founded.node, founded.fleet_id
         );
     } else {

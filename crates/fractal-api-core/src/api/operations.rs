@@ -114,7 +114,13 @@ pub async fn doctor(
             ),
         });
     }
-    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
+    let slo_store = reader_store.clone();
+    let slo_report = blocking_store(move || {
+        let mut report = request_latency_windows();
+        super::client_observations::attach(&slo_store, &mut report, client_now_ms() as u64)?;
+        Ok(report)
+    }).await?;
+    for (name, status, message) in crate::slo::doctor_lines(&slo_report) {
         report.checks.push(DoctorCheck {
             name,
             status: status.into(),

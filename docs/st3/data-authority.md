@@ -26,6 +26,14 @@ not a replicated projection. Its receipts survive projection reconstruction and
 remain outside shared logical rows and projection digests. Constructors install
 its empty schema before returning the store, without making run admission decisions.
 
+`shell_environment_scrub_v1` is host-local security migration authority. Its single
+completion marker is read by shell-resource schema initialization to skip a completed
+historical environment scrub. It is written only after rewriting the local rows,
+vacuuming and checkpointing their physical storage. Like local cleanup receipts and
+secret registrations, it is neither a shared projection nor reconstructible from
+claims, and remains outside replication and shared projection digests. Importing
+another host's completion marker would not prove erasure of this database.
+
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
 pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
@@ -34,6 +42,23 @@ Explicit unregistration, pairing revocation/replacement and expiry remove them. 
 or losing this local table loses registrations; recovery requires the phone to register
 again with a valid locally issued pairing, not a graph replay. Full local database backups
 contain these secrets and must remain private; a graph-only backup cannot recover them.
+
+Phone service minutes are durable `custom.client.observation-minute` claims, not
+member-local observations or diagnostic JSONL. The phone persists an exact report
+before upload; paired ingestion atomically records its minute summaries and
+trusted operation receipts. The logical source binds the authenticated person
+and device, independently of the receiving member or a replacement pairing grant.
+Exact retries collapse by source/target/carrier/path/minute. Conflicting replicated
+content for the same minute supplies unknown evidence, not a chosen winner or a
+second population. Native iOS objectives fold these claims fleet-wide; absent
+minutes and absent foreground time are never inferred to be zero or healthy.
+The held client request-latency diagnostic retains its existing local admission,
+JSONL and in-memory phone windows until its separately authorized cutover.
+Those local windows are diagnostic-only and never supply native objective rows
+or doctor verdicts. A replacement pairing on the same process can still meet the
+legacy diagnostic report-scope conflict after the durable graph deduplicates it;
+activation must resolve that boundary rather than interpreting the refusal as
+missing fleet evidence.
 
 ## Large inline values
 
@@ -361,6 +386,7 @@ order from the same admitted claims.
 | `claim_signature_reference_migration` | Local representation progress | Durable phase and keyset cursor for bounded inline-text to reference conversion after authorization bootstrap. Not replicated and not an authorization-readiness gate. |
 | `claim_signature_nonce_uses` | Shared incremental projection | Cryptographically matching key/nonce use per live claim, including non-winning candidates. Invalid signature bytes cannot reserve another key's nonce; deletion invalidates affected dependencies before removing use. |
 | `claim_signatures` | Shared projection | Best candidate under current authority: Verified before Held before Invalid, then normalized signature bytes. Every candidate contributes authority dependencies and matching nonce use, including non-winners. Readers pin one complete legacy or candidate model. |
+| `claim_verdict_dependency_keys`, `claim_verdict_dependency_edges` | Local derived dependency index | Additive integer dictionary (`id`, unique `link`) and edges (`dependency_id`, `claim_id`), with reverse index `claim_verdict_dependency_edges_claim(claim_id, dependency_id)`. Outside shared digests and replay authority. The read-only `claim_verdict_dependency_links(link, claim_id)` view unions legacy links with dictionary-joined edges using `UNION ALL`; invalidation deduplicates claim IDs in canonical claim-ID order, at most 1,024 per page. Reader ceiling is 22, default writer remains 20, and newly recorded dependencies still target `claim_verdict_links`, including when opening version-22 stores. Installation neither converts existing links nor activates production integer writes. |
 | `claim_verdict_fresh`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdicts` | Local cache of shared outcomes | Current-authority candidate fold and dependency work, outside replication digests and rebuilt by `recheck_claim_verdicts`. Links accumulate conservatively per page until claim removal or explicit recheck; completing a judgment does not rewrite its whole dependency set. Property tests compare inventory, selection, verdicts and recomputation across shuffled, split and duplicate delivery. |
 | `claims` | Shared storage, with stated local fields | Shared immutable logical claim bytes/id/subject/kind/actor/predecessors/time. store_index alone is local; system-local/legacy migrated claims must be excluded from logical replicated-source digests. |
 | `coordination_sends` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |

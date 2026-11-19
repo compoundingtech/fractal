@@ -204,7 +204,7 @@ mission "garden-docs" state="ready" {{
         .create_mission_run(&MissionRunRequest {
             mission: "garden-docs".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/alex".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),

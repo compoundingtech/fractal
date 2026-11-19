@@ -20,6 +20,8 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod idle_residency;
+mod residency_evidence;
 pub mod launch_freeze;
 pub mod resource_membership;
 pub mod resource_admission_objectives;
@@ -295,6 +297,7 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 mod run_fence;
+pub mod observation_minutes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rebuild_observer;
 pub mod revision_seats;
@@ -849,7 +852,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfc9ed02b4ad7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5268709f026 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -859,6 +862,13 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Phone admission seeks one stable source/report; evaluation seeks only the retained hour.
+CREATE INDEX IF NOT EXISTS claims_observation_report_index
+ON claims(json_extract(body,'$.fields.source'), json_extract(body,'$.fields.report_id'))
+WHERE kind='custom.client.observation-minute';
+CREATE INDEX IF NOT EXISTS claims_observation_minute_time_index
+ON claims(CAST(json_extract(body,'$.fields.start_ms') AS INTEGER), subject)
+WHERE kind='custom.client.observation-minute';
 -- Shared action-key admission must seek one actor/key, never scan retained resolutions.
 CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
 ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
@@ -883,6 +893,12 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_idle_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
+CREATE INDEX IF NOT EXISTS claims_suspension_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume');
 CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
 ON claims(subject, json_extract(body, '$.fields.request_key'))
 WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
@@ -2449,6 +2465,8 @@ const TRIM_SCAN_PAGE: i64 = 5_000;
 pub struct Store {
     /// Identity of this open, including same-process reopen or restore.
     membership_lifetime: uuid::Uuid,
+    /// Live shell launch values never enter durable executions or claims.
+    shell_environments: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2971,6 +2989,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3005,6 +3024,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3040,6 +3060,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -6474,6 +6495,38 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    const HOSTED_SUBJECTS_SQL: &str =
+        "SELECT subject, member FROM desired
+         WHERE subject IN (SELECT value FROM json_each(?1)) AND member IS NOT NULL";
+
+    /// Requested subjects whose current member is readable by this build and belongs to
+    /// `host`. Do not read declaration bodies: freshness authorization needs only membership.
+    pub fn hosted_subjects(&self, subjects: &[&str], host: &str) -> Result<BTreeSet<String>> {
+        if subjects.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        for subject in subjects {
+            smallclaims::touched::note_read(|| (*subject).to_owned());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h88521c22b258 owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::HOSTED_SUBJECTS_SQL)?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut hosted = BTreeSet::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row, including unreadable or forward-version members.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                hosted.insert(subject);
+            }
+        }
+        Ok(hosted)
+    }
+
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
@@ -9699,6 +9752,9 @@ fn validate_claim_cardinality(
 ) -> Result<(), FractalError> {
     let duplicate = match cardinality {
         fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition => false,
+        fractal_schema::Cardinality::Once if kind == observation_minutes::KIND => {
+            observation_minutes::admitted_minute_exists(transaction, subject)?
+        }
         fractal_schema::Cardinality::Once => transaction
             .query_row(
                 "SELECT 1 FROM claims WHERE subject=?1 AND kind=?2 LIMIT 1",
@@ -11329,7 +11385,7 @@ pub fn desired_lineage_from_tx(
 }
 
 /// `desired_lineage_from_tx` over the claims accepted at or before `at`.
-fn desired_lineage_from_at_tx(
+pub(crate) fn desired_lineage_from_at_tx(
     connection: &Connection,
     mut current: String,
     equivalent: fn(&Value, &Value) -> bool,
@@ -22933,8 +22989,8 @@ pub fn apply_effective_step_state_with_owner(
         run_phase,
         current_generation,
         generation_status,
-        root_status,
-        root_phase,
+        _root_status,
+        _root_phase,
     )) = owner
     else {
         return Ok(());
@@ -22957,13 +23013,13 @@ pub fn apply_effective_step_state_with_owner(
             }
         }
     }
+    // Cancellation is a durable owner/generation transition, not a presentation
+    // inference from the root. The shared descendant traversal performs that transition.
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
         || run_phase == "terminal"
         || is_terminal_generation_state(&generation_status)
         || generation_id != current_generation
-        || is_terminal_run_state(&root_status)
-        || root_phase == "terminal"
     {
         if !matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
             view.status = "cancelled".into();
@@ -23170,8 +23226,17 @@ pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
+    // A root owns subscription deliveries by root identity, even though their
+    // synthetic parent subjects have no step_runs row. Keep generation-scoped
+    // ordinary child traversal for non-root runs and revision retirement.
     let mut statement = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h2f4e2cad1b68 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+        /* sqlite-large-value: allow-for-now lv-hd5e2a1b1feaa owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+           SELECT child.id
+           FROM run_generations generation
+           JOIN mission_runs root ON root.id=generation.run_id AND root.root_run_id=root.id
+           JOIN mission_runs child ON child.root_run_id=root.id AND child.id<>root.id
+           WHERE generation.id=?1
+           UNION
            SELECT child.id
            FROM mission_runs child
            JOIN step_runs parent_step ON parent_step.subject=child.parent_step_run
@@ -24647,6 +24712,9 @@ pub struct ClaimCommitContext<'a> {
     pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Suspension/launch frontier read with an admitted mailbox staged/delivered decision.
+    /// Revalidate under the receipt writer lock so quiescing cannot race intake.
+    pub mailbox_intake_frontier: Option<u64>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
     /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
@@ -24702,6 +24770,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if input.kind == observation_minutes::KIND {
+            return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
+        }
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
@@ -24827,6 +24898,15 @@ pub fn append_claim_with_commit_context(
             let fence = normalized_fence.as_deref();
             let settled_receipt = if let Some(fence) = fence {
                 check_mailbox_fence(transaction, fence, &graph.origin)?;
+                if let Some(frontier) = context.mailbox_intake_frontier
+                    && matches!(input.kind.as_str(), "message.staged" | "message.delivered")
+                    && crate::suspension::mailbox_intake_index(transaction, &fence.subject).map_err(internal)? != frontier
+                {
+                    return Err(FractalError::new(
+                        "seat-suspension-changed",
+                        "the seat's suspension or launch changed before delivery was recorded",
+                    ));
+                }
                 let index = transaction.query_row(
                     "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),

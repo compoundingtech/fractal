@@ -88,7 +88,7 @@ mod canonical_agent_actor_tests {
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hda2609356de5 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb3804616e3d3 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -209,6 +209,39 @@ event, and once folds the claims that predate the triggers, tracked by `claim_ra
 takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
 loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
 import are both empty. Nothing reads them yet.
+
+## Verdict dependency readers
+
+The default writer storage version remains 20; readers accept through version 22 without
+lowering an existing marker. Version-21 signature-reference behavior is unchanged.
+Initialization installs the following empty local derived index and read-only union view:
+
+```sql
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_keys (
+    id INTEGER PRIMARY KEY,
+    link TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_edges (
+    dependency_id INTEGER NOT NULL REFERENCES claim_verdict_dependency_keys(id)
+        DEFERRABLE INITIALLY DEFERRED,
+    claim_id TEXT NOT NULL,
+    PRIMARY KEY(dependency_id,claim_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_verdict_dependency_edges_claim
+    ON claim_verdict_dependency_edges(claim_id,dependency_id);
+CREATE VIEW IF NOT EXISTS claim_verdict_dependency_links AS
+    SELECT link,claim_id FROM claim_verdict_links
+    UNION ALL
+    SELECT k.link,e.claim_id FROM claim_verdict_dependency_keys k
+    JOIN claim_verdict_dependency_edges e ON e.dependency_id=k.id;
+```
+
+Readers conservatively include both dependency representations. Paged invalidation deduplicates
+claim IDs before applying canonical claim-ID order and the 1,024-row limit. Newly recorded
+dependencies still use `claim_verdict_links`, including in version-22 stores; this reader release
+does not populate integer edges, convert existing links, or activate a production writer cutover.
+These tables and their view are local caches outside shared digests, replicated claim vocabulary
+and historical reconstruction. Installation requires neither claim replay nor a history scan.
 "#;
 
 pub fn storage_digest() -> String {
@@ -2554,6 +2587,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "custom.client.observation-minute", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Once, None, false, &[],
+        ),
+        (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
         ),
@@ -4182,6 +4219,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("request_digest", required_string()),
             ("result", FieldSpec { required: true, ..object() }),
         ],
+        "custom.client.observation-minute" => &[
+            ("source", required_string()),
+            ("pairing_grant", required_string()),
+            ("report_id", required_string()),
+            ("report_digest", required_string()),
+            ("target", required_string()),
+            ("carrier", required_enum(&["fabric", "tailscale", "lan"])),
+            ("path", string()),
+            ("start_ms", required_integer()),
+            ("count", required_integer()),
+            ("over", required_integer()),
+            ("max_ms", required_integer()),
+            ("buckets", required_array()),
+        ],
         "agent.helper-launched" => &[
             ("launcher", required_reference_to(&["agent"])),
             ("person", reference_to(&["person"])),
@@ -4392,6 +4443,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "runtime.action.requested" => &[
             ("action", string()),
             ("cause", string()),
+            ("idle_declaration", string()),
+            ("idle_after_ms", integer()),
+            ("idle_enabled_at_unix_ms", integer()),
+            ("idle_eligible_since_unix_ms", integer()),
+            ("idle_frontier", object()),
+            ("suspend_operation_id", string()),
+            ("idle_wake_lineage", string()),
+            ("idle_wake_attempt", integer()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -5573,6 +5632,7 @@ mod tests {
         current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("custom.client.observation-minute").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
         for kind in attention_controls::KINDS {
@@ -5621,6 +5681,11 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
+            "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
+            "idle_wake_lineage", "idle_wake_attempt"] {
+            current.claims.get_mut("runtime.action.requested").unwrap().fields.remove(field).unwrap();
+        }
         for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
             for field in ["cause", "mode", "request_key", "operation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
@@ -6228,6 +6293,28 @@ mod tests {
                 .code,
             "unknown-resource-field"
         );
+    }
+
+    #[test]
+    fn phone_minute_summaries_are_durable_once_and_not_publicly_writable() {
+        let kind = "custom.client.observation-minute";
+        let fields = serde_json::from_value(serde_json::json!({
+            "source": "person/avery/device/example",
+            "pairing_grant": "custom/client/pairing-example",
+            "report_id": "11111111-1111-4111-8111-111111111111",
+            "report_digest": "a".repeat(64),
+            "target": "ios-connect", "carrier": "fabric", "path": "direct",
+            "start_ms": 0, "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+        })).unwrap();
+        let subject = "custom/client/observation-minute-example";
+        let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+        assert_eq!(spec.retention, Retention::Durable);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert!(!spec.wakes_reconciler);
+        for actor in [None, Some("person/avery"), Some("agent/example")] {
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, actor)
+                .unwrap_err().code, "claim-write-forbidden");
+        }
     }
 
     #[test]
