@@ -15585,8 +15585,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         for request in engine.requests(&run.subject) {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
-                program::Wait::Start { mission, input, run_id } =>
-                    self.settle_program_start(engine, run, &request, mission, input, run_id)?,
+                program::Wait::Start { mission, input, run_id, report_to } =>
+                    self.settle_program_start(engine, run, &request, mission, input, run_id, report_to.as_deref())?,
                 program::Wait::Await { child } =>
                     self.settle_program_await(engine, run, &request, child)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
@@ -15597,6 +15597,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
+    #[allow(clippy::too_many_arguments)] // The journal, parent and publication contract remain explicit at this boundary.
     fn settle_program_start(
         &self,
         engine: &program::ProgramEngine,
@@ -15605,9 +15606,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         mission: &str,
         input: &BTreeMap<String, String>,
         run_id: &str,
+        report_to: Option<&str>,
     ) -> Result<bool> {
         match self.start_program_child(run, &request.step, mission, input,
-            request.idempotency_key(), None, Some(run_id)) {
+            request.idempotency_key(), None, Some(run_id), report_to) {
             Ok(child) => {
                 engine.waiting(request, &child.subject)?;
                 engine.resolve(request, &child.subject,
@@ -15675,7 +15677,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
             self.note_mission_capacity_holders(mission)?;
-            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None, None) {
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None, None, None) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
@@ -15707,6 +15709,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// The one place a program starts a child run: linked to the program step, for the parent
     /// run's requester, in its workspace.
+    #[allow(clippy::too_many_arguments)] // Shared legacy/named child boundary; routing never substitutes for ownership.
     fn start_program_child(
         &self,
         run: &MissionRunView,
@@ -15716,6 +15719,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         idempotency_key: String,
         resource: Option<&crate::store::resource_membership::Membership>,
         public_run_id: Option<&str>,
+        report_to: Option<&str>,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
         let inherited = if resource.is_none() {
             self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?
@@ -15744,13 +15748,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if let Some(id) = public_run_id
                     && self.store.mission_run_status(&child).map_err(smallclaims::error::typed)?.is_some()
                 {
-                    return self.store.create_named_program_child_mission_run(&request, run, step, id);
+                    return self.store.create_named_program_child_mission_run(&request, run, step, id, report_to);
                 }
                 return Err(smallclaims::error::typed(error));
             }
         }
         let result = match public_run_id {
-            Some(id) => self.store.create_named_program_child_mission_run(&request, run, step, id),
+            Some(id) => self.store.create_named_program_child_mission_run(&request, run, step, id, report_to),
             None => self.store.create_program_child_mission_run(&request, run, step),
         };
         if let (Some(context), Err(error)) = (context, &result)

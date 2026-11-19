@@ -378,26 +378,28 @@ export function run(
 /**
  * Publishes a linked child before returning its handle. `id` is the journal key, while
  * `runId` is the public mission-run declaration ID. Cancellation remains linked to the parent.
+ * Optional `reportTo` routes reports to an agent subject without changing inherited authority.
  */
 export function start<I extends InputSchema>(
   mission: ProgramMission<I, any, any>,
   input: I['Type'],
-  options: { readonly id: string; readonly runId: string },
+  options: { readonly id: string; readonly runId: string; readonly reportTo?: string },
 ): Effect.Effect<ChildHandle, ChildConflict, ProgramServices>
 export function start(
   mission: string,
   input: Readonly<Record<string, string>>,
-  options: { readonly id: string; readonly runId: string },
+  options: { readonly id: string; readonly runId: string; readonly reportTo?: string },
 ): Effect.Effect<ChildHandle, ChildConflict, ProgramServices>
 export function start(
   mission: string | ProgramMission<InputSchema, Codec, unknown>,
   input: object,
-  options: { readonly id: string; readonly runId: string },
+  options: { readonly id: string; readonly runId: string; readonly reportTo?: string },
 ): Effect.Effect<ChildHandle, ChildConflict, ProgramServices> {
   const publish = (mission: string, input: Readonly<Record<string, string>>) =>
     keyed(options.id, (key, program) => {
       program.requests.set(key, () => program.host.child({
         key, mission, input, mode: 'start', runId: options.runId,
+        ...(options.reportTo === undefined ? {} : { reportTo: options.reportTo }),
       }))
       return DurableDeferred.await(
         DurableDeferred.make(key, { success: ChildHandle, error: ChildConflict }),

@@ -50,7 +50,7 @@ enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
     Declaration(MissionWorkspaceDeclaration),
-    NamedProgram,
+    NamedProgram { report_to: Option<&'a str> },
 }
 
 /// The first canonical creation receipt is immutable authority; requester is attribution only.
@@ -639,6 +639,7 @@ impl Store {
         request: &MissionRunRequest,
         child: ChildMissionContext,
         run_id: &str,
+        report_to: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
         let subject = if run_id.starts_with("mission-run/") {
             run_id.to_owned()
@@ -646,8 +647,11 @@ impl Store {
             format!("mission-run/{run_id}")
         };
         crate::declaration_syntax::validate_full_subject(&subject)?;
+        if let Some(report_to) = report_to {
+            crate::mission::validate_report_to(report_to)?;
+        }
         self.create_mission_run_context(request, Some(child), Some(&subject), None,
-            Some(RunCreationSource::NamedProgram), None, None)
+            Some(RunCreationSource::NamedProgram { report_to }), None, None)
     }
 
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
@@ -769,12 +773,16 @@ impl Store {
         provided_transaction: Option<&Transaction<'_>>,
         principal: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
-        let explicit_program_id = matches!(&source, Some(RunCreationSource::NamedProgram));
+        let explicit_program_id = matches!(&source, Some(RunCreationSource::NamedProgram { .. }));
+        let report_to = match &source {
+            Some(RunCreationSource::NamedProgram { report_to }) => *report_to,
+            _ => None,
+        };
         let (retry, supersession, workspace_declaration) = match source {
             Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
             Some(RunCreationSource::Supersession(source, publication)) => (None, Some((source, publication)), None),
             Some(RunCreationSource::Declaration(declaration)) => (None, None, Some(declaration)),
-            Some(RunCreationSource::NamedProgram) => (None, None, None),
+            Some(RunCreationSource::NamedProgram { .. }) => (None, None, None),
             None => (None, None, None),
         };
         let mission_identity = match provided_transaction {
@@ -813,6 +821,9 @@ impl Store {
         });
         if explicit_program_id {
             request_identity["public_subject"] = json!(occurrence_subject);
+            if let Some(report_to) = report_to {
+                request_identity["report_to"] = json!(report_to);
+            }
         }
         if let Some((source, options)) = retry {
             request_identity["retry"] = json!((&source.subject, options));
@@ -1169,7 +1180,7 @@ impl Store {
         if let Some(declaration) = workspace_declaration {
             body["fields"]["workspace_declaration"] = serde_json::to_value(declaration).map_err(internal)?;
         }
-        add_run_report_fields(&mut body, &mission, None, false);
+        add_run_report_fields(&mut body, &mission, report_to, false);
         append_receipt_claim_tx(
             transaction,
             &self.origin,

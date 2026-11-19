@@ -140,7 +140,7 @@ pub enum Wait {
     /// A linked child run of `mission` with these inputs.
     Run { mission: String, input: BTreeMap<String, String> },
     /// Publish a named linked child, resolving at committed creation rather than termination.
-    Start { mission: String, input: BTreeMap<String, String>, run_id: String },
+    Start { mission: String, input: BTreeMap<String, String>, run_id: String, report_to: Option<String> },
     /// Observe an existing child linked to this parent.
     Await { child: String },
     /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
@@ -1316,7 +1316,12 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
             .map_err(|_| "`input` must map each mission input to a string".to_owned())?;
         let mission = mission.strip_prefix("mission/").unwrap_or(&mission).to_owned();
         if message["mode"] == "start" {
-            return Ok(Wait::Start { mission, input, run_id: text("runId")? });
+            let report_to = match &message["reportTo"] {
+                Value::Null => None,
+                Value::String(value) => Some(value.clone()),
+                _ => return Err("`reportTo` must name an agent".into()),
+            };
+            return Ok(Wait::Start { mission, input, run_id: text("runId")?, report_to });
         }
         return Ok(Wait::Run { mission, input });
     }

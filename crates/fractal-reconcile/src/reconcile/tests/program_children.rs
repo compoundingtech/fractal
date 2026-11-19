@@ -39,10 +39,11 @@ export default {
     if (ctx.payload.mode === 'await-foreign') {
       return ctx.child({ key: 'observe', mode: 'await', run: 'mission-run/pr-42-head12' })
     }
-    if (['start', 'start-await', 'start-invalid'].includes(ctx.payload.mode)) {
+    if (['start', 'start-await', 'start-invalid', 'start-reported'].includes(ctx.payload.mode)) {
       const published = await wait(ctx, 'publish', () => ctx.child({
         key: 'publish', mode: 'start', runId: ctx.payload.mode === 'start-invalid' ? 'invalid id' : 'pr-42-head12',
         mission: 'program-child', input: { head: 'h1' },
+        ...(ctx.payload.mode === 'start-reported' ? { reportTo: 'agent/pr/author' } : {}),
       }))
       if (published._tag === 'Failure') return published
       if (ctx.payload.mode === 'start-await') {
@@ -646,7 +647,7 @@ fn named_start_lost_ack_adopts_one_child_and_replays_after_host_restart() {
         idempotency_key: format!("program:{}:1:publish", parent.step),
     };
     let child = fixture.store.create_named_program_child_mission_run(
-        &request, &run, &parent.step, "pr-42-head12").unwrap();
+        &request, &run, &parent.step, "pr-42-head12", None).unwrap();
     fixture.until("lost acknowledgement is recovered", ||
         fixture.result(&parent.step, "publish", 1).is_some());
     assert_eq!(fixture.result(&parent.step, "publish", 1),
@@ -679,9 +680,9 @@ fn named_child_public_id_conflicts_are_atomic_and_old_child_replay_still_adopts(
         idempotency_key: "named-contract".into(),
     };
     let child = fixture.store.create_named_program_child_mission_run(
-        &request, &parent_a, &a.step, "pr-42-head12").unwrap();
+        &request, &parent_a, &a.step, "pr-42-head12", None).unwrap();
     let replay = fixture.store.create_named_program_child_mission_run(
-        &request, &parent_a, &a.step, "mission-run/pr-42-head12").unwrap();
+        &request, &parent_a, &a.step, "mission-run/pr-42-head12", None).unwrap();
     assert_eq!(child.subject, replay.subject);
     let mut different_input = request.clone();
     different_input.inputs.insert("head".into(), "h2".into());
@@ -690,7 +691,7 @@ fn named_child_public_id_conflicts_are_atomic_and_old_child_replay_still_adopts(
         (&request, &parent_b, &b.step),
     ] {
         let error = fixture.store.create_named_program_child_mission_run(
-            contract, parent, step, "pr-42-head12").unwrap_err();
+            contract, parent, step, "pr-42-head12", None).unwrap_err();
         assert_eq!(error.code, "child-conflict");
     }
     let mut different_operation = request.clone();
@@ -702,7 +703,7 @@ fn named_child_public_id_conflicts_are_atomic_and_old_child_replay_still_adopts(
     assert_eq!(existing_occurrence.subject, child.subject);
     assert_eq!(existing_occurrence.inputs["head"].value, "h1");
     assert_eq!(fixture.store.create_named_program_child_mission_run(
-        &different_operation, &parent_a, &a.step, "pr-42-head12").unwrap_err().code, "child-conflict");
+        &different_operation, &parent_a, &a.step, "pr-42-head12", None).unwrap_err().code, "child-conflict");
     assert!(fixture.children(&b.step).is_empty());
     fixture.complete_child(&child.subject);
     fixture.store.set_mission_run_state(&child.subject, "completed", "terminal", None).unwrap();
@@ -778,16 +779,83 @@ fn explicit_child_conflicts_never_rebind_or_release_existing_resource_custody() 
     let lane_b = membership("lane-b", &parent_b, &b.step);
     let input = BTreeMap::from([("head".into(), "h1".into())]);
     let child = fixture.reconciler.start_program_child(&parent_a, &a.step, "program-child",
-        &input, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12")).unwrap();
+        &input, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12"), None).unwrap();
     let conflict = fixture.reconciler.start_program_child(&parent_b, &b.step, "program-child",
-        &input, "resource-creator-b".into(), Some(&lane_b), Some("pr-42-head12")).unwrap_err();
+        &input, "resource-creator-b".into(), Some(&lane_b), Some("pr-42-head12"), None).unwrap_err();
     assert_eq!(conflict.code, "child-conflict");
     let changed = BTreeMap::from([("head".into(), "h2".into())]);
     let conflict = fixture.reconciler.start_program_child(&parent_a, &a.step, "program-child",
-        &changed, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12")).unwrap_err();
+        &changed, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12"), None).unwrap_err();
     assert_eq!(conflict.code, "child-conflict");
     let original = fixture.store.resource_membership_record("lane-a", &lane_a.request.owner).unwrap();
     let rejected = fixture.store.resource_membership_record("lane-b", &lane_b.request.owner).unwrap();
     assert_eq!(original.child_runs, vec![child.subject]);
     assert!(rejected.child_runs.is_empty());
+}
+
+#[test]
+fn named_start_report_to_matches_cli_defaults_validation_and_creation_identity() {
+    let fixture = fixture();
+    apply_source(&fixture.store, r#"version 2
+mission "program-child" state="ready" report-to="agent/default/reporter" stalled-after="7m" report-completed=#true report-stalls=#false {
+  concurrent-runs
+  goal "Observe report routing."
+  input "head" kind="text"
+  step "publish" { agentless }
+}"#, "named-child-report-defaults");
+    let started = fixture.start("report-routing-parent", "start");
+    let parent = fixture.store.mission_run(&started.run).unwrap().unwrap();
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None, workspace: parent.workspace.clone(),
+        requester: Some(parent.requester.clone()), mode: Some(parent.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: "default-report-routing".into(),
+    };
+    let default = fixture.store.create_named_program_child_mission_run(
+        &request, &parent, &started.step, "report/default", None).unwrap();
+    let default_claim = fixture.store.latest_claim(&default.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(default_claim.body["fields"]["report_to"], "agent/default/reporter");
+    assert_eq!(default_claim.body["fields"]["stalled_after_ms"], 420_000);
+    assert_eq!(default_claim.body["fields"]["report_completed"], true);
+    assert_eq!(default_claim.body["fields"]["report_stalls"], false);
+    let explicit_request = MissionRunRequest {
+        idempotency_key: "explicit-report-routing".into(), ..request.clone()
+    };
+    let explicit = fixture.store.create_named_program_child_mission_run(
+        &explicit_request, &parent, &started.step, "report/explicit", Some("agent/pr/author")).unwrap();
+    let explicit_claim = fixture.store.latest_claim(&explicit.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(explicit_claim.body["fields"]["report_to"], "agent/pr/author");
+    for field in ["stalled_after_ms", "report_completed", "report_stalls"] {
+        assert_eq!(explicit_claim.body["fields"][field], default_claim.body["fields"][field]);
+    }
+    assert_eq!(fixture.store.mission_run_initiating_principal(&explicit.subject).unwrap(),
+        fixture.store.mission_run_initiating_principal(&parent.subject).unwrap());
+    let replay = fixture.store.create_named_program_child_mission_run(
+        &explicit_request, &parent, &started.step, "report/explicit", Some("agent/pr/author")).unwrap();
+    assert_eq!(replay.subject, explicit.subject);
+    for changed_target in [None, Some("agent/another/author")] {
+        assert_eq!(fixture.store.create_named_program_child_mission_run(
+            &explicit_request, &parent, &started.step, "report/explicit", changed_target).unwrap_err().code,
+            "child-conflict");
+    }
+    for invalid in ["person/author", "author", "agent/", "agent//author", "agent/pr author"] {
+        assert_eq!(fixture.store.create_named_program_child_mission_run(
+            &request, &parent, &started.step, "report/invalid", Some(invalid)).unwrap_err().code,
+            "invalid-report-to");
+    }
+    assert!(fixture.store.mission_run("report/invalid").unwrap().is_none());
+}
+
+#[test]
+fn native_start_report_to_is_committed_before_the_handle_without_lending_authority() {
+    let fixture = fixture();
+    let parent = fixture.start("reported-native", "start-reported");
+    fixture.until("routed publication returns its handle", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let child = fixture.store.mission_run("pr-42-head12").unwrap().unwrap();
+    let claim = fixture.store.latest_claim(&child.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["report_to"], "agent/pr/author");
+    assert!(claim.body["fields"]["report_completed"].is_null());
+    assert_eq!(fixture.store.mission_run_initiating_principal(&child.subject).unwrap(),
+        fixture.store.mission_run_initiating_principal(&parent.run).unwrap());
 }

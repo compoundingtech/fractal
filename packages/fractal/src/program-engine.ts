@@ -108,6 +108,8 @@ export interface HostContextV1 {
     readonly input: Readonly<Record<string, string>>
     readonly mode?: 'run' | 'start'
     readonly runId?: string
+    /** Optional agent-subject report routing for start; never changes inherited authority. */
+    readonly reportTo?: string
   } | {
     readonly key: string
     readonly mode: 'await'

@@ -1668,6 +1668,7 @@ pub trait MissionsStore {
             parent: &MissionRunView,
             parent_step_run: &str,
             run_id: &str,
+            report_to: Option<&str>,
         ) -> Result<MissionRunView, FractalError>;
     /// An occurrence belongs to its schedule, regardless of the requesting member or revision.
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String;
@@ -3057,11 +3058,13 @@ impl MissionsStore for Store {
             parent: &MissionRunView,
             parent_step_run: &str,
             run_id: &str,
+            report_to: Option<&str>,
         ) -> Result<MissionRunView, FractalError> {
         self.create_named_program_mission_run(
             request,
             child_context(parent, parent_step_run, None, Some(parent.subject.clone())),
             run_id,
+            report_to,
         )
     }
 

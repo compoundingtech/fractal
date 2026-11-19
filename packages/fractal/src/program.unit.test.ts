@@ -60,13 +60,69 @@ describe('start-only linked children', () => {
     }),
   )
 
+  it.effect('passes an explicit report target when starting a mission by string', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
+          output: Schema.String },
+        ({ change }) => Fractal.start('factory/landing', { change },
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
+      )
+      const exit: ProgramExit = { _tag: 'Success', value: { run: 'mission-run/pr-42-head12' } }
+      const host = fakeHost({ child: async (request) => {
+        requests.push(request)
+        return exit
+      } })
+      expect(yield* start(controller, host)).toEqual({
+        _tag: 'Success', value: 'mission-run/pr-42-head12',
+      })
+      expect(requests).toEqual([
+        { key: 'publish', mode: 'start', runId: 'pr-42-head12',
+          mission: 'factory/landing', input: { change: 'abc' }, reportTo: 'agent/landing-reporter' },
+      ])
+    }),
+  )
+
+  it.effect('encodes typed mission input and passes its explicit report target', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const landing = Fractal.mission(
+        { meta, id: 'factory/landing', goal: 'Land.', reportTo,
+          input: Schema.Struct({ count: Schema.NumberFromString }), output: Schema.String },
+        ({ count }) => Effect.succeed(String(count)),
+      )
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
+          output: Schema.String },
+        () => Fractal.start(landing, { count: 42 },
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
+      )
+      const exit: ProgramExit = { _tag: 'Success', value: { run: 'mission-run/pr-42-head12' } }
+      const host = fakeHost({ child: async (request) => {
+        requests.push(request)
+        return exit
+      } })
+      expect(yield* start(controller, host)).toEqual({
+        _tag: 'Success', value: 'mission-run/pr-42-head12',
+      })
+      expect(requests).toEqual([
+        { key: 'publish', mode: 'start', runId: 'pr-42-head12',
+          mission: 'factory/landing', input: { count: '42' }, reportTo: 'agent/landing-reporter' },
+      ])
+    }),
+  )
+
   it.effect('delivers a typed public-ID conflict rather than a child handle', () =>
     Effect.gen(function* () {
       const controller = Fractal.mission(
         { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
           output: Schema.String },
         ({ change }) => Fractal.start('factory/landing', { change },
-          { id: 'publish', runId: 'pr-42-head12' }).pipe(Effect.map((handle) => handle.run)),
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
       )
       const exit: ProgramExit = { _tag: 'Failure', error: {
         _tag: 'ChildConflict', run: 'mission-run/pr-42-head12',

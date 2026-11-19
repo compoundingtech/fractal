@@ -105,7 +105,13 @@ by `finite_resources.landing.allowedActors`. An unauthorized root is visibly ref
 `unauthorized-landing`, never downgraded to another class.
 [Linked children](program-engine.md#6-linked-child-runs-worker-turns-and-asks), including children
 published with `Fractal.start`, inherit that principal and request their own DSL/program lane.
-A handle, requester label or parent lane is not a substitute for that authorization.
+A handle, requester label, `Fractal.start` reporting destination (`reportTo`) or parent lane is not
+a substitute for that authorization. `reportTo` is routing only: it never sets
+`initiating_principal` or authorizes Landing. It accepts an exact `agent/...` subject and replaces
+the mission's destination for failure, cancellation and stall reporting, without implying
+`--report-completed` or changing the mission's `stalled-after` (default: 30 minutes). Omission
+retains the mission's reporting default; a different explicit `reportTo` conflicts with the
+existing child publication identity.
 
 
 ## Shell callers

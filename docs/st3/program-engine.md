@@ -524,14 +524,16 @@ again and the start is retried then. When the child ends, the program receives:
 const child = yield* Fractal.start('factory/land', { change: '123' }, {
   id: 'dispatch-reviewed-head',
   runId: 'pr-123-head12',
+  reportTo: 'agent/factory-controller',
 })
 // The linked child is now durably published and visible. Release dispatch locks here.
 const result = yield* Fractal.await(child)
 ```
 
 `start` accepts either a typed `ProgramMission` with its schema's input type or a mission ID
-string with `Readonly<Record<string, string>>` input. Its required options are
-`{ readonly id: string; readonly runId: string }`. It returns
+string with `Readonly<Record<string, string>>` input. Its options are
+`{ readonly id: string; readonly runId: string; readonly reportTo?: string }`; `id` and `runId`
+are required. It returns
 `Effect.Effect<ChildHandle, ChildConflict, ProgramServices>`, where `ChildHandle` is the exported
 schema and type `{ run: string }`. In the example, `child.run` is the canonical subject
 `mission-run/pr-123-head12`, not an acknowledgement token or a guessed generated ID.
@@ -543,16 +545,26 @@ The two IDs are distinct contracts:
 - `runId` is the explicit public mission-run declaration ID, validated and normalized by the
   existing declaration ID rules. It is not a replacement for the journal key.
 
+Optional `reportTo` matches `fractal missions start --report-to AGENT`: it accepts only an
+`agent/...` subject, passed exactly as supplied without normalization. It replaces the mission's
+reporting destination for failure, cancellation and stall reports. It does not imply the CLI's
+separate `--report-completed` flag, and there is no `reportCompleted` start option. The mission's
+`stalled-after` remains unchanged (30 minutes without progress by default). Omitting `reportTo`
+retains the mission's default reporting configuration. See the existing CLI
+[`missions start` arguments and `mission_run_intent` path](../../crates/fractal/src/main.rs), which writes
+the exact `--report-to` string into the run's `report-to`.
+
 The start acknowledgement is sent only after linked-child publication is committed and visible,
 not merely after queuing a request. A dispatcher can hold its reviewed-slot and per-change locks
 through `start`, release them after it returns, then await outside the locks. Forking and polling
 a guessed ID does not provide this publication guarantee.
 
 An explicit-ID collision can adopt only the same creation identity, parent and input contract.
-A different parent, payload or conflicting public ID returns the exported typed error
+A different parent, payload, explicit `reportTo` or conflicting public ID returns the exported typed error
 `ChildConflict { _tag: 'ChildConflict', run: string, reason: string }`; it never reparents an
 existing run or silently creates another child. The public ID remains searchable across controller
-parents, but lookup does not transfer ownership.
+parents, but lookup does not transfer ownership. Explicit `reportTo` participates in the publication
+creation identity, so changing the reporting target conflicts rather than adopting the existing run.
 
 `Fractal.await(handle)` returns `Effect.Effect<ChildRun, ChildFailed, ProgramServices>`. It observes
 the recorded subject and returns its existing terminal result, including an already terminal
@@ -563,7 +575,8 @@ The engine reuses the existing persisted waiting-child association and child sto
 
 Start-only children remain linked: parent cancellation cancels them even when the parent has not
 called `await`. Both operations preserve the original authenticated initiating principal inherited
-through the parent. Requester attribution is not authority. In particular, a child's own
+through the parent. `reportTo` is routing only: it never sets `initiating_principal` or authorizes
+Landing. Requester attribution is not authority. In particular, a child's own
 [Landing resource lane](resources.md#host-owned-profiles-with-landing) is authorized from that
 principal, not from possession of a handle or the parent's resource grant.
 
