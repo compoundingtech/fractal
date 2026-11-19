@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "st": {
-      "command": "fractal",
+      "command": "st",
       "args": [
         "driver",
         "claude-mcp"
