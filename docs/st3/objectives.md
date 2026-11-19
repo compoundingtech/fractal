@@ -105,6 +105,8 @@ runtime heartbeat is not productive work: matching harness `ready`, `idle`, `blo
 is fresh under the existing harness stale/future-skew bounds. Starts, new incarnations,
 work, and missing or expired matching harness observations cannot. Receiving an old report
 again does not refresh its source evidence.
+Freshness is checked before each admitted replacement as well as at minute boundaries;
+a later fresh observation cannot erase an earlier intra-minute gap of expired evidence.
 
 The separately labeled **representative isolated controlled quiet reference** is commissioned
 with the real daemon/worker sampler, never synthetic CPU values and never by pausing live seats.
@@ -127,8 +129,10 @@ binary/configuration inputs and reference worker topology, then collects exactly
 closed minutes and waits for seat settlement. The operator's isolation receipt, not the socket
 name, establishes that launch overrides really isolate the member and that these are the files
 actually used. Unknown CPU, missing boundaries, busy/unsettled seats, topology changes or a
-changed build cannot pass. Its JSON stdout carries binary/configuration SHA-256, build, worker topology,
-isolation provenance, measured CPU/wall totals and per-minute evidence. Save that stdout as the
+changed build cannot pass. The measured verdict is published only after the final health read
+confirms the same nonempty build commit; a failed final health check leaves the receipt `no-data`.
+Its JSON stdout carries binary/configuration SHA-256, build, worker topology, isolation provenance,
+measured CPU/wall totals and per-minute evidence. Save that stdout as the
 commissioning artifact; a miss/no-data exits nonzero. This is `cpu/quiet-reference`, explicitly
 `production_objective=false`, not a third production objective or evidence of the busy host's
 idle behavior. Production `cpu` and conditional `cpu/idle` are unchanged by commissioning.

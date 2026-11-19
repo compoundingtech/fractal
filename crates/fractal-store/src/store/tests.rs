@@ -12996,6 +12996,37 @@ fn local_seats_busy_expires_quiet_evidence_after_harness_publisher_loss() {
 }
 
 #[test]
+fn local_seats_busy_preserves_expired_evidence_gaps_before_a_fresh_replacement() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/node.e".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("inc-1")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let stale_ms = fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64;
+    let from = now_ms() as u64 + stale_ms;
+    // Quiet at the opening boundary, but expires ten milliseconds into the minute.
+    let old = harness_state("agent/node.e", "idle", from - stale_ms + 10);
+    store.append_latest_observation(&old, u128::from(from - 1)).unwrap();
+    let (_, carried) = store.local_seats_busy(from - MINUTE, from, None).unwrap();
+    // A newly admitted quiet observation covers the closing boundary, not the preceding gap.
+    let fresh = harness_state("agent/node.e", "idle", from + 50_000);
+    store.append_latest_observation(&fresh, u128::from(from + 50_000)).unwrap();
+    for carried in [None, Some(carried)] {
+        assert!(store.local_seats_busy(from, from + MINUTE, carried).unwrap().0,
+            "fresh endpoints cannot prove the expired work-state interval was quiet");
+    }
+}
+
+#[test]
 fn a_claims_acceptance_time_is_read_from_the_store_once() {
     let store = Store::open_memory("node").unwrap();
     let observe = |n: usize| {

@@ -7582,15 +7582,17 @@ impl Store {
                     COALESCE(json_extract(body, '$.fields.state'), json_extract(body, '$.state')),
                     json_extract(body, '$.fields.background_jobs'),
                     json_extract(body, '$.fields.incarnation_id'),
-                    json_extract(body, '$.fields.observed_at_ms')
+                    json_extract(body, '$.fields.observed_at_ms'),
+                    observed_at_unix_ms
                  FROM local_observations
                  WHERE observed_at_unix_ms>=?1 AND observed_at_unix_ms<?2 AND kind='harness.observed'
-                 ORDER BY id",
+                 ORDER BY observed_at_unix_ms, id",
             )?
-            .query_map(params![from, until], harness)?
+            .query_map(params![from, until], |row| Ok((harness(row)?, row.get::<_, u64>(5)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (subject, observed) in within {
-            busy |= !observed.1;
+        for ((subject, observed), admitted_at) in within {
+            // A fresh replacement cannot erase an expired-evidence gap earlier in the minute.
+            busy |= seats.busy(admitted_at) || !observed.1;
             seats.harness.insert(subject, observed);
         }
         let (from_text, until_text) = (from.to_string(), until.to_string());

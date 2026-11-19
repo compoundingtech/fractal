@@ -32,6 +32,18 @@ class QuietReference(unittest.TestCase):
         with self.assertRaises(ValueError):
             reference.build_commit({})
 
+    def test_final_health_failure_cannot_leave_a_met_receipt(self):
+        initial = {"build": {"commit": "a" * 40}}
+        for final in [{}, {"build": {}}, {"build": {"commit": "b" * 40}}]:
+            receipt = {"status": "no-data", "production_objective": False}
+            with self.subTest(final=final), self.assertRaises(ValueError):
+                reference.finish_receipt(receipt, quiet(), 1, initial, final)
+            self.assertEqual(receipt["status"], "no-data")
+            self.assertNotIn("cores", receipt)
+        receipt = {"status": "no-data", "production_objective": False}
+        reference.finish_receipt(receipt, quiet(), 1, initial, initial)
+        self.assertEqual(receipt["status"], "met")
+
     def test_separate_population_and_real_denominator(self):
         result = reference.baseline(quiet(), 1)
         self.assertEqual(result["cores"], 0.2)

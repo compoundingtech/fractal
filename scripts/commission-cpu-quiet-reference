@@ -53,6 +53,13 @@ def build_commit(health):
     return commit
 
 
+def finish_receipt(receipt, minutes, expected_workers, initial_health, final_health):
+    # Publish a verdict only after the final real health read and identity validation succeed.
+    if build_commit(final_health) != build_commit(initial_health):
+        raise ValueError("isolated build changed during quiet reference")
+    receipt.update(baseline(minutes, expected_workers))
+
+
 def baseline(minutes, expected_workers):
     """Exact consecutive population; missing/unknown observations are never zero."""
     if len(minutes) != 10 or any(b["minute"] != a["minute"] + 1 for a, b in zip(minutes, minutes[1:])):
@@ -126,10 +133,8 @@ def main():
         if len(minutes) == 10 and all(m["seats_busy"] is not None for m in minutes):
             receipt["minute_evidence"] = minutes
             try:
-                receipt.update(baseline(minutes, args.expected_workers))
-                if get(args.socket, "/v1/health")["build"] != health["build"]:
-                    receipt["status"] = "no-data"
-                    raise ValueError("isolated build changed during quiet reference")
+                finish_receipt(receipt, minutes, args.expected_workers, health,
+                               get(args.socket, "/v1/health"))
             except ValueError as error:
                 receipt["reason"] = str(error)
                 print(json.dumps(receipt, sort_keys=True))
