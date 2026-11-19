@@ -5,11 +5,12 @@ use fractal_conversation_ui::text::Line;
 pub use fractal_conversation_ui::pane::truncate;
 #[cfg(test)]
 pub use fractal_conversation_ui::text::plain;
-pub use fractal_conversation_ui::text::{Run, run, sanitize, width, wrap};
+pub use fractal_conversation_ui::text::{Run, decoration, field_prefixes, run, sanitize, width, wrap};
 
 pub fn inline(text: &str, base: Style) -> Vec<Run> {
     fractal_conversation_ui::text::inline(text, base, &super::theme::conversation())
 }
+
 
 pub fn markdown(input: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     fractal_conversation_ui::text::markdown(input, width, base, &super::theme::conversation())
