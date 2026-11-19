@@ -14,6 +14,46 @@ pub(super) fn set_request(member: &mut MemberSpec, request: &LaneRequest) -> Res
     Ok(())
 }
 
+/// Endpoints are launch inputs from the reconciler, never inherited payload authority.
+pub(super) fn set_authority_endpoint(environment: &mut BTreeMap<String, String>, endpoint: &str) {
+    environment.insert("ST3_ENDPOINT".into(), endpoint.into());
+    environment.insert("FRACTAL_ENDPOINT".into(), endpoint.into());
+}
+
+/// Bind discovery hints only after native admission has supplied the current host grant.
+/// Shell descendants retain their host-recorded root; direct DSL/program roots own themselves.
+/// These labels do not authorize a caller; consumers must still verify physical root membership.
+pub(super) fn bind_payload_markers(
+    store: &Store,
+    environment: &mut BTreeMap<String, String>,
+    grant: &crate::store::resource_membership::Grant,
+    request: &LaneRequest,
+    runtime_id: &str,
+) -> Result<()> {
+    let record = store.resource_membership_for_grant(grant)?;
+    anyhow::ensure!(record.request == *request, "payload markers must use the host-owned lane request");
+    let shell = store.shell_resource_if_exists(runtime_id)?;
+    let root_exec_id = match &shell {
+        Some(execution) => {
+            anyhow::ensure!(execution.command.lane == *request, "shell payload must use its host-owned lane request");
+            if execution.root_exec_id.is_empty() {
+                request.id.strip_prefix("shell:").unwrap_or(runtime_id)
+            } else {
+                execution.root_exec_id.as_str()
+            }
+        }
+        None => runtime_id,
+    };
+    environment.insert(crate::store::shell_resources::PARENT_ENV.into(), serde_json::to_string(
+        &crate::store::shell_resources::ParentContext {
+            grant: grant.clone(), request: request.clone(), root_exec_id: Some(root_exec_id.into()),
+        },
+    )?);
+    environment.insert("FRACTAL_RESOURCE_EXEC_ID".into(), root_exec_id.into());
+    environment.insert("FRACTAL_RESOURCE_MEMBER_EXEC_ID".into(), runtime_id.into());
+    Ok(())
+}
+
 fn lower_request(lane: &crate::model::ResourceLaneSpec, id: String, owner: Owner) -> LaneRequest {
     LaneRequest {
         id, owner, name: lane.name.clone(), host: lane.host.clone(), max_members: lane.max_members,
@@ -288,6 +328,68 @@ impl<R: RuntimeControl> Reconciler<R> {
 mod tests {
     use super::*;
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn canonical_payload_markers_bind_shell_dsl_and_program_roots_and_replace_forged_env() {
+        use crate::store::shell_resources::{Command, PARENT_ENV, ParentContext};
+
+        for kind in ["shell", "nested-shell", "legacy-shell", "dsl", "program"] {
+            let store = Store::open_memory("node").unwrap();
+            store.start_resource_authority("node", "authority").unwrap();
+            let mut request = profile_request();
+            request.profile = None;
+            request.id = if kind.contains("shell") { "shell:root".into() } else { format!("{kind}:root") };
+            let Admission::Admitted(grant) = store.request_resource_membership(&request, test_fit(), 100).unwrap()
+                else { panic!("{kind} must admit"); };
+            let runtime_id = if kind == "nested-shell" { "shell-child" } else { "root" };
+            if kind.contains("shell") {
+                let mut execution = store.submit_shell_resource(Command {
+                    id: runtime_id.into(), request_id: None, lane: request.clone(),
+                    argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(),
+                    timeout_ms: None, parent: (kind == "nested-shell").then(|| grant.clone()),
+                }, 100).unwrap();
+                if kind == "legacy-shell" {
+                    execution.root_exec_id.clear();
+                    store.update_shell_resource(&execution).unwrap();
+                }
+            }
+            let mut environment = BTreeMap::from([
+                (PARENT_ENV.into(), "{\"grant\":\"forged\"}".into()),
+                ("FRACTAL_RESOURCE_EXEC_ID".into(), "forged-root".into()),
+                ("FRACTAL_RESOURCE_MEMBER_EXEC_ID".into(), "forged-member".into()),
+                ("ST3_ENDPOINT".into(), "forged-endpoint".into()),
+                ("FRACTAL_ENDPOINT".into(), "forged-endpoint".into()),
+                ("PAYLOAD_SETTING".into(), "retained".into()),
+            ]);
+            set_authority_endpoint(&mut environment, "unix:/host-authority");
+            bind_payload_markers(&store, &mut environment, &grant, &request, runtime_id).unwrap();
+            let context: ParentContext = serde_json::from_str(&environment[PARENT_ENV]).unwrap();
+            assert_eq!(context.grant, grant, "{kind}");
+            assert_eq!(context.request, request, "{kind}");
+            assert_eq!(context.root_exec_id.as_deref(), Some("root"), "{kind}");
+            assert_eq!(environment["FRACTAL_RESOURCE_EXEC_ID"], "root", "{kind}");
+            assert_eq!(environment["FRACTAL_RESOURCE_MEMBER_EXEC_ID"], runtime_id, "{kind}");
+            assert_eq!(environment["ST3_ENDPOINT"], "unix:/host-authority", "{kind}");
+            assert_eq!(environment["FRACTAL_ENDPOINT"], "unix:/host-authority", "{kind}");
+            assert_eq!(environment["PAYLOAD_SETTING"], "retained", "{kind}");
+            assert!(store.resource_membership_for_grant(&grant).unwrap().roots.is_empty(),
+                "binding discovery hints must not prepare or release a root");
+        }
+    }
+
+    #[test]
+    fn payload_markers_refuse_a_request_not_owned_by_the_host_grant() {
+        let store = Store::open_memory("node").unwrap();
+        store.start_resource_authority("node", "authority").unwrap();
+        let mut request = profile_request();
+        request.profile = None;
+        let Admission::Admitted(grant) = store.request_resource_membership(&request, test_fit(), 100).unwrap()
+            else { panic!("request must admit"); };
+        request.name = "forged-lane".into();
+        let mut environment = BTreeMap::new();
+        assert!(bind_payload_markers(&store, &mut environment, &grant, &request, "root").is_err());
+        assert!(environment.is_empty());
+    }
 
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }

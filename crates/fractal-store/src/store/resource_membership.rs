@@ -442,6 +442,21 @@ impl Store {
         bodies.into_iter().map(|body| Ok(serde_json::from_str(&body)?)).collect()
     }
 
+    /// Resolve an exact physical root from existing custody, including retired records so that
+    /// callers can refuse stale roots rather than silently selecting another live generation.
+    pub fn resource_membership_for_runtime_root(&self, runtime_id: &str) -> Result<Option<Membership>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT body FROM resource_memberships_v1
+             WHERE EXISTS (SELECT 1 FROM json_each(resource_memberships_v1.body, '$.roots') root
+                           WHERE json_extract(root.value, '$.runtimeId')=?1)
+             LIMIT 2")?;
+        let mut rows = statement.query_map([runtime_id], |row| row.get::<_, String>(0))?;
+        let Some(body) = rows.next().transpose()? else { return Ok(None) };
+        anyhow::ensure!(rows.next().transpose()?.is_none(), "runtime root has ambiguous membership custody");
+        Ok(Some(serde_json::from_str(&body)?))
+    }
+
     pub fn attach_resource_child(&self, grant: &Grant, owner: &Owner, child: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
@@ -1030,6 +1045,31 @@ mod tests {
         request.owner.run = "person/operator".into();
         request.owner.invocation = None;
         request
+    }
+
+    #[test]
+    fn exact_runtime_root_lookup_retains_retired_custody_and_refuses_ambiguity() {
+        let store = Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "root-lookup").unwrap();
+        let first = request("dsl-root");
+        let Admission::Admitted(grant) = store.request_resource_membership(&first, test_fit(), 1).unwrap()
+            else { panic!("first root must be admitted") };
+        store.prepare_resource_membership(&grant, "native-runtime").unwrap();
+        let found = store.resource_membership_for_runtime_root("native-runtime").unwrap().unwrap();
+        assert_eq!(found.request.id, first.id);
+        assert!(store.resource_membership_for_runtime_root("native-runtime-suffix").unwrap().is_none());
+        store.update_resource_membership(&grant, |member| {
+            member.state = "retired".into();
+            member.retired_at = Some(2);
+            Ok(())
+        }).unwrap();
+        let retired = store.resource_membership_for_runtime_root("native-runtime").unwrap().unwrap();
+        assert_eq!(retired.state, "retired");
+        let second = request("program-root");
+        let Admission::Admitted(other) = store.request_resource_membership(&second, test_fit(), 3).unwrap()
+            else { panic!("second root must be admitted") };
+        store.prepare_resource_membership(&other, "native-runtime").unwrap();
+        assert!(store.resource_membership_for_runtime_root("native-runtime").is_err());
     }
 
     #[test]

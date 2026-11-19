@@ -113,6 +113,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             None
         };
+        if resource_lanes::request(&prepared.launch_member)?.is_some() {
+            resource_lanes::set_authority_endpoint(&mut prepared.launch_member.environment, &self.endpoint);
+        }
         let id = uuid::Uuid::now_v7().to_string();
         prepared
             .launch_member

@@ -144,6 +144,13 @@ by NUL without a trailing NUL; NUL-containing arguments are refused. Nested proo
 eventual outer root receipt instead of fabricating a terminal root outcome from a child's exit.
 `FRACTAL_RESOURCE_EXEC_ID` joins the outer root receipt; `FRACTAL_RESOURCE_MEMBER_EXEC_ID`
 identifies the current execution generation. Neither value is authorization.
+Shell, direct DSL and program payloads receive the same host-derived
+`FRACTAL_RESOURCE_PARENT`, `FRACTAL_RESOURCE_EXEC_ID` and
+`FRACTAL_RESOURCE_MEMBER_EXEC_ID` markers before release, overwriting caller-provided values.
+Direct roots use their runtime ID for both execution selectors; nested shell members retain the
+outer shell root selector. Endpoints reconnect to the admitting authority. These native markers
+support inherited verification; nested `resources exec` submission still requires a shell parent
+and is not supported under a direct DSL/program parent.
 Receipts contain actual root argv, so never put credentials in argv. Environment values are sent
 only in the live launch request and are neither receipt fields nor persisted command data.
 After restart, a command whose live environment is unavailable fails closed rather than replaying
@@ -191,10 +198,16 @@ check below. No custody layout or configurable cgroup root is exposed.
 
 `fractal --json resources member-scope --exec-id EXECUTION_ID` reports the runtime-owned DTO:
 `{execId, rootExecId, requestId, lane, class, profile, generation, state: "running", cgroupPath}`. The authenticated API
-`GET /v1/internal/resources/{id}/member-scope` checks the exact shell owner, host membership,
-released root, live grant, enforced coverage and execution generation, then verifies the running
-runtime binding and exact kernel cgroup path. Parent slices, sibling generations, ended roots,
-retiring memberships and logical-only execution are not proof of a live enforced member.
+`GET /v1/internal/resources/{id}/member-scope` resolves shell, direct DSL and program roots
+from existing membership custody. Bound callers authenticate through their exact run credential
+(run, step and attempt) or native agent invocation; local-operator inspection remains unchanged.
+It checks the owner, host, released root, live grant, enforced coverage and exact runtime
+generation, then verifies that target generation's kernel cgroup placement. It does not prove
+the HTTP querying process is inside that cgroup, and never authenticates from environment markers.
+Direct roots have no shell request UUID (`requestId` is null); the response shape is unchanged.
+Parent slices, sibling generations, ended/retired roots, retiring memberships and logical-only
+execution are not proof of a live enforced member. Missing or ambiguous custody refuses with
+`resource-member-scope-refused`; foreign ownership remains `resource-exec-owner`.
 
 A root helper must independently read its own unified `/proc/self/cgroup` entry and require
 **exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_MEMBER_EXEC_ID`; prefix matching

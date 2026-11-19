@@ -303,26 +303,61 @@ pub(super) async fn wait(State(state): State<AppState>, bound: Option<BoundActor
     }
 }
 
-/// Report only a live runtime generation whose binding agrees with authenticated host custody.
-pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
-    let caller = CallerOwner::resolve(&state, bound, run)?;
-    let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
-    authorize_execution(caller.as_ref(), &execution)?;
-    require_exec_platform(cfg!(target_os = "macos"))?;
-    let scope = (|| -> anyhow::Result<_> {
-        anyhow::ensure!(execution.command.lane.host == state.node, "execution does not belong to this host");
-        anyhow::ensure!(execution.started_at.is_some() && execution.ended_at.is_none() && !execution.cancel,
-            "execution has no live released payload");
-        let member = state.store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner)?;
-        anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched") && member.retirement_requested_at.is_none(),
+/// Resolve native custody independently of shell transport. The runtime still verifies physical
+/// placement below; this read never grants membership or substitutes a desired declaration.
+fn member_scope_custody(
+    state: &AppState,
+    caller: Option<&CallerOwner>,
+    id: &str,
+) -> Result<(crate::store::resource_membership::Membership, Option<Execution>), ApiError> {
+    let execution = state.store.shell_resource_if_exists(id).map_err(ApiError::internal)?;
+    if let Some(execution) = &execution {
+        authorize_execution(caller, execution)?;
+    }
+    let member = (|| -> anyhow::Result<_> {
+        match &execution {
+            Some(execution) => state.store.resource_membership_record(
+                &execution.command.lane.id, &execution.command.lane.owner),
+            None => state.store.resource_membership_for_runtime_root(id)?
+                .context("execution root has no membership custody"),
+        }
+    })().map_err(|error| ApiError::bad(FractalError::new("resource-member-scope-refused", error.to_string())))?;
+    if caller.is_some_and(|caller| !caller.owns(&member.request.owner)) {
+        return Err(ApiError::bad(FractalError::new("resource-exec-owner",
+            "execution root belongs to another execution owner")));
+    }
+    (|| -> anyhow::Result<()> {
+        anyhow::ensure!(member.request.host == state.node, "execution does not belong to this host");
+        if let Some(execution) = &execution {
+            anyhow::ensure!(execution.started_at.is_some() && execution.ended_at.is_none() && !execution.cancel,
+                "execution has no live released payload");
+        }
+        anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched")
+            && member.retirement_requested_at.is_none() && member.retired_at.is_none(),
             "execution membership is not live");
-        let root = member.roots.iter().find(|root| root.runtime_id == id).context("execution root is not bound to membership")?;
+        let root = member.roots.iter().find(|root| root.runtime_id == id)
+            .context("execution root is not bound to membership")?;
         anyhow::ensure!(root.payload_released_at.is_some() && root.execution_ended_at.is_none(),
             "execution root has no live released payload");
-        let generation = &root.execution.as_ref().context("execution root has no generation")?.generation_id;
+        root.execution.as_ref().context("execution root has no generation")?;
         let grant = member.grant.as_ref().context("execution membership has no live grant")?;
         anyhow::ensure!(grant.coverage == Coverage::Enforced, "member-scope requires enforced coverage");
         state.store.resource_membership_for_grant(grant)?;
+        Ok(())
+    })().map_err(|error| ApiError::bad(FractalError::new("resource-member-scope-refused", error.to_string())))?;
+    Ok((member, execution))
+}
+
+/// Report only a live runtime generation whose binding agrees with authenticated host custody.
+pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let (member, execution) = member_scope_custody(&state, caller.as_ref(), &id)?;
+    require_exec_platform(cfg!(target_os = "macos"))?;
+    let scope = (|| -> anyhow::Result<_> {
+        let generation = &member.roots.iter().find(|root| root.runtime_id == id)
+            .context("execution root is not bound to membership")?
+            .execution.as_ref().context("execution root has no generation")?.generation_id;
+        let grant = member.grant.as_ref().context("execution membership has no live grant")?;
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: grant.membership_id.clone(), authority_epoch: grant.authority_epoch.clone(), generation: grant.generation.clone(),
         };
@@ -331,17 +366,20 @@ pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<Bo
         anyhow::ensure!(&scope.generation == generation, "runtime generation differs from host custody");
         Ok(scope)
     })().map_err(|error| ApiError::bad(FractalError::new("resource-member-scope-refused", error.to_string())))?;
-    let request_id = if execution.root_exec_id == execution.command.id {
-        execution.command.request_id.clone()
-    } else {
-        let root = state.store.shell_resource(&execution.root_exec_id).map_err(ApiError::internal)?;
-        authorize_execution(caller.as_ref(), &root)?;
-        root.command.request_id
+    let (root_exec_id, request_id) = match &execution {
+        Some(execution) if execution.root_exec_id == execution.command.id =>
+            (execution.root_exec_id.as_str(), execution.command.request_id.clone()),
+        Some(execution) => {
+            let root = state.store.shell_resource(&execution.root_exec_id).map_err(ApiError::internal)?;
+            authorize_execution(caller.as_ref(), &root)?;
+            (execution.root_exec_id.as_str(), root.command.request_id)
+        }
+        None => (id.as_str(), None),
     };
     Ok(Json(serde_json::to_value(MemberScopeResponse {
-        scope, root_exec_id: &execution.root_exec_id, request_id,
-        lane: &execution.command.lane.name, class: execution.command.lane.class,
-        profile: execution.command.lane.profile.as_deref(),
+        scope, root_exec_id, request_id,
+        lane: &member.request.name, class: member.request.class,
+        profile: member.request.profile.as_deref(),
     }).map_err(ApiError::internal)?))
 }
 
@@ -357,6 +395,81 @@ pub(super) async fn cancel(State(state): State<AppState>, bound: Option<BoundAct
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn member_scope_resolves_shell_dsl_and_program_roots_from_exact_live_custody() {
+        use crate::store::resource_membership::{Admission, Fit};
+        for kind in ["shell", "dsl", "program"] {
+            let directory = tempfile::tempdir().unwrap();
+            let state = super::super::tests::state(directory.path());
+            state.store.start_resource_authority(&state.node, "scope-epoch").unwrap();
+            let id = match kind {
+                "program" => format!("program-resource-{}-{}", "a".repeat(64), "b".repeat(64)),
+                "dsl" => "native-dsl-proof".into(),
+                _ => uuid::Uuid::now_v7().to_string(),
+            };
+            let mut lane = request();
+            lane.id = format!("{kind}:proof");
+            lane.name = format!("{kind}-checks");
+            lane.host.clone_from(&state.node);
+            lane.coverage = Coverage::Enforced;
+            lane.owner = Owner { run: "mission-run/proof".into(), step: "step-run/proof".into(),
+                attempt: 1, invocation: Some(format!("{kind}:proof")) };
+            let Admission::Admitted(grant) = state.store.request_resource_membership(&lane, Fit {
+                room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default()
+            }, 10).unwrap() else { panic!("test root must be admitted") };
+            state.store.prepare_resource_membership(&grant, &id).unwrap();
+            let generation = serde_json::from_value(json!({
+                "schema":"st.runtime.exec-generation.v1", "pid":123, "createdAtUnixMs":10,
+                "startToken":1, "generationId":"scope-generation",
+                "payloadReleasedAtUnixMs":11, "resourceMembership": {
+                    "membershipId":grant.membership_id, "generation":grant.generation,
+                    "authorityEpoch":grant.authority_epoch,
+                }
+            })).unwrap();
+            state.store.launch_resource_membership(&grant, &id, &generation, 11).unwrap();
+            if kind == "shell" {
+                let mut execution = state.store.submit_shell_resource(Command {
+                    id: id.clone(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
+                    cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+                }, 10).unwrap();
+                execution.started_at = Some(11);
+                execution.state = "running".into();
+                state.store.update_shell_resource(&execution).unwrap();
+            }
+            let caller = CallerOwner { owner: lane.owner.clone(), agent: false };
+            let (member, shell) = member_scope_custody(&state, Some(&caller), &id).unwrap();
+            assert_eq!(member.request.id, lane.id);
+            assert_eq!(shell.is_some(), kind == "shell");
+            assert_eq!(member.roots[0].runtime_id, id);
+            let foreign = CallerOwner { owner: Owner {
+                run: "mission-run/outside".into(), step: "step-run/outside".into(),
+                attempt: 1, invocation: None,
+            }, agent: false };
+            // A foreign authenticated execution cannot acquire custody by supplying another
+            // root's locator markers, even if it copies that root's serialized parent grant.
+            let forged_markers = BTreeMap::from([
+                ("FRACTAL_RESOURCE_PARENT", serde_json::to_string(
+                    &crate::store::shell_resources::ParentContext {
+                        grant: grant.clone(), request: lane.clone(), root_exec_id: Some(id.clone()),
+                    }).unwrap()),
+                ("FRACTAL_RESOURCE_EXEC_ID", id.clone()),
+                ("FRACTAL_RESOURCE_MEMBER_EXEC_ID", id.clone()),
+            ]);
+            assert_eq!(member_scope_custody(&state, Some(&foreign),
+                &forged_markers["FRACTAL_RESOURCE_MEMBER_EXEC_ID"]).unwrap_err().code, "resource-exec-owner");
+            assert_eq!(member_scope_custody(&state, Some(&caller), "outside-all-roots").unwrap_err().code,
+                "resource-member-scope-refused");
+            state.store.end_resource_execution(&grant, &id, 20).unwrap();
+            assert_eq!(member_scope_custody(&state, Some(&caller), &id).unwrap_err().code,
+                "resource-member-scope-refused");
+            state.store.cancel_resource_membership(&grant, &lane.owner, 21).unwrap();
+            assert_eq!(member_scope_custody(&state, Some(&caller), &id).unwrap_err().code,
+                "resource-member-scope-refused");
+        }
+    }
+
     #[test]
     fn nested_member_scope_keeps_current_generation_separate_from_verified_root() {
         let scope = fractal_runtime::MemberScope { exec_id: "nested-id".into(), generation: "nested-generation".into(),

@@ -1345,6 +1345,7 @@ impl NativeRuntime {
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
                     anyhow::bail!("finite execution membership is not admitted");
                 };
+                resource_lanes::bind_payload_markers(store, &mut environment, &grant, request, &member.runtime_id)?;
                 // Every live snapshot contributes once, including generations retiring under an
                 // older estimate. A new estimate can never shrink another generation's envelope.
                 let aggregate = store.resource_lane_aggregate(&request.host, &request.name)?;

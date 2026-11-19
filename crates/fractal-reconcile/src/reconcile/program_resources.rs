@@ -92,6 +92,18 @@ fn command_environment(
     options
 }
 
+/// Freeze caller argv before preparing host wrappers. Ordinary launches need no second copy.
+fn command_launch(argv: Vec<String>, priority: Option<&str>, macos: bool) -> (LaunchSpec, Option<LaunchSpec>) {
+    if macos && priority == Some("background") {
+        let mut prepared = Vec::with_capacity(argv.len() + 2);
+        prepared.extend(["/usr/sbin/taskpolicy".into(), "-b".into()]);
+        prepared.extend(argv.iter().cloned());
+        (LaunchSpec::Argv(prepared), Some(LaunchSpec::Argv(argv)))
+    } else {
+        (LaunchSpec::Argv(argv), None)
+    }
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     /// A single authority epoch for this daemon's host, never one per program or membership.
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
@@ -346,20 +358,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(_launch_permit) = self.admit_incarnation_launch()? else {
                 return Ok(false);
             };
-            let environment = command_environment(
+            let mut environment = command_environment(
                 command.options.env,
                 engine.attempt_environment(&request.step, request.attempt)?,
                 command.options.priority.as_deref(),
             );
-            let mut argv = command.argv;
-            if cfg!(target_os = "macos") && command.options.priority.as_deref() == Some("background") {
-                argv.splice(0..0, ["/usr/sbin/taskpolicy".into(), "-b".into()]);
-            }
+            resource_lanes::set_authority_endpoint(&mut environment, &self.endpoint);
+            let (launch, payload) = command_launch(command.argv, command.options.priority.as_deref(), cfg!(target_os = "macos"));
             let member = MemberSpec {
                 kind: MemberKind::Exec, host: self.host.clone(), runtime_id: runtime_id.clone(),
                 workspace: run.workspace.clone(), workspace_create: false,
                 cwd: command.options.cwd.unwrap_or_else(|| run.workspace.clone()), terminal: false,
-                launch: LaunchSpec::Argv(argv), environment, tags: BTreeMap::new(), display_name: None,
+                launch, environment, tags: BTreeMap::new(), display_name: None,
                 lifecycle: MemberLifecycle::Service, terminal_binding: None, one_shot: false,
                 restart: RestartType::Never, restart_intensity: RestartIntensity::default(),
                 shutdown_timeout_ms: 5_000, driver: None, terminal_size: None, capacity: None,
@@ -367,7 +377,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut member = member;
             resource_lanes::set_request(&mut member, &record.request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, &member.launch, None, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, payload.as_ref().unwrap_or(&member.launch), None, &|| {
                 let current = self.store.step_run(&request.step)?.context("program step disappeared before payload release")?;
                 anyhow::ensure!(current.attempt == request.attempt && program::RUNNING_STATES.contains(&current.status.as_str()),
                     "program attempt was cancelled before payload release");
@@ -425,6 +435,28 @@ impl<R: RuntimeControl> Reconciler<R> {
 mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
+
+    #[test]
+    fn background_macos_launch_freezes_payload_before_taskpolicy_wrapper() {
+        let argv = vec!["cargo".into(), "test".into(), "--workspace".into()];
+        let (launch, payload) = command_launch(argv.clone(), Some("background"), true);
+        let LaunchSpec::Argv(prepared) = &launch else { panic!("expected argv"); };
+        let LaunchSpec::Argv(frozen) = payload.as_ref().expect("wrapped launch must freeze payload")
+            else { panic!("expected argv payload"); };
+        assert_eq!(frozen, &argv);
+        assert_eq!(&prepared[..2], &["/usr/sbin/taskpolicy", "-b"]);
+        assert_eq!(&prepared[2..], argv.as_slice());
+        assert_eq!(fractal_runtime::argv_sha256(frozen),
+            format!("{:x}", sha2::Sha256::digest(b"cargo\0test\0--workspace")));
+        assert_ne!(fractal_runtime::argv_sha256(frozen), fractal_runtime::argv_sha256(prepared));
+
+        for (priority, macos) in [(Some("background"), false), (None, true)] {
+            let (launch, payload) = command_launch(argv.clone(), priority, macos);
+            assert!(payload.is_none(), "unwrapped commands reuse the original launch");
+            let LaunchSpec::Argv(prepared) = launch else { panic!("expected argv"); };
+            assert_eq!(prepared, argv);
+        }
+    }
 
     #[test]
     fn keyed_acquisition_decodes_declaration_but_never_caller_estimates() {
