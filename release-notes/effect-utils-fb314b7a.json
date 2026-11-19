@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Pin the shared effect-utils source and Nix toolchain to fb314b7a and refresh the TypeScript client's fixed-output dependency installation pin.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, claim or storage change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No API, CLI or wire change; shared build inputs and the TypeScript dependency installation pin are updated together."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime rollout is required for the dependency pin update."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the dependency pin update."
+  }
+}
