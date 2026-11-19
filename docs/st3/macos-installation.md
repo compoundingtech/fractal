@@ -19,26 +19,36 @@ for an update, restart the daemon and replication services when ready.
 
 ## Darwin slot custody
 
-The separately packaged `fractal-mac-custody` helper provides process custody for
-the configured `heavy1` slot, whose login-less user is `_fractal-heavy1` and whose
-workspace is `/Users/Shared/fractal-jobs/heavy1/`. It is not a CPU or memory limit.
-Membership is the union of effective and real slot UIDs; zombies are not live.
-`leftovers` reports that membership, and `sample` reports sampled resident memory,
-including unavailable samples, with `enforced: false`.
+The separately packaged `fractal-mac-custody` helper provides custody for explicitly
+requested finite executions in `heavy1`, whose login-less user is `_fractal-heavy1`.
+It is not a host-wide isolation mode or a CPU/memory limit. Ordinary launches and
+PTY seats retain detached execution; admission policy chooses slot requests
+separately. A requested slot requires an authorized helper, otherwise launch fails
+with `helperUnavailable` rather than silently becoming detached.
 
-Retirement uses `cancel`: remove the slot's launchd user domain, then signal and
-reactively observe UID members until a fresh scan is empty. An exit notification
-alone is not retirement. `retirementUnknown` keeps the slot occupied for operator
-inspection; no timeout releases it. Calls append structured audit receipts.
+`run heavy1 PLAN` validates `{jobId, argv, cwd, env}`; the canonical working directory
+must be under `/Users/Shared/fractal-jobs/heavy1/`. It refuses live members or an
+existing job binding, binds the job under a root-owned lock, drops all credentials
+to the slot user and execs argv. The lock remains held through the credential
+transition and closes atomically at exec. Stdin/stdout/stderr remain inherited,
+preserving the runtime's release authorization and exit-status observation.
+
+`cancel heavy1 JOB_ID` compares the root-owned binding before touching the slot:
+`staleJob` cannot retire a replacement job. A matching cancel removes the slot's
+launchd user domain, then signals and reactively observes effective-UID ∪ real-UID
+members until a fresh scan finds no live processes (zombies are not live). Natural
+exit and explicit cancellation use this same retirement path. `retirementUnknown`
+retains the binding; no timeout frees the slot. `leftovers` reports membership and
+the bound job ID. `sample` reports resident memory and unavailable coverage, with
+`enforced: false`. Root calls append structured audit receipts.
 
 `FRACTAL_MAC_CUSTODY` identifies the pinned helper installed by host configuration.
-An absent or unauthorized helper is reported as `helperUnavailable`, rather than
-claiming custody. Even with an authorized helper, the runtime currently reports
-that launch integration is unavailable and keeps detached execution. The helper
-package alone does not enable custody: inherited release authorization and
-child-exit tracking must belong to the slot payload, not a wrapper PID.
-Installing or testing root behavior requires separate operator approval; ordinary
-crate tests do not modify users or launchd.
+The helper's sudo policy must disable `use_pty` and `log_output`: sudo may fork and
+wait, but must preserve the caller's inherited pipes and propagate payload status.
+Do not treat sudo's PID as slot membership or retirement evidence. Installing or
+testing root behavior requires separate operator approval; ordinary crate tests
+do not modify users or launchd. The approved root acceptance test must verify fd
+identity, credential drop, escaped descendants and stale-job fencing.
 
 ## Signing and installation transactions
 

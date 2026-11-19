@@ -625,6 +625,7 @@ mod tests {
             let closed_scope = |unit: &str| Ok(Some(crate::ScopeRetirementProof {
                 version: 1, unit: unit.into(), load_state: "not-found".into(),
                 active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+                darwin: None,
             }));
             let result = runtime.reconcile_producer(&directory, &mut owner, closed_scope);
             assert_eq!(result.unwrap_or(false), closes, "{invalid}");

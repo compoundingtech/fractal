@@ -1,12 +1,12 @@
 //! The unsafe boundary is libproc, kqueue and descriptor ownership only. All
 //! returned process data is size-checked; PIDs are revalidated before signals.
-use crate::{Invocation, Receipt, Status, USER};
-use serde::Serialize;
-use std::{collections::{BTreeMap, BTreeSet}, fs::{File, OpenOptions}, io::{self, Write}, mem::{self, MaybeUninit}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}}, path::Path, process::Command, time::{SystemTime, UNIX_EPOCH}};
+use crate::{Invocation, Plan, Receipt, Status, USER};
+use serde::{Deserialize, Serialize};
+use std::{collections::{BTreeMap, BTreeSet}, fs::{File, OpenOptions}, io::{self, Write}, mem::{self, MaybeUninit}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt}}, path::Path, process::Command, time::{SystemTime, UNIX_EPOCH}};
 
 const PROC_UID_ONLY: u32 = 4;
 const PROC_RUID_ONLY: u32 = 5;
-const STATE_DIR: &str = "/var/db/fractal-mac-custody";
+const STATE_DIR: &str = "/var/run/fractal-mac-custody";
 const AUDIT_PATH: &str = "/var/log/fractal-mac-custody.jsonl";
 
 fn gone(error: &io::Error) -> bool { matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT)) }
@@ -78,8 +78,12 @@ fn slot_uid() -> io::Result<u32> {
     Ok(uid)
 }
 
+fn open_custody_file(path: &Path, mode: u32, append: bool) -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).create(true).append(append).mode(mode).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+}
+
 fn protected_file(path: &Path, mode: u32, append: bool) -> io::Result<File> {
-    let file = OpenOptions::new().read(true).write(true).create(true).append(append).mode(mode).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+    let file = open_custody_file(path, mode, append)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.uid() != 0 || meta.nlink() != 1 { return Err(io::Error::other("custody file must be a root-owned regular file with one link")); }
     file.set_permissions(std::fs::Permissions::from_mode(mode))?;
@@ -95,10 +99,61 @@ fn lock_slot() -> io::Result<File> {
     }
     let meta = path.symlink_metadata()?;
     if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o077 != 0 { return Err(io::Error::other("custody state directory must be root-owned mode 0700")); }
-    let file = protected_file(&path.join("heavy1.lock"), 0o600, false)?;
+    acquire_lock(protected_file(&path.join("heavy1.lock"), 0o600, false)?)
+}
+
+fn acquire_lock(file: File) -> io::Result<File> {
     // SAFETY: flock operates on a valid descriptor held until the operation ends.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 { return Err(io::Error::last_os_error()); }
     Ok(file)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Binding { job_id: String, bound_at: u64 }
+
+fn read_binding() -> io::Result<Option<Binding>> {
+    let path = Path::new(STATE_DIR).join("heavy1.json");
+    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.uid() != 0 || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other("slot binding must be a root-owned mode 0600 regular file"));
+    }
+    let binding: Binding = serde_json::from_reader(file)?;
+    crate::validate_job_id(&binding.job_id).map_err(io::Error::other)?;
+    Ok(Some(binding))
+}
+
+fn write_binding(job_id: &str) -> io::Result<()> {
+    let directory = Path::new(STATE_DIR);
+    let pending = directory.join("heavy1.pending");
+    let mut file = protected_file(&pending, 0o600, false)?;
+    file.set_len(0)?;
+    let binding = Binding { job_id: job_id.into(), bound_at: SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs() };
+    serde_json::to_writer(&mut file, &binding)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    std::fs::rename(pending, directory.join("heavy1.json"))?;
+    File::open(directory)?.sync_all()
+}
+
+fn stale_status(binding: Option<&Binding>, job_id: &str) -> Option<Status> {
+    if binding.is_some_and(|binding| binding.job_id == job_id) { None }
+    else { Some(Status::StaleJob { bound_job_id: binding.map(|binding| binding.job_id.clone()) }) }
+}
+
+fn run_busy_status(members: Vec<i32>, bound_job_id: Option<String>) -> Option<Status> {
+    if members.is_empty() && bound_job_id.is_none() { None }
+    else { Some(Status::SlotBusy { members, bound_job_id }) }
+}
+
+fn leftovers_status(pids: Vec<i32>, bound_job_id: Option<String>) -> Status {
+    if pids.is_empty() && bound_job_id.is_none() { Status::Empty }
+    else { Status::Members { pids, bound_job_id } }
 }
 
 fn bootout(target: &str) -> io::Result<()> {
@@ -166,29 +221,22 @@ fn sweep(uid: u32) -> io::Result<(u64, u64)> {
     }
 }
 
-fn cancel(uid: u32) -> Status {
-    let result = (|| {
-        let active = Path::new(STATE_DIR).join("heavy1.active");
-        match std::fs::read_to_string(&active) {
-            Ok(label) => {
-                if !label.starts_with(crate::LABEL_PREFIX) || label.trim() != label || !label[crate::LABEL_PREFIX.len()..].bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')) { return Err(io::Error::other("invalid stored active label")); }
-                bootout(&format!("system/{label}"))?;
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {},
-            Err(e) => return Err(e),
-        }
+fn cancel(uid: u32, job_id: &str) -> io::Result<Status> {
+    let binding = read_binding()?;
+    if let Some(stale) = stale_status(binding.as_ref(), job_id) { return Ok(stale); }
+    let result: io::Result<(u64, u64)> = (|| {
         bootout(&format!("user/{uid}"))?;
         let proof = sweep(uid)?;
-        match std::fs::remove_file(active) { Ok(()) => {}, Err(e) if e.kind() == io::ErrorKind::NotFound => {}, Err(e) => return Err(e) }
+        std::fs::remove_file(Path::new(STATE_DIR).join("heavy1.json"))?;
         Ok(proof)
     })();
-    match result {
+    Ok(match result {
         Ok((sweeps, signals)) => Status::Retired { sweeps, signals },
         Err(error) => match live_members(uid) {
             Ok(members) => Status::RetirementUnknown { members, reason: error.to_string() },
             Err(scan) => Status::RetirementUnknown { members: Vec::new(), reason: format!("{error}; final membership scan unavailable: {scan}") },
         },
-    }
+    })
 }
 
 fn sample(uid: u32) -> io::Result<Status> {
@@ -211,46 +259,187 @@ fn sample(uid: u32) -> io::Result<Status> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Audit<'a> { ts: u64, verb: &'a str, slot: &'a str, job_id: Option<&'a str>, caller_pid: i32, caller_uid: Option<u32>, status: &'a Status }
-fn audit(inv: &Invocation, status: &Status, job_id: Option<&str>) -> io::Result<()> {
-    let mut file = protected_file(Path::new(AUDIT_PATH), 0o644, true)?;
+
+struct Caller { pid: i32, uid: Option<u32> }
+impl Caller {
+    fn capture() -> Self {
+        // SAFETY: getppid is an argument-free identity query.
+        Self { pid: unsafe { libc::getppid() }, uid: std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok()) }
+    }
+}
+
+fn audit(file: &mut File, inv: &Invocation, status: &Status, job_id: Option<&str>, caller: &Caller) -> io::Result<()> {
     // SAFETY: descriptor remains alive through the append; lock serializes audit
     // records across verbs and rejected invocations as well as slot operations.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 { return Err(io::Error::last_os_error()); }
-    let record = Audit { ts: SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs(), verb: &inv.verb, slot: &inv.slot, job_id, caller_pid: unsafe { libc::getppid() }, caller_uid: std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok()), status };
-    serde_json::to_writer(&mut file, &record)?;
-    file.write_all(b"\n")?;
-    file.sync_data()
+    let result = (|| {
+        let record = Audit { ts: SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs(), verb: &inv.verb, slot: &inv.slot, job_id, caller_pid: caller.pid, caller_uid: caller.uid, status };
+        serde_json::to_writer(&mut *file, &record)?;
+        file.write_all(b"\n")?;
+        file.sync_data()
+    })();
+    // SAFETY: release this valid descriptor's advisory append lock. Do not hold
+    // the audit lock over exec; other slots/verbs must remain able to audit.
+    let unlock = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    result?;
+    if unlock != 0 { return Err(io::Error::last_os_error()); }
+    Ok(())
+}
+
+fn drop_identity(uid: u32, gid: u32) -> io::Result<()> {
+    let name = std::ffi::CString::new(USER).expect("constant has no NUL");
+    // SAFETY: helper is single-threaded and still root. initgroups replaces
+    // supplementary groups. Darwin's privileged setgid/setuid set all real,
+    // effective and saved IDs, unlike setegid/seteuid. No payload runs on error.
+    if unsafe { libc::initgroups(name.as_ptr(), gid) } != 0 { return Err(io::Error::last_os_error()); }
+    // SAFETY: gid was resolved from the system nobody group, not the plan.
+    if unsafe { libc::setgid(gid) } != 0 { return Err(io::Error::last_os_error()); }
+    // SAFETY: uid was resolved and validated from the compile-time slot account.
+    if unsafe { libc::setuid(uid) } != 0 { return Err(io::Error::last_os_error()); }
+    // SAFETY: argument-free identity queries verify both real and effective IDs.
+    let ids_match = unsafe { libc::getuid() == uid && libc::geteuid() == uid && libc::getgid() == gid && libc::getegid() == gid };
+    if !ids_match { return Err(io::Error::other("slot identity drop verification failed")); }
+    Ok(())
+}
+
+fn run(inv: &Invocation, plan: &Plan, uid: u32, audit_file: &mut File, caller: &Caller) -> io::Result<Status> {
+    if plan.env.get("FRACTAL_MAC_CUSTODY_STDIO").is_some_and(|value| value == "pipe") {
+        // SAFETY: isatty only inspects the inherited standard descriptors.
+        if (0..=2).any(|fd| unsafe { libc::isatty(fd) } == 1) {
+            return Ok(Status::PlanRejected { reason: "controllingPty: pipe stdio requested but a standard descriptor is a terminal".into() });
+        }
+    }
+    let group = std::ffi::CString::new("nobody").expect("constant has no NUL");
+    // SAFETY: NUL-terminated constant; copy gid before another group lookup.
+    let entry = unsafe { libc::getgrnam(group.as_ptr()) };
+    if entry.is_null() { return Err(io::Error::other("nobody group not found")); }
+    // SAFETY: successful getgrnam returned a valid group record.
+    let gid = unsafe { (*entry).gr_gid };
+    if gid == 0 { return Err(io::Error::other("nobody group must not be root")); }
+    let mut command = Command::new(&plan.argv[0]);
+    command.args(&plan.argv[1..]).env_clear().envs(&plan.env);
+    // SAFETY: getpid is an argument-free query; audit describes the exec attempt,
+    // not a fabricated successful launch receipt.
+    audit(audit_file, inv, &Status::Executing { pid: unsafe { libc::getpid() } }, Some(&plan.job_id), caller)?;
+    write_binding(&plan.job_id)?;
+    std::env::set_current_dir(&plan.cwd)?;
+    drop_identity(uid, gid)?;
+    // exec preserves stdin/stdout/stderr and PID. The CLOEXEC slot lock stays
+    // held through the identity transition and closes atomically with exec.
+    // A failed exec returns here; the pre-opened root audit descriptor remains
+    // writable for the failure record even after dropping privileges.
+    Err(command.exec())
 }
 
 pub fn execute(inv: &Invocation) -> Receipt {
     // SAFETY: geteuid is an argument-free identity query.
     if unsafe { libc::geteuid() } != 0 { return Receipt::new(Status::Failed { reason: "custody operations require root".into() }); }
+    let caller = Caller::capture();
+    let mut audit_file = match protected_file(Path::new(AUDIT_PATH), 0o644, true) {
+        Ok(file) => file,
+        Err(e) => return Receipt::new(Status::Failed { reason: format!("audit open failed: {e}") }),
+    };
+    let mut job_id = inv.job_id.clone();
     let result = (|| {
         if inv.slot != crate::SLOT { return Err(io::Error::other("only heavy1 is compiled into this helper")); }
+        if (inv.verb == "run") != inv.plan_file.is_some() { return Err(io::Error::other("only run requires a plan file")); }
+        if (inv.verb == "cancel") != inv.job_id.is_some() { return Err(io::Error::other("only cancel requires a jobId fence")); }
+        if let Some(id) = inv.job_id.as_deref() { crate::validate_job_id(id).map_err(io::Error::other)?; }
         let _lock = lock_slot()?;
         let uid = slot_uid()?;
         match inv.verb.as_str() {
-            "cancel" => Ok(cancel(uid)),
-            "leftovers" => { let pids = live_members(uid)?; Ok(if pids.is_empty() { Status::Empty } else { Status::Members { pids } }) },
+            "run" => {
+                let file = File::open(inv.plan_file.as_ref().ok_or_else(|| io::Error::other("run requires a plan file"))?)?;
+                let plan: Plan = match serde_json::from_reader(file) {
+                    Ok(plan) => plan,
+                    Err(e) => return Ok(Status::PlanRejected { reason: format!("invalid plan: {e}") }),
+                };
+                job_id = Some(plan.job_id.clone());
+                let validated = match plan.validate(&inv.slot) {
+                    Ok(plan) => plan,
+                    Err(reason) => return Ok(Status::PlanRejected { reason }),
+                };
+                let members = live_members(uid)?;
+                let bound_job_id = read_binding()?.map(|binding| binding.job_id);
+                if let Some(busy) = run_busy_status(members, bound_job_id) { return Ok(busy); }
+                run(inv, &validated.plan, uid, &mut audit_file, &caller)
+            },
+            "cancel" => cancel(uid, inv.job_id.as_deref().ok_or_else(|| io::Error::other("cancel requires jobId"))?),
+            "leftovers" => {
+                let pids = live_members(uid)?;
+                let bound_job_id = read_binding()?.map(|binding| binding.job_id);
+                Ok(leftovers_status(pids, bound_job_id))
+            },
             "sample" => sample(uid),
             _ => Err(io::Error::other("unsupported verb")),
         }
     })();
     let status = result.unwrap_or_else(|e: io::Error| Status::Failed { reason: e.to_string() });
-    if let Err(e) = audit(inv, &status, None) { return Receipt::new(Status::Failed { reason: format!("audit append failed: {e}") }); }
+    if let Err(e) = audit(&mut audit_file, inv, &status, job_id.as_deref(), &caller) { return Receipt::new(Status::Failed { reason: format!("audit append failed: {e}") }); }
     Receipt::new(status)
 }
 
 /// Audit a strict-argv rejection too; raw strings are JSON escaped.
 pub fn rejected_invocation(args: &[std::ffi::OsString], reason: String) -> Receipt {
     let status = Status::PlanRejected { reason };
-    let inv = Invocation { verb: args.first().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), slot: args.get(1).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() };
-    if let Err(e) = audit(&inv, &status, None) { return Receipt::new(Status::Failed { reason: format!("audit append failed: {e}") }); }
+    let inv = Invocation { verb: args.first().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), slot: args.get(1).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), plan_file: None, job_id: None };
+    let result = protected_file(Path::new(AUDIT_PATH), 0o644, true)
+        .and_then(|mut file| audit(&mut file, &inv, &status, None, &Caller::capture()));
+    if let Err(e) = result { return Receipt::new(Status::Failed { reason: format!("audit append failed: {e}") }); }
     Receipt::new(status)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn binding_fences_and_empty_membership() {
+        let binding: Binding = serde_json::from_str(r#"{"jobId":"job.1","boundAt":123}"#).unwrap();
+        assert_eq!(binding.bound_at, 123);
+        assert!(stale_status(Some(&binding), "job.1").is_none());
+        assert_eq!(stale_status(Some(&binding), "other"), Some(Status::StaleJob { bound_job_id: Some("job.1".into()) }));
+        assert_eq!(stale_status(None, "job.1"), Some(Status::StaleJob { bound_job_id: None }));
+        assert!(run_busy_status(Vec::new(), None).is_none());
+        assert_eq!(run_busy_status(Vec::new(), Some("job.1".into())), Some(Status::SlotBusy { members: Vec::new(), bound_job_id: Some("job.1".into()) }));
+        assert_eq!(leftovers_status(Vec::new(), Some("job.1".into())), Status::Members { pids: Vec::new(), bound_job_id: Some("job.1".into()) });
+        assert_eq!(leftovers_status(Vec::new(), None), Status::Empty);
+        assert!(serde_json::from_str::<Binding>(r#"{"jobId":"job.1"}"#).is_err());
+    }
+
+    #[test]
+    fn lock_is_cloexec_and_held_from_bind_until_exec() {
+        const CHILD: &str = "FRACTAL_CUSTODY_LOCK_TEST_CHILD";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let path = Path::new(&path);
+            let lock = acquire_lock(open_custody_file(path, 0o600, false).unwrap()).unwrap();
+            // SAFETY: F_GETFD only inspects this live test descriptor.
+            let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFD) };
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+            std::fs::write(path.with_extension("json"), br#"{"jobId":"test","boundAt":1}"#).unwrap();
+            let contender = open_custody_file(path, 0o600, false).unwrap();
+            // SAFETY: nonblocking flock probes the same inode via a distinct
+            // open description. The binding-to-exec critical section stays held.
+            assert_eq!(unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, -1);
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EWOULDBLOCK));
+            drop(contender);
+            // No explicit unlock: exec must close the still-live lock descriptor.
+            let script = format!("test ! -e /dev/fd/{}", lock.as_raw_fd());
+            let error = Command::new("/bin/sh").args(["-c", &script]).exec();
+            panic!("test exec failed: {error}");
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp/custody-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::tempdir_in(root).unwrap();
+        let path = scratch.path().join("slot.lock");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "darwin::tests::lock_is_cloexec_and_held_from_bind_until_exec", "--test-threads=1"])
+            .env(CHILD, &path).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let binding: Binding = serde_json::from_slice(&std::fs::read(path.with_extension("json")).unwrap()).unwrap();
+        assert_eq!(binding.job_id, "test");
+    }
+
     #[test]
     fn own_uid_scan_without_privilege() {
         // SAFETY: argument-free identity and PID queries.

@@ -8,9 +8,11 @@ fn main() {
         Err(reason) => rejected_invocation(&args, reason),
     };
     let failed = matches!(receipt.status, Status::Failed { .. } | Status::Unsupported { .. } | Status::PlanRejected { .. } | Status::RetirementUnknown { .. });
+    let busy = matches!(receipt.status, Status::SlotBusy { .. });
     let mut stdout = std::io::stdout().lock();
     if serde_json::to_writer(&mut stdout, &receipt).is_err() || stdout.write_all(b"\n").is_err() || stdout.flush().is_err() {
         std::process::exit(1);
     }
+    if busy { std::process::exit(75); }
     if failed { std::process::exit(1); }
 }

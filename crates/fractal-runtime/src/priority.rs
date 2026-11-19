@@ -414,7 +414,7 @@ fn placement_report(observations: &[PtyObservation]) -> (&'static str, String) {
                 )
             }
         }
-        crate::Isolation::Detached | crate::Isolation::DegradedDetached => (
+        crate::Isolation::Detached | crate::Isolation::DegradedDetached | crate::Isolation::DarwinSlot { .. } => (
             "warn",
             "without systemd user scopes, PTY servers share CPU and IO with their harnesses".into(),
         ),

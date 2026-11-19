@@ -1,14 +1,19 @@
-//! Darwin custody v2. Invoke `sudo -n <helper> <cancel|leftovers|sample> heavy1`.
-//! Stdout is exactly one JSON [`Receipt`]. Launch verbs are not exposed.
-//! Slot membership, not launchd exit, is the retirement authority. Sampled RSS
-//! is observational and never an enforcement or peak-memory claim.
+//! Darwin custody v2. Invoke `sudo -n <helper> <verb> heavy1 [plan-file]`.
+//! `run` alone takes a plan file and execs in place with inherited stdin/out/err:
+//! success emits no receipt, and slotBusy emits one receipt and exits 75.
+//! Other verbs and failures emit exactly one JSON [`Receipt`]. Sampled RSS is
+//! observational, never an enforcement or peak-memory claim.
+//! Cancellation requires `cancel heavy1 <jobId>` and compares the root binding
+//! before any bootout or signal. A bound slot is busy even with no live PIDs;
+//! only matching successful retirement removes the binding. The root lock stays
+//! held from empty-slot validation through exec, where CLOEXEC closes it.
+//! Set plan env `FRACTAL_MAC_CUSTODY_STDIO=pipe` to reject sudo-inserted PTYs.
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::{Component, Path, PathBuf}};
 
 pub const SCHEMA: &str = "fractal.darwin-custody.v2";
 pub const SLOT: &str = "heavy1";
 pub const USER: &str = "_fractal-heavy1";
-pub const LABEL_PREFIX: &str = "dev.schickling.fractal-job.heavy1.";
 pub const SLOT_ROOT: &str = "/Users/Shared/fractal-jobs/heavy1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +23,6 @@ pub struct Plan {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
-    pub stdout_path: PathBuf,
-    pub stderr_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,13 +38,14 @@ impl Receipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Status {
-    Started { label: String, pid: i32 },
-    SlotBusy { members: Vec<i32> },
+    Executing { pid: i32 },
+    SlotBusy { members: Vec<i32>, bound_job_id: Option<String> },
     PlanRejected { reason: String },
     Retired { sweeps: u64, signals: u64 },
     RetirementUnknown { members: Vec<i32>, reason: String },
     Empty,
-    Members { pids: Vec<i32> },
+    Members { pids: Vec<i32>, bound_job_id: Option<String> },
+    StaleJob { bound_job_id: Option<String> },
     Sampled { rss_bytes: u64, sampled: u64, unavailable: u64, enforced: bool },
     Unsupported { reason: String },
     Failed { reason: String },
@@ -58,9 +62,7 @@ impl Plan {
     }
 
     fn validate_under(mut self, root: &Path) -> Result<ValidatedPlan, String> {
-        if self.job_id.is_empty() || self.job_id.len() > 96 || !self.job_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
-            return Err("jobId must be 1..96 ASCII letters, digits, hyphens or underscores".into());
-        }
+        validate_job_id(&self.job_id)?;
         if self.argv.is_empty() || self.argv[0].is_empty() || self.argv.iter().any(|a| a.contains('\0')) {
             return Err("argv must contain a nonempty executable and no NUL bytes".into());
         }
@@ -69,48 +71,48 @@ impl Plan {
         }
         let canonical_root = root.canonicalize().map_err(|e| format!("slot root: {e}"))?;
         if canonical_root != root { return Err("slot root must be canonical, not a symlink".into()); }
-        self.cwd = contained_path(&self.cwd, root, false)?;
+        self.cwd = contained_path(&self.cwd, root)?;
         if !self.cwd.is_dir() { return Err("cwd must be a directory".into()); }
-        self.stdout_path = contained_path(&self.stdout_path, root, true)?;
-        self.stderr_path = contained_path(&self.stderr_path, root, true)?;
         Ok(ValidatedPlan { plan: self })
     }
 }
 
-fn contained_path(path: &Path, root: &Path, log: bool) -> Result<PathBuf, String> {
+/// Job IDs are shared by plans, cancellation fences and root binding records.
+pub fn validate_job_id(job_id: &str) -> Result<(), String> {
+    if job_id.is_empty() || job_id.len() > 128 || !job_id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-')) {
+        return Err("jobId must be 1..128 ASCII letters, digits, dots, underscores or hyphens".into());
+    }
+    Ok(())
+}
+
+fn contained_path(path: &Path, root: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) || !path.starts_with(root) {
         return Err("path must be absolute and inside the selected slot, without '..'".into());
     }
-    let canonical = if log {
-        let name = path.file_name().ok_or("log path needs a filename")?;
-        let parent = path.parent().ok_or("log path needs a parent")?.canonicalize().map_err(|e| format!("log parent: {e}"))?;
-        let candidate = parent.join(name);
-        match candidate.symlink_metadata() {
-            Ok(meta) if meta.file_type().is_symlink() => return Err("log path must not be a symlink".into()),
-            Ok(meta) if !meta.is_file() => return Err("log path must be a regular file".into()),
-            Ok(_) => candidate.canonicalize().map_err(|e| e.to_string())?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => candidate,
-            Err(e) => return Err(e.to_string()),
-        }
-    } else { path.canonicalize().map_err(|e| format!("cwd: {e}"))? };
+    let canonical = path.canonicalize().map_err(|e| format!("cwd: {e}"))?;
     if !canonical.starts_with(root) { return Err("path escapes slot through a symlink".into()); }
     Ok(canonical)
 }
 
 
 #[derive(Debug, Clone)]
-pub struct Invocation { pub verb: String, pub slot: String }
+pub struct Invocation { pub verb: String, pub slot: String, pub plan_file: Option<PathBuf>, pub job_id: Option<String> }
 impl Invocation {
     pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
         let args: Vec<_> = args.into_iter().collect();
-        if args.len() != 2 { return Err("expected <cancel|leftovers|sample> heavy1".into()); }
+        if args.len() < 2 { return Err("expected run heavy1 <plan-file>, cancel heavy1 <jobId>, leftovers heavy1, or sample heavy1".into()); }
         let verb = args[0].to_str().ok_or("verb must be UTF-8")?;
         let slot = args[1].to_str().ok_or("slot must be UTF-8")?;
         if slot != SLOT { return Err("only heavy1 is compiled into this helper".into()); }
-        if !matches!(verb, "cancel" | "leftovers" | "sample") {
+        if !matches!(verb, "run" | "cancel" | "leftovers" | "sample") || args.len() != if matches!(verb, "run" | "cancel") { 3 } else { 2 } {
             return Err("invalid verb or argument count".into());
         }
-        Ok(Self { verb: verb.into(), slot: slot.into() })
+        let job_id = if verb == "cancel" {
+            let id = args[2].to_str().ok_or("jobId must be UTF-8")?;
+            validate_job_id(id)?;
+            Some(id.into())
+        } else { None };
+        Ok(Self { verb: verb.into(), slot: slot.into(), plan_file: if verb == "run" { args.get(2).map(PathBuf::from) } else { None }, job_id })
     }
 }
 
@@ -137,7 +139,7 @@ mod tests {
         tempfile::tempdir_in(root).unwrap()
     }
     fn plan(root: &Path) -> Plan {
-        Plan { job_id: "job-1".into(), argv: vec!["/bin/echo".into(), "<&>".into()], cwd: root.into(), env: BTreeMap::from([("A".into(), "<&>".into())]), stdout_path: root.join("stdout"), stderr_path: root.join("stderr") }
+        Plan { job_id: "job-1".into(), argv: vec!["/bin/echo".into(), "<&>".into()], cwd: root.into(), env: BTreeMap::from([("A".into(), "<&>".into())]) }
     }
     #[test]
     fn plan_boundaries() {
@@ -146,21 +148,26 @@ mod tests {
         let p = plan(&root);
         assert!(p.clone().validate("other").is_err());
         assert_eq!(p.clone().validate_under(&root).unwrap().plan.cwd, root);
+        for old_field in ["stdoutPath", "stderrPath"] {
+            let mut legacy = serde_json::to_value(&p).unwrap();
+            legacy.as_object_mut().unwrap().insert(old_field.into(), "/unused".into());
+            assert!(serde_json::from_value::<Plan>(legacy).is_err());
+        }
+        let mut bad = p.clone(); bad.argv[0].clear(); assert!(bad.validate_under(&root).is_err());
+        let mut bad = p.clone(); bad.argv.push("bad\0arg".into()); assert!(bad.validate_under(&root).is_err());
+        let mut bad = p.clone(); bad.env.insert("BAD=KEY".into(), "value".into()); assert!(bad.validate_under(&root).is_err());
         let mut bad = p.clone(); bad.argv.clear(); assert!(bad.validate_under(&root).is_err());
         let mut bad = p.clone(); bad.cwd = root.join("../escape"); assert!(bad.validate_under(&root).is_err());
-        let mut bad = p.clone(); bad.stdout_path = root.with_extension("other").join("log"); assert!(bad.validate_under(&root).is_err());
-        let mut bad = p; bad.job_id = "x.y".into(); assert!(bad.validate_under(&root).is_err());
+        let mut bad = p.clone(); bad.cwd = root.with_extension("other"); assert!(bad.validate_under(&root).is_err());
+        let mut bad = p; bad.job_id = "x/y".into(); assert!(bad.validate_under(&root).is_err());
     }
     #[cfg(unix)]
     #[test]
-    fn symlink_escape_and_nonexistent_logs() {
+    fn symlink_escape() {
         let dir = scratch(); let outside = scratch();
         let root = dir.path().canonicalize().unwrap();
         std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
         let mut p = plan(&root); p.cwd = root.join("escape"); assert!(p.validate_under(&root).is_err());
-        let mut p = plan(&root); p.stdout_path = root.join("escape/log"); assert!(p.validate_under(&root).is_err());
-        std::os::unix::fs::symlink(outside.path().join("log"), root.join("linked-log")).unwrap();
-        let mut p = plan(&root); p.stdout_path = root.join("linked-log"); assert!(p.validate_under(&root).is_err());
         assert!(plan(&root).validate_under(&root).is_ok());
     }
     #[test]
@@ -168,7 +175,15 @@ mod tests {
         for args in [vec!["start", "heavy1"], vec!["start", "heavy1", "plan.json"], vec!["run", "heavy1"], vec!["sample", "heavy1", "extra"], vec!["cancel", "heavy2"], vec!["unknown", "heavy1"]] {
             assert!(Invocation::parse(args.into_iter().map(Into::into)).is_err());
         }
-        let statuses = [Status::Empty, Status::Started { label: "label".into(), pid: 123 }, Status::Retired { sweeps: 2, signals: 3 }, Status::Sampled { rss_bytes: 42, sampled: 1, unavailable: 0, enforced: false }, Status::Unsupported { reason: "platform".into() }];
+        let invocation = Invocation::parse(["run".into(), SLOT.into(), "plan.json".into()]).unwrap();
+        assert_eq!(invocation.plan_file.unwrap(), PathBuf::from("plan.json"));
+        assert!(Invocation::parse(["cancel".into(), SLOT.into()]).is_err());
+        let cancel = Invocation::parse(["cancel".into(), SLOT.into(), "job.1-a_b".into()]).unwrap();
+        assert_eq!(cancel.job_id.as_deref(), Some("job.1-a_b"));
+        for id in ["", "a/b", "a b", "é"] { assert!(validate_job_id(id).is_err()); }
+        assert!(validate_job_id(&"a".repeat(128)).is_ok());
+        assert!(validate_job_id(&"a".repeat(129)).is_err());
+        let statuses = [Status::Empty, Status::Executing { pid: 123 }, Status::SlotBusy { members: Vec::new(), bound_job_id: Some("bound".into()) }, Status::Members { pids: Vec::new(), bound_job_id: Some("bound".into()) }, Status::StaleJob { bound_job_id: None }, Status::Retired { sweeps: 2, signals: 3 }, Status::Sampled { rss_bytes: 42, sampled: 1, unavailable: 0, enforced: false }, Status::Unsupported { reason: "platform".into() }];
         for status in statuses {
             let receipt = Receipt::new(status);
             let bytes = serde_json::to_vec(&receipt).unwrap();
