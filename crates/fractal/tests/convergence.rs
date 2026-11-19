@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v38.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v39.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -271,6 +271,21 @@ fn the_corpus_generates_valid_native_capture_inputs() {
     for id in written.values() {
         assert!(replicated.contains_key(id), "capture claim {id} must replicate");
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_phone_minute_summaries() {
+    let kind = "custom.client.observation-minute";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(spec, 0).expect("phone minute input");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["count"], 1);
+    assert_eq!(input.fields["buckets"], json!([[103, 1]]));
+    assert!(world.nodes[0].store.append_claim(&input).is_err(),
+        "generic append cannot impersonate an authenticated phone producer");
 }
 
 #[test]
@@ -1171,6 +1186,24 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "custom.client.observation-minute" {
+            let source = "person/operator/device/phone";
+            let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
+            let path = Some("direct");
+            let key = smallclaims::hash::canonical_hash(&(source, "ios-connect", "fabric", path, start_ms)).unwrap();
+            return Some(ClaimInput {
+                subject: format!("custom/client/observation-minute-{key}"),
+                kind: spec.kind.clone(), actor: Some(PERSON.into()),
+                fields: serde_json::from_value(json!({
+                    "source": source, "pairing_grant": "custom/client/pairing-phone",
+                    "report_id": "11111111-1111-4111-8111-111111111111",
+                    "report_digest": "a".repeat(64), "target": "ios-connect",
+                    "carrier": "fabric", "path": "direct", "start_ms": start_ms,
+                    "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            });
+        }
         if matches!(spec.kind.as_str(), "resource.admission.observed"
             | "resource.admission.coverage" | "gate.admission.observed") {
             let id = self.fresh("admission");
@@ -2433,11 +2466,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v38 adds native admission evidence, shifting the seeded schedule.
+/// Corpus v39 adds durable phone minutes, shifting the seeded schedule.
 /// Prior corpus characterizations are recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
+const NEVER_TRIMS: &[u64] = &[2, 34, 179];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
@@ -2447,7 +2480,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v38 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v39 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2456,7 +2489,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v38 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v39 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2464,7 +2497,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v38 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v39 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2677,7 +2710,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v38.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v39.json"
         }))
         .unwrap(),
     )

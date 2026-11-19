@@ -2554,6 +2554,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "custom.client.observation-minute", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Once, None, false, &[],
+        ),
+        (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
         ),
@@ -4182,6 +4186,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("request_digest", required_string()),
             ("result", FieldSpec { required: true, ..object() }),
         ],
+        "custom.client.observation-minute" => &[
+            ("source", required_string()),
+            ("pairing_grant", required_string()),
+            ("report_id", required_string()),
+            ("report_digest", required_string()),
+            ("target", required_string()),
+            ("carrier", required_enum(&["fabric", "tailscale", "lan"])),
+            ("path", string()),
+            ("start_ms", required_integer()),
+            ("count", required_integer()),
+            ("over", required_integer()),
+            ("max_ms", required_integer()),
+            ("buckets", required_array()),
+        ],
         "agent.helper-launched" => &[
             ("launcher", required_reference_to(&["agent"])),
             ("person", reference_to(&["person"])),
@@ -5581,6 +5599,7 @@ mod tests {
         current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("custom.client.observation-minute").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
         for kind in attention_controls::KINDS {
@@ -6241,6 +6260,28 @@ mod tests {
                 .code,
             "unknown-resource-field"
         );
+    }
+
+    #[test]
+    fn phone_minute_summaries_are_durable_once_and_not_publicly_writable() {
+        let kind = "custom.client.observation-minute";
+        let fields = serde_json::from_value(serde_json::json!({
+            "source": "person/avery/device/example",
+            "pairing_grant": "custom/client/pairing-example",
+            "report_id": "11111111-1111-4111-8111-111111111111",
+            "report_digest": "a".repeat(64),
+            "target": "ios-connect", "carrier": "fabric", "path": "direct",
+            "start_ms": 0, "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+        })).unwrap();
+        let subject = "custom/client/observation-minute-example";
+        let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+        assert_eq!(spec.retention, Retention::Durable);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert!(!spec.wakes_reconciler);
+        for actor in [None, Some("person/avery"), Some("agent/example")] {
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, actor)
+                .unwrap_err().code, "claim-write-forbidden");
+        }
     }
 
     #[test]
