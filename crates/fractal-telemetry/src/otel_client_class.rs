@@ -348,7 +348,7 @@ mod tests {
             ("curl", ClientClass::Other),
             ("fractal", ClientClass::Fractal),
             ("st agents ls", ClientClass::Cli),
-            ("st attention ls", ClientClass::Cli),
+            ("st alerts ls", ClientClass::Cli),
             ("st conversations read", ClientClass::Cli),
             ("st3 doctor", ClientClass::Cli),
             ("st3 driver codex", ClientClass::Driver),
