@@ -2859,7 +2859,7 @@ impl Ui {
             if let Some((column, edge)) = &row.edge
                 && *column < area.width
             {
-                buf.set_span(area.x + column, y, edge, area.width - column);
+                buf.set_stringn(area.x + column, y, edge.content.as_ref(), (area.width - column) as usize, edge.style);
             }
             for (column, width, hit) in &row.hits {
                 self.hit(
