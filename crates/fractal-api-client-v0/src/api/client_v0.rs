@@ -10800,7 +10800,8 @@ mod tests {
         assert!(share["windows"]["1m"]["live_share"].is_null(), "missing phone time stays unknown");
         let now = client_now_ms() as u64;
         let start = now / 60_000 * 60_000 - 60_000;
-        let timestamp = |ms| chrono::DateTime::from_timestamp_millis(ms as i64).unwrap().to_rfc3339();
+        let timestamp = |ms| chrono::DateTime::from_timestamp_millis(ms as i64).unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let wire = serde_json::to_vec(&json!({
             "report_id":"33333333-3333-4333-8333-333333333333",
             "samples":[{"kind":"latency","target":"ios-connect","carrier":"lan",
