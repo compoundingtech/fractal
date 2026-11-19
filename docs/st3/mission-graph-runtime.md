@@ -2247,6 +2247,19 @@ disable that budget, or retroactively introduce new delivery-stall policy.
 Unknown legacy exit timestamps are not reconstructed from recovery time.
 New native attempts use the new policy.
 
+Deployment baseline `68cd28b9e2f5db8869b16f1426cfabb5bf8181d1` predates this
+feature: its `crates/fractal-reconcile/src/reconcile.rs:16898-16941` evaluates
+the legacy projected execution clock, not native `execution-timeout` phase
+claims. Its `crates/fractal-store/src/store.rs:22627-22656` folds that legacy
+clock, and `:22766-22782` already excludes declared waits. The baseline has
+neither the `step.execution-phase` registry kind nor the native phase emitter
+or evaluator; its `program_resources.rs:398` timeout is a separate resource
+command failure, not step-phase evidence. Thus the deployed baseline cannot
+produce or consume the pre-wait-fix native timeout evidence from intermediate
+revisions of this change. Those intermediate revisions are not deployment
+targets; participating coordinators and executors must adopt the final change
+together, as required by the release note.
+
 Expiry records `dispatch-stalled` with the exec and the waiting subphase, raises
 an operational fault, and fails the step with that reason, never with an execution
 timeout. This internal phase does not add a public work status. All new timing
