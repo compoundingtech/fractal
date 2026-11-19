@@ -115,12 +115,35 @@ fn in_place_kind(dir: &Path) -> Result<WorkspaceKind> {
     }
 }
 
-pub(crate) fn workspace_kind(path: &Path) -> Result<WorkspaceKind> {
+fn workspace_kind(path: &Path) -> Result<WorkspaceKind> {
     match git(path, &["rev-parse", "--git-dir"], None, None) {
         Ok(_) => Ok(WorkspaceKind::Git),
         Err(error) if code(&error) == "git-command-failed" => Ok(WorkspaceKind::NonGit),
         Err(error) => Err(error),
     }
+}
+
+/// Same-host Git resume historically needed only the native binding. Enforce kind
+/// equality when the capture actually recorded Git evidence, not merely because a
+/// historical suspension's missing mode defaults to Git.
+pub(crate) fn validate_git_workspace(state: &Path, operation: &str, path: &Path) -> Result<()> {
+    let bytes = match fs::read(directory(state, operation).join("workspace.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        snapshot["head"].as_str().is_some_and(|head| !head.is_empty()),
+        "Git workspace snapshot has no recorded HEAD"
+    );
+    if workspace_kind(path)? != WorkspaceKind::Git {
+        return Err(refusal(
+            "workspace-kind-mismatch",
+            "the Git workspace became non-Git while suspended",
+        ));
+    }
+    Ok(())
 }
 fn refusal(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     FractalError::new(code, message).into()
@@ -804,6 +827,30 @@ pub async fn transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_resume_validates_captured_evidence_but_preserves_legacy_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, _, _) = fixture(root.path());
+        let state = root.path().join("state");
+        let source = Path::new(&member.workspace);
+        // Legacy native-only suspensions have no Git capture to compare against.
+        validate_git_workspace(&state, "legacy", source).unwrap();
+        validate_git_workspace(&state, "legacy", &root.path().join("absent")).unwrap();
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        validate_git_workspace(&state, "snapshot", source).unwrap();
+        fs::rename(source.join(".git"), root.path().join("saved-git")).unwrap();
+        assert_eq!(
+            code(&validate_git_workspace(&state, "snapshot", source).unwrap_err()),
+            "workspace-kind-mismatch"
+        );
+        validate_git_workspace(&state, "legacy", source).unwrap();
+        fs::rename(root.path().join("saved-git"), source.join(".git")).unwrap();
+        validate_git_workspace(&state, "snapshot", source).unwrap();
+        // Corrupt existing evidence is not mistaken for a legacy missing capture.
+        fs::write(directory(&state, "snapshot").join("workspace.json"), b"{}").unwrap();
+        assert!(validate_git_workspace(&state, "snapshot", source).is_err());
+    }
     fn member(path: &Path) -> MemberSpec {
         crate::parse_intent(&format!("version 2\nagent \"sample\" {{ host \"amber\"; workspace \"{}\"; harness \"omp\" {{}} }}", path.display()), "amber")
             .unwrap().subjects.into_values().find_map(|desired| desired.member).unwrap()

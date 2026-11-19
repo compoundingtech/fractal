@@ -9284,10 +9284,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .as_deref()
                     .is_some_and(|source| source != self.host);
                 if !moved && suspension.mode() == "git" {
-                    match crate::seat_snapshot::workspace_kind(Path::new(&member.workspace)) {
-                        Ok(crate::seat_snapshot::WorkspaceKind::Git) => {}
-                        Ok(_) => return self.fail_suspension(agent, suspension, "workspace-kind-mismatch", "the Git workspace became non-Git while suspended".into(), Vec::new()),
-                        Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                    if let Some(operation) = suspension.suspend_operation_id.as_deref()
+                        && let Err(error) = crate::seat_snapshot::validate_git_workspace(
+                            self.driver_state_dir.parent().unwrap(), operation, Path::new(&member.workspace),
+                        )
+                    {
+                        return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
                     }
                 }
                 if suspension.mode() == "in-place" {

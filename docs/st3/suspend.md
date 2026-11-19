@@ -103,6 +103,10 @@ snapshots and empty capture markers convert to the tagged `legacy-unknown` kind:
 they retain the previous resume checks without claiming historical kind equality.
 Their resume evidence records `legacy-unknown-kind`. This preserves both non-Git
 and unborn-Git historical sessions; only known kinds enforce the new equality guard.
+Same-host Git resume checks the captured workspace HEAD evidence before comparing
+the live kind. A historical native-only suspension with no workspace capture retains
+its previous resume behavior; a missing/defaulted mode is not itself Git evidence.
+Existing but unreadable or malformed workspace evidence still fails validation.
 Older daemons with in-place support ignore the additive kind field and can preserve the
 session, but do not enforce the kind-change guard. Use an updated daemon to resume.
 Daemons without in-place support cannot restore the missing Git bundle; they refuse
