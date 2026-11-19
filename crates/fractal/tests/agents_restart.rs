@@ -3586,7 +3586,7 @@ async fn a_requested_restart_waits_for_the_seats_handoff() {
     assert_eq!(messages.len(), 1, "{messages:?}");
     assert_eq!(messages[0].from, "daemon/runtime");
     assert_eq!(messages[0].title.as_deref(), Some("Prepare for restart"));
-    assert!(messages[0].content.contains("st agents handoff write"));
+    assert!(messages[0].content.contains("fractal agents handoff write"));
     assert!(fractal_daemon::silent::always_wakes(&messages[0].from, &messages[0].tags));
 
     // Writing the handoff acknowledges it, and the seat is restarted.

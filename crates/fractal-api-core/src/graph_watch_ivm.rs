@@ -234,7 +234,7 @@ mod tests {
         }
     }
 
-    // The real st3 wrapper exercises Borrow<GraphStore>. Source maintenance is explicit
+    // The real Fractal wrapper exercises Borrow<GraphStore>. Source maintenance is explicit
     // in this transport fixture; it does not certify the production card dependencies.
     pub struct Fixture {
         store: Arc<crate::store::Store>,

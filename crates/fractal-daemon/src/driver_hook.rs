@@ -1,13 +1,13 @@
-//! `st driver-hook NAME [ARGS]`: the st3 binary answering a hook its own seat's harness runs.
+//! `fractal driver-hook NAME [ARGS]`: the Fractal binary answering a hook its own seat's harness runs.
 //!
-//! Every script in st3's hook set execs this, hidden from `--help`, with the harness's payload on
+//! Every script in Fractal's hook set execs this, hidden from `--help`, with the harness's payload on
 //! stdin. The arguments and environment are the ones the seat's driver exports: the event name in
 //! the first argument, resolved `FRACTAL_DRIVER_*` (or legacy `ST_DRIVER_*`) paths and identity,
 //! and the Claude wrapper-session fence. Already-running seats retain their catalog discovery fallback.
 //!
 //! Observation fails open, since a hook the harness waits on must not stop it. One case is loud:
 //! a SessionStart that leaves no native-session binding for the current wrapper session, because
-//! without it st cannot find the seat's transcript. That hook exits non-zero, prints why, and
+//! without it Fractal cannot find the seat's transcript. That hook exits non-zero, prints why, and
 //! records a `harness.diagnostic` claim. A mandatory resume binding failure also exits non-zero,
 //! as it always has.
 
@@ -21,7 +21,7 @@ use serde_json::Value;
 /// Active hooks this subcommand answers. New hook sets hold one script per name.
 pub const HOOKS: [&str; 2] = ["claude-observe", "claude-statusline"];
 
-/// The subcommand name st3's hook scripts exec.
+/// The subcommand name Fractal's hook scripts exec.
 pub const SUBCOMMAND: &str = "driver-hook";
 
 /// The diagnostic code a Claude seat records when its SessionStart hook bound no native session.
@@ -112,7 +112,7 @@ pub fn run(
     stdin: &mut dyn Read,
     report: &mut dyn FnMut(Diagnostic),
 ) -> u8 {
-    // Harness-session state stays beneath st3's driver directory, never st2's.
+    // Harness-session state stays beneath Fractal's driver directory, never st2's.
     if let Some(drivers) = env.var("ST3_DRIVER_STATE_DIR") {
         fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
     }
@@ -128,7 +128,7 @@ pub fn run(
                 Ok(resolved) => resolved,
                 Err(error) => {
                     let _ = std::io::copy(stdin, &mut std::io::sink());
-                    eprintln!("st: Claude status line paths are unavailable: {error:#}");
+                    eprintln!("fractal: Claude status line paths are unavailable: {error:#}");
                     return 0;
                 }
             };
@@ -142,7 +142,7 @@ pub fn run(
                 }, |_| Ok(()),
             );
             if let Err(error) = &ownership {
-                eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(error));
+                eprintln!("fractal: {}", fractal_drivers::claude_process::diagnostic(error));
             }
             if ownership.is_ok() && env.var("ST3_MAILBOX_TRANSPORT").as_deref() == Some("push") {
                 // Every render reads graph authority; no display-name environment snapshot.
@@ -161,7 +161,7 @@ pub fn run(
             match rendered {
                 Ok(()) => 0,
                 Err(error) => {
-                    eprintln!("st: the Claude status line failed: {error:#}");
+                    eprintln!("fractal: the Claude status line failed: {error:#}");
                     1
                 }
             }
@@ -186,7 +186,7 @@ pub fn run(
             }
             let _ = std::io::copy(stdin, &mut std::io::sink());
             eprintln!(
-                "st: unknown driver hook `{other}`; this binary answers {}",
+                "fractal: unknown driver hook `{other}`; this binary answers {}",
                 HOOKS.join(", ")
             );
             1
@@ -301,7 +301,7 @@ fn claude_observe(
         }
     };
     if event.is_empty() {
-        eprintln!("st: claude-observe needs the Claude hook event name");
+        eprintln!("fractal: claude-observe needs the Claude hook event name");
         return 0;
     }
     let runtime_id = hook_var(env, fractal_drivers::claude_session::RUNTIME_ID_ENV)
@@ -315,7 +315,7 @@ fn claude_observe(
         if let Err(error) = fractal_drivers::claude_process::with_caller(&paths.agent_dir, &session,
             sequence, std::process::id(), None,
             fractal_drivers::claude_process::Caller::Hook { trampoline: &command }, |_| Ok(())) {
-            eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(&error));
+            eprintln!("fractal: {}", fractal_drivers::claude_process::diagnostic(&error));
             // A proven secondary is harmless and unscoped. A primary whose proof cannot be
             // read must expose failed SessionStart/mandatory binding, not pretend it succeeded.
             return u8::from((session_start || mandatory)
@@ -344,10 +344,10 @@ fn claude_observe(
     };
     if let Err(error) = observed {
         if mandatory {
-            eprintln!("st: the mandatory Claude SessionStart binding failed: {error:#}");
+            eprintln!("fractal: the mandatory Claude SessionStart binding failed: {error:#}");
             return 1;
         }
-        eprintln!("st: Claude {event} was not recorded: {error:#}");
+        eprintln!("fractal: Claude {event} was not recorded: {error:#}");
         return if session_start {
             match session_start_binding(&paths.agent_dir, env, &raw) {
                 Ok(()) => 0,
@@ -356,7 +356,7 @@ fn claude_observe(
         } else { 0 };
     }
     if event == "PermissionRequest" {
-        answer_permission_from_st(env, &identity, &paths.agent_dir, &raw);
+        answer_permission_from_fractal(env, &identity, &paths.agent_dir, &raw);
         return 0;
     }
     if event == "Stop" {
@@ -376,19 +376,19 @@ fn claude_observe(
     }
 }
 
-/// How long a permission hook waits for a person's answer from a client: exactly as long as st
+/// How long a permission hook waits for a person's answer from a client: exactly as long as Fractal
 /// offers one, so an answer given from a client is never recorded after its hook has gone. Claude
 /// shows its own dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
 const PROMPT_ANSWER_WAIT: std::time::Duration =
     std::time::Duration::from_millis(crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS as u64);
 const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
-/// How long a subagent's prompt waits for a person before st denies it: as long as Claude waits
+/// How long a subagent's prompt waits for a person before Fractal denies it: as long as Claude waits
 /// before it denies a top-level dangerous-removal prompt itself. A background subagent's dialog has
 /// no such deadline (Claude Code 2.1.302), so the subagent would wait until someone happened on the
 /// seat's terminal.
 const SUBAGENT_PROMPT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
-/// What a subagent reads when st denies its prompt because nobody answered it.
-const SUBAGENT_PROMPT_UNANSWERED: &str = "No person answered this permission prompt within 2 minutes, so st denied it. The call was not run. If it removes files after a cd, remove them by literal absolute path instead (rm -f /full/path/to/dir/*), never by a relative glob.";
+/// What a subagent reads when Fractal denies its prompt because nobody answered it.
+const SUBAGENT_PROMPT_UNANSWERED: &str = "No person answered this permission prompt within 2 minutes, so Fractal denied it. The call was not run. If it removes files after a cd, remove them by literal absolute path instead (rm -f /full/path/to/dir/*), never by a relative glob.";
 
 /// How a hook's wait on its prompt ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -402,12 +402,12 @@ enum PromptWait {
 }
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
-/// shows its dialog; if the person answers in st first, the hook returns that decision, which
+/// shows its dialog; if the person answers in Fractal first, the hook returns that decision, which
 /// closes the dialog (measured on Claude Code 2.1.296, for the seat's own prompts and its
 /// subagents', and for `AskUserQuestion`, whose answer carries the person's choices). A subagent's
 /// prompt nobody answers within [`SUBAGENT_PROMPT_ANSWER_WAIT`] is denied, so the subagent reads why
 /// and carries on; its next event closes the prompt (`fractal_drivers::claude_prompts`).
-fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
+fn answer_permission_from_fractal(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
     // This hook's own prompt, as the seat's open prompts name it: it is answered only once the
     // seat shows it, by an answer to exactly the observation that shows it, never one to an
@@ -482,7 +482,7 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
     }
 }
 
-/// This seat's daemon client, and the seat's subject, for a hook that talks to st.
+/// This seat's daemon client, and the seat's subject, for a hook that talks to Fractal.
 fn hook_client(
     env: &dyn HookEnv,
     identity: &str,
@@ -525,7 +525,7 @@ fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str
         Ok(denials) if !denials.is_empty() => denials,
         Ok(_) => return,
         Err(error) => {
-            eprintln!("st: Claude's denied calls were not read: {error:#}");
+            eprintln!("fractal: Claude's denied calls were not read: {error:#}");
             return;
         }
     };
@@ -565,11 +565,11 @@ fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str
                 if let Err(error) =
                     fractal_drivers::claude_denials::raised(agent_dir, &denial.call_id, &record.id)
                 {
-                    eprintln!("st: a denied call's alert was not remembered: {error:#}");
+                    eprintln!("fractal: a denied call's alert was not remembered: {error:#}");
                 }
             }
-            Ok(Err(error)) => eprintln!("st: a denied call was not raised: {error:#}"),
-            Err(_) => eprintln!("st: a denied call was not raised: the st daemon did not answer"),
+            Ok(Err(error)) => eprintln!("fractal: a denied call was not raised: {error:#}"),
+            Err(_) => eprintln!("fractal: a denied call was not raised: the Fractal daemon did not answer"),
         }
     }
 }
@@ -612,10 +612,10 @@ fn allow_approved_call(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw:
             serde_json::json!({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "permissionDecisionReason": "The seat's person allowed this from st after auto mode denied it."}})
+                "permissionDecisionReason": "The seat's person allowed this from Fractal after auto mode denied it."}})
         ),
         Ok(false) => {}
-        Err(error) => eprintln!("st: an allowed call was not checked: {error:#}"),
+        Err(error) => eprintln!("fractal: an allowed call was not checked: {error:#}"),
     }
 }
 
@@ -682,7 +682,7 @@ fn wait_for_prompt_answer(
 }
 
 /// What a permission hook prints for the prompt `payload` opened, once it has waited on `state`:
-/// the person's answer, or st's deny of a subagent's prompt nobody answered within `subagent_wait`.
+/// the person's answer, or Fractal's deny of a subagent's prompt nobody answered within `subagent_wait`.
 /// The seat's own prompt waits `wait` and, unanswered, prints nothing: Claude's dialog stays.
 fn prompt_output(
     payload: &Value,
@@ -743,11 +743,11 @@ fn permission_decision(answer: &str, payload: &Value) -> Option<String> {
     let decision = match answer {
         "deny" if tool == Some("ExitPlanMode") => serde_json::json!({
             "behavior": "deny",
-            "message": "The person did not approve this plan from st. Keep planning, and ask them what to change if it is not clear."}),
+            "message": "The person did not approve this plan from Fractal. Keep planning, and ask them what to change if it is not clear."}),
         _ if tool == Some("ExitPlanMode") => return None,
         "deny" if question => serde_json::json!({
-            "behavior": "deny", "message": "The person declined to answer this from st."}),
-        "deny" => serde_json::json!({"behavior": "deny", "message": "The person denied this from st."}),
+            "behavior": "deny", "message": "The person declined to answer this from Fractal."}),
+        "deny" => serde_json::json!({"behavior": "deny", "message": "The person denied this from Fractal."}),
         "allow" if !question => serde_json::json!({"behavior": "allow"}),
         choices if question => {
             let Ok(Value::Object(choices)) = serde_json::from_str::<Value>(choices) else {
@@ -796,8 +796,8 @@ fn session_start_binding(
 }
 
 fn unbound(env: &dyn HookEnv, report: &mut dyn FnMut(Diagnostic), reason: &str) -> u8 {
-    let reason = format!("Claude started, but st cannot find this seat's transcript: {reason}");
-    eprintln!("st: {reason}");
+    let reason = format!("Claude started, but Fractal cannot find this seat's transcript: {reason}");
+    eprintln!("fractal: {reason}");
     if let Some(subject) = env
         .var("ST3_SUBJECT")
         .or_else(|| env.var("ST_AGENT"))
@@ -870,7 +870,7 @@ pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()>
             client.post::<_, Value>("/v1/claims", &claim),
         )
         .await
-        .context("the st daemon did not answer within 5 seconds")?
+        .context("the Fractal daemon did not answer within 5 seconds")?
         .map(|_| ())
     })
 }
@@ -1299,7 +1299,7 @@ mod tests {
         let started = Instant::now();
         let output = super::prompt_output(&subagent, || Some(NativePromptState::Open), long, short, tick);
         assert!(started.elapsed() < Duration::from_secs(60), "the subagent waited the seat's wait");
-        let denied: Value = serde_json::from_str(&output.expect("st denies the prompt")).unwrap();
+        let denied: Value = serde_json::from_str(&output.expect("Fractal denies the prompt")).unwrap();
         assert_eq!(denied["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
         let decision = &denied["hookSpecificOutput"]["decision"];
         assert_eq!(decision["behavior"], "deny");
@@ -1308,7 +1308,7 @@ mod tests {
             assert!(message.contains(said), "{said}: {message}");
         }
 
-        // Answered within the wait: the person's answer, not st's.
+        // Answered within the wait: the person's answer, not Fractal's.
         let mut states = vec![
             Some(NativePromptState::Open),
             Some(NativePromptState::Answered { answer: "deny".into() }),
@@ -1318,7 +1318,7 @@ mod tests {
             &super::prompt_output(&subagent, || states.next().flatten(), long, long, tick).unwrap(),
         )
         .unwrap();
-        assert_eq!(answered["hookSpecificOutput"]["decision"]["message"], "The person denied this from st.");
+        assert_eq!(answered["hookSpecificOutput"]["decision"]["message"], "The person denied this from Fractal.");
         // Closed elsewhere first: nothing to say.
         assert_eq!(super::prompt_output(&subagent, || Some(NativePromptState::Gone), long, long, tick), None);
 
