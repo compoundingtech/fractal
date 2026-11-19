@@ -266,6 +266,12 @@ through native `fractal missions start`; pre-roll roots cannot lend landing auth
 Legacy client-v0 `mission.start` has no authenticated write principal and creates roots without
 one, even when its session supplies an allowlisted `authority_actor`. Such roots cannot use landing.
 
+Agentless work requests its landing lane **on the step itself** (a DSL exec lane or program
+resource), authorized by that run's recorded initiating principal. Native exec caller identity
+is unchanged here: a new run started by an anonymous agentless native exec records no
+initiating principal, even when `--as` or `requester` names an allowlisted actor, and cannot use
+landing. Acquiring a parent lane does not confer Landing authority on an anonymously started run.
+
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`
 does not consume the payload's `timeout`; retirement grace does not extend execution. The enclosing

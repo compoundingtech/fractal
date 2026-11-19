@@ -186,12 +186,12 @@ fn a_program_effects_descendant_binds_its_run() {
     assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
 }
 
-/// Attribution cannot grant Landing. Only authenticated root identity survives system
-/// subscription delivery and a live agentless attempt's BoundRun publication.
+/// Attribution cannot grant Landing. Authenticated root identity survives system
+/// subscription delivery and a live program attempt's BoundRun publication, not anonymous execs.
 #[tokio::test]
 async fn landing_authority_follows_authenticated_subscription_and_bound_run_ancestry() {
     use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner, RefusalCode};
-    use fractal_peer::DeliveryStore;
+    use crate::DeliveryStore;
 
     for (agent, actor, requester, allowed) in [
         (Some("agent/example/lander"), "agent/example/lander", "agent/example/lander", true),
@@ -210,7 +210,7 @@ mission "landing-root" state="ready" {
 mission "landing-child" state="ready" {
   authority { start "landing-proof"; }
   goal "Subscription-created agentless factory dispatcher."
-  step "dispatch" { agentless; exec "dispatch" { command "true"; } }
+  step "dispatch" { agentless }
 }
 mission "landing-proof" state="ready" {
   concurrent-runs
@@ -266,15 +266,30 @@ mission "landing-proof" state="ready" {
         assert_eq!(response.status(), StatusCode::OK, "BoundRun actor {}", child.subject);
         let land = state.store.mission_run("landing/proof").unwrap().unwrap();
         assert_eq!(state.store.mission_run_initiating_principal(&land.subject).unwrap().as_deref(), agent);
+        // Native agentless exec child-start requests carry no run credential today.
+        // A claimed allowlisted actor/requester cannot lend the parent's authority.
+        let declaration = format!(
+            "version 2\nmission-run \"landing/anonymous\" {{ mission {:?}; workspace {:?}; requester \"agent/example/lander\"; }}",
+            format!("mission/landing-proof@{revision}"), root.path().join("anonymous").display().to_string(),
+        );
+        let (status, body) = json_request(router(state.clone()), "/v1/intent/apply",
+            serde_json::to_value(apply_request(&state, &declaration, "agent/example/lander", "landing-anonymous")).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let anonymous = state.store.mission_run("landing/anonymous").unwrap().unwrap();
+        assert_eq!(state.store.mission_run_initiating_principal(&anonymous.subject).unwrap(), None);
         state.store.start_resource_authority("node", "landing-test").unwrap();
-        for invocation in ["exec/proof", "program:proof"] {
+        for (owner_run, may_land, invocation) in [
+            (&land, allowed, "exec/proof"), (&land, allowed, "program:proof"),
+            (&anonymous, false, "exec/proof"), (&anonymous, false, "program:proof"),
+        ] {
             let request = LaneRequest {
-                id: invocation.into(), name: invocation.into(), host: "node".into(), max_members: 1,
+                id: format!("{}:{invocation}", owner_run.id), name: invocation.into(), host: "node".into(), max_members: 1,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
                 class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
                 disk: None, io: None, admission_timeout_ms: None,
-                owner: Owner { run: land.subject.clone(), step: land.steps[0].subject.clone(),
-                    attempt: land.steps[0].attempt, invocation: Some(invocation.into()) },
+                owner: Owner { run: owner_run.subject.clone(), step: owner_run.steps[0].subject.clone(),
+                    attempt: owner_run.steps[0].attempt, invocation: Some(invocation.into()) },
             };
             let fit = Fit {
                 room: Some(fractal_runtime::Capacity { cores: 4, memory: 4 }),
@@ -283,7 +298,7 @@ mission "landing-proof" state="ready" {
                 }, ..Default::default()
             };
             let admission = state.store.request_resource_membership(&request, fit, 1).unwrap();
-            if allowed {
+            if may_land {
                 assert!(matches!(admission, Admission::Admitted(_)));
             } else {
                 assert!(matches!(admission, Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
@@ -294,7 +309,7 @@ mission "landing-proof" state="ready" {
         }
         // The child credential stops conferring BoundRun identity with its issuing attempt.
         state.store.set_step_run_state_for_tests(&step.subject, "completed", step.attempt);
-        assert!(state.store.run_binding(&credential).unwrap().is_none());
+        assert_eq!(state.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
         // A person/seat requesting a retry is a new root of authority, not a system
         // derivation. Retaining the original requester must not retain its privilege.
         state.store.set_mission_run_state(&parent.id, "failed", "terminal", Some("retry fixture")).unwrap();
