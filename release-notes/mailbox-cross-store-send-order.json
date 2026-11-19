@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use canonical send keys across both stores. Pagination namespaces are not delivery priority. Socket epochs and durable boot floors are logged on open and close; delivery-assessment transitions log their cause." },
   "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no data conversion." },
   "manual": { "status": "none", "detail": "No manual action required." },
-  "recovery": { "status": "changed", "detail": "Pending offers remain owned by their harness incarnation across transport reconnects. Message IDs and existing receipt idempotency preserve deduplication; no durable format changes." }
+  "recovery": { "status": "changed", "detail": "Pending offers remain owned by their harness incarnation across transport reconnects. Unresolved staged recovery batches are reconstructed before choosing more backlog, preserving the five-outstanding bound. Message IDs and existing receipt idempotency preserve deduplication; no durable format changes." }
 }

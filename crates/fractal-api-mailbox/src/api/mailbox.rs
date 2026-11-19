@@ -519,13 +519,24 @@ fn retain_live_mail(
     admit: bool,
 ) -> anyhow::Result<()> {
     let mut candidates = Vec::with_capacity(messages.len());
-    let mut available = if recovered.backlog.is_empty() { RECOVERY_BACKLOG_LIMIT } else { 0 };
     for (position, message) in messages.drain(..).enumerate() {
         let Some(sent) = sent_claim(store, &message)? else {
             continue;
         };
+        // A replacement socket has no ephemeral recovery set. Reconstruct its
+        // incarnation's unresolved staged batch BEFORE choosing any new backlog,
+        // even when an unoffered candidate sorts earlier than that batch.
+        if admit && message.status == "staged"
+            && !crate::silent::is_held(&message)
+            && recovery_backlog(sent.accepted_at_unix_ms, since) == Some(true)
+            && offered_since(store, &message, (since, through.unwrap_or(0)))?
+        {
+            recovered.backlog.insert(message.subject.clone());
+            recovered.admitted.insert(message.subject.clone());
+        }
         candidates.push((sent.accepted_at_unix_ms, position, message, false));
     }
+    let mut available = if recovered.backlog.is_empty() { RECOVERY_BACKLOG_LIMIT } else { 0 };
     // Imports have fresh indexes but retain their original send times.
     if admit {
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1747,10 +1758,9 @@ mod tests {
                 rusqlite::params![at.to_string(), claim.id],
             ).unwrap();
         }
-        let mut first = controlled_stream(state.clone(), &fence, &root.path().join("first.sock")).await;
-        let Frame::Mailbox { messages } = next_mailbox(&mut first.socket).await else {
-            panic!("first connection did not offer mail");
-        };
+        let (mut first, messages) = controlled_stream_with_initial(
+            state.clone(), &fence, &root.path().join("first.sock"), None,
+        ).await;
         assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected);
         for subject in expected {
             if subject == expected[0] {
@@ -1773,15 +1783,83 @@ mod tests {
         first.socket.close(None).await.unwrap();
         // No new send, turn end, idle proof or timer tick: opening a replacement
         // socket under the SAME incarnation and fence must replay both pending IDs.
-        let mut second = controlled_stream(state.clone(), &fence, &root.path().join("second.sock")).await;
-        let Frame::Mailbox { messages } = next_mailbox(&mut second.socket).await else {
-            panic!("reconnected socket did not offer pending mail");
-        };
+        let (mut second, messages) = controlled_stream_with_initial(
+            state.clone(), &fence, &root.path().join("second.sock"), None,
+        ).await;
         assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected);
         assert!(messages.iter().all(|message| message.status == "staged"));
         assert!(messages[0].created_index > messages[1].created_index);
         assert_eq!(state.store.native_mail_boot_floor(&fence.subject).unwrap(), Some(floor));
         second.socket.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_preserves_the_unsettled_five_message_recovery_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&state.store, "bounded-recovery");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let fence = state.store.bind_mailbox(
+            &Fence::new("agent/eval.worker", "bounded-recovery", "delivery"),
+        ).unwrap();
+        let floor = state.store.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+        let send_old = |ordinal: u64, at: u128| {
+            let target = if ordinal % 2 == 0 { &*shard } else { &state.store.graph };
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{ordinal:016x}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic bounded recovery fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        let old = floor.0 - 7_200_000;
+        for ordinal in 0..12 {
+            send_old(ordinal, old + u128::from(ordinal));
+        }
+        let expected = (0..RECOVERY_BACKLOG_LIMIT)
+            .map(|ordinal| format!("message/{ordinal:016x}")).collect::<Vec<_>>();
+        for connection in 0..3 {
+            let (mut stream, messages) = controlled_stream_with_initial(
+                state.clone(), &fence, &root.path().join(format!("connection-{connection}.sock")), None,
+            ).await;
+            assert_eq!(messages.iter().map(|m| m.subject.clone()).collect::<Vec<_>>(), expected);
+            if connection == 0 {
+                for message in &messages {
+                    let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+                    if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+                        assert!(crate::store::messages_shard::record_lifecycle(
+                            &state.store, &message.subject, "message.staged", Some(&fence.subject), &fields,
+                        ).unwrap());
+                    } else {
+                        state.store.append_claim(&ClaimInput {
+                            subject: message.subject.clone(), kind: "message.staged".into(),
+                            actor: Some(fence.subject.clone()), fields,
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap();
+                    }
+                }
+                // An earlier late import must not take a slot before reconstruction.
+                send_old(12, old - 1);
+            } else {
+                assert!(messages.iter().all(|message| message.status == "staged"));
+            }
+            // No delivered/read/closed receipts: neither replacement may admit
+            // a sixth old message while this incarnation's first batch is unresolved.
+            stream.socket.close(None).await.unwrap();
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -3858,6 +3936,14 @@ mod tests {
     async fn controlled_stream_with_peer(
         state: AppState, fence: &Fence, path: &Path, peer: Option<NativeDeliveryPeer>,
     ) -> ControlledStream {
+        let (stream, initial) = controlled_stream_with_initial(state, fence, path, peer).await;
+        assert!(initial.is_empty(), "control requires an initially empty mailbox");
+        stream
+    }
+
+    async fn controlled_stream_with_initial(
+        state: AppState, fence: &Fence, path: &Path, peer: Option<NativeDeliveryPeer>,
+    ) -> (ControlledStream, Vec<MessageView>) {
         let (recheck, receiver) = tokio::sync::mpsc::unbounded_channel();
         let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
         let (heartbeat, heartbeats) = tokio::sync::mpsc::unbounded_channel();
@@ -3931,21 +4017,26 @@ mod tests {
         let client = Client::new(Endpoint::Unix(path.to_owned()));
         let mut socket = client.open_mailbox(fence).await.unwrap();
         // Only a delivery stream carries mail; a title stream starts silent.
-        if fence.component == "delivery" {
+        let initial = if fence.component == "delivery" {
             let mut initial = next(&mut socket).await;
             if matches!(initial, Frame::Seat { .. }) {
                 initial = next(&mut socket).await;
             }
-            assert!(matches!(initial, Frame::Mailbox { messages } if messages.is_empty()));
-        }
-        ControlledStream {
+            match initial {
+                Frame::Mailbox { messages } => messages,
+                other => panic!("expected initial mailbox, got {other:?}"),
+            }
+        } else {
+            Vec::new()
+        };
+        (ControlledStream {
             dirty_gate,
             socket,
             recheck,
             heartbeat,
             reads,
             server,
-        }
+        }, initial)
     }
 
     #[cfg(target_os = "linux")]
