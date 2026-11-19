@@ -41,6 +41,7 @@ pub struct FractalRuntime {
     pub conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
+    pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
@@ -817,6 +818,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(&transaction)?;
+        card_actual::install(&transaction)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
@@ -828,6 +830,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(connection)?;
+        card_actual::install(connection)?;
     }
     Ok(())
 }
@@ -867,6 +870,7 @@ impl FractalRuntime {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
+        self.card_actuals.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
         self.agent_page_refs_cache
             .lock()
