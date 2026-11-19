@@ -87,6 +87,7 @@ pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
 mod binary_payloads;
+pub mod record_bytes;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;

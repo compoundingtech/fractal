@@ -4995,7 +4995,8 @@ fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
             "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
             |row| row.get::<_, Vec<u8>>(0),
         ).unwrap();
-        assert_eq!(retried_raw, original_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !original_raw.is_empty());
     }
     assert!(upgraded.replica_records(true).unwrap().is_empty());
     assert_eq!(upgraded.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
@@ -5163,7 +5164,8 @@ fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
         let retried_raw: Vec<u8> = upgraded.readers.get().query_row(
             "SELECT raw FROM replica_records WHERE claim_id=?1",[&claim.id],|row|row.get(0),
         ).unwrap();
-        assert_eq!(raw,retried_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !raw.is_empty());
         assert!(upgraded.replica_records(true).unwrap().is_empty(), "{kind}");
         assert_eq!(
             upgraded.latest_claim("host/ada", Some("transport.observed")).unwrap().unwrap().id,
@@ -7370,6 +7372,40 @@ fn a_mailbox_stream_seeks_its_seats_newer_local_observations() {
 /// Foreign keys are on, so deleting or rekeying a parent row looks up every child that names
 /// it. A child column without an index made each lookup read the whole child table: deleting
 /// a claim read every operation, and a checkpoint trim held the writer for an hour.
+#[test]
+fn emptying_a_valid_records_bytes_fires_no_trigger() {
+    // `record_bytes` empties `raw` on every valid record of an existing store. A trigger that
+    // fired on that update would queue or rebuild work for every record.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='replica_records'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(!triggers.is_empty());
+    let mut blind = Vec::new();
+    for (name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(event) = sql.split(" ON replica_records").next() else { continue };
+        let Some((_, update)) = event.split_once(" UPDATE") else { continue };
+        let columns = update.trim_start().strip_prefix("OF ").map(|columns| {
+            columns.split(',').map(str::trim).collect::<Vec<_>>()
+        });
+        // The checkpoint capture trigger fires on any update but compares every column but
+        // `raw` in its condition.
+        let compared = sql.contains("OLD.state IS NOT NEW.state") && !sql.contains("OLD.raw");
+        match columns {
+            Some(columns) if columns.contains(&"raw") => blind.push(name),
+            None if !compared => blind.push(name),
+            _ => {}
+        }
+    }
+    assert!(blind.is_empty(), "triggers that fire when only `raw` changes: {blind:?}");
+}
+
 #[test]
 fn every_foreign_key_column_leads_an_index() {
     let store = Store::open_memory("node").unwrap();
