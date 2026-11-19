@@ -2834,6 +2834,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 }
 
 #[test]
+fn agent_card_residency_is_optional_and_names_policy_epoch_deadline_and_refusal() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("RESIDENCY"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "member".into(),
+        eligible_since: Some("2026-11-18T10:00:00Z".into()),
+        due_at: Some("2026-11-18T10:30:00Z".into()),
+        refusal_reason: None,
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    member\n"));
+    assert!(rendered.contains("  ELIGIBLE   2026-11-18T10:00:00Z\n"));
+    assert!(rendered.contains("  DUE        2026-11-18T10:30:00Z\n"));
+    assert!(!rendered.contains("  REFUSAL"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "off".into(),
+        eligible_since: None,
+        due_at: None,
+        refusal_reason: Some("policy-off".into()),
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    off\n  REFUSAL    policy-off\n"));
+    assert!(!rendered.contains("  DUE"));
+}
+
+#[test]
 fn declared_admission_human_output_is_explicitly_not_enforced() {
     let mut agent = stopped_agent(serde_json::Value::Null);
     assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
