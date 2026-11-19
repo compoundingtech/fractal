@@ -1779,8 +1779,8 @@ async fn observe_poll(
     }
 
     // Active exact-head waits revalidate their targets within this observer's normal cadence.
-    // Conditional REST reads acquire head and merged together, after normal detail merging,
-    // so an older cached GraphQL answer cannot overwrite a fresh target head.
+    // Keep REST acquisition proof separate from GraphQL head/queue observations: REST does
+    // not read merge-queue membership, so its newer head must never relabel an older queue.
     for target in &request.await_prs {
         let number = target.pr;
         let pull = match github_json(&client, format!("{base}/pulls/{number}"), token, Duration::ZERO).await {
@@ -1795,26 +1795,12 @@ async fn observe_poll(
             .context("the GitHub pull request response has no node ID")?;
         anyhow::ensure!(pull.get("number").and_then(Value::as_u64) == Some(number),
             "the GitHub pull request response names another PR");
-        let head = pull.pointer("/head/sha").and_then(Value::as_str)
-            .context("the GitHub pull request response has no head SHA")?;
-        let merged = pull.get("merged").and_then(Value::as_bool)
-            .context("the GitHub pull request response has no merged flag")?;
         cursor.identities.insert(id.to_owned(), ItemIdentity { number, pull: true });
-        let mut facts = serde_json::Map::new();
-        for (name, pointer) in [
-            ("number", "/number"), ("node_id", "/node_id"), ("state", "/state"),
-            ("merged", "/merged"), ("merge_commit_sha", "/merge_commit_sha"),
-            ("merged_at", "/merged_at"), ("merged_by", "/merged_by/login"),
-            ("url", "/html_url"), ("title", "/title"),
-        ] {
-            insert(&mut facts, name, pull.pointer(pointer));
-        }
-        facts.insert("head".into(), json!(head));
-        facts.insert("head_sha".into(), json!(head));
-        facts.insert("await_pr_observation".into(), json!({
-            "registrations": target.registrations, "head": head, "merged": merged,
-            "merge_commit_sha": pull.get("merge_commit_sha").unwrap_or(&Value::Null),
-        }));
+        let facts = serde_json::Map::from_iter([
+            ("number".into(), json!(number)),
+            ("node_id".into(), json!(id)),
+            ("await_pr_observation".into(), await_pr_observation(&pull, &target.registrations)?),
+        ]);
         merge(&mut items, Item { pull: true, listed: false, facts });
     }
 
@@ -1909,6 +1895,18 @@ async fn observe_poll(
         cursor: Some(serde_json::to_string(&cursor)?),
         next_check_unix_ms: now_ms().saturating_add(delay),
     })
+}
+
+/// A single acquisition's native proof, kept opaque so queue facts retain their own head.
+fn await_pr_observation(pull: &Value, registrations: &[String]) -> Result<Value> {
+    let head = pull.pointer("/head/sha").and_then(Value::as_str)
+        .context("the GitHub pull request response has no head SHA")?;
+    let merged = pull.get("merged").and_then(Value::as_bool)
+        .context("the GitHub pull request response has no merged flag")?;
+    Ok(json!({
+        "registrations": registrations, "head": head, "merged": merged,
+        "merge_commit_sha": pull.get("merge_commit_sha").unwrap_or(&Value::Null),
+    }))
 }
 
 fn http_not_found(error: &anyhow::Error) -> bool {
@@ -2328,9 +2326,6 @@ mod tests {
         }];
         let observed = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
         let pull = item(&observed.facts, "pull_requests", 42);
-        assert_eq!(pull["head_sha"], "head");
-        assert_eq!(pull["merged"], true);
-        assert_eq!(pull["merge_commit_sha"], "merge");
         assert_eq!(pull["await_pr_observation"], json!({
             "registrations": ["registration-42"], "head": "head",
             "merged": true, "merge_commit_sha": "merge",
@@ -2355,7 +2350,36 @@ mod tests {
         input.previous_facts = Some(missing.facts);
         let found = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
         assert_eq!(found.facts["await_prs_not_found"], json!([]));
-        assert_eq!(item(&found.facts, "pull_requests", 42)["head_sha"], "head");
+        assert_eq!(item(&found.facts, "pull_requests", 42)["await_pr_observation"]["head"], "head");
+    }
+
+    #[test]
+    fn fresh_rest_head_does_not_relabel_a_cached_graphql_queue_entry() {
+        let mut items = BTreeMap::new();
+        merge(&mut items, Item { pull: true, listed: true, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)),
+            ("head".into(), json!("queued-A")),
+            ("head_sha".into(), json!("queued-A")),
+            ("merge_queue".into(), json!({"state": "QUEUED"})),
+        ]) });
+        let proof = await_pr_observation(&json!({
+            "head": {"sha": "unqueued-B"}, "merged": false,
+        }), &["registration-B".into()]).unwrap();
+        merge(&mut items, Item { pull: true, listed: false, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)), ("await_pr_observation".into(), proof),
+        ]) });
+        let queued = &items[&42].facts;
+        assert_eq!(queued["head_sha"], "queued-A",
+            "the entry remains A's even though REST already acquired B");
+        assert_eq!(queued["await_pr_observation"]["head"], "unqueued-B");
+        assert!(!queued.contains_key("merged"), "REST proof does not rewrite GraphQL state");
+        merge(&mut items, Item { pull: true, listed: false, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)), ("head".into(), json!("unqueued-B")),
+            ("head_sha".into(), json!("unqueued-B")), ("merge_queue".into(), Value::Null),
+        ]) });
+        assert_eq!(items[&42].facts["head_sha"], "unqueued-B");
+        assert!(items[&42].facts["merge_queue"].is_null(),
+            "a later unqueued B has no earlier B entry to prove a B dequeue");
     }
 
     #[test]
