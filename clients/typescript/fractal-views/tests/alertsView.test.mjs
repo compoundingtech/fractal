@@ -100,8 +100,8 @@ assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': {
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: null } } }).call_id, null);
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'] } } }).call_id, null, 'a missing call_id names none');
 
-// A prompt st serves (`presentation.prompt`): its calls as a person reads them, and allow where st
-// allows it. A cut input stays the text st served; st serves none when it cannot read the seat.
+// A prompt Fractal serves (`presentation.prompt`): its calls as a person reads them, and allow where Fractal
+// allows it. A cut input stays the text Fractal served; Fractal serves none when it cannot read the seat.
 const served = servedPrompt({ presentation: { prompt: {
   calls: [
     { call_id: 'c1', tool: 'Task', input: '{"prompt":"run the build"}', input_complete: true },
@@ -114,15 +114,15 @@ assert.deepEqual(served.calls.map(each => [each.id, each.complete]), [['c1', tru
 assert.deepEqual(served.calls[1].lines, ['command: make']);
 assert.deepEqual(served.calls[1].input, { command: 'make' });
 assert.equal(served.calls[2].input, '{"text":"cut');
-assert.deepEqual(servedAnswers(bound, served), ['allow', 'deny'], 'beside the call st allows');
-assert.deepEqual(servedAnswers(bound, { ...served, allow: false }), ['deny'], 'st does not allow it');
+assert.deepEqual(servedAnswers(bound, served), ['allow', 'deny'], 'beside the call Fractal allows');
+assert.deepEqual(servedAnswers(bound, { ...served, allow: false }), ['deny'], 'Fractal does not allow it');
 assert.deepEqual(servedAnswers({ ...bound, call_id: null }, served), ['deny'], 'no named call, no allow');
 const unread = servedPrompt({ presentation: { prompt: { calls: null, answers: ['allow', 'deny'], allow: false, unknown_reason: 'The agent runs on another host.' } } });
 assert.deepEqual(unread, { calls: null, allow: false, why: 'The agent runs on another host.' });
 assert.deepEqual(servedAnswers(bound, unread), ['deny']);
-assert.equal(servedPrompt({ presentation: null }).calls, null, 'an older st serves no prompt');
+assert.equal(servedPrompt({ presentation: null }).calls, null, 'an older Fractal serves no prompt');
 assert.deepEqual(servedAnswers({ target_id: 'a', episode: 'e', answers: ['trust', 'exit'] }, unread), ['trust', 'exit'], "a screen prompt's own answers need no call");
-// A question is answered only where st allows it and its questions can be read.
+// A question is answered only where Fractal allows it and its questions can be read.
 const askedServed = servedPrompt({ presentation: { prompt: { calls: [{ call_id: 'q', tool: 'AskUserQuestion', input: JSON.stringify(asked[0].input), input_complete: true }], answers: ['answer', 'deny'], allow: true } } });
 assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, askedServed), ['answer', 'deny']);
 assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, { ...askedServed, allow: false }), ['deny']);
