@@ -466,7 +466,7 @@ fn render_object_fields(
             if !nested.is_empty() {
                 let padding = " ".repeat(indent);
                 let _ = writeln!(output, "{padding}{}", style.heading("Declared admission — declared, not enforced."));
-                let _ = writeln!(output, "{padding}st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+                let _ = writeln!(output, "{padding}Fractal stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
                 render_object_fields(output, nested, indent + 2, style, None);
             }
             continue;
@@ -1979,7 +1979,7 @@ mod tests {
             "mission": {"declared_admission": {"lane": "check"}}
         }), OutputStyle::plain());
         assert!(rendered.contains("Declared admission — declared, not enforced."));
-        assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
+        assert!(rendered.contains("Fractal stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
         assert!(rendered.contains("check"));
         assert!(!render_human_value(&serde_json::json!({
             "declared_admission": {}

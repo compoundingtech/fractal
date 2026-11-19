@@ -2,7 +2,7 @@
 //! person presses its one button; the screen itself is `fractal_tui::checklist`.
 //!
 //! The line-mode setup stays for pipes, `--yes` and anything that is not a terminal. Both modes
-//! run the same stages (save the names, install st, start it, set up each agent, start the
+//! run the same stages (save the names, install fractal, start it, set up each agent, start the
 //! Assistant); only who answers the questions differs.
 
 use std::collections::BTreeMap;
@@ -187,7 +187,7 @@ fn home(environment: &BTreeMap<String, String>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("~"))
 }
 
-/// A row for every harness st supports, found or not.
+/// A row for every harness fractal supports, found or not.
 pub(super) fn rows(environment: &BTreeMap<String, String>) -> Vec<Row> {
     let home = home(environment);
     HARNESSES
@@ -779,7 +779,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".local/share/opencode")).unwrap();
         std::fs::write(home.path().join(".local/share/opencode/auth.json"), r#"{"example":{"type":"api"}}"#).unwrap();
         assert_eq!(signin("opencode", &env, home.path()).signed_in, Tri::Yes);
-        // Pi and Omp keep sign-in in ways st does not read: it says it does not know.
+        // Pi and Omp keep sign-in in ways fractal does not read: it says it does not know.
         assert_eq!(signin("pi", &env, home.path()).signed_in, Tri::Unknown);
         assert_eq!(signin("omp", &env, home.path()).signed_in, Tri::Unknown);
     }

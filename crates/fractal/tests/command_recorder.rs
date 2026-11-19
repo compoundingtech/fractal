@@ -29,7 +29,7 @@ struct Fixture {
     real: PathBuf,
 }
 
-fn st3() -> &'static Path {
+fn fractal_cli() -> &'static Path {
     Path::new(test_env!("CARGO_BIN_EXE_fractal-fixture"))
 }
 
@@ -39,7 +39,7 @@ fn write_program(path: &Path, source: &str) {
 }
 
 fn install(state: &Path, real: &Path) -> fractal_daemon::recorder::Installation {
-    fractal_daemon::recorder::install(state, "test-host", st3(), &[real.as_os_str()]).unwrap()
+    fractal_daemon::recorder::install(state, "test-host", fractal_cli(), &[real.as_os_str()]).unwrap()
 }
 
 fn fixture(source: &str) -> Fixture {
@@ -457,7 +457,7 @@ fn a_recorder_never_runs_itself_or_another_recorder() {
     let second = install(&fixture.root.path().join("second-state"), &fixture.real);
     let unmarked = fixture.root.path().join("unmarked");
     fs::create_dir(&unmarked).unwrap();
-    std::os::unix::fs::symlink(st3(), unmarked.join("git")).unwrap();
+    std::os::unix::fs::symlink(fractal_cli(), unmarked.join("git")).unwrap();
     let spelled_again = PathBuf::from(format!("{}/", fixture.recorder.display()));
 
     let output = command(
