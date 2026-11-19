@@ -84,6 +84,51 @@ fn observe_outcome(store: &Store, revision: &str, state: &str, next: u128) -> (R
 }
 
 #[test]
+fn unavailable_identity_additions_and_recoveries_persist_without_fact_changes() {
+    for fast_path in [true, false] {
+        let (_directory, store, revision) = fixture();
+        let facts = json!({"state": "closed", "state_reason": "not_found"});
+        let cursors = [
+            json!({"items_since": "2026-09-10T00:00:00Z"}),
+            json!({"items_since": "2026-09-10T00:00:00Z",
+                "tombstones": {"I_unavailable": {"number": 1, "pull": false}}}),
+            json!({"items_since": "2026-09-10T00:00:00Z"}),
+        ];
+        let mut next = 1;
+        for (index, cursor) in cursors.into_iter().enumerate() {
+            let cursor = cursor.to_string();
+            let mut record = || {
+                let result = if fast_path {
+                    store.record_resource_observation_outcome(
+                        "observer/fixture", &revision, None, "resource/fixture", Some(&cursor),
+                        &facts, next, &[], None).unwrap()
+                } else {
+                    store.record_resource_observation_attempt(
+                        "observer/fixture", &revision, None, "resource/fixture", Some(&cursor),
+                        &facts, next, &[], None, None, None).unwrap().unwrap()
+                };
+                next += 1;
+                result
+            };
+            let (outcome, wrote) = record();
+            assert!(wrote, "cursor transition {index} must be written on both paths");
+            if index > 0 {
+                assert!(!outcome.baseline);
+                assert!(outcome.changed_fields.is_empty());
+                assert!(outcome.observation_claim.is_none());
+                assert!(outcome.message_subjects.is_empty());
+            }
+            assert_eq!(store.claimed_observer_cursor("observer/fixture").unwrap().as_deref(), Some(cursor.as_str()));
+            let claims = store.claims_for("observer/fixture", Some("observer.observed")).unwrap();
+            assert_eq!(claims.len(), index + 1);
+            assert!(!record().1, "an unchanged tombstone set must not write another claim");
+            assert_eq!(store.claims_for("observer/fixture", Some("observer.observed")).unwrap().len(), index + 1);
+            assert_eq!(store.claims_for("resource/fixture", Some("resource.observed")).unwrap().len(), 1);
+        }
+    }
+}
+
+#[test]
 fn the_write_flag_follows_the_fast_path_the_stale_retries_and_the_fallback() {
     let (_store_directory, store, revision) = fixture();
     assert!(observe_outcome(&store, &revision, "open", 1).1, "a first observation writes");
