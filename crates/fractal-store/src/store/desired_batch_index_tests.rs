@@ -35,6 +35,9 @@ fn named_desired_reads_keep_constant_scan_work_and_freshness_parity() {
         }
         store.read_snapshot(|_| {
             let connection = store.readers.get();
+            // Compare steady-state scans with both statements already initialized,
+            // rather than include one-time statement setup only in the first sample.
+            store.desired_subjects_named(&names)?;
             let steps = Arc::new(AtomicU64::new(0));
             let counter = steps.clone();
             connection.progress_handler(1, Some(move || {
