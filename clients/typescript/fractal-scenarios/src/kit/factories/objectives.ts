@@ -20,7 +20,7 @@ export const noObjectives = (): ObjectivesState => ({
 const handle = (person: CastPerson) => person.id.slice(person.id.lastIndexOf('/') + 1)
 
 /**
- * Budgets on the people's provider accounts and objectives on the fleet, as st serves them: tone,
+ * Budgets on the people's provider accounts and objectives on the fleet, as Fractal serves them: tone,
  * status and forecasts are the daemon's words, including a tone word a later daemon may add.
  */
 export const fleetObjectives = (people: readonly CastPerson[]): ObjectivesState => {

@@ -4,7 +4,7 @@ import { files, resources } from './resource-fixtures'
 import type { ResourceData as TasteResource, ResourceFile as TasteFile } from '../resources/resource-model'
 import { detailsSectionOrder, type DetailsOverview, type DetailsResource, type DetailsSection, type DetailsSectionName, type DetailsState, type DetailsValue } from './model'
 /**
- * Fixture provenance: shapes and counts are modeled on one real `st --json agents`
+ * Fixture provenance: shapes and counts are modeled on one real `fractal --json agents`
  * observation (2026-10-08T07:58:26Z, sanitized machine `workstation-a`): working
  * agent, harness omp, status-since 06:49:52, incarnation started the previous day
  * 22:35:26 (9h23m age), context 61,206/1,000,000 with 6 compactions, cumulative

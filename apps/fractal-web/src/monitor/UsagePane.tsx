@@ -13,7 +13,7 @@ import { useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialNotice, waiting, type Feed } from '../data/source.ts'
 import { bars, chartSummary, creditsText, forecastOf, leftText, safeLink, secondLine, sloGroups, spanText, toneOf } from './usageModel.ts'
 
-// The Usage screen: objectives and budgets from st's served rows, as the phone and the terminal UI's
+// The Usage screen: objectives and budgets from Fractal's served rows, as the phone and the terminal UI's
 // Usage tab show them, beside the declared accounts. A row opens to its words and a chart of the last day.
 
 const CHART_STEPS = 48
@@ -61,7 +61,7 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
     <div {...stylex.props(styles.body)}>
       <Stale feed={list} />
       {list._tag !== 'Observed' ? <Unread feed={list} what="objectives and budgets" onRetry={source.refresh} />
-        : rows.length === 0 ? <SystemNotice kind="empty" title="No objectives or budgets" detail="st declares none on this computer" />
+        : rows.length === 0 ? <SystemNotice kind="empty" title="No objectives or budgets" detail="Fractal declares none on this computer" />
           : sloGroups(rows).map(group => (
             <section key={group.kind} aria-label={`${label}: ${group.title}`}>
               <h3 {...stylex.props(styles.section)}>{group.title} <span {...stylex.props(styles.meta)}>{group.rows.length}</span></h3>
