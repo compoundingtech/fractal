@@ -1172,8 +1172,10 @@ impl World {
                 };
                 fields.insert(name.clone(), value);
             }
+            // The host sample is a continuing host stream, not an episode subject.
+            let subject_id = if suffix == "host" { &host } else { &id };
             return Some(ClaimInput {
-                subject: format!("residency/{host}/{suffix}/{id}"),
+                subject: format!("residency/{host}/{suffix}/{subject_id}"),
                 kind: spec.kind.clone(), actor: None, fields, evidence: Vec::new(),
                 expected_subject: None, idempotency_key: Some(id),
             });
