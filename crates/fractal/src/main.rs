@@ -22123,8 +22123,8 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if state()?.done() {
-                    let complete = state()?;
+                let complete = state()?;
+                if complete.done() && !complete.references_pending {
                     if !initial.done() { stderr_message("fractal", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();
