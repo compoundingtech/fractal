@@ -5,6 +5,7 @@ import {
   AskCancelled,
   ChildFailed,
   Fractal,
+  ResourceError,
   type ProgramExit,
   type ProgramServices,
 } from './effect.ts'
@@ -643,7 +644,7 @@ describe('native review lifecycle', () => {
   })
   const programFor = (request: ReviewOptions) => Fractal.mission(
     { meta, id: 'factory/test', goal: 'Review exact material.', reportTo, input: Change,
-      output: ReviewResult, error: ReviewError },
+      output: ReviewResult, error: Schema.Union([ReviewError, ChildFailed, ResourceError]) },
     () => Fractal.review(request),
   )
   const setup = (config: {

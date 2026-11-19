@@ -261,6 +261,8 @@ actors/incarnations, missing evidence, or mismatched binding fails with typed `R
 Program steps act as mission runs, not agent claimants; the exclusion set includes the native
 requester and assignee. The native child envelope binds executions to its generation, whose step
 namespace is distinct from the stable mission-run ID.
+An explicit mission `error` schema must admit `ReviewError`, native `ChildFailed`, and
+`ResourceError`; omit it to use the program's default tagged-failure encoding.
 
 For a PR, the **child publishes its own comment from its own active seat**, using
 `Fractal.reviewComment({ subject, rubric, verdict, reviewer, publication })` with its actual
