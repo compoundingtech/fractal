@@ -68,6 +68,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
 use fractal_daemon::HarnessQuestionsStore;
+use fractal_daemon::DeliveryStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1497,6 +1498,29 @@ const PROBES: &[Probe] = &[
             })
         },
     ),
+    // Native physical authority is absent from generated stores. Exercise the real fenced
+    // persistence path, including a fresh incarnation and non-replayed frontier each time.
+    direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
+        let agent = &fixture.subjects.seats[0];
+        let incarnation = format!("cost-mail-frontier-{attempt}");
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: agent.clone(), kind: kind.into(), actor: Some(agent.clone()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).map_err(|error| error.message)?;
+        }
+        let fence = store.bind_mailbox(&fractal_daemon::client::Fence::new(agent, &incarnation, "delivery"))
+            .map_err(|error| error.message)?;
+        let through = u64::try_from(smallclaims::store::now_ms()).unwrap();
+        let (record, written) = store.record_mail_acceptance_frontier(&fence, through)
+            .map_err(|error| error.message)?;
+        assert!(written, "measure an advancing source frontier, not a replay");
+        Ok(serde_json::to_value(record).unwrap())
+    }),
     // The route binds its caller to a live seat process, which a test has none of.
     direct("POST /v1/harness-events", |store, fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
