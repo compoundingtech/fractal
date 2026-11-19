@@ -706,6 +706,21 @@
           };
         };
 
+        fractalMacCustody = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-mac-custody";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "fractal-mac-custody" "--bin" "fractal-mac-custody" ];
+          cargoTestFlags = [ "-p" "fractal-mac-custody" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          meta = {
+            description = "Short-lived Darwin slot process custody helper";
+            homepage = "https://github.com/compoundingtech/fractal";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "fractal-mac-custody";
+          };
+        };
+
         # Both entrypoints share one crate and build; only nix run's default differs.
         fractalMcp = fractalChatgpt.overrideAttrs (old: {
           meta = old.meta // { mainProgram = "fractal-mcp"; };
@@ -940,6 +955,7 @@
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
         packages.fractal-chatgpt = fractalChatgpt;
+        packages.fractal-mac-custody = fractalMacCustody;
         # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         packages.st-chatgpt = fractalChatgpt;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias

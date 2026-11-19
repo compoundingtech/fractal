@@ -17,6 +17,31 @@ refuses to rewrite a loaded definition.
 For a first daemon install, run `fractal service install` from the installed app executable;
 for an update, restart the daemon and replication services when ready.
 
+## Darwin slot custody
+
+The separately packaged `fractal-mac-custody` helper provides process custody for
+the configured `heavy1` slot, whose login-less user is `_fractal-heavy1` and whose
+workspace is `/Users/Shared/fractal-jobs/heavy1/`. It is not a CPU or memory limit.
+Membership is the union of effective and real slot UIDs; zombies are not live.
+`leftovers` reports that membership, and `sample` reports sampled resident memory,
+including unavailable samples, with `enforced: false`.
+
+Retirement uses `cancel`: remove the slot's launchd user domain, then signal and
+reactively observe UID members until a fresh scan is empty. An exit notification
+alone is not retirement. `retirementUnknown` keeps the slot occupied for operator
+inspection; no timeout releases it. Calls append structured audit receipts.
+
+`FRACTAL_MAC_CUSTODY` identifies the pinned helper installed by host configuration.
+An absent or unauthorized helper is reported as `helperUnavailable`, rather than
+claiming custody. Even with an authorized helper, the runtime currently reports
+that launch integration is unavailable and keeps detached execution. The helper
+package alone does not enable custody: inherited release authorization and
+child-exit tracking must belong to the slot payload, not a wrapper PID.
+Installing or testing root behavior requires separate operator approval; ordinary
+crate tests do not modify users or launchd.
+
+## Signing and installation transactions
+
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by
 `apps/macos/listen/build.sh DIR` with Xcode's Swift and the macOS 26 SDK), the installer
 nests it at `SmallTalk.app/Contents/Helpers/StListen.app`. It signs the helper before the app,
