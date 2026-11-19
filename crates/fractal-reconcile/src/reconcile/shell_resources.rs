@@ -19,7 +19,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     execution.state = "failing".into();
                     if !already_failing { self.signal_changed(); }
                 } else {
-                    execution.state = match self.retire_shell_resource(&execution) {
+                    execution.state = match self.retire_shell_resource(&mut execution) {
                         Ok(true) => "refused",
                         Ok(false) => "retiring",
                         Err(retirement) => { execution.reason.push_str(&format!("; retirement: {retirement:#}")); "retiring" }
@@ -45,13 +45,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.driver_state_dir.parent().unwrap_or(&self.driver_state_dir).join("resource-exec").join(format!("{id}.json"))
     }
 
-    fn retire_shell_resource(&self, execution: &Execution) -> Result<bool> {
-        let request = &execution.command.lane;
-        let member = self.store.resource_memberships_for_host(&self.host)?.into_iter().find(|member| member.request.id == request.id);
+    fn retire_shell_resource(&self, execution: &mut Execution) -> Result<bool> {
+        let member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
+            .find(|member| member.request.id == execution.command.lane.id);
         let Some(member) = member else { return Ok(true); };
+        let request = &member.request;
+        let generation = member.roots.iter().find(|root| root.runtime_id == execution.command.id)
+            .and_then(|root| root.execution.as_ref()).map(|generation| generation.generation_id.clone());
+        if let Some(generation) = &generation {
+            self.commit_shell_oom(execution, generation)?;
+        }
         if execution.command.parent.is_some() {
             if member.roots.iter().any(|root| root.runtime_id == execution.command.id) {
                 self.runtime.retire_resource_exec(&self.store, request, &execution.command.id)?;
+            }
+            if let Some(generation) = &generation {
+                self.finish_shell_oom(execution, generation)?;
             }
             return Ok(true);
         }
@@ -70,11 +79,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let retired = self.runtime.retire_resource_lane(&self.store, request)?;
         if retired {
+            if let Some(generation) = &generation {
+                self.finish_shell_oom(execution, generation)?;
+            }
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
         }
         Ok(retired)
+    }
+
+    fn commit_shell_oom(&self, execution: &mut Execution, generation: &str) -> Result<()> {
+        if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
+            execution.oom_killed |= self.runtime.resource_exec_oom_killed(&execution.command.id, generation, false)?;
+        }
+        execution.oom_killed |= execution.result.as_ref().and_then(|result| result.oom_kills).is_some_and(|count| count > 0);
+        if execution.oom_killed { execution.reason = "payload-oom-killed".into(); }
+        // Retained Result must never be reset before this durable observation.
+        if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+        Ok(())
+    }
+
+    fn finish_shell_oom(&self, execution: &mut Execution, generation: &str) -> Result<()> {
+        self.commit_shell_oom(execution, generation)?;
+        if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
+            self.runtime.resource_exec_oom_killed(&execution.command.id, generation, true)?;
+        }
+        Ok(())
     }
 
     fn shell_payload_observation(&self, execution: &Execution, generation: &str, now: u64) -> Result<PayloadResult> {
@@ -94,6 +125,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             wall_duration_ms: self.store.resource_execution_elapsed(&execution.command.lane.id,
                 &execution.command.lane.owner, &execution.command.id, now)?.context("shell release clock missing")?,
             memory_peak_bytes,
+            oom_kills: None,
         })
     }
 
@@ -129,6 +161,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 execution.result = Some(self.shell_payload_observation(&execution, &generation,
                     u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
             }
+            self.commit_shell_oom(&mut execution, &generation)?;
             execution.state = if matches!(execution.state.as_str(), "failing" | "finishing-refused") {
                 "finishing-refused"
             } else { "finishing" }.into();
@@ -168,10 +201,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
                 if let Some(previous) = &execution.result {
                     result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                    result.oom_kills = result.oom_kills.or(previous.oom_kills);
                     result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
                 }
                 execution.result = Some(result);
             }
+            self.commit_shell_oom(&mut execution, &generation)?;
             if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
         }
         Ok(())
@@ -195,6 +230,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
             if let Some(previous) = &execution.result {
                 result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                result.oom_kills = result.oom_kills.or(previous.oom_kills);
                 result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
             }
             execution.result = Some(result);
@@ -394,6 +430,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let mut result = self.shell_payload_observation(execution, &generation.generation_id, now)?;
                 if let Some(previous) = &execution.result {
                     result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                    result.oom_kills = result.oom_kills.or(previous.oom_kills);
                     result.wall_duration_ms = previous.wall_duration_ms;
                 }
                 execution.result = Some(result);

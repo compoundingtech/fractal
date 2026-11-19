@@ -379,7 +379,15 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
             .and_then(|group| fs::read_to_string(Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')).join("memory.peak")).ok())
             .and_then(|peak| peak.trim().parse().ok())
     } else { None };
-    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes };
+    let oom_kills = if cfg!(target_os = "linux") && enforced {
+        let groups = fs::read_to_string("/proc/self/cgroup")?;
+        let group = groups.lines().find_map(|line| line.strip_prefix("0::"))
+            .context("payload has no unified cgroup")?;
+        let events = fs::read_to_string(Path::new("/sys/fs/cgroup")
+            .join(group.trim_start_matches('/')).join("memory.events"))?;
+        Some(parse_oom_kills(&events)?)
+    } else { None };
+    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes, oom_kills };
     let temporary = result_path.with_extension("pending");
     let mut file = fs::File::create(&temporary)?;
     std::io::Write::write_all(&mut file, &serde_json::to_vec(&result)?)?;
@@ -390,9 +398,31 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
     if code == 0 { Ok(()) } else { Err(CommandExit(code.clamp(1,255) as u8).into()) }
 }
 
+fn parse_oom_kills(events: &str) -> Result<u64> {
+    let mut count = None;
+    for line in events.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some("oom_kill") {
+            anyhow::ensure!(count.is_none(), "duplicate memory.events oom_kill counter");
+            count = Some(fields.next().context("missing oom_kill count")?.parse()?);
+            anyhow::ensure!(fields.next().is_none(), "malformed oom_kill counter");
+        }
+    }
+    count.context("memory.events has no oom_kill counter")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memory_events_oom_kills_are_exact_and_required() {
+        assert_eq!(parse_oom_kills("low 0\noom 4\noom_kill 2\noom_group_kill 1\n").unwrap(), 2);
+        assert_eq!(parse_oom_kills("oom_kill 0\n").unwrap(), 0);
+        for events in ["oom 1\n", "oom_kill\n", "oom_kill -1\n", "oom_kill 1 2\n",
+            "oom_kill 1\noom_kill 2\n", "oom_kill 18446744073709551616\n"] {
+            assert!(parse_oom_kills(events).is_err(), "{events}");
+        }
+    }
     #[test]
     fn local_operator_selector_is_preserved_for_supervisor_commands() {
         for arguments in [
@@ -515,7 +545,7 @@ mod tests {
         completed.receipt_subject = Some("resource/exec/abcd/host/check/root".into());
         completed.result = Some(PayloadResult {
             head_start: Some("start-head".into()), head_end: Some("end-head".into()), clean_start: Some(true), clean_end: Some(false),
-            exit_code: Some(37), exit_signal: None, wall_duration_ms: 91, memory_peak_bytes: Some(42),
+            exit_code: Some(37), exit_signal: None, wall_duration_ms: 91, memory_peak_bytes: Some(42), oom_kills: Some(2),
         });
         write_receipt(&path, &completed).unwrap();
         let receipt: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

@@ -608,6 +608,9 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
         anyhow::bail!("runtime does not support generation-fenced memory observations")
     }
+    fn resource_exec_oom_killed(&self, _id: &str, _generation: &str, _reset: bool) -> Result<bool> {
+        anyhow::bail!("runtime does not support generation-fenced OOM observations")
+    }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
@@ -1065,6 +1068,9 @@ impl RuntimeControl for NativeRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+    fn resource_exec_oom_killed(&self, id: &str, generation: &str, reset: bool) -> Result<bool> {
+        self.exec.resource_oom_killed(id, generation, reset)
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;

@@ -486,6 +486,7 @@ impl ExecRuntime {
             Some(&env),
             lane.as_ref(),
             self.unlaned_seat.as_ref(),
+            self.finite_lane.is_some(),
         );
         command
             .current_dir(cwd)
@@ -1014,6 +1015,21 @@ impl ExecRuntime {
         anyhow::ensure!(current.generation_id == expected_generation,
             "execution generation changed after retirement");
         Ok(current)
+    }
+
+    /// Query only the exact persisted generation's finite scope. Reset is called only
+    /// after the daemon durably records the result and proves whole-tree retirement.
+    pub fn resource_oom_killed(&self, id: &str, expected_generation: &str, reset: bool) -> Result<bool> {
+        let generation = match self.observe(id)?.context("resource OOM generation missing")? {
+            ExecObservation::Running(generation) | ExecObservation::Exited(generation) => generation,
+            ExecObservation::Indeterminate(reason) => anyhow::bail!("resource OOM generation indeterminate: {reason}"),
+        };
+        anyhow::ensure!(generation.generation_id == expected_generation && generation.resource_membership.is_some(),
+            "resource OOM observation belongs to another generation or a nonfinite execution");
+        let unit = generation.scope_unit.as_deref().context("resource OOM scope missing")?;
+        anyhow::ensure!(crate::isolate::scope_identity("st3", unit) == Some(crate::isolate::sanitize(id).as_str()),
+            "resource OOM scope differs from execution identity");
+        crate::isolate::scope_oom_killed(unit, reset)
     }
 
     /// Exact-generation whole-tree retirement. A missing/replaced record is not empty evidence.

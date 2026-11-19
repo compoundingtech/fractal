@@ -1082,6 +1082,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
+        resource_oom_killed: Mutex<bool>,
+        resource_oom_resets: Mutex<u32>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
@@ -1535,7 +1537,7 @@ mission "shell-owner" state="ready" {{
         fs::write(path, serde_json::to_vec(&PayloadResult {
             head_start: Some("abc123".into()), head_end: Some("def456".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
-            wall_duration_ms: 1234, memory_peak_bytes: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None, oom_kills: None,
         }).unwrap()).unwrap();
         if expire_owner {
             store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
@@ -1621,7 +1623,7 @@ mission "shell-owner" state="ready" {{
             fs::write(&temporary, serde_json::to_vec(&PayloadResult {
                 head_start: Some("abc123".into()), head_end: Some("def456".into()),
                 clean_start: Some(true), clean_end: Some(false),
-                exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+                exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None, oom_kills: None,
             }).unwrap()).unwrap();
             fs::rename(temporary, path).unwrap();
         }));
@@ -1674,7 +1676,130 @@ mission "shell-owner" state="ready" {{
         assert!(page.claims[0].body["fields"].get("exit_signal").is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "deliberate memcg OOM; requires systemd >=254 and admitted Linux host"]
+    fn native_shell_oom_retirement_publishes_typed_receipt() {
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+        use crate::store::shell_resources::Command;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.ensure_resource_authority().unwrap();
+        let now = u64::try_from(now_ms()).unwrap();
+        let id = format!("oom-{}", uuid::Uuid::new_v4().simple());
+        let capacity = fractal_runtime::Capacity { cores: 1, memory: 128 * 1024 * 1024 };
+        let request = LaneRequest {
+            id: format!("shell:{id}"), name: id.clone(), host: "node".into(), max_members: 1,
+            capacity: Some(capacity), coverage: Coverage::Enforced, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+            owner: Owner { run: "person/operator".into(), step: id.clone(), attempt: 1, invocation: None },
+            profile: None, profile_estimate: None, disk_path: None,
+        };
+        let mut execution = store.submit_shell_resource(Command {
+            id: id.clone(), request_id: None, lane: request.clone(), argv: vec!["memory-hog".into()],
+            cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+        }, now).unwrap();
+        let Admission::Admitted(grant) = store.request_resource_membership(&request,
+            Fit { room: Some(capacity), ..Fit::default() }, now).unwrap() else { panic!("OOM fixture admission refused"); };
+        store.prepare_resource_membership(&grant, &id).unwrap();
+        let was_enforced = fractal_runtime::lanes_enforced();
+        fractal_runtime::set_lanes_enforced(true);
+        struct Cleanup(Arc<NativeRuntime>, String, bool);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.exec.kill(&self.1);
+                let _ = self.0.exec.end_leftovers(&self.1);
+                fractal_runtime::end_lane(&format!("finite:{}", self.1));
+                fractal_runtime::set_lanes_enforced(self.2);
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone(), id.clone(), was_enforced);
+        let policy = fractal_runtime::FiniteLane { name: id.clone(), capacity: Some(capacity),
+            member_capacity: Some(capacity), memory_high_bytes: None, require_enforced: true };
+        let binding = fractal_runtime::ResourceExecutionBinding { membership_id: grant.membership_id.clone(),
+            generation: grant.generation.clone(), authority_epoch: grant.authority_epoch.clone() };
+        let path = reconciler.shell_result_path(&id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The shell is the surviving observer; only the allocating child is OOM-killed.
+        let script = format!(r#"head -c 402653184 /dev/zero | tail -c 402653184 >/dev/null
+status=$?
+group=$(sed -n 's/^0:://p' /proc/self/cgroup)
+kills=$(awk '$1 == "oom_kill" {{ print $2 }}' "/sys/fs/cgroup$group/memory.events")
+printf '{{"headStart":null,"headEnd":null,"cleanStart":null,"cleanEnd":null,"exitCode":%s,"exitSignal":null,"wallDurationMs":1,"memoryPeakBytes":null,"oomKills":%s}}' "$status" "$kills" > "{}"
+"#, path.display());
+        let generation = runtime.exec.spawn_in_lane_authorized(&id, &fractal_runtime::Launch::Shell(script),
+            root.path(), &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                lane: &policy, binding: &binding, guard: &|| Ok(()),
+                authorize: &|generation, release| store.release_resource_payload(&grant, &id, generation, release),
+            }).unwrap();
+        store.launch_resource_membership(&grant, &id, &generation, now).unwrap();
+        runtime.exec.wait_for_exit(&id, &generation.generation_id).unwrap();
+        execution.started_at = generation.payload_released_at_unix_ms;
+        execution.state = "running".into();
+        store.update_shell_resource(&execution).unwrap();
+        reconciler.drive_shell_resource(&mut execution).unwrap();
+        assert_eq!(execution.state, "completed", "{}", execution.reason);
+        store.update_shell_resource(&execution).unwrap();
+        let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource(&id).unwrap());
+        assert!(fields["oom_kills"].as_u64().unwrap() >= 1, "{fields:?}");
+        assert_eq!(fields["oom_killed"], true);
+        assert_eq!(fields["reason"], "payload-oom-killed");
+        assert!(!runtime.exec.resource_oom_killed(&id, &generation.generation_id, false).unwrap());
+        let claims = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(claims.claims[0].body["fields"]["reason"], "payload-oom-killed");
+    }
+
+    #[test]
+    fn recovered_oom_without_observer_publication_is_committed_before_scope_reset() {
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        fs::remove_file(reconciler.shell_result_path("outcome")).unwrap();
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.command.lane.coverage = crate::store::resource_membership::Coverage::Enforced;
+        store.update_shell_resource(&execution).unwrap();
+        *runtime.resource_oom_killed.lock().unwrap() = true;
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(|store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            assert!(execution.oom_killed);
+            assert_eq!(execution.reason, "payload-oom-killed");
+        }));
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert!(execution.oom_killed);
+        assert_eq!(execution.reason, "payload-oom-killed");
+        assert_eq!(execution.result.unwrap().oom_kills, None);
+        assert_eq!(*runtime.resource_oom_resets.lock().unwrap(), 1);
+        assert!(!*runtime.resource_oom_killed.lock().unwrap());
+        let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource("outcome").unwrap());
+        assert_eq!(fields["oom_killed"], true);
+        assert_eq!(fields["reason"], "payload-oom-killed");
+        assert!(!fields.contains_key("oom_kills"));
+    }
+
     impl RuntimeControl for FakeRuntime {
+        fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
+            Ok(None)
+        }
+        fn resource_exec_oom_killed(&self, id: &str, generation: &str, reset: bool) -> Result<bool> {
+            let execs = self.execs.lock().unwrap();
+            anyhow::ensure!(execs.get(id).and_then(|exec| exec.incarnation_id.as_deref()) == Some(generation),
+                "fake OOM generation changed");
+            let mut killed = self.resource_oom_killed.lock().unwrap();
+            let observed = *killed;
+            if reset {
+                *self.resource_oom_resets.lock().unwrap() += 1;
+                *killed = false;
+            }
+            Ok(observed)
+        }
         fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
             if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
             for execution in store.shell_resources(host, true)? {

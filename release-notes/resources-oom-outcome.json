@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "summary": "Resource execution receipts distinguish confirmed memory OOM kills from external signals without changing CLI exit-code mapping.",
+  "schema": {
+    "status": "changed",
+    "detail": "Execution adds oomKilled (historical records default false). PayloadResult adds optional oomKills, the exact cumulative scope memory.events oom_kill count when the observer survives; absent means unknown, not zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason. Confirmed OOM outcomes use reason payload-oom-killed. Show includes the typed execution fields."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Finite scopes no longer use --collect. Failed scopes retain systemd Result after their cgroup and observer disappear. The daemon generation-fences the recorded scope identity, durably captures Result=oom-kill before retirement and again after whole-tree retirement, then explicitly resets the failed unit. Startup recovery captures retained results before retiring predecessor executions. Successful empty scopes unload normally. This avoids racing a daemon-side memory.events read against automatic cgroup removal and never invents a kill count from Result."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive fields preserve historical record decoding. Existing exit code, exit signal, timeout mapping and Darwin logical coverage remain unchanged. Ordinary nonfinite seat scopes still use --collect."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployment or host policy change is activated."
+  }
+}

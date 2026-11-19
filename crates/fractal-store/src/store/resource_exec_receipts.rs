@@ -48,6 +48,8 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("coverage", json!(request.coverage)),
         ("state", json!(execution.state)),
         ("timed_out", json!(execution.timed_out)),
+        ("oom_killed", json!(execution.oom_killed)),
+        ("reason", json!(execution.reason)),
         ("refusal_code", json!(execution.refusal_code)),
         ("disk_reserved_bytes", json!(request.disk.as_ref().map_or(0, |disk| disk.bytes))),
         ("queue_wait_ms", json!(execution.queue_wait_ms)),
@@ -68,6 +70,7 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("clean_end", result.and_then(|result| result.clean_end).map(|clean| json!(clean))),
         ("exit_code", execution.exit_code.map(|code| json!(code))),
         ("exit_signal", execution.exit_signal.map(|signal| json!(signal))),
+        ("oom_kills", result.and_then(|result| result.oom_kills).map(|count| json!(count))),
         ("memory_peak_bytes", result.and_then(|result| result.memory_peak_bytes)
             .filter(|_| request.coverage == Coverage::Enforced).map(|peak| json!(peak))),
     ] {
@@ -112,7 +115,7 @@ mod tests {
         execution.result = Some(PayloadResult {
             head_start: Some("abc123".into()), head_end: Some("abc123".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
-            wall_duration_ms: 1234, memory_peak_bytes: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None, oom_kills: None,
         });
         execution
     }
@@ -120,6 +123,26 @@ mod tests {
     fn claims(store: &Store, prefix: Option<&str>) -> Vec<ClaimRecord> {
         store.claims_page_matching(ClaimsFilter { kind: Some(KIND), subject_prefix: prefix,
             ..ClaimsFilter::default() }, None, 0, None, false, 100).unwrap().claims
+    }
+
+    #[test]
+    fn oom_outcome_is_additive_and_unknown_count_stays_absent() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut execution = terminal(&store, "oom", "completed");
+        let mut historical = serde_json::to_value(&execution).unwrap();
+        historical.as_object_mut().unwrap().remove("oomKilled");
+        historical["result"].as_object_mut().unwrap().remove("oomKills");
+        let historical: Execution = serde_json::from_value(historical).unwrap();
+        assert!(!historical.oom_killed);
+        assert_eq!(historical.result.unwrap().oom_kills, None);
+        execution.oom_killed = true;
+        execution.reason = "payload-oom-killed".into();
+        let fields = receipt_fields(&execution);
+        assert_eq!(fields["oom_killed"], true);
+        assert_eq!(fields["reason"], "payload-oom-killed");
+        assert!(!fields.contains_key("oom_kills"));
+        execution.result.as_mut().unwrap().oom_kills = Some(3);
+        assert_eq!(receipt_fields(&execution)["oom_kills"], 3);
     }
 
     #[test]
