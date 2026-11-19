@@ -586,3 +586,137 @@ index. `fractal claims ls --kind KIND --subject-prefix PREFIX` prints them. Both
 claims' kind and subject indexes. The interval and count indicators read their claims the same way,
 keeping each objective's samples or events in memory and reading only claims newer than the last it
 saw.
+
+## Build admission lifecycle
+
+`build/admission/HOST/CLASS` measures accepted eligible finite requests granted capacity
+within two hours: 90% good over 30 days, with paired burns of 14.4× over 1h and 5m,
+or 6× over 6h and 30m. The capacity grant is the stop, not payload launch or completion.
+The denominator is resolved requests plus overdue open requests, not queue polls.
+An open request fails once in its original deadline bucket; a later grant cannot move
+that failure. Early refusal and withdrawal are failed admissions, not successful stops.
+The native withdrawal interface has no typed intentional-supersession proof and therefore
+does not silently exclude cancellation. Requests without a finite profile are separately
+excluded. Impossible finite profiles are failures.
+
+The host authority commits `resource.admission.observed` claims atomically with membership
+changes, carrying accepted onset, grant timestamp, retirement/refusal facts, attempt owner,
+original authority epoch and logical/enforced coverage mode. Replayable grants and runtime
+custody are never copied into this stream. Authority acquisition replays existing membership
+records once before committing its source cut. SLO reads incrementally consume only the
+durable claim stream; they neither inspect the membership table nor create observations.
+Child and inherited contexts do not create another membership sample. Repeated requests
+retain their original identity and onset.
+The native registry admits these system-only claims on `resource-admission/HOST/ID`;
+`resource.admission.coverage` uses `resource-admission/HOST` for each acquired source cut.
+Both kinds remain durable replicated evidence, not launch capabilities. Ordinary public
+claim writers cannot publish either kind.
+The daemon subscribes to claim-change notifications and arms one timer for the nearest
+open deadline or 5m/30m/1h/6h/30d accounting boundary. The wake autonomously evaluates
+the full native objective set and existing owner bindings even without an SLO reader.
+Timers do not sample membership or manufacture lifecycle facts; an empty source has no
+timer. There is no periodic admission-source poll.
+
+Local native coverage is admitted only after this process acquires the host authority and
+completes replay. A persisted marker cannot certify an absent producer after restart.
+Remote evidence remains unknown: replication alone does not certify a remote complete cut.
+Unreadable or uncertain clocks also leave the source unknown, never green. Coverage modes
+remain visible in `coverage_modes`; a logical grant does not claim physical enforcement.
+
+### Transitional gate producer
+
+Gate admission receipts use immutable `gate-slot.admission/v1` accepted, granted, failed
+and typed superseded edges, not payload completion receipts. Configure the gate producer's
+`GATE_SLOT_ADMISSION_SPOOL` and the daemon's `FRACTAL_GATE_ADMISSION_SPOOL` to the same directory.
+The producer defaults to `$XDG_STATE_HOME/gate-slot/admission` (or the standard user state
+directory); the daemon requires an explicit source directory. `GATE_SLOT_ADMISSION_HOST`
+must agree with the daemon's host identity when the machine's short hostname does not.
+The reactive importer retains source files, replays idempotently on restart and publishes
+`gate.admission.observed`; no periodic directory sampler or parallel SLO policy is involved.
+The system-only `gate.admission.observed` kind uses `gate-admission/HOST/ID/OUTCOME`.
+Each outcome receipt is immutable and retained durably; its schema admits the producer's
+logical coverage only, without granting native execution custody.
+Supersession before the deadline is visibly excluded; after the deadline it remains bad.
+Unconfirmed wrapper death leaves an open sample, not an invented successful grant.
+
+Gate evidence deliberately remains unknown until the deployment owner proves prospective
+complete adoption: every authorized gate writer uses the instrumented revision, the complete
+host/gate-root population is known, and pre-existing uninstrumented waiters have drained or
+been reconciled. A receipt directory, one successful completion or a snapshot cannot prove
+that older writers cannot introduce new unobserved requests. No historical coverage is
+invented. Remove this transitional producer/importer when callers migrate to native resource
+membership; do not remove admission safety as part of measurement.
+
+## Agent mail delivery lifecycle
+
+`agents/mail-delivery/<host>` measures durable agent messages accepted by a native harness
+within **15 minutes**, with **95% good over 30 days**. A miss is counted once in its original
+deadline bucket even while the message remains open, or after late acceptance. A terminal
+close or expiry without input acceptance is bad, not successful delivery. The shared native
+budget evaluator uses paired **14.4x (1h + 5m)** and **6x (6h + 30m)** burns, with one sample
+as the minimum; sample counts remain visible. The 24h p95 and oldest open age are diagnostics,
+not substitutes for the failed-message budget.
+
+The producer joins graph sends, messages-shard sends and local lifecycle marks through
+transaction-fed retained metadata. Shard lifecycle timestamps come from the source shard,
+not from the mirror's later wall time; its dedicated replay cursor catches up existing
+history. Retry and alias spellings collapse to one `(message, canonical agent recipient)`
+sample. Current declared host ownership determines the host row. People are outside this
+family; missing agent ownership is unknown, never a successful delivery.
+
+`POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
+`input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider
+authority, recipient and current mailbox incarnation/epoch must all match. Acceptance
+commits under the same transactional fence and preserves its first source timestamp.
+It does **not** advance generic delivered/read state. Ordinary `message.delivered` or
+`message.read` assertions cannot certify input acceptance. Historical settled mail without
+a native acceptance certificate remains unknown rather than being manufactured as success.
+Acceptance committed in a valid recipient incarnation remains historical evidence after
+a later restart; a replacement cannot submit an earlier incarnation's unbound receipt.
+
+Explicit silent/next-turn mail is shown in held diagnostics until its first durable staged
+eligibility edge. It is never called delivered while held. Once eligible, its latency still
+starts at the **original durable send**; hold time is visible but is not subtracted or reset.
+Terminal undelivered held mail remains bad. Busy delivery-capable seats are not excluded.
+An eligible open message remains visible after its failure bucket leaves the budget horizon.
+
+`POST /v1/mailbox/acceptance-frontier` accepts a flat current mailbox fence and
+`observed_through_unix_ms`. A native producer first seals/drains its source and durably posts
+every acceptance through that cut. An unresolved handoff bounds the frontier before that
+attempt; missing original handoff clocks cannot certify a frontier. This is not a daemon
+heartbeat or receipt-pump wall-time assertion. The source joins each current recipient
+incarnation to its frontier and evaluates budgets at the **minimum proven accounting cut**.
+A source clock behind a message onset does not manufacture a deadline failure; that message
+remains unjudged until the source cut reaches it. Frontier freshness is 120s.
+
+Ledger attempt generations survive pruning, binding changes and reopen. A rejected RPC
+resolves only its own generation; abandoned earlier attempts, including unknown source
+clocks, continue to bound coverage until authoritative native absence resolves them.
+Claude retains native acceptance timestamps independently of optional TODO journaling.
+Frontier publication failures retain those bounds and produce the protocol-visible
+`claude-acceptance-frontier-unsettled` waiting diagnostic, including after daemon recovery
+acknowledges a previously unavailable publication; they do not write into the seat terminal.
+
+The daemon starts one reactive source publication beside its roster producer. Source events
+invalidate the previous cut immediately; capture failure, startup, missing shard mirror
+coverage, missing ownership, missing/stale driver frontiers and malformed original clocks
+produce unknown/no-data and cannot recover an owner episode. An idle source subscription
+can renew its own capture heartbeat without querying mail, but cannot advance a native
+producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluation; no source
+polling or request-time sampling is used. Native ownership/response declarations bind this
+host row through the existing native indicator mechanism, without a separate alert evaluator.
+
+The local acceptance and lifecycle ledgers retain metadata across restarts and source-mark
+retention. They contain recipient identity, source timestamps, sender/tags and lifecycle
+provenance, not message content or model output. They currently retain this audit metadata
+without automatic deletion; 30d applies to budget evaluation, not a destructive ledger TTL.
+
+Capture does not aggregate these indefinitely retained ledgers on each event. Producer
+transactions maintain a rebuildable pending-message key projection (unresolved or invalid
+original send clocks), and an indexed send-time range supplies the current window. Capture
+unions those populations, then reads lifecycle and certificate primary-key ranges only for
+relevant messages assigned to this host. Completed history outside the window therefore
+causes no historical lifecycle/certificate reads on unrelated daemon events. Startup replay
+rebuilds this projection from durable metadata; no timer refresh or cached-success fallback
+substitutes for producer facts.
+

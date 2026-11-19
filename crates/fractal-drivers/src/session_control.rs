@@ -32,12 +32,24 @@ impl DeliveryBlockReason {
 struct Permit {
     expires: Option<Instant>,
     blocked: Option<DeliveryBlockReason>,
+    incarnation: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct DeliveryGate(Arc<Mutex<Permit>>);
 
 impl DeliveryGate {
+    /// Bind the native producer to the same runtime incarnation as its receipt authority.
+    pub fn bind_incarnation(&self, incarnation: &str) {
+        if let Ok(mut permit) = self.0.lock() {
+            permit.incarnation = Some(incarnation.to_owned());
+        }
+    }
+
+    fn incarnation(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|permit| permit.incarnation.clone())
+    }
+
     /// Empty mail needs no permission. This closes the gate without claiming a failed read.
     pub fn idle(&self) {
         if let Ok(mut permit) = self.0.lock() {
@@ -143,6 +155,12 @@ pub enum SessionControl {
 }
 
 impl SessionControl {
+    pub(crate) fn incarnation(&self) -> Option<String> {
+        match self {
+            Self::Graph(gate) => gate.incarnation(),
+        }
+    }
+
     pub(crate) fn held(&self) -> bool {
         match self {
             Self::Graph(gate) => gate.held(),
@@ -153,6 +171,19 @@ impl SessionControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receipt_incarnation_is_shared_with_native_producer_and_survives_gate_updates() {
+        let gate = DeliveryGate::default();
+        let producer = SessionControl::Graph(gate.clone());
+        assert_eq!(producer.incarnation(), None);
+        gate.bind_incarnation("runtime-fixture");
+        gate.update(false, Duration::from_secs(30));
+        assert_eq!(producer.incarnation().as_deref(), Some("runtime-fixture"));
+        gate.unavailable();
+        assert_eq!(producer.incarnation().as_deref(), Some("runtime-fixture"));
+        assert!(producer.held());
+    }
+
 
     #[test]
     fn native_control_starts_closed_expires_and_ignores_status() {
