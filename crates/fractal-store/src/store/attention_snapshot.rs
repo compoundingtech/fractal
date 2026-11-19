@@ -3485,6 +3485,9 @@ mod desired_kind_scan_tests {
             ("observer/healthy", "observer", "null"),
             ("observer/stale", "observer", "null"),
             ("agent/quiet", "agent", "null"),
+            // Keep the observer range's upper bound nonempty at both inventory sizes:
+            // ending at the next kind takes one more opcode than ending at index EOF.
+            ("resource/baseline", "resource", "null"),
         ] {
             let claim = append(&tx, subject, "intent.desired", json!({}));
             tx.execute(
