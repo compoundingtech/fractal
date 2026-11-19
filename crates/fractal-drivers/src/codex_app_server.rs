@@ -596,6 +596,7 @@ enum CodexDeliveryMethod {
 struct PendingCodexDelivery {
     request_id: u64,
     filename: String,
+    attempt_sequence: u64,
     method: CodexDeliveryMethod,
     requested_at: Instant,
 }
@@ -1293,7 +1294,7 @@ impl CodexInboxDelivery {
     /// recipient agent's act and the only settlement authority: an entry whose file left the inbox
     /// releases ownership, and this pump never moves a file.
     fn reconcile_inbox(&mut self, unread: &[message::Message]) -> Result<()> {
-        self.ledger.prune(|filename| {
+        self.ledger.prune(Some(self.runtime.incarnation()), |filename| {
             crate::push_mailbox::is_unread(&self.config.agent_dir, filename, unread)
         })
     }
@@ -1392,7 +1393,7 @@ impl CodexInboxDelivery {
             .binding()
             .is_some_and(|binding| binding != state.thread_id())
         {
-            self.ledger.rebind(state.thread_id())?;
+            self.ledger.rebind(state.thread_id(), Some(self.runtime.incarnation()))?;
         }
         let Some(head) = self.head.clone() else {
             return Ok(None);
@@ -1457,7 +1458,7 @@ impl CodexInboxDelivery {
         let request =
             codex_delivery_request(request_id, state.thread_id(), &client_id, &text, &method);
         // Durable ownership lands before transport.
-        self.ledger.begin(delivery_ledger::Begin {
+        let entry = self.ledger.begin(delivery_ledger::Begin {
             filename: filename.clone(),
             binding: state.thread_id().to_string(),
             correlation: delivery_ledger::Correlation::native(client_id.clone()),
@@ -1468,6 +1469,7 @@ impl CodexInboxDelivery {
         self.pending = Some(PendingCodexDelivery {
             request_id,
             filename,
+            attempt_sequence: entry.attempt_sequence.context("new Codex RPC has no durable attempt sequence")?,
             method,
             requested_at: Instant::now(),
         });
@@ -1688,10 +1690,7 @@ impl CodexInboxDelivery {
             // The request itself was refused: an authoritative negative acknowledgement about
             // this attempt, and the only thing that re-authorizes the same client ID here. A
             // delivery that already reached its ceiling cannot be un-settled by a late error.
-            self.ledger.negative(
-                &pending.filename,
-                delivery_ledger::NegativeReceipt::Rejected,
-            )?;
+            self.ledger.reject_attempt(&pending.filename, pending.attempt_sequence)?;
             self.rejected = Some(RejectedCodexDelivery {
                 filename: pending.filename,
                 observed: observed.clone(),
@@ -1909,9 +1908,23 @@ pub fn consumed_delivery_filenames(
     identity: &str,
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
+    Ok(delivery_receipts(state_dir, identity, runtime_id)?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
+        .map(|entry| entry.filename)
+        .collect())
+}
+
+/// Validated durable evidence; acceptance clocks are never inferred from consumption.
+pub fn delivery_receipts(
+    state_dir: &Path,
+    identity: &str,
+    runtime_id: &str,
+) -> Result<delivery_ledger::ReceiptSnapshot> {
     let path = state_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(BTreeSet::new());
+        return Ok(delivery_ledger::ReceiptSnapshot::default());
     }
     let ledger = delivery_ledger::Ledger::open(
         &path,
@@ -1923,12 +1936,7 @@ pub fn consumed_delivery_filenames(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("Codex delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger
-        .entries()
-        .iter()
-        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
-        .map(|entry| entry.filename.clone())
-        .collect())
+    Ok(ledger.receipt_snapshot())
 }
 
 fn codex_delivery_request(
