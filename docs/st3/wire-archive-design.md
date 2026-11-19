@@ -20,6 +20,15 @@ The caller supplies explicit sorted envelope identities `(writer, sequence, enve
 
 There is **no daemon default archive writer**, no age selector, no hot deletion, no storage schema/version upgrade, no checkpoint-rule change, no fleet feature activation and no production archive converter in this PR. Merely linking the module or opening the normal store must not produce archive files or alter persistence defaults. No release-dependent byte saving is claimed for this inactive primitive.
 
+### Second PR: inactive native archive-addressed reads
+
+`ArchiveReaders` pins explicitly supplied verified segments, indexes full identities and rejects contradictory duplicate coverage. Native `replica_envelopes_with_archive`, `replication_signatures_with_archive`, `replica_record_with_archive` and `export_replication_difference_with_archive` provide original typed peer envelopes/signatures, envelope-plus-position repair witnesses with raw bytes, and the existing bounded replication difference protocol over a merged compact inventory. Existing entrypoints stay hot-only: no daemon configuration, catalogue loader or persisted activation is introduced.
+
+The merged inventory preserves all fork hashes and payloadless checkpoint identities; authoritative retirement still prevents serving archived payloads. Exact hot/cold duplicates collapse, while differing receipt/repair/signature snapshots fail closed pending the overlay-aware stage rather than silently selecting one tier. Repair reads do not mutate cold state or perform repair. The temporary merged inventory is not persisted or fed back into the hot inventory cache. Tests relocate wire rows only inside offline fixtures and exercise bounded empty-peer catch-up, byte-identical payload transfer, native repair witnesses, signature ordering, conflict refusal, retired non-resurrection and unchanged default readers.
+
+Signature responses independently read the hot signature table even when its envelope is absent: follow-up receipt legitimately retains signature-only rows. They union those rows with cold signatures by full envelope identity plus member key, collapse identical signatures and refuse contradictory signature text. Envelope presence is never a prerequisite for exporting a retained hot signature.
+
+
 ### Later production scope
 
 Archive-aware native reads, current-state overlays, catalogue publication, complete backup integration, separate archive native metrics and offline construction proofs precede activation. Historical claims, signature-candidate authority, global nonce membership, dependency invalidation and operation receipts need their own reader/representation changes; archiving three wire tables does not solve them implicitly.

@@ -109,6 +109,69 @@ in the new process rather than mislabeled as no qualifying events.
 Synthetic probes are not organic attachment or fresh-read traffic. Any future availability
 probe must have its own separately named objective rather than filling these sparse rows.
 
+### CPU populations and commissioning
+
+Production `cpu` remains ≤1 core over **all 60 closed UTC minutes**, including daemon and
+replication-worker process CPU. Unknown minutes never become zero or a shorter denominator.
+The sampler requires the exact expected fresh worker cohort at both boundaries. In production's
+singleton-worker topology, the newest reported process birth supersedes older births; the changed
+minute stays unknown, but the following stable minute recovers without waiting for the old report
+to age out. Equal-birth competing identities remain ambiguous, and a delayed older report cannot
+revive a superseded worker. Multi-worker topologies retain the entire exact cohort check.
+The CPU target in `/v1/client/request-latency` includes at most one hour of `minute_evidence`:
+CPU/wall nanoseconds, expected worker count, idle/seat evidence,
+busy reasons and a bounded `missing_reason` (`worker-missing`, `worker-stale`,
+`worker-cohort-extra`, `worker-topology-changed`, `worker-incarnation-changed`,
+`worker-counter-regressed`, `daemon-counter-regressed`). An omitted minute is an unobserved
+boundary, not a known zero. These are current local diagnostics, not durable historical
+attribution: an older receipt without them cannot prove which condition caused its unknown CPU.
+
+Production `cpu/idle` remains conditional: ≤0.5 core over at least ten confirmed idle minutes
+in a complete hour. `not eligible: busy` means productive seat activity alone rules out ten
+idle minutes; the row stays no-data with no error-budget credit. Missing CPU/seat evidence
+remains distinct and visible, even when reasons overlap. A live session's same-incarnation
+runtime heartbeat is not productive work: matching harness `ready`, `idle`, `blocked` or
+`ended` with no background jobs can prove it quiet only while the source `observed_at_ms`
+is fresh under the existing harness stale/future-skew bounds. Starts, new incarnations,
+work, and missing or expired matching harness observations cannot. Receiving an old report
+again does not refresh its source evidence.
+Freshness is checked before each admitted replacement as well as at minute boundaries;
+a later fresh observation cannot erase an earlier intra-minute gap of expired evidence.
+
+The separately labeled **representative isolated controlled quiet reference** is commissioned
+with the real daemon/worker sampler, never synthetic CPU values and never by pausing live seats.
+Prepare a network/state-isolated member using the same binary and configuration as the reference
+member, with instance-specific isolation supplied as launch overrides. Retain the launch,
+network/state isolation and configuration provenance in an operator receipt. Do not connect its
+worker to production peers. Then run:
+
+```sh
+python3 scripts/commission-cpu-quiet-reference \
+  --socket /isolated/member.sock --reference-socket /reference/member.sock \
+  --config /isolated/config.toml --reference-config /reference/config.toml \
+  --binary /isolated/fractal --reference-binary /reference/fractal \
+  --expected-workers 1 --isolation-evidence '<launch-and-isolation-receipt>'
+```
+
+The command only reads both members; it requires equal nonempty `build.commit` strings in
+both health responses, checks byte-identical
+binary/configuration inputs and reference worker topology, then collects exactly ten **new consecutive**
+closed minutes and waits for seat settlement. The operator's isolation receipt, not the socket
+name, establishes that launch overrides really isolate the member and that these are the files
+actually used. Unknown CPU, missing boundaries, busy/unsettled seats, topology changes or a
+changed build cannot pass. The measured verdict is published only after the final health read
+confirms the same nonempty build commit; a failed final health check leaves the receipt `no-data`.
+Its JSON stdout carries binary/configuration SHA-256, build, worker topology, isolation provenance,
+measured CPU/wall totals and per-minute evidence. Save that stdout as the
+commissioning artifact; a miss/no-data exits nonzero. This is `cpu/quiet-reference`, explicitly
+`production_objective=false`, not a third production objective or evidence of the busy host's
+idle behavior. Production `cpu` and conditional `cpu/idle` are unchanged by commissioning.
+
+Regression commands (not substitutes for a measured commissioning receipt):
+`cargo test -p smallclaims windows::cpu_minutes`,
+`cargo test -p fractal-store runtime_heartbeats_do_not_make_a_quiet_live_session_productive`,
+`cargo test -p fractal-api-core the_cpu_rows_are_met_missed_or_no_data_never_met_without_the_facts`,
+and `python3 scripts/commission-cpu-quiet-reference-test`.
 
 ### Source-backed GitHub measurements
 
