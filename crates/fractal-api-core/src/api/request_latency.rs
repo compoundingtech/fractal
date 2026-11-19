@@ -561,6 +561,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn organic_terminal_first_screen_counts_but_plural_listing_does_not() {
+        let now = Instant::now();
+        let mut meter = Meter::default();
+        meter.time(now, Timed::resolve("stream terminals", false, Wait::No), Duration::from_secs(5));
+        let listing = meter.targets_snapshot(now).finish();
+        let attach = listing["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "terminal-attach").unwrap();
+        assert_eq!(attach["windows"]["1h"]["count"], 0);
+        assert!(crate::slo::targets().for_path("stream terminals").is_none());
+
+        // The collections socket records this singular key only after a screen send succeeds.
+        meter.time(now, Timed::resolve("stream terminal", false, Wait::No), Duration::from_millis(120));
+        meter.time(now, Timed::resolve("GET /v1/client/terminals/{id}/screen", false, Wait::No), Duration::from_millis(80));
+        let measured = meter.windows_snapshot(now).finish();
+        let attach = measured["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "terminal-attach").unwrap();
+        assert_eq!(attach["windows"]["1h"]["count"], 2);
+        assert_eq!(attach["windows"]["1h"]["over_target"], 0);
+        assert_eq!(attach["windows"]["1h"]["max_ms"], 120.0);
+    }
+
+    #[test]
     fn dedicated_exports_keep_separate_classes_without_reclassifying_reads() {
         let mut meter = Meter::default();
         for (method, route, duration) in [

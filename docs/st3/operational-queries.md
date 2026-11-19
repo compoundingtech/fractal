@@ -157,6 +157,16 @@ run when the mission has multiple runs. The published missions list is the same 
 window: `active_runs`, `total_runs`, and `run_counts` count the entire history, while the
 card previews at most three runs and `runs_truncated` says when the preview is incomplete.
 
+`fractal missions show RUN --follow` captures the daemon's event cursor before reading
+the run, then blocks on `/v1/events/page` with that cursor. Mission-run and step-run
+lifecycle events refresh the run and its bounded tree; empty long-poll responses and
+other graph events do not. The lifecycle subscription is global so new children beyond
+the displayed page are not missed. It does not periodically fetch run snapshots.
+Transport interruptions use the normal follow reconnection diagnostics and resume at
+the same cursor. A lost or expired cursor fails visibly rather than skipping changes.
+`completed` and `standing` exit successfully; `failed` and `cancelled` exit 2. JSON
+follow prints only the successful final run, as before.
+
 To investigate outcomes in a time window, or every terminal transition of one mission:
 
 ```sh
