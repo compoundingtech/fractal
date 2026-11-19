@@ -203,6 +203,7 @@ impl FractalRuntime {
         relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
+        wake_demand::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
         // The remaining initial DDL has no backfill transaction. Keep existing-store
         // upgrade progress unchanged, and commit this chunk only for a fresh store.
