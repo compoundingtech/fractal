@@ -225,6 +225,40 @@ raise AssertionError((name, args))
 
 
 class IosEnvironmentTests(unittest.TestCase):
+    def test_fabric_packaging_does_not_wait_for_foreign_xcodebuild(self):
+        script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
+        # Exercise the actual shell packaging stage after both Rust targets.
+        packaging = script.read_text().split("\ndone\n", 1)[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "build").mkdir()
+            tools = {
+                "pgrep": 'echo "4242"; echo probe >> "$CALLS"; exit 0',
+                "sleep": 'echo sleep >> "$CALLS"; exit 97',
+                "xcodebuild": 'printf "%s\\n" "$@" > "$CALLS"; exit "${PACKAGE_EXIT:-0}"',
+            }
+            for name, body in tools.items():
+                tool = root / name
+                tool.write_text("#!/bin/sh\n" + body + "\n")
+                tool.chmod(0o755)
+            calls = root / "calls"
+            for status in (0, 42):
+                with self.subTest(package_exit=status):
+                    result = subprocess.run(
+                        ["sh", "-eu", "-c", packaging], cwd=root,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "CALLS": str(calls), "PACKAGE_EXIT": str(status)},
+                        capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    arguments = calls.read_text().splitlines()
+                    self.assertEqual(arguments, [
+                        "-create-xcframework",
+                        "-library", "rust/target/aarch64-apple-ios/release/libfractal_fabric_bridge.a",
+                        "-headers", "build/headers",
+                        "-library", "rust/target/aarch64-apple-ios-sim/release/libfractal_fabric_bridge.a",
+                        "-headers", "build/headers",
+                        "-output", "ios/build/FractalFabricRust.xcframework"])
+
     def test_fabric_cache_only_is_opted_in_and_manual_builds_still_realize(self):
         script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
         with tempfile.TemporaryDirectory() as temporary:
@@ -678,6 +712,19 @@ fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3])
     def assert_installed(self, commit):
         self.assertEqual(self.saved_state().get("installed"), commit)
         self.assertFalse(self.saved_state().get("pending"))
+
+    def test_build_logs_timestamped_phase_starts_in_order(self):
+        self.reconcile()
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        phases = [line for line in log.read_text().splitlines() if " phase=" in line]
+        self.assertEqual([line.split(" phase=", 1)[1] for line in phases], [
+            "pnpm_install", "expo_config", "fabric_build", "prebuild_pod_install",
+            "export_ios", "xcodebuild", "verify"])
+        for line in phases:
+            timestamp = line.split(" ", 1)[0]
+            self.assertEqual(time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                          time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")),
+                             timestamp)
 
     def test_fractal_environment_configures_delivery_without_legacy_values_winning(self):
         preferred = {
