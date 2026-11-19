@@ -9669,6 +9669,15 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
+fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+    let blocking = status.blocking_summary();
+    DoctorCheck {
+        name: "checkpoint".into(),
+        status: if blocking.is_some() { "warn" } else { "pass" }.into(),
+        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+    }
+}
+
 /// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
 /// threads, each under its own deadline from the clock, so a slow check costs its own time and
 /// not the time of the checks after it. A worker past the first reads on a reader it is
@@ -10529,6 +10538,13 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
+    if state.fleet_id.is_some() {
+        checks.check("checkpoint", || {
+            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
+                .map_err(ApiError::internal)?;
+            Ok(vec![checkpoint_doctor_check(&status)])
+        });
+    }
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -11484,6 +11500,9 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
+    state.store.record_idle_unrouted(&subject,
+        crate::store::idle_residency::UnroutedKind::ExplicitResume)
+        .map_err(ApiError::internal)?;
     let (claim, _) = state
         .store
         .append_source_gated(

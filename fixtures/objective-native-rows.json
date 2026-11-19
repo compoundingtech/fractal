@@ -3,6 +3,7 @@
     "cpu",
     "cpu/idle",
     "database",
+    "database-archive",
     "fleet/roll-completion",
     "ios-connect",
     "ios-conversation-open",
