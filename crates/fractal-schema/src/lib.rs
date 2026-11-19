@@ -5901,15 +5901,24 @@ mod tests {
             ("queue_wait_ms".into(), Value::from(0)),
         ]);
         let validate = |fields: &BTreeMap<String, Value>| {
-            registry().validate_claim("resource/exec/_/node/check/execution", "resource.exec-receipt", fields)
+            registry().validate_claim(
+                "resource/exec/_/node/check/execution",
+                "resource.exec-receipt",
+                fields,
+            )
         };
         validate(&fields).unwrap(); // Historical receipts omit every new observation.
         fields.insert("reason".into(), Value::from("payload-oom-killed"));
-        for (outcome, count) in [(Value::Null, None), (Value::Bool(false), Some(0)),
-            (Value::Bool(true), Some(2))] {
+        for (outcome, count) in [
+            (Value::Null, None),
+            (Value::Bool(false), Some(0)),
+            (Value::Bool(true), Some(2)),
+        ] {
             fields.insert("oom_killed".into(), outcome);
             fields.remove("oom_kills");
-            if let Some(count) = count { fields.insert("oom_kills".into(), Value::from(count)); }
+            if let Some(count) = count {
+                fields.insert("oom_kills".into(), Value::from(count));
+            }
             validate(&fields).unwrap();
         }
         fields.insert("oom_killed".into(), Value::from("true"));

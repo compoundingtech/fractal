@@ -492,3 +492,12 @@ The full registry-kind coverage assertion remains intact.
 Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
 not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
 the three-seed cap, and majority trim coverage remain enforced.
+
+`claims-v37.json` adds the optional `oom_killed`, `oom_kills`, and `reason` fields to
+`resource.exec-receipt`. Versions 1 through 36 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v37.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v37.
+Field additions also consume seeded draws, so v36's trim-schedule expectation must be
+checked against v37 rather than inferred from the historical observations above.
+The registry's content-derived claim digest changes automatically; neither the `st3.v1`
+schema name nor the independent SQLite storage layout version is bumped for optional fields.
