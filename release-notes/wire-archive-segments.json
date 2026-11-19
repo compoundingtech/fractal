@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add opt-in sealed, indexed wire evidence segments with exact-byte export and transactional wire-row restore; hot persistence is unchanged",
+  "replay": {"status": "none", "detail": "No graph replay. The wire-row restore primitive is not a replacement for logical backup restore or graph admission."},
+  "schema": {"status": "none", "detail": "No database schema, claim kind or schema-version change. Segment format version one is a separate externally sealed binary archive."},
+  "rules": {"status": "none", "detail": "No checkpoint or protected-witness selection changes in this reader-first primitive."},
+  "compatibility": {"status": "changed", "detail": "New opt-in wire archive reader/writer library API. No daemon default writes segments, no hot rows are removed, and the existing signature-reference writer activation is unchanged. Unknown segment versions fail closed."},
+  "downtime": {"status": "none", "detail": "None; there is no live activation."},
+  "manual": {"status": "none", "detail": "No production operation. Segment construction requires explicitly selected identities from a private offline source copy."},
+  "recovery": {"status": "none", "detail": "Reverting does not affect the unchanged hot store. Retain any opt-in segments and their external seals; older binaries cannot consume them."}
+}
