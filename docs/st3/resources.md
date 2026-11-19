@@ -397,6 +397,14 @@ not invented zeroes, false clean flags, empty heads or successful exit codes. In
 pre-launch refusal/cancellation may have no exit status or worktree observations, and logical
 coverage does not imply a measured memory peak.
 
+`oom_kills` is the daemon-read cumulative kernel OOM kill count in the execution's
+generation slice, including units the payload starts there. This cooperative owner-UID
+accounting is not authenticated against deliberate same-user interference. A positive
+count sets `oom_killed=true` and `reason=payload-oom-killed`; a measured zero sets
+`oom_killed=false`. If the generation slice is gone during recovery, `oom_killed` is
+null and `oom_kills` is absent, never an invented false/zero. Historical receipts may
+omit these fields. Payload result files and exit signals cannot establish this outcome.
+
 Subjects use this layout, where `hex` is lowercase hexadecimal encoding of the exact UTF-8 bytes:
 
 ```text
