@@ -2,7 +2,7 @@
 
 This isolated opt-in adapter connects `ViewRuntime` local appends and bounded replicated
 projection to the namespace-aware installer. It uses the runtime's existing claims-only
-admission policy; it does not replace st3 typed admission, arrangement authority, fleet
+admission policy; it does not replace Fractal typed admission, arrangement authority, fleet
 signer closure, owned desired sets, local numeric observations or the ordered run-tree fold.
 The nine controls have passed in local iteration using the standard Cargo wrapper
 and target runner with default jobs and test threads.

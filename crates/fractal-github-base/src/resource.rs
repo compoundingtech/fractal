@@ -255,7 +255,7 @@ fn github_client() -> reqwest::Client {
                 // Follow REST redirects explicitly so every HTTP hop is admitted.
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
-                .user_agent("st3-resource-observer/0.1")
+                .user_agent("fractal-resource-observer/0.1")
                 .connect_timeout(GITHUB_CONNECT_TIMEOUT)
                 .timeout(GITHUB_REQUEST_TIMEOUT)
                 .build()
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_local_file_is_a_distinct_observation() {
-        let path = std::env::temp_dir().join("st3-file-that-does-not-exist");
+        let path = std::env::temp_dir().join("fractal-file-that-does-not-exist");
         let observation = RegisteredResourceProvider
             .observe(ObservationRequest {
                 provider: "local.file".into(),

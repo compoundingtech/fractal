@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn writer_children_keep_request_context_and_complete_after_finalization() {
         // Isolate the global tracer provider and opt-in phase flag from sibling tests.
-        const CHILD: &str = "ST3_WRITER_CHILD_SPANS_TEST_CHILD";
+        const CHILD: &str = "FRACTAL_WRITER_CHILD_SPANS_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "sqlite::telemetry::tests::writer_children_keep_request_context_and_complete_after_finalization", "--nocapture"])
