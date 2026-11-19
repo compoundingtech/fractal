@@ -12942,6 +12942,27 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
 }
 
 #[test]
+fn runtime_heartbeats_do_not_make_a_quiet_live_session_productive() {
+    let subject = "agent/node.quiet".to_owned();
+    let mut seats = LocalSeats::default();
+    assert!(seats.fold_runtime(subject.clone(), r#"{"status":"running","incarnation_id":"one"}"#).unwrap());
+    seats.harness.insert(subject.clone(), (Some("one".into()), true));
+    assert!(!seats.busy());
+    for fields in [
+        r#"{"status":"running","incarnation_id":"one"}"#,
+        r#"{"status":"running"}"#,
+    ] {
+        assert!(!seats.fold_runtime(subject.clone(), fields).unwrap(), "{fields}");
+        assert!(!seats.busy(), "{fields}");
+    }
+    seats.harness.insert(subject.clone(), (Some("one".into()), false));
+    assert!(seats.busy(), "productive work still excludes idle eligibility");
+    seats.harness.insert(subject.clone(), (Some("one".into()), true));
+    assert!(seats.fold_runtime(subject, r#"{"status":"running","incarnation_id":"two"}"#).unwrap());
+    assert!(seats.busy(), "a new incarnation needs its own quiet evidence");
+}
+
+#[test]
 fn a_claims_acceptance_time_is_read_from_the_store_once() {
     let store = Store::open_memory("node").unwrap();
     let observe = |n: usize| {
