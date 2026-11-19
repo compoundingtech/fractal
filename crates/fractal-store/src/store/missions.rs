@@ -50,6 +50,7 @@ enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
     Declaration(MissionWorkspaceDeclaration),
+    NamedProgram,
 }
 
 /// The first canonical creation receipt is immutable authority; requester is attribution only.
@@ -631,6 +632,24 @@ impl Store {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None, None)
     }
 
+    /// Explicit program-child publication uses the ordinary writer fence, but never adopts
+    /// another creation merely because its public name matches.
+    pub fn create_named_program_mission_run(
+        &self,
+        request: &MissionRunRequest,
+        child: ChildMissionContext,
+        run_id: &str,
+    ) -> Result<MissionRunView, FractalError> {
+        let subject = if run_id.starts_with("mission-run/") {
+            run_id.to_owned()
+        } else {
+            format!("mission-run/{run_id}")
+        };
+        crate::declaration_syntax::validate_full_subject(&subject)?;
+        self.create_mission_run_context(request, Some(child), Some(&subject), None,
+            Some(RunCreationSource::NamedProgram), None, None)
+    }
+
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
     pub fn create_declared_workspace_mission_run(
         &self,
@@ -750,10 +769,12 @@ impl Store {
         provided_transaction: Option<&Transaction<'_>>,
         principal: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
+        let explicit_program_id = matches!(&source, Some(RunCreationSource::NamedProgram));
         let (retry, supersession, workspace_declaration) = match source {
             Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
             Some(RunCreationSource::Supersession(source, publication)) => (None, Some((source, publication)), None),
             Some(RunCreationSource::Declaration(declaration)) => (None, None, Some(declaration)),
+            Some(RunCreationSource::NamedProgram) => (None, None, None),
             None => (None, None, None),
         };
         let mission_identity = match provided_transaction {
@@ -790,6 +811,9 @@ impl Store {
                 "default_selector": child.default_selector,
             })),
         });
+        if explicit_program_id {
+            request_identity["public_subject"] = json!(occurrence_subject);
+        }
         if let Some((source, options)) = retry {
             request_identity["retry"] = json!((&source.subject, options));
         }
@@ -817,6 +841,19 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
+            if explicit_program_id {
+                let stored_hash: Option<String> = transaction.query_row(
+                    "SELECT r.request_hash FROM mission_run_requests r JOIN idempotency i
+                     ON i.operation_id=r.operation_id
+                     WHERE r.operation_id=?1 AND json_extract(i.response,'$.subject')=?2",
+                    params![opaque_cache_key(&request.idempotency_key), subject],
+                    |row| row.get(0),
+                ).optional().map_err(internal)?;
+                if stored_hash.as_deref() != Some(request_hash.as_str()) {
+                    return Err(FractalError::new("child-conflict",
+                        format!("public child `{subject}` belongs to a different creation contract")));
+                }
+            }
             let view = mission_run_view_tx(transaction, &run).map_err(internal)?;
             return Ok(view);
         }

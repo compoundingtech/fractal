@@ -36,6 +36,23 @@ const DECISION = {
 }
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (ctx.payload.mode === 'await-foreign') {
+      return ctx.child({ key: 'observe', mode: 'await', run: 'mission-run/pr-42-head12' })
+    }
+    if (['start', 'start-await', 'start-invalid'].includes(ctx.payload.mode)) {
+      const published = await wait(ctx, 'publish', () => ctx.child({
+        key: 'publish', mode: 'start', runId: ctx.payload.mode === 'start-invalid' ? 'invalid id' : 'pr-42-head12',
+        mission: 'program-child', input: { head: 'h1' },
+      }))
+      if (published._tag === 'Failure') return published
+      if (ctx.payload.mode === 'start-await') {
+        const terminal = await wait(ctx, 'observe', () => ctx.child({
+          key: 'observe', mode: 'await', run: published.value.run,
+        }))
+        if (terminal._tag === 'Failure') return terminal
+      }
+      return { _tag: 'Success', value: { published: published.value, gate: await gate(ctx) } }
+    }
     if (ctx.payload.mode === 'child') {
       const published = await wait(ctx, 'publish', () => ctx.child({ key: 'publish', mission: 'program-child', input: { head: 'h1' } }))
       if (published._tag === 'Failure') return published
@@ -591,4 +608,144 @@ fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     assert_eq!(run.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
     assert_eq!(fixture.status(&still_open), "cancelled");
     assert!(fixture.engine.requests(&parent.run).is_empty());
+}
+
+#[test]
+fn named_start_publishes_before_ack_and_separate_await_observes_termination() {
+    let fixture = fixture();
+    let parent = fixture.start("named-await", "start-await");
+    fixture.until("publication is acknowledged without waiting for termination", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let child = "mission-run/pr-42-head12";
+    assert_eq!(fixture.result(&parent.step, "publish", 1),
+        Some(("completed".into(), json!({"run": child}))));
+    assert_eq!(fixture.children(&parent.step).len(), 1);
+    assert!(!matches!(fixture.run_status(child).as_str(), "completed" | "failed" | "cancelled"));
+    assert!(fixture.result(&parent.step, "observe", 1).is_none());
+    fixture.complete_child(child);
+    fixture.until("separate await returns the child's result", ||
+        fixture.result(&parent.step, "observe", 1).is_some());
+    let (_, result) = fixture.result(&parent.step, "observe", 1).unwrap();
+    assert_eq!(result["run"], child);
+    assert_eq!(result["status"], "completed");
+    std::fs::write(&parent.gate, "").unwrap();
+    fixture.until("parent completes", || fixture.status(&parent.step) == "completed");
+}
+
+#[test]
+fn named_start_lost_ack_adopts_one_child_and_replays_after_host_restart() {
+    let fixture = fixture();
+    let parent = fixture.start("lost-start-ack", "start");
+    let run = fixture.store.mission_run(&parent.run).unwrap().unwrap();
+    // Publication committed, but no waiting association or acknowledgement was delivered.
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None,
+        workspace: run.workspace.clone(), requester: Some(run.requester.clone()),
+        mode: Some(run.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: format!("program:{}:1:publish", parent.step),
+    };
+    let child = fixture.store.create_named_program_child_mission_run(
+        &request, &run, &parent.step, "pr-42-head12").unwrap();
+    fixture.until("lost acknowledgement is recovered", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    assert_eq!(fixture.result(&parent.step, "publish", 1),
+        Some(("completed".into(), json!({"run": child.subject}))));
+    fixture.until("parent proceeds while child is running", ||
+        count(&fixture.journal(&parent.step), "gate", "started") == 1);
+    assert!(!matches!(fixture.run_status(&child.subject).as_str(), "completed" | "failed" | "cancelled"));
+    let host = fixture.kill_host();
+    fixture.until("restarted host replays the same handle", ||
+        fixture.engine.host_pid().is_some_and(|pid| pid != host)
+        && count(&fixture.journal(&parent.step), "gate", "started") == 2);
+    assert_eq!(fixture.children(&parent.step).len(), 1);
+    fixture.store.request_mission_run_cancellation(&parent.run, "cancel parent after start").unwrap();
+    fixture.until("parent cancellation cancels the acknowledged child", ||
+        fixture.run_status(&child.subject) == "cancelled");
+}
+
+#[test]
+fn named_child_public_id_conflicts_are_atomic_and_old_child_replay_still_adopts() {
+    let fixture = fixture();
+    let a = fixture.start("creator-a", "start");
+    let b = fixture.start("creator-b", "start");
+    let parent_a = fixture.store.mission_run(&a.run).unwrap().unwrap();
+    let parent_b = fixture.store.mission_run(&b.run).unwrap().unwrap();
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None,
+        workspace: parent_a.workspace.clone(), requester: Some(parent_a.requester.clone()),
+        mode: Some(parent_a.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: "named-contract".into(),
+    };
+    let child = fixture.store.create_named_program_child_mission_run(
+        &request, &parent_a, &a.step, "pr-42-head12").unwrap();
+    let replay = fixture.store.create_named_program_child_mission_run(
+        &request, &parent_a, &a.step, "mission-run/pr-42-head12").unwrap();
+    assert_eq!(child.subject, replay.subject);
+    let mut different_input = request.clone();
+    different_input.inputs.insert("head".into(), "h2".into());
+    for (contract, parent, step) in [
+        (&different_input, &parent_a, &a.step),
+        (&request, &parent_b, &b.step),
+    ] {
+        let error = fixture.store.create_named_program_child_mission_run(
+            contract, parent, step, "pr-42-head12").unwrap_err();
+        assert_eq!(error.code, "child-conflict");
+    }
+    let mut different_operation = request.clone();
+    different_operation.idempotency_key = "another-creation".into();
+    // Existing occurrence callers intentionally adopt by subject, without imposing the new
+    // program-start contract on their replay semantics.
+    let existing_occurrence = fixture.store.create_mission_run_inner(
+        &different_input, None, Some(&child.subject), None).unwrap();
+    assert_eq!(existing_occurrence.subject, child.subject);
+    assert_eq!(existing_occurrence.inputs["head"].value, "h1");
+    assert_eq!(fixture.store.create_named_program_child_mission_run(
+        &different_operation, &parent_a, &a.step, "pr-42-head12").unwrap_err().code, "child-conflict");
+    assert!(fixture.children(&b.step).is_empty());
+    fixture.complete_child(&child.subject);
+    fixture.store.set_mission_run_state(&child.subject, "completed", "terminal", None).unwrap();
+    let mut legacy = request;
+    legacy.idempotency_key = "legacy-child-replay".into();
+    let first = fixture.store.create_program_child_mission_run(&legacy, &parent_a, &a.step).unwrap();
+    let replay = fixture.store.create_program_child_mission_run(&legacy, &parent_a, &a.step).unwrap();
+    assert_eq!(first.subject, replay.subject);
+}
+
+#[test]
+fn awaiting_another_parents_child_is_a_typed_refusal() {
+    let fixture = fixture();
+    let creator = fixture.start("handle-owner", "start");
+    fixture.until("owner receives a handle", ||
+        fixture.result(&creator.step, "publish", 1).is_some());
+    let observer = fixture.start("foreign-observer", "await-foreign");
+    fixture.until("foreign await is refused", ||
+        fixture.result(&observer.step, "observe", 1).is_some());
+    assert_eq!(fixture.result(&observer.step, "observe", 1), Some(("failed".into(), json!({
+        "_tag": "ChildFailed", "run": "mission-run/pr-42-head12", "status": "refused",
+        "reason": "the handle does not name a child of this parent run",
+    }))));
+    assert!(!matches!(fixture.run_status("mission-run/pr-42-head12").as_str(),
+        "completed" | "failed" | "cancelled"));
+    assert!(fixture.children(&observer.step).is_empty());
+    let conflicting = fixture.start("conflicting-dispatcher", "start");
+    fixture.until("conflicting publication is refused", ||
+        fixture.result(&conflicting.step, "publish", 1).is_some());
+    let (status, error) = fixture.result(&conflicting.step, "publish", 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ChildConflict");
+    assert!(fixture.children(&conflicting.step).is_empty());
+}
+
+#[test]
+fn start_validates_public_id_with_declaration_rules_before_publication() {
+    let fixture = fixture();
+    let parent = fixture.start("invalid-public-id", "start-invalid");
+    fixture.until("invalid declaration ID is refused", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let (status, error) = fixture.result(&parent.step, "publish", 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ChildConflict");
+    assert!(fixture.children(&parent.step).is_empty());
 }

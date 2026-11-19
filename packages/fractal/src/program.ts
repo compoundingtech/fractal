@@ -35,6 +35,16 @@ type Codec = Schema.Codec<any, any>
 export type InputSchema = Workflow.AnyStructSchema &
   Schema.Codec<object, { readonly [name: string]: string }>
 
+/** A durably published linked child, which can be awaited separately. */
+export const ChildHandle = Schema.Struct({ run: Schema.String })
+export type ChildHandle = typeof ChildHandle.Type
+
+/** The requested public ID cannot be published under this creation contract. */
+export class ChildConflict extends Schema.TaggedError<ChildConflict>()('ChildConflict', {
+  run: Schema.String,
+  reason: Schema.String,
+}) {}
+
 /** A linked child run that completed: its subject and the products its steps declare. */
 export const ChildRun = Schema.Struct({
   run: Schema.String,
@@ -364,6 +374,50 @@ export function run(
     child(options?.id ?? id, id, encoded),
   )
 }
+
+/**
+ * Publishes a linked child before returning its handle. `id` is the journal key, while
+ * `runId` is the public mission-run declaration ID. Cancellation remains linked to the parent.
+ */
+export function start<I extends InputSchema>(
+  mission: ProgramMission<I, any, any>,
+  input: I['Type'],
+  options: { readonly id: string; readonly runId: string },
+): Effect.Effect<ChildHandle, ChildConflict, ProgramServices>
+export function start(
+  mission: string,
+  input: Readonly<Record<string, string>>,
+  options: { readonly id: string; readonly runId: string },
+): Effect.Effect<ChildHandle, ChildConflict, ProgramServices>
+export function start(
+  mission: string | ProgramMission<InputSchema, Codec, unknown>,
+  input: object,
+  options: { readonly id: string; readonly runId: string },
+): Effect.Effect<ChildHandle, ChildConflict, ProgramServices> {
+  const publish = (mission: string, input: Readonly<Record<string, string>>) =>
+    keyed(options.id, (key, program) => {
+      program.requests.set(key, () => program.host.child({
+        key, mission, input, mode: 'start', runId: options.runId,
+      }))
+      return DurableDeferred.await(
+        DurableDeferred.make(key, { success: ChildHandle, error: ChildConflict }),
+      ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
+    })
+  if (typeof mission === 'string')
+    return publish(mission, input as Readonly<Record<string, string>>)
+  return Effect.flatMap(Effect.orDie(Schema.encodeUnknownEffect(mission.intent.input)(input)),
+    (encoded) => publish(mission.intent.id, encoded))
+}
+
+/** Observes the terminal result of an already published child without starting another run. */
+const awaitChild = (handle: ChildHandle): Effect.Effect<ChildRun, ChildFailed, ProgramServices> =>
+  keyed(`await:${handle.run}`, (key, program) => {
+    program.requests.set(key, () => program.host.child({ key, mode: 'await', run: handle.run }))
+    return DurableDeferred.await(
+      DurableDeferred.make(key, { success: ChildRun, error: ChildFailed }),
+    ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
+  })
+export { awaitChild as await }
 
 /**
  * Runs a command as its own process group, which the host ends when the program is cancelled.

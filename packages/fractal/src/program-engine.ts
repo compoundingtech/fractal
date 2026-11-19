@@ -106,6 +106,14 @@ export interface HostContextV1 {
     readonly key: string
     readonly mission: string
     readonly input: Readonly<Record<string, string>>
+    readonly mode?: 'run' | 'start'
+    readonly runId?: string
+  } | {
+    readonly key: string
+    readonly mode: 'await'
+    readonly run: string
+    readonly mission?: never
+    readonly input?: never
   }): Promise<ProgramExit>
   /** Opens or adopts the person ask for `key` on the program step; journaled under `key`. */
   ask(request: {

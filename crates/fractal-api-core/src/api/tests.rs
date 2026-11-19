@@ -289,11 +289,15 @@ mission "landing-proof" state="ready" {
         let linked = state.store.create_child_mission_run(
             &linked_request, &parent, &parent.steps[0].subject, None,
         ).unwrap();
+        let named = state.store.create_named_program_child_mission_run(
+            &MissionRunRequest { idempotency_key: "landing-named-child".into(), ..linked_request.clone() },
+            &parent, &parent.steps[0].subject, "pr-42-head12",
+        ).unwrap();
         let scoped = state.store.create_program_child_mission_run(
             &MissionRunRequest { idempotency_key: "landing-scoped-child".into(), ..linked_request },
             &parent, &parent.steps[0].subject,
         ).unwrap();
-        for child in [&linked, &scoped] {
+        for child in [&linked, &scoped, &named] {
             assert_eq!(state.store.mission_run_initiating_principal(&child.subject).unwrap().as_deref(), agent);
         }
         state.store.start_resource_authority("node", "landing-test").unwrap();
@@ -301,12 +305,14 @@ mission "landing-proof" state="ready" {
             (&land, allowed, "exec/proof"), (&land, allowed, "program:proof"),
             (&linked, allowed, "exec/proof"), (&linked, allowed, "program:proof"),
             (&scoped, allowed, "exec/proof"), (&scoped, allowed, "program:proof"),
+            (&named, allowed, "exec/proof"), (&named, allowed, "program:proof"),
             (&anonymous, false, "exec/proof"), (&anonymous, false, "program:proof"),
         ] {
             let request = LaneRequest {
                 id: format!("{}:{invocation}", owner_run.id), name: format!("{}:{invocation}", owner_run.id),
                 host: "node".into(), max_members: 1,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
+                profile: None, profile_estimate: None, disk_path: None,
                 class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
                 disk: None, io: None, admission_timeout_ms: None,
                 owner: Owner { run: owner_run.subject.clone(), step: owner_run.steps[0].subject.clone(),

@@ -15575,12 +15575,78 @@ impl<R: RuntimeControl> Reconciler<R> {
         for request in engine.requests(&run.subject) {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
+                program::Wait::Start { mission, input, run_id } =>
+                    self.settle_program_start(engine, run, &request, mission, input, run_id)?,
+                program::Wait::Await { child } =>
+                    self.settle_program_await(engine, run, &request, child)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
                 program::Wait::Resource { operation, payload, cancelled } =>
                     self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
         }
         Ok(changed)
+    }
+
+    fn settle_program_start(
+        &self,
+        engine: &program::ProgramEngine,
+        run: &MissionRunView,
+        request: &program::Request,
+        mission: &str,
+        input: &BTreeMap<String, String>,
+        run_id: &str,
+    ) -> Result<bool> {
+        match self.start_program_child(run, &request.step, mission, input,
+            request.idempotency_key(), None, Some(run_id)) {
+            Ok(child) => {
+                engine.waiting(request, &child.subject)?;
+                engine.resolve(request, &child.subject,
+                    serde_json::json!({"_tag": "Success", "value": {"run": child.subject}}))?;
+                Ok(true)
+            }
+            Err(error) if error.code == "mission-run-capacity" => {
+                self.note_mission_capacity_holders(mission)?;
+                Ok(false)
+            }
+            Err(error) if error.code == "internal" || error.is_sqlite_contention() => Err(error.into()),
+            Err(error) => {
+                engine.resolve(request, "", serde_json::json!({
+                    "_tag": "Failure", "error": {
+                        "_tag": "ChildConflict", "run": run_id, "reason": error.message,
+                    }
+                }))?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn settle_program_await(
+        &self,
+        engine: &program::ProgramEngine,
+        run: &MissionRunView,
+        request: &program::Request,
+        child: &str,
+    ) -> Result<bool> {
+        let view = self.store.mission_run(child)?;
+        let linked = if let Some(parent_step) = view.as_ref().and_then(|view| view.parent_step_run.as_deref()) {
+            self.store.step_run(parent_step)?.is_some_and(|step| step.run == run.subject)
+        } else { false };
+        if !linked {
+            engine.resolve(request, "", serde_json::json!({"_tag": "Failure", "error": {
+                "_tag": "ChildFailed", "run": child, "status": "refused",
+                "reason": "the handle does not name a child of this parent run",
+            }}))?;
+            return Ok(true);
+        }
+        let view = view.expect("linked child exists");
+        if request.child.is_none() {
+            engine.waiting(request, &view.subject)?;
+        }
+        if !matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
+            return Ok(false);
+        }
+        engine.resolve(request, &view.subject, self.program_child_exit(&view.subject, &view.status)?)?;
+        Ok(true)
     }
 
     /// A linked child run: started once per key and attempt, adopted when the program resumes,
@@ -15599,7 +15665,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
             self.note_mission_capacity_holders(mission)?;
-            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None) {
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None, None) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
@@ -15639,18 +15705,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         input: &BTreeMap<String, String>,
         idempotency_key: String,
         resource: Option<&crate::store::resource_membership::Membership>,
+        public_run_id: Option<&str>,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
         let inherited = if resource.is_none() {
             self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?
         } else { None };
         let context = resource.or(inherited.as_ref());
-        let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        let child = public_run_id.map(|id| {
+            if id.starts_with("mission-run/") { id.to_owned() } else { format!("mission-run/{id}") }
+        }).unwrap_or_else(|| self.store.mission_run_subject_for_idempotency_key(&idempotency_key));
+        if public_run_id.is_some() {
+            crate::declaration_syntax::validate_full_subject(&child)?;
+        }
         if let Some(context) = context {
             let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
             self.store.attach_resource_child(grant, &context.request.owner, &child).map_err(smallclaims::error::typed)?;
         }
-        let result = self.store.create_program_child_mission_run(
-            &MissionRunRequest {
+        let request = MissionRunRequest {
                 mission: mission.to_owned(),
                 revision: None,
                 workspace: run.workspace.clone(),
@@ -15658,10 +15729,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 mode: Some(run.mode.clone()),
                 inputs: input.clone(),
                 idempotency_key,
-            },
-            run,
-            step,
-        );
+            };
+        let result = match public_run_id {
+            Some(id) => self.store.create_named_program_child_mission_run(&request, run, step, id),
+            None => self.store.create_program_child_mission_run(&request, run, step),
+        };
         if let (Some(context), Err(error)) = (context, &result) {
             let grant = context.grant.as_ref().expect("context grant checked before child creation");
             self.store.reject_resource_child(grant, &context.request.owner, &child, error).map_err(smallclaims::error::typed)?;

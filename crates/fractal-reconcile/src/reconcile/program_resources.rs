@@ -310,7 +310,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         smallclaims::touched::note_read(|| holder.subject.clone());
                     }
                     // The shared creation boundary binds the child before it becomes runnable.
-                    match self.start_program_child(run, &request.step, &child.mission, &child.input, request.idempotency_key(), Some(&record)) {
+                    match self.start_program_child(run, &request.step, &child.mission, &child.input, request.idempotency_key(), Some(&record), None) {
                         Ok(_) => {}
                         Err(error) if error.code == "mission-run-capacity" => return Ok(false),
                         Err(error) => return Err(error.into()),
