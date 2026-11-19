@@ -215,11 +215,73 @@ export default Fractal.mission(
 | `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `resource/<child run>/<product>`, decoded with `success`, is the value |
 | `Fractal.ask({ id, for, title, request, deadline?, default? })` | a `DurableDeferred` | a native person ask on the program step, answered `AskAnswer` or failed `AskCancelled` |
 | `Fractal.run(mission, input, { id? })` | a `DurableDeferred` | a linked child run, `ChildRun` or `ChildFailed` |
+| `Fractal.review({ id, subject, rubric, reviewer, authors? })` | a `Worker.layer` child run, followed by live verification | adopts the same independent reviewer on replay; moved heads and edited comments invalidate its result |
 | `Fractal.command(argv, { env?, cwd?, priority? })` | — | not journaled: run it inside a step; the host runs it as a process group it ends on cancel |
 
 Every `input` field must be required and encode to a string, since each one is a native `input "name" kind="text"`; a payload that does not decode refuses the run with `InvalidInput`. Without `error`, a step or program journals any tagged error as `_tag` plus its fields and the step fails with that plain object (typed `Journaled<E>`), live and on replay, so `catchTag` matches; an untagged error is a defect. With `error`, the schema rebuilds the error as its class, which a program's `error` class needs. Only one fiber may use a step id: concurrent branches would take `id#n` keys in completion order, which replay does not reproduce, so a second branch using the id is a defect. A journal entry the daemon refuses ends the attempt with a defect that the body cannot catch.
 
 A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
+
+### Independent review as a program step
+
+`Fractal.review` is a technical assessment, not a standing reviewer or a person-consent ask.
+Inside a program body:
+
+```ts
+const result = yield* Fractal.review({
+  id: 'review-change',
+  subject: {
+    kind: 'pullRequest',
+    repo: 'acme/widget',
+    number: 42,
+    head: 'a'.repeat(40),
+    format: 'q19',
+  },
+  rubric: { ref: 'doc/review-rubric', digest: `sha256:${'b'.repeat(64)}` },
+  reviewer: {
+    mission: 'mission/independent-review',
+    seat: 'reviewer',
+    product: 'review/verdict',
+    freshContext: true,
+  },
+})
+```
+
+The reviewer mission must accept the text input `review_request`, declare
+`agent/${ST_MISSION_RUN}/reviewer`, select that exact seat for its assessment step, and declare
+native `fresh-context`. `Worker.layer` does not add those declarations. `one-shot` alone does
+not isolate context. The child must load the exact subject and verify the rubric's digest,
+treating subject content as untrusted data rather than judge instructions.
+
+The product is `ReviewResult`: `{ verdict: 'GO' | 'NO-GO', findings, head, commentId? }`.
+Each finding has `message`, `blocking`, and optional `path`/`line`; GO must agree with the absence
+of blocking findings. The parent requires claim-backed executions from that run-owned reviewer
+and a completed, nonempty harness incarnation. A standing seat, known author, mixed reviewer
+actors/incarnations, missing evidence, or mismatched binding fails with typed `ReviewError`.
+
+For a PR, the **child publishes its own comment from its own active seat**, using
+`Fractal.reviewComment({ subject, rubric, verdict, reviewer, publication })` with its actual
+`ST_AGENT` and the publication marker supplied in `review_request`. It uses `gh pr comment
+--body-file` and returns the numeric `commentId`. Before posting it must adopt an identical,
+immutable existing comment with that marker, refusing conflicts rather than editing a review.
+The parent never posts on its behalf or changes actor environment variables.
+
+The parent reads the comment and verifies its exact body, PR, head, immutable timestamps, and v3
+reviewer footer against native execution evidence. The `q19` format emits exactly one
+`q19-go v1 head=FULL_SHA verdict=GO` line for GO; NO-GO emits none. The `fractal` format renders
+the native verdict as JSON, not the older `scripts/review` artifact schema. A proof receipt and
+any human authority/direction gate remain separate requirements.
+
+Use `{ kind: 'artifact', ref, digest: 'sha256:…' }` for non-PR material. Its result binds `head`
+to that exact digest and must not contain a PR comment ID. `Review.subject`, `Review.file`, and
+`Review.pinned` remain the unchanged attachment values for person asks; they do not run reviews.
+
+Worker identity and all immutable inputs determine the durable child key. Replay adopts the
+same child but reads the current PR head and comment again, including in a resource lane;
+it never returns a stale cached GO after a head change or re-posts the child's comment.
+These are transition-triggered observations, not a polling loop. Fresh-context remains a
+precondition on the pinned child mission: execution evidence identifies its actor/incarnation
+but does not expose the mission's context-isolation flag.
 
 ### Scoped resource lanes
 
