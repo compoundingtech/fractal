@@ -1,6 +1,6 @@
 {
   "name": "st-channel",
-  "description": "Deliver st messages and work through the local daemon subscription",
+  "description": "Deliver Fractal messages and work through the local daemon subscription",
   "version": "0.1.0",
   "author": {
     "name": "Compounding"
