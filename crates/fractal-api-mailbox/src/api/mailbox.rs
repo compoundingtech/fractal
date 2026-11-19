@@ -865,6 +865,7 @@ where
         policy_rechecks.retain(|subject| eligible.contains(subject));
         retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
         order.bound_held(&mut messages, true);
+        store.order_mailbox_messages(&mut messages, &mut order.keys)?;
         Ok((mark, (seat, messages), true))
     });
     // Reading never commits a closure or builds persistent derived state. The background
@@ -1659,6 +1660,71 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn mailbox_orders_graph_and_high_index_stream_mail_by_send_time() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&store, "ordered");
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "ordered", "delivery")).unwrap();
+        let send_at = |target: &smallclaims::store::Store, id: &str, at: u128| {
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic ordering fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        // Shard admission order differs from send order, and its index namespace is
+        // above every graph index. Neither fact may move an older send behind new mail.
+        send_at(&shard, "0000000000000030", 30);
+        send_at(&shard, "0000000000000010", 10);
+        send_at(&store.graph, "0000000000000020", 20);
+        let mut recovery = MailRecovery::default();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let (mark, initial, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, None, (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        let subjects = |messages: &[MessageView]| messages.iter()
+            .map(|message| message.subject.clone()).collect::<Vec<_>>();
+        let expected = [
+            "message/0000000000000010",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ];
+        assert_eq!(subjects(&initial.1), expected);
+        assert!(initial.1[0].created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(initial.1[0].created_index > initial.1[1].created_index);
+        // The delta reuses cached graph AND shard keys, and inserts a backdated
+        // shard import before later sends rather than at the end of the namespace.
+        send_at(&shard, "0000000000000015", 15);
+        let (_, delta, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, Some((mark, initial)), (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        assert_eq!(subjects(&delta.1), [
+            "message/0000000000000010",
+            "message/0000000000000015",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ]);
+        assert_eq!(order.keys.len(), 4, "every admitted message keeps its canonical key");
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
