@@ -41,6 +41,7 @@ pub struct FractalRuntime {
     pub conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
+    pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
@@ -377,6 +378,10 @@ impl Runtime for FractalRuntime {
     }
 
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()> {
+        // Core source tables (including repaired-claim membership) are installed
+        // after create_schema. This common hook runs after that on fresh opens,
+        // reopens and upgrades, before projections or readers can use reductions.
+        card_actual::install(transaction)?;
         if let Some(views) = &self.ivm_views {
             // An admitted frontier identifies pending work, never successful projection.
             // Existing sources require an explicit installer and dependency certificate.
@@ -870,6 +875,7 @@ impl FractalRuntime {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
+        self.card_actuals.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
         self.agent_page_refs_cache
             .lock()
