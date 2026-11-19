@@ -20,6 +20,7 @@ export const fakeHost = (
     readonly nack?: string
     readonly ask?: HostContextV1['ask']
     readonly awaitPr?: HostContextV1['awaitPr']
+    readonly awaitDaemon?: HostContextV1['awaitDaemon']
     readonly spawn?: HostContextV1['spawn']
     readonly resource?: HostContextV1['resource']
     readonly resourceMembership?: HostContextV1['resourceMembership']
@@ -47,6 +48,7 @@ export const fakeHost = (
     child: options.child ?? (() => Promise.reject(new Error('unexpected child run'))),
     ask: options.ask ?? (() => Promise.reject(new Error('unexpected ask'))),
     awaitPr: options.awaitPr ?? (() => Promise.reject(new Error('unexpected pull request wait'))),
+    awaitDaemon: options.awaitDaemon ?? (() => Promise.reject(new Error('unexpected daemon wait'))),
     resource: options.resource ?? (() => Promise.reject(new Error('unexpected resource operation'))),
     spawn:
       options.spawn ??

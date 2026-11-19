@@ -1,7 +1,7 @@
 /**
  * The program form of a mission, `Fractal.mission(intent, program)`, and what its body calls:
- * `Fractal.step` (an `Activity`), worker turns, `Fractal.ask`, `Fractal.run` and `Fractal.awaitPr`
- * (`DurableDeferred`s the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
+ * `Fractal.step` (an `Activity`), worker turns, `Fractal.ask`, `Fractal.run`, `Fractal.awaitPr`
+ * and `Fractal.awaitDaemon` (`DurableDeferred`s the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
  * See docs/st3/program-engine.md §11.
  */
 import { Context, Effect, Layer, Option, Schedule, Schema, SchemaAST } from 'effect'
@@ -87,6 +87,27 @@ export class AwaitPrFailed extends Schema.TaggedError<AwaitPrFailed>()('AwaitPrF
   pr: Schema.Number,
   message: Schema.String,
 }) {}
+
+const positiveSafeInteger = (value: number): value is number =>
+  Number.isSafeInteger(value) && value > 0
+
+/** One owner-origin daemon announcement satisfying a lifecycle capability wait; not readiness. */
+export const AwaitDaemonResult = Schema.Struct({
+  host: Schema.String,
+  claim: Schema.String,
+  version: Schema.String,
+  feature: Schema.String,
+  featureVersion: Schema.Int.pipe(Schema.refine(positiveSafeInteger)),
+})
+export type AwaitDaemonResult = typeof AwaitDaemonResult.Type
+
+/** A daemon lifecycle wait request is malformed. */
+export class AwaitDaemonFailed extends Schema.TaggedError<AwaitDaemonFailed>()('AwaitDaemonFailed', {
+  code: Schema.Literal('invalid-request'),
+  message: Schema.String,
+}) {}
+
+const daemonIdentifier = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u
 
 /** The intent of a program mission; `input` fields become its native text inputs. */
 export interface ProgramIntent<
@@ -368,6 +389,39 @@ export const awaitPr = (options: {
     program.requests.set(key, () => program.host.awaitPr({ ...request, key }))
     return DurableDeferred.await(
       DurableDeferred.make(key, { success: AwaitPrOutcome, error: AwaitPrFailed }),
+    ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
+  })
+
+/**
+ * Waits for the newest owner-origin daemon.started announcement to advertise `feature` at
+ * `minVersion` or higher. `version`, if supplied, matches the daemon version string exactly;
+ * it is not ordered. This observes lifecycle capability, not readiness, and never polls.
+ * Journaled under `id` (default `await-daemon/<host>/<feature>`), then `id#2`… for repeats.
+ */
+export const awaitDaemon = (options: {
+  readonly id?: string
+  readonly host: string
+  readonly feature: string
+  readonly minVersion: number
+  readonly version?: string
+}): Effect.Effect<AwaitDaemonResult, AwaitDaemonFailed, ProgramServices> =>
+  keyed(options.id ?? `await-daemon/${options.host}/${options.feature}`, (key, program) => {
+    if (
+      typeof options.host !== 'string' || !daemonIdentifier.test(options.host) ||
+      typeof options.feature !== 'string' || !daemonIdentifier.test(options.feature) ||
+      !positiveSafeInteger(options.minVersion) ||
+      (options.version !== undefined &&
+        (typeof options.version !== 'string' || options.version.trim().length === 0))
+    ) {
+      return Effect.fail(new AwaitDaemonFailed({
+        code: 'invalid-request',
+        message: 'Daemon waits require valid host and feature identifiers, a positive safe integer minVersion, and an optional nonblank exact version string.',
+      }))
+    }
+    const { id: _, ...request } = options
+    program.requests.set(key, () => program.host.awaitDaemon({ ...request, key }))
+    return DurableDeferred.await(
+      DurableDeferred.make(key, { success: AwaitDaemonResult, error: AwaitDaemonFailed }),
     ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
   })
 

@@ -714,7 +714,7 @@ fn resumed_await_pr_adopts_registration_and_releases_it_on_completion_or_attempt
     engine.handle(&message, 7).unwrap();
     let request = engine.requests(&run.subject).pop().unwrap();
     let subject = await_pr::subject(&request);
-    let original = engine.register_pr(&request, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    let original = engine.register_wait(&request, &subject, "await-pr", json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
     assert_eq!(engine.store.program_pr_watches().unwrap(), vec![original.clone()]);
     assert!(engine.journal(step, 1).unwrap().is_empty(), "registration is not an outcome");
     running_attempt(&engine, &run, 1, 8);
@@ -722,7 +722,7 @@ fn resumed_await_pr_adopts_registration_and_releases_it_on_completion_or_attempt
     let resumed = engine.requests(&run.subject).pop().unwrap();
     assert_eq!(await_pr::subject(&resumed), subject);
     let before = journal_claims(&engine, step);
-    assert_eq!(engine.register_pr(&resumed, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap(), original);
+    assert_eq!(engine.register_wait(&resumed, &subject, "await-pr", json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap(), original);
     assert_eq!(journal_claims(&engine, step), before, "adoption does not reset the time baseline");
     engine.resolve(&resumed, &subject, json!({"_tag":"Success","value":{"outcome":"merged","mergeCommit":"merge"}})).unwrap();
     assert!(engine.store.program_pr_watches().unwrap().is_empty());
@@ -732,7 +732,7 @@ fn resumed_await_pr_adopts_registration_and_releases_it_on_completion_or_attempt
     engine.handle(&second, 8).unwrap();
     let request = engine.requests(&run.subject).pop().unwrap();
     let subject = await_pr::subject(&request);
-    engine.register_pr(&request, &subject, json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    engine.register_wait(&request, &subject, "await-pr", json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
     assert_eq!(engine.store.program_pr_watches().unwrap().len(), 1);
     engine.store.set_step_run_state_for_tests(step, "working", 2);
     assert!(engine.store.program_pr_watches().unwrap().is_empty(), "departed attempts retain no observer");
@@ -752,7 +752,7 @@ fn native_pr_registration_retains_the_standing_observer_without_a_seat_subscript
         "repo":"acme/garden","pr":12,"head":"head",
     }), 7).unwrap();
     let request = engine.requests(&run.subject).pop().unwrap();
-    engine.register_pr(&request, &await_pr::subject(&request), json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
+    engine.register_wait(&request, &await_pr::subject(&request), "await-pr", json!({"repo":"acme/garden","pr":12,"head":"head"})).unwrap();
     let runtime = Arc::new(NativeRuntime::new(dir.path(), None, Path::new("unused-pty")));
     let reconciler = Reconciler::new(engine.store.clone(), runtime, "node".into(), Arc::new(tokio::sync::Notify::new()));
     reconciler.reconcile_github_watches(&engine.store.github_watch_declarations().unwrap()).unwrap();
@@ -898,4 +898,90 @@ fn native_await_pr_resolves_only_observed_queue_exit_or_changed_head() {
             "outcome":"dequeued","reason":if moved { "head-changed" } else { "merge-queue-exit" },
         }));
     }
+}
+
+#[test]
+fn await_daemon_protocol_validates_identifiers_and_feature_version() {
+    let valid = json!({"t":"await-daemon","host":"birch","feature":"capability","minVersion":2,"version":"build-one"});
+    assert!(matches!(wait("step-run/generation/work", 1, "barrier", &valid).unwrap(),
+        Wait::AwaitDaemon { host, feature, min_version: 2, version: Some(version) }
+        if host == "birch" && feature == "capability" && version == "build-one"));
+    for (field, value) in [
+        ("host", json!("../birch")), ("feature", json!("a/b")), ("minVersion", json!(0)),
+        ("minVersion", json!(1.5)), ("minVersion", json!(9_007_199_254_740_992_u64)),
+        ("version", json!("")), ("version", Value::Null),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        assert!(wait("step-run/generation/work", 1, "barrier", &invalid).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn await_daemon_tracks_absence_adopts_registration_and_settles_from_replication() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "daemon-capability");
+    running_attempt(&engine, &run, 1, 7);
+    let step = &run.steps[0].subject;
+    let message = json!({
+        "t":"await-daemon","step":step,"attempt":1,"seq":1,"key":"barrier",
+        "host":"birch","feature":"capability","minVersion":2,"version":"build-one",
+    });
+    engine.handle(&message, 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    let (settled, reads) = smallclaims::touched::record(||
+        await_daemon::settle(&engine.store, &engine, &request, "birch", "capability", 2, Some("build-one")));
+    assert!(!settled.unwrap());
+    assert!(reads.contains("daemon/birch"), "absent startup registers a replication dependency");
+    let registration = engine.store.claims_for(step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .find(|claim| claim.body["fields"]["value"]["type"] == "await-daemon").unwrap();
+    assert!(engine.journal(step, 1).unwrap().is_empty(), "registration is not success");
+    running_attempt(&engine, &run, 1, 8);
+    engine.handle(&message, 8).unwrap();
+    let resumed = engine.requests(&run.subject).pop().unwrap();
+    assert!(!await_daemon::settle(&engine.store, &engine, &resumed, "birch", "capability", 2, Some("build-one")).unwrap());
+    let registrations: Vec<_> = engine.store.claims_for(step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .filter(|claim| claim.body["fields"]["value"]["type"] == "await-daemon").collect();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].id, registration.id);
+    let peer = Store::open_memory("birch").unwrap();
+    let claim = peer.append_claim(&ClaimInput {
+        subject:"daemon/birch".into(), kind:"daemon.started".into(), actor:None,
+        fields:serde_json::from_value(json!({"status":"running","version":"build-one","features":{"capability":3}})).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    engine.store.import_replication("birch", &peer.export_replication(0).unwrap()).unwrap();
+    assert!(await_daemon::settle(&engine.store, &engine, &resumed, "birch", "capability", 2, Some("build-one")).unwrap());
+    assert!(engine.requests(&run.subject).is_empty());
+    assert_eq!(engine.journal(step, 1).unwrap(), vec![json!({
+        "key":"barrier","_tag":"Success","value":{
+            "host":"birch","claim":claim.id,"version":"build-one","feature":"capability","featureVersion":3,
+        },
+    })]);
+    let count = journal_claims(&engine, step);
+    running_attempt(&engine, &run, 1, 9);
+    engine.handle(&message, 9).unwrap();
+    assert!(engine.requests(&run.subject).is_empty(), "completed wait replays without subscribing again");
+    assert_eq!(journal_claims(&engine, step), count);
+}
+
+#[test]
+fn cancelled_daemon_wait_has_no_observer_or_late_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "daemon-cancel");
+    running_attempt(&engine, &run, 1, 7);
+    let step = &run.steps[0].subject;
+    engine.handle(&json!({
+        "t":"await-daemon","step":step,"attempt":1,"seq":1,"key":"barrier",
+        "host":"birch","feature":"capability","minVersion":1,
+    }), 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    assert!(!await_daemon::settle(&engine.store, &engine, &request, "birch", "capability", 1, None).unwrap());
+    engine.store.set_step_run_state_for_tests(step, "cancelled", 1);
+    engine.release_left(&engine.store.mission_run_view(&run.subject).unwrap().unwrap()).unwrap();
+    assert!(engine.requests(&run.subject).is_empty());
+    engine.resolve(&request, "program-await-daemon/stale", json!({"_tag":"Success","value":{}})).unwrap();
+    assert!(engine.journal(step, 1).unwrap().is_empty(), "late resolution cannot complete cancelled wait");
 }

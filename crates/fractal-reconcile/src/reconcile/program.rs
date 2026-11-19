@@ -35,6 +35,7 @@ use crate::store::Store;
 use crate::{MissionsStore, PersonWorkStore};
 
 pub(super) mod await_pr;
+pub(super) mod await_daemon;
 
 pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
@@ -145,6 +146,8 @@ pub enum Wait {
     Ask(Box<PersonAskRequest>),
     /// A GitHub pull request outcome, pinned to the caller's head.
     AwaitPr { repo: String, pr: u64, head: String },
+    /// The host's own newest replicated startup fact at the requested feature version.
+    AwaitDaemon { host: String, feature: String, min_version: u64, version: Option<String> },
     /// Resource operations always visit the host authority, including journal replay.
     Resource { operation: String, payload: Value, cancelled: bool },
 }
@@ -577,7 +580,7 @@ impl ProgramEngine {
     fn cancel_waits(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
         let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
         for child in self.open_waits(step, attempt)? {
-            if child.starts_with("program-await-pr/") {
+            if child.starts_with("program-await-pr/") || child.starts_with("program-await-daemon/") {
                 continue;
             }
             if child.starts_with("mission-run/") {
@@ -674,15 +677,15 @@ impl ProgramEngine {
     }
 
     /// Adopt the original registration and its baseline; a host restart is not a new wait.
-    fn register_pr(&self, request: &Request, child: &str, mut value: Value) -> Result<Value> {
+    fn register_wait(&self, request: &Request, child: &str, kind: &str, mut value: Value) -> Result<Value> {
         if let Some(claim) = self.journal_claims(&request.step)?.into_iter().find(|claim| {
             let fields = &claim.body["fields"];
             fields["attempt"] == request.attempt && fields["key"] == request.key
-                && fields["child"] == child && fields["value"]["type"] == "await-pr"
+                && fields["child"] == child && fields["value"]["type"] == kind
         }) {
             return Ok(claim.body["fields"]["value"].clone());
         }
-        value["type"] = Value::from("await-pr");
+        value["type"] = Value::from(kind);
         value["step"] = Value::from(request.step.clone());
         value["attempt"] = Value::from(request.attempt);
         value["since_unix_ms"] = Value::from(smallclaims::store::now_ms().to_string());
@@ -911,7 +914,7 @@ impl ProgramEngine {
         };
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
-            Some("run" | "ask" | "await-pr" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
+            Some("run" | "ask" | "await-pr" | "await-daemon" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
             Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
@@ -933,7 +936,7 @@ impl ProgramEngine {
             Ok(wait) => wait,
             Err(reason) => return self.fail(step, attempt, &format!("the program made an invalid request for `{key}`: {reason}")),
         };
-        if matches!(wait, Wait::AwaitPr { .. })
+        if matches!(wait, Wait::AwaitPr { .. } | Wait::AwaitDaemon { .. })
             && let Some(mut exit) = self.journal(step, attempt)?.into_iter().find(|entry| entry["key"] == key)
         {
             exit.as_object_mut().expect("journal exit object").remove("key");
@@ -1040,7 +1043,8 @@ impl ProgramEngine {
             expected_subject: None,
             idempotency_key: if status != "started" {
                 Some(format!("program:{step}:{attempt}:{key}:result"))
-            } else if result["value"]["type"] == "await-pr" && child.is_some_and(|child| child.starts_with("program-await-pr/")) {
+            } else if matches!(result["value"]["type"].as_str(), Some("await-pr" | "await-daemon"))
+                && child.is_some_and(|child| child.starts_with("program-await-pr/") || child.starts_with("program-await-daemon/")) {
                 Some(format!("program:{step}:{attempt}:{key}:registration"))
             } else { None },
         })
@@ -1321,6 +1325,20 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
             .map(str::to_owned)
             .ok_or_else(|| format!("`{name}` must be a non-empty string"))
     };
+    if message["t"] == "await-daemon" {
+        let host = text("host")?;
+        let feature = text("feature")?;
+        for (name, value) in [("host", &host), ("feature", &feature)] {
+            if !await_daemon::identifier(value) {
+                return Err(format!("`{name}` must be an identifier of 1 to 128 ASCII letters, digits, dots, underscores or hyphens"));
+            }
+        }
+        let min_version = message["minVersion"].as_u64()
+            .filter(|version| *version > 0 && *version <= 9_007_199_254_740_991)
+            .ok_or_else(|| "`minVersion` must be a positive safe integer".to_owned())?;
+        let version = message.get("version").map(|_| text("version")).transpose()?;
+        return Ok(Wait::AwaitDaemon { host, feature, min_version, version });
+    }
     if message["t"] == "await-pr" {
         let repo = text("repo")?;
         let pr = message["pr"].as_u64().filter(|pr| *pr > 0 && *pr <= 9_007_199_254_740_991)

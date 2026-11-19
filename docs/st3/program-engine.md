@@ -491,16 +491,17 @@ fail the step (a bug), interrupts (host or daemon gone) are never journaled and 
 Long-lived loops do not grow one journal forever: a recurring program is a schedule of finite runs,
 and an iterative program that needs more than a few thousand steps runs rounds as child runs (§6).
 
-### 6. Linked child runs, worker turns, asks and pull requests
+### 6. Linked child runs, worker turns, asks, pull requests and daemon facts
 
-A program waits on three kinds of things the daemon owns: a linked child run (`run`, from
-`Fractal.run` and worker turns), a native person ask (`ask`, from `Fractal.ask`), and a
-pull-request outcome (`await-pr`, from `Fractal.awaitPr`). The engine
+A program waits on four kinds of things the daemon owns: a linked child run (`run`, from
+`Fractal.run` and worker turns), a native person ask (`ask`, from `Fractal.ask`), a
+pull-request outcome (`await-pr`, from `Fractal.awaitPr`), and a replicated daemon capability
+fact (`await-daemon`, from `Fractal.awaitDaemon`). The engine
 journals a `started` entry for the key when the request arrives, and the program's run evaluation
 starts or adopts what the key waits on. Child runs and asks receive a second `started` entry whose
 `child` names them. Once a wait ends, the daemon journals its result under the key and sends
 `resolved`. Everything the evaluation looks at is a noted read, so the store transition that ends a
-child run, answers an ask or records a changed PR observation evaluates the parent run again;
+child run, answers an ask or records a changed PR or daemon fact evaluates the parent run again;
 nothing polls. A replayed key never registers again; a resumed attempt adopts its open wait. A
 request the daemon refuses (an unknown mission, inputs the mission does not accept, an ask without
 a person) fails the program step with the reason, as a defect would; a store failure leaves the
@@ -608,6 +609,40 @@ transport or store failures are not successful outcomes. Once resolved, later Gi
 do not replace the journaled result.
 The exit reason names the observed transition; it does not infer GitHub's underlying rejection
 cause when the observation does not contain one.
+
+**Daemon facts.** `Fractal.awaitDaemon({ id?, host, feature, minVersion, version? })` is a
+reactive capability barrier over the newest `daemon.started` claim written by the named host's
+own origin. `host` and `feature` are 1–128 ASCII letters/digits/dots/underscores/hyphens,
+starting with a letter or digit. `minVersion` is a positive safe integer: it compares the
+advertised **feature version**, not the daemon's build string. Optional `version` requires an
+exact, nonblank `fields.version` match. Git hashes and build strings have no implicit ordering.
+For example, `yield* Fractal.awaitDaemon({ host: 'amber', feature: 'mission_authority',
+minVersion: 1 })` waits until that host advertises the capability; it neither upgrades the host
+nor grants the calling run authority.
+
+The successful value is `{ host, claim, version, feature, featureVersion }`. `claim` is the
+canonical startup claim ID; the build string and observed feature version are retained for
+audit/replay. A missing claim, absent feature, lower feature version, wrong exact build,
+malformed advertisement or non-running status stays pending. Newer incompatible owner
+restarts supersede older capable advertisements. Foreign-origin claims neither satisfy the
+wait nor hide the newest owner-origin advertisement.
+
+The default journal key is `await-daemon/<host>/<feature>`, with ordinary occurrence suffixes;
+use `id` to bind a different semantic boundary. A durable `program.step` registration with
+`child=program-await-daemon/…` preserves the requested tuple across host restarts. The absent
+case is also a noted read of `daemon/<host>`, so importing its claim wakes the existing run
+without a subscription race, subprocess or timer. Completed keys replay their original result,
+even if the host later advertises another startup; a new observation needs a new key/run.
+Malformed author inputs fail locally as typed `AwaitDaemonFailed` (`code=invalid-request`);
+the native bridge independently refuses malformed wire requests. Cancellation drops the
+wait with its attempt and creates no external watch or host action.
+
+`daemon.started` is a startup/capability fact, **not live health, repair completion, HTTP
+readiness or a guarantee of current process liveness**. An already replicated matching fact
+may satisfy a new barrier immediately. Do not use it as proof that a particular activation
+finished or that a daemon restarted after an activation; those require run/epoch-bound health
+or service completion facts. Programs using this request require compatible execution daemons;
+old bundled hosts cannot decode it.
 
 **Cancellation.** Cancelling the parent run cancels its children through
 `cancel_descendant_mission_runs_tx` (R08), and its asks end with the run. When a program step ends,
@@ -777,7 +812,8 @@ command (`Fractal.command(argv, { priority: 'background' })`); this is the progr
 The author-facing API is the `Fractal` namespace of the `fractal` package's `fractal/effect` entry
 point (`import { Fractal } from 'fractal/effect'`, D7), on `effect/workflow`. The entry point's other
 named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `ChildFailed`,
-`AskAnswer`, `AskCancelled`, `AwaitPrOutcome`, `AwaitPrFailed`) are the host contract a bundle
+`AskAnswer`, `AskCancelled`, `AwaitPrOutcome`, `AwaitPrFailed`, `AwaitDaemonResult`,
+`AwaitDaemonFailed`) are the host contract a bundle
 implements and the exits it decodes.
 
 | `Fractal` | `effect/workflow` | Engine |
@@ -788,6 +824,7 @@ implements and the exits it decodes.
 | `Fractal.ask({ id, for, title, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | `ctx.ask` (protocol `ask`): a native person ask on the program step; the answer is journaled under the key, `AskCancelled` when it is withdrawn (§6) |
 | `Fractal.run(mission, input, { id })` | `DurableDeferred.make` named by the key (default: the mission's id) | `ctx.child` (protocol `run`): a linked child run; its end is journaled under the key, `ChildFailed` when it does not complete (§6) |
 | `Fractal.awaitPr({ id, repo, pr, head })` | `DurableDeferred.make` named by the key | `ctx.awaitPr` (protocol `await-pr`): a native GitHub observation wait at an exact head; merged/dequeued outcomes or typed `AwaitPrFailed` are journaled under the key (§6) |
+| `Fractal.awaitDaemon({ id?, host, feature, minVersion, version? })` | `DurableDeferred.make` named by the key | `ctx.awaitDaemon` (protocol `await-daemon`): a noted replicated startup capability wait; the exact claim result is journaled under the key (§6) |
 | — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal, else waits for the daemon's `resolved` |
 
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
