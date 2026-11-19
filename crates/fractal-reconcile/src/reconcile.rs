@@ -8440,27 +8440,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "rollout target or policy changed before start"
             );
         }
-        if subject.kind == "exec" && !member.tags.contains_key("st3.agent") {
-            use crate::store::run_credentials::{LIVE_STEP_STATES, RUN_CREDENTIAL_ENV};
-            // A launch cannot borrow an authored/inherited credential from another attempt.
-            crate::environment::remove_aliases(&mut launch_member.environment, RUN_CREDENTIAL_ENV);
-            if let Some(step_subject) = subject.owner_step.as_deref() {
-                let step = self.store.step_run(step_subject)?
-                    .ok_or_else(|| anyhow::anyhow!("native exec's owning step no longer exists"))?;
-                let attempt = member.environment.get("ST_ATTEMPT")
-                    .and_then(|attempt| attempt.parse::<u32>().ok());
-                anyhow::ensure!(
-                    subject.owner_run.as_deref() == Some(step.run.as_str())
-                        && attempt == Some(step.attempt)
-                        && LIVE_STEP_STATES.contains(&step.status.as_str()),
-                    "native exec's owning step attempt is no longer live"
-                );
-                let credential = self.store.issue_run_credential(
-                    &step.subject, step.attempt, program::RUN_CREDENTIAL_LIFETIME_MS,
-                )?;
-                crate::environment::set(&mut launch_member.environment, RUN_CREDENTIAL_ENV, credential);
-            }
-        }
         // Capture the token before starting; a publication during start must not relabel the launch.
         let desired_token = self.launch_token(&subject.subject)?;
         crate::environment::set(&mut launch_member.environment, crate::suspension::LAUNCH_DESIRED_TOKEN_ENV,

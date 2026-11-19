@@ -3861,11 +3861,10 @@ mission "single" state="ready" {
                   }
 
                 step "work" {
-                  agentless
 
                     exec "task" {
                       command "true"
-                      env { CUSTOM_RUN "${ST_MISSION_RUN}"; ST_RUN_CREDENTIAL "borrowed-attempt"; }
+                      env { CUSTOM_RUN "${ST_MISSION_RUN}" }
                     }
 
                   gate "verify context" {
@@ -3925,12 +3924,6 @@ mission "single" state="ready" {
             assert!(task.environment.contains_key(name), "missing {name}");
         }
         assert!(!task.environment.contains_key("ST_AGENT"));
-        let credential = &task.environment[crate::store::run_credentials::RUN_CREDENTIAL_ENV];
-        assert_ne!(credential, "borrowed-attempt");
-        let binding = reconciler.store.run_binding(credential).unwrap();
-        assert_eq!(binding.run, run.subject);
-        assert_eq!(binding.step_run, run.steps[0].subject);
-        assert_eq!(binding.attempt.to_string(), task.environment["ST_ATTEMPT"]);
         assert_eq!(task.environment["CUSTOM_RUN"], run.id);
         let mission_task = runtime
             .started_members
@@ -3969,11 +3962,6 @@ mission "single" state="ready" {
         assert_eq!(gate.environment["ST_GATE"], "verify context");
         assert_eq!(gate.environment["ST_MISSION_RUN"], run.id);
         assert_eq!(gate.environment["ST_STEP"], "work");
-        reconciler.store.set_step_run_state_for_tests(&binding.step_run, "working", binding.attempt + 1);
-        assert_eq!(reconciler.store.run_binding(credential).unwrap_err().code, "run-credential-ended");
-        reconciler.store.set_step_run_state_for_tests(&binding.step_run, "completed", binding.attempt + 1);
-        let retired = reconciler.store.issue_run_credential(&binding.step_run, binding.attempt + 1, u64::MAX).unwrap();
-        assert_eq!(reconciler.store.run_binding(&retired).unwrap_err().code, "run-credential-ended");
     }
 
     #[test]

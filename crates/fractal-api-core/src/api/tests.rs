@@ -251,12 +251,9 @@ mission "landing-proof" state="ready" {
         let step = &child.steps[0];
         let credential = state.store.issue_run_credential(&step.subject, step.attempt, u64::MAX).unwrap();
         let revision = state.store.mission_spec("landing-proof", None).unwrap().unwrap().revision;
-        // This is the CLI shape of `missions start --as mission-run/CHILD`.
-        // Its person/mission-run/CHILD requester attribution confers no authority.
         let declaration = format!(
-            "version 2\nmission-run \"landing/proof\" {{ mission {:?}; workspace {:?}; requester {:?}; }}",
+            "version 2\nmission-run \"landing/proof\" {{ mission {:?}; workspace {:?}; requester {requester:?}; }}",
             format!("mission/landing-proof@{revision}"), root.path().join("proof").display().to_string(),
-            format!("person/{}", child.subject),
         );
         let response = router(state.clone())
             .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor))
@@ -297,7 +294,7 @@ mission "landing-proof" state="ready" {
         }
         // The child credential stops conferring BoundRun identity with its issuing attempt.
         state.store.set_step_run_state_for_tests(&step.subject, "completed", step.attempt);
-        assert_eq!(state.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
+        assert!(state.store.run_binding(&credential).unwrap().is_none());
         // A person/seat requesting a retry is a new root of authority, not a system
         // derivation. Retaining the original requester must not retain its privilege.
         state.store.set_mission_run_state(&parent.id, "failed", "terminal", Some("retry fixture")).unwrap();

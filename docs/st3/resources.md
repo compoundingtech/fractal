@@ -266,21 +266,6 @@ through native `fractal missions start`; pre-roll roots cannot lend landing auth
 Legacy client-v0 `mission.start` has no authenticated write principal and creates roots without
 one, even when its session supplies an allowlisted `authority_actor`. Such roots cannot use landing.
 
-Native ownerless execs belonging to a live mission step receive the existing
-`ST_RUN_CREDENTIAL` capability for that exact step/attempt, as program effects already do.
-Authored/inherited credentials are removed; the launcher mints its own. Ending or replacing
-the attempt invalidates it. `ST_AGENT` remains absent. Mission-level execs without a step
-cannot carry a step credential and retain their existing caller binding.
-
-This narrows previously anonymous local-Person writes to the run's existing authority.
-The actor is now `mission-run/RUN`: an explicit `--as` for some other actor is rejected,
-and documents, claims, mission publication/start and other writes outside that run's
-authority may now be refused. The CLI currently requires `missions start --as`, so native
-factory dispatch/reconcile/land/drain callers must pass `--as mission-run/<their own run>`,
-not their attributed requester. The Factory Manager's interactive/root `missions start`
-uses native `/v1/intent/apply` and records the seat's authenticated principal, not client-v0.
-Factory's downstream Landing flip requires both this daemon and that caller adjustment.
-
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`
 does not consume the payload's `timeout`; retirement grace does not extend execution. The enclosing

@@ -1,5 +1,5 @@
-//! Run credentials (docs/st3/program-engine.md §3): the engine mints one per program attempt or
-//! native agentless exec attempt and passes it as `ST_RUN_CREDENTIAL`; the daemon binds a request carrying
+//! Run credentials (docs/st3/program-engine.md §3): the engine mints one per program attempt and
+//! passes it to the attempt's effects as `ST_RUN_CREDENTIAL`; the daemon binds a request carrying
 //! it to `mission-run/RUN`. It is a local, hashed store capability whose subject is the step run
 //! and whose incarnation is the attempt. It needs no revocation: it binds only while that attempt
 //! is the step run's current one and the step is still live, so it dies with its attempt.
@@ -7,11 +7,11 @@ use super::*;
 
 /// The capability kind of a run credential.
 pub const RUN_CREDENTIAL_KIND: &str = "program-run";
-/// The environment variable program effects and native agentless attempts carry their credential in.
+/// The environment variable a program attempt's effects carry their run credential in.
 pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
 
-/// The statuses in which an attempt may act, including one waiting on a person's answer.
-pub const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
+/// The step statuses in which a program attempt runs, including one waiting on a person's answer.
+pub(super) const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 
 /// The actor a run credential binds: `run` is `mission-run/RUN`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,7 +26,7 @@ fn ended(reason: &str) -> FractalError {
 }
 
 impl Store {
-    /// Mint the credential one live step attempt carries, valid for at most `lifetime_ms`.
+    /// Mint the credential one program attempt's effects carry, valid for at most `lifetime_ms`.
     pub fn issue_run_credential(&self, step_run: &str, attempt: u32, lifetime_ms: u64) -> Result<String> {
         self.issue_capability(RUN_CREDENTIAL_KIND, step_run, Some(&attempt.to_string()), lifetime_ms)
             .map(|(secret, _)| secret)
