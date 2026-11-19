@@ -1926,9 +1926,27 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
         .collect::<Vec<_>>();
     seal(&store);
     store.judge_claims(true).unwrap();
+    let mut saved_bytes = 0_u64;
     for claim in &after {
         assert_eq!(verdict(&store, claim), Verdict::Verified);
+        let connection = store.readers.get();
+        let (cursor, roots, complete, dirty, blocked): (String, String, bool, bool, bool) =
+            connection.query_row(
+                "SELECT last_signature,roots_digest,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1",
+                [&claim.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).unwrap();
+        assert!(cursor.is_empty() && roots.is_empty(), "completed result must be cold");
+        assert!(complete && !dirty && !blocked);
+        saved_bytes += connection.query_row(
+            "SELECT length(CAST(MAX(signature) AS BLOB))+(SELECT length(content_digest) FROM claim_signature_judging WHERE claim_id=?1) FROM claim_signature_candidates WHERE claim_id=?1",
+            [&claim.id], |row| row.get::<_, u64>(0),
+        ).unwrap();
     }
+    eprintln!(
+        "cold judging fixture: {} completed delegated claims; {saved_bytes} logical bytes saved; {} bytes/claim; at fixture rate {}/day: {saved_bytes} bytes/day",
+        after.len(), saved_bytes / after.len() as u64, after.len(),
+    );
     // The real signature arrives: the revocation counts, and its requeue queues one page now.
     attach(
         &store,
