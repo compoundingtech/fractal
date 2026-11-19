@@ -2587,6 +2587,7 @@ pub fn mission_detail(
             .collect(),
         messages: steps.messages,
         entries: steps.entries,
+        copy_blocks: steps.copy_blocks,
     };
     doc.card("steps", theme::OVERLAY1, false, steps, width);
     let mut agents = Doc::new();

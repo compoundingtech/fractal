@@ -51,7 +51,7 @@ impl Ui {
         (!text.trim().is_empty()).then_some(text)
     }
 
-    fn copy_body_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn copy_body_key(&mut self, key: KeyEvent) -> bool {
         if key.code != KeyCode::Char('y') || !key.modifiers.is_empty()
             || (matches!(self.tab(), 0 | 2) && self.attention_focus().is_some()
                 && (self.current_kind() == Some("request")
