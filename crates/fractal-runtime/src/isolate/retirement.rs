@@ -130,7 +130,7 @@ impl ScopeRetirementProof {
         self.validate_ending(expected_unit, false)
     }
 
-    fn validate_ending(&self, expected_unit: &str, allow_server: bool) -> Result<()> {
+    pub(crate) fn validate_ending(&self, expected_unit: &str, allow_server: bool) -> Result<()> {
         ensure!(
             self.version == 1
                 && self.unit == expected_unit
