@@ -1049,8 +1049,8 @@ fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3])
     def test_offline_bootstrap_has_no_implicitly_trusted_fallback(self):
         self.origin.rename(self.root / "offline-origin.git")
         result = self.invoke()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no previously trusted observation", result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("publication_unavailable", result.stdout)
         self.assertNotIn(str(self.origin), result.stdout + result.stderr)
         self.assertEqual(self.saved_state(), {})
         self.assertEqual(self.commands(), [])
@@ -1451,6 +1451,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         baseline = (self.state / "state.json").read_bytes()
         commands = len(self.commands())
         self.git("branch", "older-app", self.initial_commit)
+        self.git("fetch", str(self.source),
+                 "refs/heads/older-app:refs/heads/older-app", cwd=self.origin)
         result = self.invoke("--ref", "older-app")
         self.assertEqual(result.returncode, 1)
         self.assertIn("not a descendant", result.stdout)
@@ -1534,9 +1536,11 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                     if not fetch_ok:
                         self.lose_source_snapshot()
                     installs = len(self.device_commands("install"))
+                    commands_before = len(self.commands())
                     self.invoke()
                     if not fetch_ok:
                         self.git("fetch", "origin")
+                        self.assertEqual(self.commands()[commands_before:], [])
                     if fetch_ok:
                         observed = self.git("rev-parse", "HEAD")
                     expected = (self.app_trees(observed),
@@ -1554,9 +1558,9 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                         self.assertEqual(content, expected, message)
                         if faults["install_exit"] == 0:
                             phone = content
-                    if not any(faults.values()):
-                        # A healthy tick always converges the phone; it never
-                        # stays stuck behind a matching or superseded artifact.
+                    if fetch_ok and not any(faults.values()):
+                        # A healthy tick with verified publication converges;
+                        # an unresolvable snapshot must perform no delivery.
                         self.assertEqual(phone, expected, message)
                         self.assert_installed(self.saved_state()["installed"])
 
