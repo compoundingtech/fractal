@@ -9077,33 +9077,77 @@ async fn startable_mission(
 
 struct MissionPublication {
     revision: String,
+    actor: Option<String>,
+    claim_id: String,
     origin: String,
     accepted_at_unix_ms: u128,
 }
 
-/// The mission's publications on this host, newest first.
+/// The mission's publication history, newest first, including older run revisions.
 async fn mission_publications(
     client: &Client,
     mission_id: &str,
 ) -> Result<Vec<MissionPublication>> {
-    let page: ClaimsPage = client
-        .get(&format!(
-            "/v1/claims?subject={}&order=desc&limit=100",
-            urlencoding::encode(&format!("mission/{mission_id}"))
-        ))
-        .await?;
-    Ok(page
-        .claims
-        .into_iter()
-        .filter(|claim| claim.kind == "mission.published")
-        .filter_map(|claim| {
+    let mut publications = Vec::new();
+    let mut before = String::new();
+    loop {
+        let page: ClaimsPage = client
+            .get(&format!(
+                "/v1/claims?subject={}&kind=mission.published&order=desc&limit=100{before}",
+                urlencoding::encode(&format!("mission/{mission_id}"))
+            ))
+            .await?;
+        publications.extend(page.claims.into_iter().filter_map(|claim| {
             Some(MissionPublication {
                 revision: claim.body.get("revision")?.as_str()?.to_owned(),
+                actor: claim.actor,
+                claim_id: claim.id,
                 origin: claim.origin,
                 accepted_at_unix_ms: claim.accepted_at_unix_ms,
             })
-        })
-        .collect())
+        }));
+        match page.next_cursor {
+            Some(cursor) => before = format!("&before_index={cursor}"),
+            None => return Ok(publications),
+        }
+    }
+}
+
+/// Publication authority is independent of the requester who owns the run.
+fn mission_publication_note(revision: &str, publications: &[MissionPublication]) -> String {
+    let Some(publication) = publications.iter().find(|item| item.revision == revision) else {
+        return "PUBLISHER No publication claim available; requester is not publication attribution.\n".into();
+    };
+    let published = i64::try_from(publication.accepted_at_unix_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "unknown time".into());
+    format!(
+        "PUBLISHER {} · {} · {published}\nPUBLICATION {}\n",
+        publication.actor.as_deref().unwrap_or("unattributed"),
+        publication.origin,
+        publication.claim_id,
+    )
+}
+
+/// Older daemons may omit the sidecar from their run view. Join only the exact revision,
+/// never the mission's latest source or the requester's workspace.
+async fn load_run_source_provenance(client: &Client, run: &mut MissionRunView) -> Result<()> {
+    if run.provenance.is_some() {
+        return Ok(());
+    }
+    let subject = format!("{}@{}", run.mission, run.revision);
+    let page: ClaimsPage = client.get(&format!(
+        "/v1/claims?subject={}&kind=mission.provenance&order=asc&limit=1",
+        urlencoding::encode(&subject),
+    )).await?;
+    if let Some(claim) = page.claims.into_iter().next() {
+        run.provenance = Some(serde_json::from_value(
+            claim.body["fields"]["provenance"].clone(),
+        ).context("invalid mission revision provenance")?);
+    }
+    Ok(())
 }
 
 /// Say which revision a run started, and whether other revisions share the mission name.
@@ -9200,7 +9244,13 @@ async fn follow_mission_run_to(
             String::new()
         };
         if summary != prior && let Some(page) = &page {
+            load_run_source_provenance(client, &mut run).await?;
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
+            let publications = mission_publications(
+                client,
+                run.mission.strip_prefix("mission/").unwrap_or(&run.mission),
+            ).await?;
+            frame.push_str(&mission_publication_note(&run.revision, &publications));
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
                     "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}\n",
