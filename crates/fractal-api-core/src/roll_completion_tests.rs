@@ -699,9 +699,9 @@ fn native_frontier_serializes_behind_snapshot_races_and_fences_cached_old_clock_
     let through = config.enabled_at_ms + 10_000;
     // This accepted source event was absent from the snapshot but has an older
     // canonical acceptance clock. A frontier must not certify the captured cut.
-    publish_fixture(&store, declaration("queued-old-clock", &["host-a"]), Some("agent/example/roll-authority"));
+    let raced = publish_fixture(&store, declaration("queued-old-clock", &["host-a"]), Some("agent/example/roll-authority"));
     assert!(publish_frontier(&store, &config, config.enabled_at_ms, through, captured, &crate::roll_source::source_lifetime(&store).unwrap(), through + 1).is_err());
-    ingest_fixture(&store, declaration("queued-old-clock", &["host-a"]), through).unwrap();
+    ingest(&store, SignedReceipt { claim_id: raced }, through).unwrap();
     let captured = store.index().unwrap();
     store.set_write_clock_at(u128::from(through + 1)).unwrap();
     let token = authority_cut(&store).unwrap();
