@@ -1805,7 +1805,7 @@ mod tests {
         ).unwrap();
         let floor = state.store.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
         let send_old = |ordinal: u64, at: u128| {
-            let target = if ordinal % 2 == 0 { &*shard } else { &state.store.graph };
+            let target = if ordinal.is_multiple_of(2) { &*shard } else { &state.store.graph };
             let claim = target.append_claim(&ClaimInput {
                 subject: format!("message/{ordinal:016x}"),
                 kind: "message.sent".into(),
