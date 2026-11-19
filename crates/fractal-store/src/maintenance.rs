@@ -184,6 +184,37 @@ pub async fn run_client_message_selectors_observed(
     drop(observer);
 }
 
+/// Populate usage lookups only after serving starts. Every turn has background admission,
+/// visits at most 64 source rows, and releases both the writer and Store before resting.
+pub async fn run_usage_period(store: std::sync::Weak<Store>) {
+    loop {
+        let Some(current) = store.upgrade() else { return; };
+        let result = tokio::task::spawn_blocking(move || -> Result<bool> {
+            if crate::store::usage_period::ready(&current.graph.readers.get())? {
+                return Ok(true);
+            }
+            let mut writer = current.graph.connection.write_background();
+            let tx = writer.transaction()?;
+            let complete = crate::store::usage_period::backfill_step_tx(&tx)?;
+            tx.commit()?;
+            Ok(complete)
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "usage period backfill stopped; exact claim reads remain active");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(%error, "usage period backfill worker stopped");
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Hydrate completion-health candidates only after serving starts. Every chunk releases the
 /// writer and rests before another loan; an idle worker owns no Store and performs no SQL.
 pub async fn run_completion_health(store: std::sync::Weak<Store>) {

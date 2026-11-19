@@ -3533,6 +3533,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap();
     }
+    {
+        // This fixture serves routers directly, without main.rs maintenance workers.
+        // Finish the real bounded builder before any measured route scope; never
+        // charge concurrent catch-up SQL to an unrelated endpoint or assume a warmup.
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            loop {
+                let mut writer = store.connection.write_background();
+                let tx = writer.transaction().unwrap();
+                let complete = fractal_daemon::store::usage_period::backfill_step_tx(&tx).unwrap();
+                tx.commit().unwrap();
+                drop(writer);
+                if complete { break; }
+            }
+            assert!(fractal_daemon::store::usage_period::ready(&store.readers.get()).unwrap());
+        }).await.unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
