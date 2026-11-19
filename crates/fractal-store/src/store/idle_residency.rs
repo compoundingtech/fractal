@@ -11,8 +11,14 @@ const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeatu
     carries: "automatic idle suspension and wake",
 };
 
-// Recheck an unadmitted rival only with spare capacity; active owners invalidate slot release.
+// Spare-capacity rivals and frontier races recheck; active owners invalidate slot release.
 const WAKE_QUEUE_RECHECK_MS: u128 = 1_000;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_WAKE_RANKING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_WAKE_WRITER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 // Reserve the source writer before the graph writer: separate WAL databases need both
 // reservations to exclude a shard acceptance between frontier validation and graph commit.
@@ -385,10 +391,21 @@ impl Store {
         } else if own_eligible && selected.is_none() {
             retry_at = Some(now.saturating_add(WAKE_QUEUE_RECHECK_MS));
         }
+        let frontier_race_retry = || IdleWakeAdmission {
+            operation_id: None,
+            retry_at_unix_ms: (available > 0).then(|| {
+                let recheck = now.saturating_add(WAKE_QUEUE_RECHECK_MS);
+                retry_at.map_or(recheck, |due| due.min(recheck))
+            }),
+        };
+        #[cfg(test)]
+        if let Some(hook) = AFTER_WAKE_RANKING.with(|hook| hook.borrow_mut().take()) { hook(); }
         let demand = self.wake_demand(subject)?;
-        if before != demand.frontier { return Ok(IdleWakeAdmission::default()); }
+        if before != demand.frontier { return Ok(frontier_race_retry()); }
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_WAKE_WRITER.with(|hook| hook.borrow_mut().take()) { hook(); }
         with_source_fence(self, || self.connection.batched(|tx| -> Result<IdleWakeAdmission> {
-            if !frontier_matches(self, tx, &demand.frontier)? { return Ok(IdleWakeAdmission::default()); }
+            if !frontier_matches(self, tx, &demand.frontier)? { return Ok(frontier_race_retry()); }
             if owned(tx, &self.origin, subject)?.is_none() { return Ok(IdleWakeAdmission::default()); }
             declared_admission::validate_fleet(tx, &self.origin, &FEATURE).map_err(anyhow::Error::new)?;
             for (seat, lineage, pending, incarnation) in &queued {
@@ -670,6 +687,77 @@ mod tests {
         assert!(!incremental.needs("member:garden", due - 1), "the other seat's closure does not dirty garden");
         assert!(incremental.needs("member:garden", due), "the waiting seat's exact deadline restores liveness");
         assert!(store.admit_idle_wake(SEAT, 1, due).unwrap().operation_id.is_some());
+    }
+
+    #[test]
+    fn wake_frontier_races_retry_with_spare_capacity_and_follow_full_slot_release() {
+        for before_writer in [false, true] {
+            for queue in 0..3 {
+                let root = tempfile::tempdir().unwrap();
+                let store = fixture(&root.path().join("graph.sqlite"), root.path());
+                let orchard = "agent/alder.orchard";
+                let intent = crate::parse_intent(
+                    "version 2\nagent \"orchard\" { workspace \".\"; command \"true\"; }", "alder").unwrap();
+                store.apply(&intent, &BTreeMap::from([(orchard.into(), Vec::new())]), "orchard").unwrap();
+                let declaration = store.selected_desired_token(orchard).unwrap().unwrap();
+                let suspend = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
+                    "runtime.action.requested", Some(orchard),
+                    &json!({"evidence":[declaration],"fields":{"action":"suspend","cause":"idle","incarnation_id":"two"}}),
+                    &[], None, "orchard-suspend")).unwrap().unwrap();
+                complete_suspend(&store, orchard, &suspend.id);
+                let garden = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+                complete_suspend(&store, SEAT, &garden);
+                claim(&store, "message/garden", "message.sent", Some(SEAT),
+                    json!({"from":SEAT,"to":SEAT,"content":"Agent demand.","status":"sent","tags":[]}));
+                if queue != 0 {
+                    claim(&store, "message/orchard", "message.sent", Some("person/avery"),
+                        json!({"from":"person/avery","to":orchard,"content":"Person demand.","status":"sent","tags":[]}));
+                }
+                let now = 9_000_000_000_000;
+                let active_resume = if queue == 2 {
+                    Some(store.admit_idle_wake(orchard, 1, now).unwrap().operation_id.unwrap())
+                } else { None };
+                let incremental = crate::incremental::Incremental::default();
+                incremental.observe(&store).unwrap();
+                let concurrent = store.clone();
+                let inject: Box<dyn FnOnce()> = Box::new(move || {
+                    std::thread::spawn(move || claim(&concurrent, "message/unrelated", "message.sent", Some("person/avery"),
+                        json!({"from":"person/avery","to":"person/avery","content":"Unrelated frontier write.","status":"sent","tags":[]})))
+                        .join().unwrap();
+                });
+                if before_writer {
+                    BEFORE_WAKE_WRITER.with(|hook| *hook.borrow_mut() = Some(inject));
+                } else {
+                    AFTER_WAKE_RANKING.with(|hook| *hook.borrow_mut() = Some(inject));
+                }
+                let (admission, reads) = smallclaims::touched::record(|| store.admit_idle_wake(SEAT, 1, now).unwrap());
+                assert!(admission.operation_id.is_none(), "a raced frontier must never admit stale ranking");
+                let due = if queue == 2 {
+                    assert_eq!(admission.retry_at_unix_ms, None, "a full queue follows slot release, not timers");
+                    now + 73_000
+                } else {
+                    assert_eq!(admission.retry_at_unix_ms, Some(now + WAKE_QUEUE_RECHECK_MS),
+                        "both selected seats and rival-blocked seats retain a bounded frontier-race retry");
+                    now + WAKE_QUEUE_RECHECK_MS
+                };
+                incremental.evaluated("member:garden", reads, admission.retry_at_unix_ms);
+                if queue == 1 {
+                    claim(&store, "message/orchard", "message.closed", Some("daemon/runtime"), json!({"status":"closed"}));
+                }
+                incremental.observe(&store).unwrap();
+                assert!(!incremental.needs("member:garden", due - 1), "unrelated writes must not dirty this seat");
+                if let Some(resume) = active_resume {
+                    assert!(!incremental.needs("member:garden", due));
+                    store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
+                        "runtime.action.succeeded", Some(orchard),
+                        &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"resumed","incarnation_id":"three"}}),
+                        &[], None, &crate::suspension::resume_completed_key(&resume))).unwrap().unwrap();
+                    incremental.observe(&store).unwrap();
+                }
+                assert!(incremental.needs("member:garden", due));
+                assert!(store.admit_idle_wake(SEAT, 1, due).unwrap().operation_id.is_some());
+            }
+        }
     }
 
     #[test]
