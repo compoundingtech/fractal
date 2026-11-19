@@ -13,6 +13,23 @@ fn attempt_count(connection: &Connection, agent: &str, incarnation: &str) -> Res
         params![agent, incarnation], |row| row.get(0)).optional()?.unwrap_or(0))
 }
 
+/// Match the supported restart selector under the admission writer's snapshot.
+fn latest_restart_request(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    Ok(connection.query_row(&canonical_sql(
+        "SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested'
+         AND json_extract(body,'$.actor') IS NOT NULL
+         AND json_extract(body,'$.fields.action') IN ('restart','restart-when-idle')
+         ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        [agent], |row| row.get(0)).optional()?)
+}
+
+fn restart_completed(connection: &Connection, request: &str) -> Result<bool> {
+    let completion = operation_id_for_key(&format!("agent-restart-completed:{request}"));
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND state='active')",
+        [&completion], |row| row.get(0))?)
+}
+
 impl Store {
     /// A single exact deadline, not a retry poll, when a prior admission spends the budget.
     pub fn model_return_budget_resumes_at(&self, agent: &str) -> Result<Option<u128>> {
@@ -49,17 +66,28 @@ impl Store {
             if next.is_none() || input.fields.get("model_return_attempt").and_then(Value::as_u64) != next {
                 return Err(FractalError::new("model-return-stale", "another model return advanced the durable admission generation"));
             }
+            // A manual request may commit after the reconciler's preliminary read.
+            // Never let automatic admission replace its restart/fresh-session intent.
+            if let Some(request) = latest_restart_request(connection, &input.subject).map_err(internal)?
+                && !restart_completed(connection, &request).map_err(internal)?
+            {
+                return Err(FractalError::new("model-return-stale", "a restart request is already pending"));
+            }
             let mut requests = connection.prepare_cached(
-                "SELECT id FROM claims WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')=?1 AND json_extract(body,'$.fields.host')=?2"
+                "SELECT id, subject FROM claims WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')=?1 AND json_extract(body,'$.fields.host')=?2"
             ).map_err(internal)?;
             let mut rows = requests.query(params![OPERATION, host]).map_err(internal)?;
             while let Some(row) = rows.next().map_err(internal)? {
                 let request: String = row.get(0).map_err(internal)?;
-                let completion = operation_id_for_key(&format!("agent-restart-completed:{request}"));
-                let completed: bool = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND state='active')",
-                    [&completion], |row| row.get(0)).map_err(internal)?;
-                if !completed { return Err(FractalError::new("model-return-host-busy", "another model return is in progress on this host")); }
+                let agent: String = row.get(1).map_err(internal)?;
+                // Ordinary restart reconciliation selects only the newest request.
+                // A superseded bridge can no longer execute or retain host admission.
+                if latest_restart_request(connection, &agent).map_err(internal)?.as_deref() != Some(request.as_str()) {
+                    continue;
+                }
+                if !restart_completed(connection, &request).map_err(internal)? {
+                    return Err(FractalError::new("model-return-host-busy", "another model return is in progress on this host"));
+                }
             }
             Ok(())
         };
@@ -165,5 +193,51 @@ mod tests {
         input.fields.insert("model_return_attempt".into(), json!(2));
         assert!(store.admit_model_return(&input, after_budget).is_ok());
         assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 2);
+    }
+
+    fn manual_fresh_restart(store: &Store, key: &str) -> ClaimRecord {
+        store.append_claim(&ClaimInput {
+            subject: "agent/first".into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!("restart")),
+                ("fresh_session".into(), json!(true)),
+                ("reason".into(), json!("operator requested a fresh session")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        }).unwrap()
+    }
+
+    #[test]
+    fn model_return_host_slot_releases_after_manual_fresh_restart_supersedes_bridge() {
+        let store = fixture();
+        let bridge = request(&store, "agent/first", "one", "superseded-bridge");
+        let bridge = store.admit_model_return(&bridge, now_ms()).unwrap();
+        let manual = manual_fresh_restart(&store, "superseding-manual-restart");
+        assert_eq!(crate::restart::latest_request(&store, "agent/first").unwrap().unwrap().id, manual.id);
+        store.append_claim(&ClaimInput {
+            subject: "agent/first".into(), kind: "runtime.action.succeeded".into(),
+            actor: Some("agent/st3/reconciler".into()),
+            fields: BTreeMap::from([("action".into(), json!("restart")), ("reason".into(), json!("fresh session started"))]),
+            evidence: vec![manual.id.clone()], expected_subject: None,
+            idempotency_key: Some(format!("agent-restart-completed:{}", manual.id)),
+        }).unwrap();
+        assert!(store.operation_claim(&format!("agent-restart-completed:{}", bridge.id)).unwrap().is_none());
+        let other = request(&store, "agent/second", "one", "after-manual-restart");
+        assert!(store.admit_model_return(&other, now_ms()).is_ok());
+    }
+
+    #[test]
+    fn model_return_writer_preserves_manual_request_inserted_after_preliminary_check() {
+        let store = fixture();
+        let automatic = request(&store, "agent/first", "one", "racing-automatic-return");
+        assert!(crate::restart::latest_request(&store, "agent/first").unwrap().is_none());
+        let manual = manual_fresh_restart(&store, "racing-manual-restart");
+        assert_eq!(store.admit_model_return(&automatic, now_ms()).unwrap_err().code, "model-return-stale");
+        let selected = crate::restart::latest_request(&store, "agent/first").unwrap().unwrap();
+        assert_eq!(selected.id, manual.id);
+        assert_eq!(selected.body["fields"]["fresh_session"], true);
+        assert_eq!(store.model_return_attempt_count("agent/first", "one").unwrap(), 0);
+        assert!(store.operation_claim("racing-automatic-return").unwrap().is_none());
     }
 }
