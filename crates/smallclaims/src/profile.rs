@@ -1,6 +1,6 @@
 //! Opt-in accounting of where the daemon's time goes.
 //!
-//! Set `ST3_PROFILE_DIR` to a directory before `st3 up` and the daemon records, for each request
+//! Set `ST3_PROFILE_DIR` to a directory before `fractal up` and the daemon records, for each request
 //! route and background task: how long it queued before a thread ran it, how long it waited for
 //! the store's writer and read connections and which operation held the writer meanwhile, how
 //! long its SQLite statements ran and which ones, and how much CPU its threads used. Every minute
@@ -140,7 +140,7 @@ pub fn init_from_env() {
         return;
     };
     if let Err(error) = fs::create_dir_all(&dir) {
-        eprintln!("st3: profiling is off: create {}: {error}", dir.display());
+        eprintln!("fractal: profiling is off: create {}: {error}", dir.display());
         return;
     }
     let slow_after = std::env::var("ST3_PROFILE_SLOW_MS")
@@ -185,7 +185,7 @@ pub fn init_from_env() {
         .name("st3-profile".into())
         .spawn(flush_loop);
     eprintln!(
-        "st3: profiling into {} (slow after {} ms)",
+        "fractal: profiling into {} (slow after {} ms)",
         STATE.get().expect("just set").dir.display(),
         STATE.get().expect("just set").slow_after.as_millis()
     );
@@ -1406,7 +1406,7 @@ impl ProfileLog {
         match fs::remove_file(path) {
             Ok(()) => {
                 eprintln!(
-                    "st3: profile retention dropped {bytes} bytes from {}",
+                    "fractal: profile retention dropped {bytes} bytes from {}",
                     path.display()
                 );
                 Ok(())
@@ -1433,7 +1433,7 @@ impl ProfileLog {
         let bytes = line.len() as u64;
         if bytes > self.limit {
             eprintln!(
-                "st3: profile retention dropped oversized record ({bytes} bytes, limit {}) for {}",
+                "fractal: profile retention dropped oversized record ({bytes} bytes, limit {}) for {}",
                 self.limit,
                 self.path.display()
             );

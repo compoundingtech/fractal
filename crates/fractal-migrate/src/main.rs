@@ -408,7 +408,7 @@ fn ding_exec_node() -> KdlNode {
     exec.entries_mut().push(KdlEntry::new("ding"));
     let mut body = KdlDocument::new();
     let mut argv = KdlNode::new("argv");
-    for value in ["st3", "driver", "ding"] {
+    for value in ["fractal", "driver", "ding"] {
         argv.entries_mut().push(KdlEntry::new(value));
     }
     body.nodes_mut().push(argv);
@@ -480,14 +480,14 @@ fn legacy_resource_warnings(source: &str, input: &Path) -> Result<Vec<String>> {
                 if let Some(path) = uri.strip_prefix("file://") {
                     let owner = next_identity.unwrap_or("agent").replace('/', "-");
                     warnings.push(format!(
-                        "{}: import legacy resource `{name}` as a document after review: st3 documents put {} --as {}",
+                        "{}: import legacy resource `{name}` as a document after review: fractal documents put {} --as {}",
                         input.display(),
                         shell(path),
                         shell(&format!("doc/migration/{owner}/{name}")),
                     ));
                 } else {
                     warnings.push(format!(
-                        "{}: legacy resource `{name}` was not migrated; declare a typed st3 resource after review",
+                        "{}: legacy resource `{name}` was not migrated; declare a typed fractal resource after review",
                         input.display()
                     ));
                 }
@@ -643,7 +643,7 @@ fn rewrite_catalog_text(source: &str) -> String {
         .split_inclusive('\n')
         .map(|line| {
             if line.contains("Catalog selection on every catalog-aware command:") {
-                return "st3 selects its daemon through --endpoint or ST3_ENDPOINT.\n".into();
+                return "fractal selects its daemon through --endpoint or ST3_ENDPOINT.\n".into();
             }
             if line.contains("Bus ops retain --root as a legacy") {
                 return String::new();
@@ -653,15 +653,15 @@ fn rewrite_catalog_text(source: &str) -> String {
             {
                 return String::new();
             }
-            line.replace("`st2` CLI", "`st3` CLI")
-                .replace("The host (`st2 up`)", "The host (`st3 up`)")
-                .replace("st2 message", "st3 conversations")
-                .replace("st2 status", "st3 status")
-                .replace("st2 agents", "st3 agents")
-                .replace("st2 context", "st3 context")
-                .replace("st2 resource", "st3 resource")
-                .replace("st2 bus", "st3 graph message API")
-                .replace("st2 boot ritual", "st3 boot ritual")
+            line.replace("`st2` CLI", "`fractal` CLI")
+                .replace("The host (`st2 up`)", "The host (`fractal up`)")
+                .replace("st2 message", "fractal conversations")
+                .replace("st2 status", "fractal status")
+                .replace("st2 agents", "fractal agents")
+                .replace("st2 context", "fractal context")
+                .replace("st2 resource", "fractal resource")
+                .replace("st2 bus", "fractal graph message API")
+                .replace("st2 boot ritual", "fractal boot ritual")
         })
         .collect()
 }
@@ -1215,7 +1215,7 @@ fn write_mechanical_gate(
     timeout_ms: u64,
 ) {
     let command = format!(
-        "st3 conversations export \"${{ST_WORKSPACE}}/.st3-messages\" >/dev/null && {command}"
+        "fractal conversations export \"${{ST_WORKSPACE}}/.st3-messages\" >/dev/null && {command}"
     );
     write_raw_mechanical_gate(output, name, &command, host, timeout_ms);
 }
@@ -1296,17 +1296,17 @@ fn infer_agent_model(agent: &fractal_drivers::eval_spec::SpecAgent) -> Option<St
 
 fn rewrite_bus_command(value: &str) -> String {
     value
-        .replace("st2 message", "st3 conversations")
-        .replace("st2 channel message", "st3 graph message notification")
-        .replace("st2 bus", "st3 graph message API")
-        .replace("hermetic st2 eval", "hermetic st3 eval")
+        .replace("st2 message", "fractal conversations")
+        .replace("st2 channel message", "fractal graph message notification")
+        .replace("st2 bus", "fractal graph message API")
+        .replace("hermetic st2 eval", "hermetic fractal eval")
 }
 
 fn rewrite_eval_prompt(value: &str) -> String {
-    let mut output = rewrite_bus_command(value).replace(
-        "wait for an st3 graph message notification",
+    let mut output = rewrite_bus_command(&value.replace(
+        "wait for an st2 channel message",
         "end the turn and stay idle",
-    );
+    ));
     if !output.ends_with(char::is_whitespace) {
         output.push(' ');
     }
@@ -1338,7 +1338,7 @@ fn stage_document(
     source: &Path,
     bytes: &[u8],
 ) -> Result<DocumentReport> {
-    std::str::from_utf8(bytes).context("st3 documents must contain UTF-8 text")?;
+    std::str::from_utf8(bytes).context("fractal documents must contain UTF-8 text")?;
     let staged = output_root.join(".st3-documents").join(hash);
     write_file(&staged, bytes)?;
     Ok(DocumentReport {
@@ -1347,7 +1347,7 @@ fn stage_document(
         source: source.display().to_string(),
         staged: staged.display().to_string(),
         put_command: format!(
-            "st3 documents put {} --as {}",
+            "fractal documents put {} --as {}",
             shell(&staged.display().to_string()),
             shell(name)
         ),
@@ -1431,10 +1431,10 @@ fn rewrite_eval_asset(source: &str) -> String {
             if line.contains("--catalog") {
                 line.to_owned()
             } else {
-                line.replace("st2 message", "st3 conversations")
-                    .replace("st2 status", "st3 status")
-                    .replace("st2 agents", "st3 agents")
-                    .replace("st2 bus", "st3 graph message API")
+                line.replace("st2 message", "fractal conversations")
+                    .replace("st2 status", "fractal status")
+                    .replace("st2 agents", "fractal agents")
+                    .replace("st2 bus", "fractal graph message API")
             }
         })
         .collect()
@@ -1529,9 +1529,9 @@ mod tests {
         fs::write(&script, WAIT_TEAM_DONE).unwrap();
         let bin = temporary.path().join("bin");
         fs::create_dir(&bin).unwrap();
-        let st3 = bin.join("st3");
+        let fractal = bin.join("fractal");
         fs::write(
-            &st3,
+            &fractal,
             r#"#!/bin/sh
 case "$3" in
   supervisor) printf '%s\n' "$SUPERVISOR_MESSAGES" ;;
@@ -1541,7 +1541,7 @@ esac
 "#,
         )
         .unwrap();
-        fs::set_permissions(&st3, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&fractal, fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
         )))
@@ -1612,7 +1612,7 @@ agent "worker" {
         assert!(translated.contains("harness omp"));
         assert!(!translated.contains("prompt"));
         assert!(translated.contains("exec ding"));
-        assert!(translated.contains("argv st3 driver ding"));
+        assert!(translated.contains("argv fractal driver ding"));
         let intent = fractal_daemon::parse_intent(&translated, "local").unwrap();
         let runtimes = fractal_daemon::validate_mission_runtimes(&intent, "local").unwrap();
         assert!(runtimes.contains("agent/migration-proof/host-a.worker"));
@@ -1638,7 +1638,7 @@ agent "worker" {
         )
         .unwrap();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("st3 documents put '/tmp/proof file.txt'"));
+        assert!(warnings[0].contains("fractal documents put '/tmp/proof file.txt'"));
         assert!(warnings[0].contains("'doc/migration/host-a.worker/proof'"));
     }
 
@@ -1677,7 +1677,7 @@ agent "worker" {
                 .any(|warning| warning
                     .as_str()
                     .unwrap()
-                    .contains("st3 documents put '/tmp/proof.txt'"))
+                    .contains("fractal documents put '/tmp/proof.txt'"))
         );
     }
 
@@ -1931,11 +1931,11 @@ agent "worker" {
 
         assert_eq!(
             fs::read_to_string(output.path().join("sup/CLAUDE.md")).unwrap(),
-            "Use st3 conversations.\n"
+            "Use fractal conversations.\n"
         );
         assert_eq!(
             fs::read_to_string(output.path().join("judges/grade.sh")).unwrap(),
-            "st3 status\n"
+            "fractal status\n"
         );
         assert!(!output.path().join("fixture").exists());
     }
@@ -1946,7 +1946,7 @@ agent "worker" {
             "In a hermetic st2 eval, use st2 message and wait for an st2 channel message.",
         );
         assert!(translated.starts_with(
-            "In a hermetic st3 eval, use st3 conversations and end the turn and stay idle."
+            "In a hermetic fractal eval, use fractal conversations and end the turn and stay idle."
         ));
         assert!(translated.contains("Do not run a blocking wait, trace, poll, or sleep command."));
         assert!(!translated.contains("st2"));

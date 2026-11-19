@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal naming in supporting-crate diagnostics, private test fixtures and migration output commands.",
+  "replay": { "status": "none", "detail": "No graph replay changes." },
+  "schema": { "status": "none", "detail": "Persisted identifiers, signed domains and wire protocols are unchanged." },
+  "rules": { "status": "none", "detail": "No authority or permission changes." },
+  "compatibility": { "status": "none", "detail": "Legacy aliases, environment fallbacks and host paths remain unchanged. Migrated command examples and the migration completion helper use the canonical fractal executable." },
+  "downtime": { "status": "none", "detail": "No service changes." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No configuration or storage changes." }
+}

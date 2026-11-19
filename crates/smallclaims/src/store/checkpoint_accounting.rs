@@ -78,7 +78,7 @@ impl Drop for Phase {
             self.result.write_bytes = Some(write.saturating_sub(before_write));
         }
         let mut attempt = latest.lock();
-        eprintln!("st3: checkpoint phase {}", serde_json::json!({
+        eprintln!("fractal: checkpoint phase {}", serde_json::json!({
             "checkpoint": attempt.checkpoint, "phase": self.result,
             "d3_iterations": attempt.d3_iterations,
         }));

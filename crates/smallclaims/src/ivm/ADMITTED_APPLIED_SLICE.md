@@ -251,7 +251,7 @@ SQLite writer abort/finalizer and checked-reader reservations stay Foundation's.
 
 No reservation is taken on append_claim_record_tx, next_replica_sequence,
 previous_batch_hash or the proposed batch-head helper; reconciliation's two
-post-success commit counter lines stay its owner’s. No st3 Runtime/constructor,
+post-success commit counter lines stay its owner’s. No Fractal Runtime/constructor,
 reactor, route, thread candidate, card or health-source hunk is reserved.
 
 The first source slice is the additive real-Store fixture and bounded-input

@@ -64,7 +64,7 @@ impl PhaseDurations {
             total_ms,
         };
         eprintln!(
-            "st3: startup phases {}",
+            "fractal: startup phases {}",
             serde_json::to_string(&report).expect("finite startup durations serialize")
         );
     }

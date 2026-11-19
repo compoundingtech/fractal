@@ -782,21 +782,21 @@ impl AnswersCache {
             if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
                 match moved.and_then(|moved| Ok((moved, slots?))) {
                     Ok((moved, slots)) => state.remark_moving(&moved, &slots),
-                    Err(error) => eprintln!("st3: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
+                    Err(error) => eprintln!("fractal: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
                 }
             }
             match current {
                 Ok(Some(newest)) => state.summary_mark = state.summary_mark.max(newest),
                 Ok(None) => {
                     eprintln!(
-                        "st3: answers at {}: a claim older than the cut arrived since they were computed; \
+                        "fractal: answers at {}: a claim older than the cut arrived since they were computed; \
                          computing them again",
                         request.cut_unix_ms
                     );
                     state.summary = None;
                     state.readers.clear();
                 }
-                Err(error) => eprintln!("st3: answers at {} could not be checked: {error:#}", request.cut_unix_ms),
+                Err(error) => eprintln!("fractal: answers at {} could not be checked: {error:#}", request.cut_unix_ms),
             }
         }
         match &request.kind {
@@ -862,7 +862,7 @@ impl AnswersCache {
                         match still_current(&store.readers.get(), kept.mark, cut)? {
                             Some(newest) => return Ok(Computed::Kept(kept.summary, kept.readers, newest)),
                             None => eprintln!(
-                                "st3: answers at {cut}: a claim older than the cut arrived since they were kept; \
+                                "fractal: answers at {cut}: a claim older than the cut arrived since they were kept; \
                                  computing them again"
                             ),
                         }
@@ -886,14 +886,14 @@ impl AnswersCache {
             if let Ok(Computed::Summary(summary, readers, mark)) = &computed
                 && let Err(error) = keep(store, summary, readers, *mark)
             {
-                eprintln!("st3: answers at {cut} could not be kept: {error:#}");
+                eprintln!("fractal: answers at {cut} could not be kept: {error:#}");
             }
             let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.computing.remove(&(cut, kind.clone()));
             match computed {
                 Ok(Computed::Summary(summary, readers, mark)) => {
                     eprintln!(
-                        "st3: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
+                        "fractal: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
                         started.elapsed().as_secs(),
                         summary.kinds.len(),
                         readers.len()
@@ -903,7 +903,7 @@ impl AnswersCache {
                     state.readers = readers;
                 }
                 Ok(Computed::Kept(summary, readers, mark)) => {
-                    eprintln!("st3: answers at {cut} kept from an earlier run: {} kinds", summary.kinds.len());
+                    eprintln!("fractal: answers at {cut} kept from an earlier run: {} kinds", summary.kinds.len());
                     state.summary = Some(summary);
                     state.summary_mark = mark;
                     state.readers = readers;
@@ -916,14 +916,14 @@ impl AnswersCache {
                     }
                 }
                 Err(error) => eprintln!(
-                    "st3: answers for {} at {cut} failed: {error:#}",
+                    "fractal: answers for {} at {cut} failed: {error:#}",
                     kind.as_deref().unwrap_or("every kind")
                 ),
             }
         });
         if let Err(error) = spawned {
             state.computing.remove(&job);
-            eprintln!("st3: answers could not start: {error}");
+            eprintln!("fractal: answers could not start: {error}");
         }
         AnswersReply::pending()
     }

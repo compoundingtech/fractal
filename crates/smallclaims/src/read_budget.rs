@@ -209,7 +209,7 @@ impl ReadBudget {
         }
         if self.0.diagnostic && !self.0.reported.swap(true, Ordering::AcqRel) {
             eprintln!(
-                "st3: read cancelled route={:?} callsite={} deadline_elapsed={} work_elapsed={}",
+                "fractal: read cancelled route={:?} callsite={} deadline_elapsed={} work_elapsed={}",
                 self.0.route,
                 self.0.read_site.get().copied().unwrap_or(self.0.callsite),
                 self.0.deadline.is_some_and(|deadline| self.now() >= deadline),
