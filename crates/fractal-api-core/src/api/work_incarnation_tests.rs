@@ -881,6 +881,24 @@ async fn delayed_native_session_reports_cannot_strand_a_claim_on_a_stale_incarna
     fixture.runtime("chooser:two");
     fixture.runtime("chooser:three");
 
+    // Exercise the writer admission separately from the endpoint's earlier read fence:
+    // C can become live after that read but before B's queued publication acquires the lock.
+    let error = fixture.state.store.bind_native_session(&ClaimInput {
+        subject: SEAT.into(),
+        kind: "harness.session-file".into(),
+        actor: Some(SEAT.into()),
+        fields: BTreeMap::from([
+            ("harness".into(), json!("claude")),
+            ("session_id".into(), json!("native-one")),
+            ("incarnation_id".into(), json!("chooser:two")),
+            ("status".into(), json!("active")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap_err();
+    assert_eq!(error.code, "stale-harness-event-session");
+
     // B's delayed report is invalid both before and after C publishes its binding.
     for c_bound in [false, true] {
         if c_bound {
@@ -896,7 +914,7 @@ async fn delayed_native_session_reports_cannot_strand_a_claim_on_a_stale_incarna
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-        assert_eq!(error["code"], "stale-session-incarnation", "{error}");
+        assert_eq!(error["code"], "stale-harness-event-session", "{error}");
         let binding = fixture.state.store.latest_claim(SEAT, Some("harness.session-file"))
             .unwrap().unwrap();
         assert_eq!(

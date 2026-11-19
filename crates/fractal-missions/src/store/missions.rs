@@ -2269,7 +2269,7 @@ fn session_field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
 }
 
 fn session_history_tx(connection: &Connection, actor: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
-    let mut statement = connection.prepare(&canonical_sql(&format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h34b52ae49ecf owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY CANONICAL_DESC(claims)"
     )))?;
@@ -2366,7 +2366,7 @@ fn rebind_native_session_leases_tx(
         ).map_err(claim_append_error)?;
         project_mission_run_update(transaction, &claim)?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h6fff8d4411ab owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_lease_renewals SET lease_incarnation=?2
+            /* sqlite-large-value: allow-for-now lv-h8039b3da4b85 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_lease_renewals SET lease_incarnation=?2
              WHERE subject=?1 AND lease_owner=?3 AND lease_incarnation=?4",
             params![subject, incarnation, actor, from],
         ).map_err(internal)?;
@@ -8735,24 +8735,14 @@ impl MissionsStore for Store {
         if input.kind != "harness.session-file" {
             return Err(FractalError::new("invalid-session-binding", "expected a native-session binding"));
         }
-        let incarnation = input.fields.get("incarnation_id").and_then(Value::as_str)
-            .ok_or_else(|| FractalError::new("invalid-session-binding", "an incarnation is required"))?;
-        let admission = |connection: &Connection| {
-            if current_harness_at(connection, &input.subject, None).map_err(internal)?
-                .is_some_and(|live| live.state == "ended" || live.incarnation_id != incarnation)
-            {
-                return Err(FractalError::new("stale-session-incarnation",
-                    "only the live incarnation may publish its native-session binding"));
-            }
-            Ok(())
-        };
+        // The standard binding append already checks the running incarnation under the writer
+        // lock before deduplication. Its follow-up keeps continuity proof and transfer there too.
         let then = |transaction: &Transaction<'_>, binding: &ClaimRecord| {
             rebind_native_session_leases_tx(transaction, &self.origin, binding)
         };
         let (claim, _) = append_claim_with_commit_context(
             &self.graph, input, None, None, None, None,
             ClaimCommitContext {
-                admission: Some(&admission),
                 then: Some(&then),
                 all_run_projections: true,
                 ..Default::default()

@@ -9902,6 +9902,48 @@
         "immutable": false,
         "reference": false
       },
+      "idle_after_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_declaration": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_eligible_since_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_enabled_at_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_frontier": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_wake_attempt": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "idle_wake_lineage": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "ignore_fit": {
         "value_type": "boolean",
         "required": false,
@@ -9945,6 +9987,12 @@
         "reference": false
       },
       "source_host": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "suspend_operation_id": {
         "value_type": "string",
         "required": false,
         "immutable": false,
