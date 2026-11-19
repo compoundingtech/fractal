@@ -73,8 +73,6 @@ pub struct Execution {
     /// Digest of the initial semantic submission, before host profile resolution.
     #[serde(default)]
     pub submission_digest: Option<String>,
-    #[serde(default)]
-    pub refusal_code: Option<resource_membership::RefusalCode>,
 }
 
 #[derive(Deserialize, Serialize)]
