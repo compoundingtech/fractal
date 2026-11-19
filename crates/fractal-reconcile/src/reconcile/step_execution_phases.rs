@@ -27,7 +27,7 @@ fn timeout_observed(claims: &[crate::model::ClaimRecord], view: &StepRunView, ex
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
-    fn record_step_exec_phase(&self, view: &StepRunView, desired: &DesiredSubject, phase: &str,
+    pub(super) fn record_step_exec_phase(&self, view: &StepRunView, desired: &DesiredSubject, phase: &str,
         at: u128, incarnation: Option<&str>, reason: Option<&str>) -> Result<()> {
         if desired.kind != "exec" || desired.member.as_ref().is_none_or(|member| member.terminal) {
             return Ok(());
@@ -62,7 +62,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn record_native_exec_phase(&self, desired: &DesiredSubject, phase: &str, at: u128,
+    pub(super) fn record_native_exec_phase(&self, desired: &DesiredSubject, phase: &str, at: u128,
         incarnation: Option<&str>) -> Result<()> {
         if desired.kind != "exec" { return Ok(()); }
         let Some(owner) = desired.owner_step.as_deref() else { return Ok(()); };
@@ -74,7 +74,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.record_step_exec_phase(&view, desired, phase, at, incarnation, None)
     }
 
-    fn record_native_exec_observation(&self, desired: &DesiredSubject, member: &MemberSpec,
+    pub(super) fn record_native_exec_observation(&self, desired: &DesiredSubject, member: &MemberSpec,
         observation: &RuntimeObservation) -> Result<()> {
         if desired.kind != "exec" || member.terminal || member.host != self.host {
             return Ok(());
@@ -130,7 +130,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         })?.and_then(|claim| claim.body["fields"]["exec_exited_at_unix_ms"].as_u64().map(u128::from)))
     }
 
-    fn native_step_execs(&self, view: &StepRunView) -> Result<Vec<DesiredSubject>> {
+    pub(super) fn native_step_execs(&self, view: &StepRunView) -> Result<Vec<DesiredSubject>> {
         Ok(self.store.desired_subjects_for_owner_step(&view.subject)?.into_iter()
             .filter(|desired| desired.kind == "exec"
                 && desired.owner_step.as_deref() == Some(view.subject.as_str())
@@ -140,7 +140,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// None leaves non-native work on its existing worker/wait clock. The executor's durable
     /// start and end bound native execution even if either claim arrives much later.
-    fn native_step_timed_out(&self, view: &StepRunView, timeout: u64) -> Result<Option<bool>> {
+    pub(super) fn native_step_timed_out(&self, view: &StepRunView, timeout: u64) -> Result<Option<bool>> {
         let execs = self.native_step_execs(view)?;
         if execs.is_empty() { return Ok(None); }
         let claims = self.store.claims_for(&view.subject, Some(KIND))?;
@@ -170,7 +170,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Dispatch/admission and result replication each get one unextended step budget. The
     /// coordinator also bounds the whole attempt to dispatch + execution + result budgets.
     /// A missing start/result is never evidence that an exec exceeded its execution budget.
-    fn expire_native_dispatch_budget(&self, view: &StepRunView, timeout: u64) -> Result<bool> {
+    pub(super) fn expire_native_dispatch_budget(&self, view: &StepRunView, timeout: u64) -> Result<bool> {
         let execs = self.native_step_execs(view)?;
         if execs.is_empty() { return Ok(false); }
         let claims = self.store.claims_for(&view.subject, Some(KIND))?;
