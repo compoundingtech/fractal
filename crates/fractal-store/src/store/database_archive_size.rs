@@ -1,11 +1,8 @@
 //! Separate local wire-archive capacity accounting. This never creates an archive or moves data.
 //! File lengths are not content-integrity/catalogue-coverage proof, nor physical allocated extents.
 use super::*;
-use anyhow::Context as _;
 use std::collections::HashMap;
 use std::fs;
-use rusqlite::OptionalExtension as _;
-use sha2::Digest as _;
 use serde::{Deserialize, Serialize};
 use crate::slo::{ArchiveBytes, ArchiveSizeStatus, DatabaseArchiveSize};
 
