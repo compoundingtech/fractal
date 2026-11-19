@@ -258,6 +258,9 @@ Each finding has `message`, `blocking`, and optional `path`/`line`; GO must agre
 of blocking findings. The parent requires claim-backed executions from that run-owned reviewer
 and a completed, nonempty harness incarnation. A standing seat, known author, mixed reviewer
 actors/incarnations, missing evidence, or mismatched binding fails with typed `ReviewError`.
+Program steps act as mission runs, not agent claimants; the exclusion set includes the native
+requester and assignee. The native child envelope binds executions to its generation, whose step
+namespace is distinct from the stable mission-run ID.
 
 For a PR, the **child publishes its own comment from its own active seat**, using
 `Fractal.reviewComment({ subject, rubric, verdict, reviewer, publication })` with its actual

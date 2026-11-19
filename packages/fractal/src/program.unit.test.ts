@@ -631,7 +631,7 @@ describe('native review lifecycle', () => {
   }
   const verdict = { verdict: 'GO', findings: [], head, commentId: 71 } as const
   const execution = {
-    id: 'claim/review', step_subject: 'step-run/review-child/review', attempt: 1,
+    id: 'claim/review', step_subject: 'step-run/review-generation/review', attempt: 1,
     agent: reviewer, incarnation_id: 'runtime-review', declared_model: 'requested',
     observed_models: ['actual'], fallback: null, started_at_unix_ms: 10,
     ended_at_unix_ms: 30, duration_ms: 20, status: 'completed',
@@ -653,6 +653,7 @@ describe('native review lifecycle', () => {
     readonly heads?: readonly string[]
     readonly author?: string
     readonly caller?: string
+    readonly assignee?: string
     readonly comment?: Readonly<Record<string, unknown>>
     readonly missingComment?: boolean
     readonly lane?: boolean
@@ -714,7 +715,8 @@ describe('native review lifecycle', () => {
       },
     })
     return { ...host, context: { ...host.context,
-      env: { ...host.context.env, ST_AGENT: config.caller ?? 'agent/run-1/author' } },
+      env: { ...host.context.env, ST_REQUESTER: config.caller ?? 'agent/run-1/author',
+        ST_ASSIGNEE: config.assignee ?? '', ST_RUN_GENERATION: 'gen-1' } },
       children, calls, resources, childExit, request,
       program: programFor(request),
     }
@@ -723,6 +725,8 @@ describe('native review lifecycle', () => {
   it.effect('accepts a reviewer-owned exact-head comment from one independent child and never posts', () =>
     Effect.gen(function* () {
       const host = setup()
+      expect(host.context.env.ST_AGENT).toBeUndefined()
+      expect(execution.step_subject).not.toContain('review-child')
       expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: verdict })
       expect(host.children).toHaveLength(1)
       expect(host.children[0]).toMatchObject({
@@ -826,7 +830,6 @@ describe('native review lifecycle', () => {
       for (const executions of [
         [], [{ ...execution, agent: 'agent/standing/reviewer' }],
         [{ ...execution, incarnation_id: null }], [{ ...execution, incarnation_id: '' }],
-        [{ ...execution, step_subject: 'step-run/review-child-other/review' }],
         [{ ...execution, status: 'failed' }],
         [execution, { ...execution, incarnation_id: 'another-runtime' }],
       ]) {
@@ -836,7 +839,7 @@ describe('native review lifecycle', () => {
         })
       }
       for (const config of [
-        { author: reviewer }, { caller: reviewer },
+        { author: reviewer }, { caller: reviewer }, { assignee: reviewer },
         { options: { ...options, authors: [reviewer] } },
       ]) {
         const host = setup(config)

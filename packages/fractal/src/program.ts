@@ -352,12 +352,8 @@ export const review = (options: ReviewOptions) => Effect.gen(function* () {
   const publication = reviewKey({ ...options, id: JSON.stringify([
     program.host.run, program.host.step, program.host.attempt, options.id,
   ]) })
-  const caller = program.host.env.ST_AGENT
-  if (caller === undefined || (program.host.env.FRACTAL_AGENT !== undefined &&
-    program.host.env.FRACTAL_AGENT !== caller))
-    return yield* Effect.fail(new ReviewError({
-      reason: 'not-independent', message: 'The calling actor must be explicit and unambiguous',
-    }))
+  // Program steps act as their run, not an agent claimant; native dispatch has no ST_AGENT.
+  const callers = [program.host.run, program.host.env.ST_REQUESTER, program.host.env.ST_ASSIGNEE]
 
   const github = <S extends Codec>(argv: readonly string[], schema: S) => Effect.gen(function* () {
     // Observations must not adopt an earlier lane execution's cached response on replay.
@@ -415,14 +411,15 @@ export const review = (options: ReviewOptions) => Effect.gen(function* () {
   const reviewer = `agent/${run}/${options.reviewer.seat}`
   const validActor = /^agent\/[A-Za-z0-9._/-]+$/.test(reviewer) &&
     !reviewer.split('/').some((part) => part === '' || part === '.' || part === '..')
+  // The native child envelope selects executions from this child's generation.
+  // Step namespaces use a generation ID, which is distinct from the stable run ID.
   const executions = done.executions ?? []
   const completed = executions.filter((execution) => execution.status === 'completed')
   if (run.length === 0 || !validActor || completed.length === 0 ||
-    executions.some((execution) => execution.agent !== reviewer ||
-      !execution.step_subject.startsWith(`step-run/${run}/`)) ||
+    executions.some((execution) => execution.agent !== reviewer) ||
     completed.some((execution) => execution.incarnation_id === null || execution.incarnation_id.length === 0) ||
     new Set(completed.map((execution) => execution.incarnation_id)).size !== 1 ||
-    [caller, author, ...(options.authors ?? [])].includes(reviewer))
+    [...callers, author, ...(options.authors ?? [])].includes(reviewer))
     return yield* Effect.fail(new ReviewError({
       reason: 'not-independent', message: 'Review needs a distinct run-owned reviewer with completed incarnation-bound execution evidence',
     }))
