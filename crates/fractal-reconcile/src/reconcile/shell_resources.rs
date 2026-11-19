@@ -31,6 +31,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }
             if matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
+                #[cfg(target_os = "macos")]
+                if let Some(workspace) = darwin_job_workspace(&execution.command.cwd, &execution.command.id) {
+                    match fs::remove_dir_all(&workspace) {
+                        Ok(()) => {},
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(error) => {
+                            execution.state = "refused".into();
+                            execution.reason = format!("darwin-workspace-leftover: {}: {error}", workspace.display());
+                        }
+                    }
+                }
                 let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
                 execution.ended_at.get_or_insert(now);
                 if execution.started_at.is_none() {
@@ -46,6 +57,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn shell_result_path(&self, id: &str) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Ok(execution) = self.store.shell_resource(id)
+            && let Some(workspace) = darwin_job_workspace(&execution.command.cwd, id) {
+            return workspace.join(".result.json");
+        }
         self.driver_state_dir.parent().unwrap_or(&self.driver_state_dir).join("resource-exec").join(format!("{id}.json"))
     }
 
@@ -332,6 +348,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let refusing = execution.state == "failing";
         let record = self.store.resource_membership_for_grant(&grant)?;
+        #[cfg(target_os = "macos")]
+        if !record.roots.iter().any(|root| root.runtime_id == execution.command.id) {
+            anyhow::ensure!(execution.command.parent.is_none(),
+                "darwin-custody-nested: nested shell roots cannot acquire a second slot");
+            let helper = fractal_runtime::darwin_slot::Helper::detect_in(&std::env::vars().collect())
+                .context("helperUnavailable: requested Darwin custody lane has no authorized helper")?;
+            let slot = helper.select_slot(&request.name, Path::new(&execution.command.cwd))?;
+            let workspace = slot.root().join(&execution.command.id);
+            fs::create_dir_all(&workspace).context("create Darwin job workspace")?;
+            anyhow::ensure!(!fs::symlink_metadata(&workspace)?.file_type().is_symlink()
+                && workspace.canonicalize()?.starts_with(slot.root().canonicalize()?),
+                "darwin-custody-workspace: job workspace escaped its admitted slot root");
+            if execution.command.cwd.is_empty() {
+                execution.command.cwd = workspace.to_string_lossy().into_owned();
+            }
+            execution.command.environment.insert("FRACTAL_JOB_WORKSPACE".into(), workspace.to_string_lossy().into_owned());
+            execution.command.environment.insert(fractal_runtime::darwin_slot::HELPER_ENV.into(),
+                helper.path().to_string_lossy().into_owned());
+            if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+        }
         let result_path = self.shell_result_path(&execution.command.id);
         let newly_started = !record.roots.iter().any(|root| root.runtime_id == execution.command.id);
         if newly_started {
@@ -468,4 +504,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_job_workspace(cwd: &str, id: &str) -> Option<PathBuf> {
+    use fractal_runtime::darwin_slot::Slot;
+    [Slot::Heavy1, Slot::Gate1, Slot::Gate2, Slot::Gate3, Slot::Eval1].into_iter()
+        .map(|slot| slot.root().to_path_buf())
+        .find(|root| Path::new(cwd).starts_with(root))
+        .map(|root| root.join(id))
 }

@@ -31,12 +31,15 @@ pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> b
     }
 }
 
-fn require_exec_platform(macos: bool) -> Result<(), ApiError> {
-    if macos {
-        return Err(ApiError::bad(FractalError::new("unsupported-platform",
-            "resources exec is unavailable on macOS: no whole-tree retirement proof")));
+fn require_exec_platform(macos: bool, lane: &str, helper: bool) -> Result<u32, ApiError> {
+    if !macos { return Ok(1); }
+    let slots = fractal_runtime::darwin_slot::Slot::for_lane(lane)
+        .map_err(|error| ApiError::bad(FractalError::new("darwin-custody-lane", error.to_string())))?;
+    if !helper {
+        return Err(ApiError::bad(FractalError::new("helperUnavailable",
+            "requested Darwin custody lane has no authorized helper")));
     }
-    Ok(())
+    Ok(slots.len() as u32)
 }
 
 /// A run credential owns its exact attempt; an agent additionally owns its native invocation.
@@ -132,7 +135,8 @@ pub(super) struct ListQuery {
 pub(super) struct WaitQuery { after: u64 }
 
 pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
-    require_exec_platform(cfg!(target_os = "macos"))?;
+    let max_members = require_exec_platform(cfg!(target_os = "macos"), &command.lane.name,
+        !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some())?;
     (|| -> anyhow::Result<()> {
         anyhow::ensure!(command.lane.profile_estimate.is_none(), "resource profile estimates are host-owned");
         anyhow::ensure!(command.argv.iter().all(|arg| !arg.contains('\0')), "resource execution argv cannot contain NUL");
@@ -140,7 +144,9 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
         let id = format!("shell:{}", command.id);
         anyhow::ensure!(command.lane.id == id && command.lane.owner.run == id && command.lane.owner.step == id
             && command.lane.owner.attempt == 1 && command.lane.owner.invocation.as_deref() == Some(id.as_str())
-            && command.lane.max_members > 0, "invalid shell execution owner");
+            && command.lane.max_members > 0
+            && (!cfg!(target_os = "macos") || command.lane.max_members == max_members),
+            "invalid shell execution owner or lane capacity");
         anyhow::ensure!(uuid::Uuid::parse_str(&command.id).is_ok(), "shell execution identity must be a UUID");
         Ok(())
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
@@ -623,11 +629,13 @@ mod tests {
     }
 
     #[test]
-    fn macos_exec_requires_whole_tree_retirement_proof() {
-        let error = require_exec_platform(true).unwrap_err();
-        assert_eq!(error.code, "unsupported-platform");
-        assert!(error.message.contains("no whole-tree retirement proof"));
-        assert!(require_exec_platform(false).is_ok());
+    fn macos_exec_requires_custody_without_refusing_linux() {
+        assert_eq!(require_exec_platform(true, "gate", true).unwrap(), 3);
+        assert_eq!(require_exec_platform(true, "heavy", true).unwrap(), 1);
+        assert_eq!(require_exec_platform(true, "eval", true).unwrap(), 1);
+        assert_eq!(require_exec_platform(true, "gate", false).unwrap_err().code, "helperUnavailable");
+        assert_eq!(require_exec_platform(true, "other", true).unwrap_err().code, "darwin-custody-lane");
+        assert_eq!(require_exec_platform(false, "anything", false).unwrap(), 1);
         assert!(!allows_bound_request(&axum::http::Method::HEAD, "/v1/internal/resources"));
     }
 
@@ -779,7 +787,7 @@ mod tests {
             let (status, body) = bound_request(&state,bound_agent,run_credential,"POST","/v1/internal/resources/exec",serde_json::to_value(command).unwrap()).await;
             if cfg!(target_os = "macos") {
                 assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
-                assert_eq!(body["code"],"unsupported-platform");
+                assert_eq!(body["code"],"darwin-custody-lane");
                 assert!(state.store.shell_resource(&id).is_err());
             } else {
                 assert_eq!(status,StatusCode::OK,"{body}");
