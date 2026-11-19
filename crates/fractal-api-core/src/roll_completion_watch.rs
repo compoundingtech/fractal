@@ -300,12 +300,12 @@ mod tests {
         let declaration = publish_fixture(&store, Receipt::RollDeclared {
             version: 1, roll_id: "reactive".into(), declared_at_ms: now - 100,
             targets: [("host-a".into(), target.clone())].into(),
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         publish_fixture(&store, Receipt::HostTargetResolved {
             version: 1, roll_id: "reactive".into(), declared_at_ms: now - 100,
             host: "host-a".into(), target, expected_system_path: "/nix/store/system".into(),
             expected_home_path: "/nix/store/home".into(), declaration_claim_id: declaration,
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let row = roll_completion::row(&store, now + 1);
@@ -318,7 +318,7 @@ mod tests {
         }).await.unwrap();
         // Remove the source authority after a valid result was cached. A
         // subsequent commit must remove good coverage without daemon restart.
-        let source = "version 2\nagent \"roll-authority\" {\n command \"true\"\n host \"host-a\"\n}\n".to_owned();
+        let source = "version 2\nagent \"example/roll-authority\" {\n command \"true\"\n host \"host-a\"\n}\n".to_owned();
         let intent = crate::graph::parse_intent(&source, store.origin()).unwrap();
         let preview = store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
         store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
@@ -350,12 +350,12 @@ mod tests {
         let declaration = publish_fixture(&store, Receipt::RollDeclared {
             version: 1, roll_id: "automatic".into(), declared_at_ms: now - 100,
             targets: [("host-a".into(), target.clone())].into(),
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         publish_fixture(&store, Receipt::HostTargetResolved {
             version: 1, roll_id: "automatic".into(), declared_at_ms: now - 100,
             host: "host-a".into(), target, expected_system_path: "/nix/store/system".into(),
             expected_home_path: "/nix/store/home".into(), declaration_claim_id: declaration,
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         let mut frontier = Frontier::default();
         frontier.refresh(&store).unwrap();
         let count = || store.readers.get().query_row(

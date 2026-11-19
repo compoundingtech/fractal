@@ -38,10 +38,10 @@ fn runs_since(store: &Store, config: &SourceConfig, after: Option<u64>) -> Resul
     // No phase/status predicate: terminal, pending and held runs are obligations.
     static SQL: LazyLock<String> = LazyLock::new(|| smallclaims::store::canonical_sql(
         "SELECT r.id,r.created_at_unix_ms,r.inputs,
-            (SELECT c.id FROM claims c WHERE c.subject='mission-run/' || r.id
-             AND c.kind='mission-run.created'
-             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=c.id AND state='repaired')
-             ORDER BY CANONICAL_ASC(c) LIMIT 1)
+            (SELECT created.id FROM claims created WHERE created.subject='mission-run/' || r.id
+             AND created.kind='mission-run.created'
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=created.id AND state='repaired')
+             ORDER BY CANONICAL_ASC(created) LIMIT 1)
          FROM mission_runs r WHERE r.mission_id>=?1 AND r.mission_id<?2
          ORDER BY r.created_at_unix_ms,r.id",
     ));
@@ -395,10 +395,10 @@ mod tests {
         setup_signer(&store);
         roll_completion::install(&store, root.path()).unwrap();
         let enabled = publish_fixture(&store, Receipt::SourceEnabled {
-            version: 1, producer: "agent/roll-authority".into(), enabled_at_ms: now_ms().unwrap(),
+            version: 1, producer: "agent/example/roll-authority".into(), enabled_at_ms: now_ms().unwrap(),
             mission_prefix: "fleet/roll/".into(), resource_input: "main".into(),
             revision_fact: "head".into(), roll_id_prefix: "dotfiles/".into(),
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         roll_completion::ingest(&store, SignedReceipt { claim_id: enabled }, now_ms().unwrap()).unwrap();
         let source = r#"version 2
 mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
@@ -423,7 +423,7 @@ mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
         store.set_write_clock_at(u128::from(now_ms().unwrap() + 10_000)).unwrap();
         let run = store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "fleet/roll/intent-proof".into(), revision: None, workspace: "/tmp".into(),
-            requester: Some("agent/roll-authority".into()), mode: Some("run".into()),
+            requester: Some("agent/example/roll-authority".into()), mode: Some("run".into()),
             inputs: BTreeMap::from([("main".into(), format!("{}@{}", resource.subject, resource.id))]),
             idempotency_key: "source-intent-proof".into(),
         }).unwrap();
@@ -434,6 +434,10 @@ mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
             [&run.subject], |row| row.get(0),
         ).unwrap();
         let creation = store.claim_by_id(&creation_id).unwrap().unwrap();
+        let captured = runs(&store, &config()).unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].creation.as_deref(), Some(creation_id.as_str()),
+            "full census must select the canonical creation through a supported ordering alias");
         let creation_index: u64 = store.readers.get().query_row(
             "SELECT store_index FROM claims WHERE id=?1", [&creation_id], |row| row.get(0),
         ).unwrap();
@@ -460,7 +464,7 @@ mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
                 dotfiles_revision: revision.clone(), daemon_revision: "b".repeat(40),
                 system_path: None, home_path: None,
             })]),
-        }, Some("agent/roll-authority"));
+        }, Some("agent/example/roll-authority"));
         roll_completion::ingest(&store, SignedReceipt { claim_id: declaration.clone() }, accepted + 200).unwrap();
         let blocked = census(&store, &config, accepted + 200).unwrap().unwrap();
         assert_eq!(blocked.through, accepted - 1);
@@ -476,7 +480,7 @@ mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
 
     fn config() -> SourceConfig {
         SourceConfig {
-            producer: "agent/roll-authority".into(), source_claim_id: "source-enabled".into(),
+            producer: "agent/example/roll-authority".into(), source_claim_id: "source-enabled".into(),
             enabled_at_ms: 100, mission_prefix: "mission/fleet/roll/".into(),
             resource_input: "main".into(), revision_fact: "head".into(), roll_id_prefix: "dotfiles/".into(),
         }

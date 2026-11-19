@@ -126,12 +126,14 @@ pub struct SourceConfig {
     pub revision_fact: String,
     pub roll_id_prefix: String,
 }
+type ObservationHistory = BTreeMap<u64, (Adoption, Option<Box<Verification>>)>;
+
 struct Roll {
     declared_at_ms: u64,
     intent_onset_ms: u64,
     targets: BTreeMap<String, Identity>,
     resolutions: BTreeMap<String, (String, String)>,
-    observations: BTreeMap<String, BTreeMap<u64, (Adoption, Option<Box<Verification>>)>>,
+    observations: BTreeMap<String, ObservationHistory>,
     first_verified: BTreeMap<String, u64>,
     completed_at_ms: Option<u64>,
     first_miss_at_ms: Option<u64>,
@@ -478,8 +480,7 @@ pub fn install(store: &Store, state_dir: &Path) -> Result<()> {
     let connection = Connection::open(state_dir.join("roll-signed-receipts.sqlite3"))?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h854866002229 owner=fractal_api_core::roll_completion TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS receipts (sequence INTEGER PRIMARY KEY, receipt_key TEXT NOT NULL UNIQUE, claim_id TEXT NOT NULL, accepted_at_ms INTEGER NOT NULL);")?;
-    let mut registry = Registry::default();
-    registry.membership = membership(store)?;
+    let mut registry = Registry { membership: membership(store)?, ..Registry::default() };
     {
         let mut statement = connection.prepare("SELECT claim_id, accepted_at_ms FROM receipts ORDER BY sequence")?;
         let mut records = statement.query([])?;
@@ -826,8 +827,7 @@ pub fn rebuild(store: &Store) -> Result<()> {
     let Some(connection) = writer.as_ref() else { return Ok(()); };
     let mut statement = connection.prepare("SELECT claim_id, accepted_at_ms FROM receipts ORDER BY sequence")?;
     let mut records = statement.query([])?;
-    let mut registry = Registry::default();
-    registry.membership = membership(store)?;
+    let mut registry = Registry { membership: membership(store)?, ..Registry::default() };
     while let Some(record) = records.next()? {
         let id: String = record.get(0)?;
         let accepted_at: u64 = record.get(1)?;

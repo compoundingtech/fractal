@@ -170,7 +170,7 @@ async fn api_ingestion_publishes_immediately_and_signals_native_readers() {
     let state = crate::api::tests_shared::state(root.path());
     install(&state.store, root.path()).unwrap();
     let mut changes = state.event_notify.subscribe();
-    let id = publish_fixture(&state.store, declaration("roll", &["host-a"]), Some("agent/roll-authority"));
+    let id = publish_fixture(&state.store, declaration("roll", &["host-a"]), Some("agent/example/roll-authority"));
     let accepted = crate::api::operations::ingest_roll(
         State(state.clone()), Json(SignedReceipt { claim_id: id })).await.unwrap().0;
     assert_eq!(accepted["changed"], true);
@@ -180,7 +180,7 @@ async fn api_ingestion_publishes_immediately_and_signals_native_readers() {
     let row = rows.iter().find(|row| row["id"] == OBJECTIVE).unwrap();
     assert_eq!(row["measurement"]["accepted_declarations"], 1);
     assert_eq!(row["measurement"]["unknown_open_rolls"], 1);
-    let id = publish_fixture(&state.store, declaration("roll", &["host-b"]), Some("agent/roll-authority"));
+    let id = publish_fixture(&state.store, declaration("roll", &["host-b"]), Some("agent/example/roll-authority"));
     let error = crate::api::operations::ingest_roll(
         State(state), Json(SignedReceipt { claim_id: id })).await.unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
@@ -246,8 +246,10 @@ pub(crate) fn setup_signer(store: &Store) {
     store.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
     store.pin_fleet_anchor(KEY.public()).unwrap();
     store.set_member_key(Some(KEY.clone())).unwrap();
+    // Slash-qualified identity is placement-independent. A simple name becomes
+    // agent/{host}.roll-authority and cannot authorize the separately signed principal.
     let source = format!(r#"version 2
-agent "roll-authority" {{
+agent "example/roll-authority" {{
   command "true"
   host "{}"
   resource "roll-authority" subject="resource/fleet/roll-completion" reason="Declare rolls"
@@ -256,7 +258,7 @@ agent "roll-authority" {{
     let intent = crate::graph::parse_intent(&source, store.origin()).unwrap();
     let preview = store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
     store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
-    store.ensure_principal_key("agent/roll-authority").unwrap();
+    store.ensure_principal_key("agent/example/roll-authority").unwrap();
 }
 
 pub(crate) fn publish_fixture(store: &Store, receipt: Receipt, actor: Option<&str>) -> String {
@@ -288,12 +290,31 @@ pub(crate) fn ingest_fixture(store: &Store, receipt: Receipt, now: u64) -> Resul
         let resolution = Receipt::HostTargetResolved { version: 1, roll_id: roll_id.clone(), declared_at_ms: *declared_at_ms,
             host: host.clone(), target: target.clone(), expected_system_path: proof.expected_system_path.clone(),
             expected_home_path: proof.expected_home_path.clone(), declaration_claim_id };
-        let id = publish_fixture(store, resolution, Some("agent/roll-authority"));
+        let id = publish_fixture(store, resolution, Some("agent/example/roll-authority"));
         ingest(store, SignedReceipt { claim_id: id }, now)?;
     }
-    let actor = if matches!(receipt, Receipt::HostObserved { .. } | Receipt::SourceFrontier { .. }) { None } else { Some("agent/roll-authority") };
+    let actor = if matches!(receipt, Receipt::HostObserved { .. } | Receipt::SourceFrontier { .. }) { None } else { Some("agent/example/roll-authority") };
     let id = publish_fixture(store, receipt, actor);
     ingest(store, SignedReceipt { claim_id: id }, now)
+}
+
+#[test]
+fn declared_native_authority_binds_the_exact_canonical_signer() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("host-a").unwrap();
+    install(&store, root.path()).unwrap();
+    setup_signer(&store);
+    assert_eq!(store.declared_resource_referrers(RESOURCE).unwrap(), vec![json!({
+        "owner": "agent/example/roll-authority", "name": "roll-authority", "reason": "Declare rolls"
+    })]);
+    // A verified key with a similar but undeclared identity is not the bound role.
+    let unbound = publish_fixture(&store, declaration("canonical", &["host-a"]), Some("agent/roll-authority"));
+    assert_eq!(store.claim_authorization(&unbound).unwrap().verdict, smallclaims::principal::Verdict::Verified);
+    assert!(ingest(&store, SignedReceipt { claim_id: unbound }, START).is_err());
+    let declared = publish_fixture(&store, declaration("canonical", &["host-a"]), Some("agent/example/roll-authority"));
+    assert!(!dependencies_pending(&store, &declared).unwrap());
+    ingest(&store, SignedReceipt { claim_id: declared }, START).unwrap();
+    assert_eq!(row(&store, START)["measurement"]["accepted_declarations"], 1);
 }
 
 #[test]
@@ -313,7 +334,7 @@ fn signed_wrong_principal_and_cross_host_cannot_assert_adoption() {
     let store = Store::open_memory("host-a").unwrap();
     install(&store, root.path()).unwrap();
     ingest_fixture(&store, declaration("roll", &["host-a", "host-b"]), START).unwrap();
-    let forged = publish_fixture(&store, observation("roll", "host-a", START + 1, Adoption::Verified), Some("agent/roll-authority"));
+    let forged = publish_fixture(&store, observation("roll", "host-a", START + 1, Adoption::Verified), Some("agent/example/roll-authority"));
     assert!(ingest(&store, SignedReceipt { claim_id: forged }, START + 1).is_err());
     let foreign = publish_fixture(&store, observation("roll", "host-b", START + 1, Adoption::Verified), None);
     assert!(ingest(&store, SignedReceipt { claim_id: foreign }, START + 1).is_err());
@@ -333,7 +354,7 @@ async fn public_claim_api_cannot_mint_host_evidence_or_unbound_declarations() {
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_string(&declaration("raw-file", &["host-a"])).unwrap())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    for actor in [None, Some("agent/roll-authority")] {
+    for actor in [None, Some("agent/example/roll-authority")] {
         for receipt in [declaration("poison", &["host-a"]), observation("poison", "host-a", START + 1, Adoption::Verified)] {
             let body = json!({"subject":format!("{RESOURCE}/poison/host-a/1"), "kind":"resource.observed",
                 "actor":actor, "fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"observed","facts":receipt}});
@@ -345,15 +366,15 @@ async fn public_claim_api_cannot_mint_host_evidence_or_unbound_declarations() {
     }
     // Even the legitimate bound authority cannot ask the generic API to mint host proof.
     let body = json!({"subject":format!("{RESOURCE}/poison/node/1"),"kind":"resource.observed",
-        "actor":"agent/roll-authority","fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"observed",
+        "actor":"agent/example/roll-authority","fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"observed",
         "facts":observation("poison", "node", START + 1, Adoption::Verified)}});
     let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
-        .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+        .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
         .header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
     assert!(!response.status().is_success());
     // The same bound producer may publish and admit a legitimate declaration after spoof attempts.
     let body = json!({"subject":format!("{RESOURCE}/poison/declaration"),"kind":"resource.observed",
-        "actor":"agent/roll-authority","fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"declared",
+        "actor":"agent/example/roll-authority","fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"declared",
         "facts":declaration("poison", &["node"])}});
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/claims")
         .extension(crate::api::BoundAgent("agent/roll-authority".into()))
@@ -533,7 +554,7 @@ fn stale_or_short_history_retains_diagnostics_without_budget_eligibility() {
     let stale = render(&registry, true, now + FRONTIER_FRESHNESS_MS + 1);
     assert_eq!(stale["status"], "no-data");
     assert_eq!(stale["measurement"]["windows"][0]["bad"], 1.0);
-    registry.source_accepted_at.insert("agent/roll-authority".into(), now - DAY);
+    registry.source_accepted_at.insert("agent/example/roll-authority".into(), now - DAY);
     assert_eq!(render(&registry, true, now)["status"], "no-data");
 }
 
@@ -542,8 +563,8 @@ fn frontier_waits_for_positive_receipt_and_its_predecessor_before_source_admissi
     let now = START + DAY + 10;
     let mut registry = Registry::default();
     complete_source_fixture(&mut registry, now - 2);
-    let receipt = Receipt::SourceFrontier { version: 1, producer: "agent/roll-authority".into(),
-        host: "host-a".into(), members: vec!["agent/roll-authority".into()],
+    let receipt = Receipt::SourceFrontier { version: 1, producer: "agent/example/roll-authority".into(),
+        host: "host-a".into(), members: vec!["agent/example/roll-authority".into()],
         hosts: registry.membership.hosts.clone(), source_claim_id: "enable".into(),
         covered_from_ms: 0, through_ms: now, previous_frontier_claim_id: Some(format!("frontier-{}", now - 2)),
         source_index: 2, source_lifetime: "database:1".into(), receipt_claim_ids: vec!["positive-host-observation".into()] };
@@ -563,27 +584,27 @@ async fn generic_claim_api_never_signs_source_frontiers_even_for_bound_authority
     setup_signer(&state.store);
     install(&state.store, root.path()).unwrap();
     let app = crate::api::router(state.clone());
-    for actor in [None, Some("agent/roll-authority")] {
-        let body = json!({"subject":format!("{RESOURCE}/sources/agent/roll-authority/node/frontier/1"),
+    for actor in [None, Some("agent/example/roll-authority")] {
+        let body = json!({"subject":format!("{RESOURCE}/sources/agent/example/roll-authority/node/frontier/1"),
             "kind":"resource.observed","actor":actor,
             "fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"source-closed",
-                "facts":{"version":1,"kind":"source-frontier","producer":"agent/roll-authority",
-                    "host":"node","hosts":{},"members":["agent/roll-authority"],
+                "facts":{"version":1,"kind":"source-frontier","producer":"agent/example/roll-authority",
+                    "host":"node","hosts":{},"members":["agent/example/roll-authority"],
                     "source_claim_id":"invented","covered_from_ms":0,"through_ms":1,
                     "previous_frontier_claim_id":null,"source_index":1,"receipt_claim_ids":[]}}});
         let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
-            .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+            .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
             .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
         assert!(!response.status().is_success());
     }
-    let enabled = Receipt::SourceEnabled { version:1,producer:"agent/roll-authority".into(),
+    let enabled = Receipt::SourceEnabled { version:1,producer:"agent/example/roll-authority".into(),
         enabled_at_ms:0,mission_prefix:"demo/roll/".into(),resource_input:"main".into(),
         revision_fact:"head".into(),roll_id_prefix:"demo/".into() };
-    let body = json!({"subject":format!("{RESOURCE}/sources/agent/roll-authority/enabled"),
-        "kind":"resource.observed","actor":"agent/roll-authority",
+    let body = json!({"subject":format!("{RESOURCE}/sources/agent/example/roll-authority/enabled"),
+        "kind":"resource.observed","actor":"agent/example/roll-authority",
         "fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"enabled","facts":enabled}});
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/claims")
-        .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+        .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
         .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
     assert!(response.status().is_success());
     let claim: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
@@ -608,9 +629,9 @@ fn native_source_fixture(store: &Store) -> SourceConfig {
     let key = store.claim_authorization(&claim.id).unwrap().signature.unwrap().key;
     store.admit_fleet_anchor("7c9e6679-7425-40de-944b-e07fc1f90ae7", &key, "listening").unwrap();
     store.judge_claims(true).unwrap();
-    let id = publish_fixture(store, Receipt::SourceEnabled { version: 1, producer: "agent/roll-authority".into(),
+    let id = publish_fixture(store, Receipt::SourceEnabled { version: 1, producer: "agent/example/roll-authority".into(),
         enabled_at_ms: 0, mission_prefix: "demo/roll/".into(), resource_input: "main".into(),
-        revision_fact: "head".into(), roll_id_prefix: "demo/".into() }, Some("agent/roll-authority"));
+        revision_fact: "head".into(), roll_id_prefix: "demo/".into() }, Some("agent/example/roll-authority"));
     let now = store.claim_by_id(&id).unwrap().unwrap().accepted_at_unix_ms as u64;
     ingest(store, SignedReceipt { claim_id: id }, now).unwrap();
     source_configs(store).unwrap().pop().unwrap()
@@ -666,7 +687,7 @@ fn native_frontier_serializes_behind_snapshot_races_and_fences_cached_old_clock_
     let through = config.enabled_at_ms + 10_000;
     // This accepted source event was absent from the snapshot but has an older
     // canonical acceptance clock. A frontier must not certify the captured cut.
-    publish_fixture(&store, declaration("queued-old-clock", &["host-a"]), Some("agent/roll-authority"));
+    publish_fixture(&store, declaration("queued-old-clock", &["host-a"]), Some("agent/example/roll-authority"));
     assert!(publish_frontier(&store, &config, config.enabled_at_ms, through, captured, &crate::roll_source::source_lifetime(&store).unwrap(), through + 1).is_err());
     ingest_fixture(&store, declaration("queued-old-clock", &["host-a"]), through).unwrap();
     let captured = store.index().unwrap();
@@ -675,7 +696,7 @@ fn native_frontier_serializes_behind_snapshot_races_and_fences_cached_old_clock_
     publish_frontier(&store, &config, config.enabled_at_ms, through, captured, &crate::roll_source::source_lifetime(&store).unwrap(), through + 1).unwrap();
     assert_eq!(authority_cut(&store).unwrap(), token, "verified quiet frontiers must not replay retained authority history");
     store.set_write_clock_at(1).unwrap();
-    let later = publish_fixture(&store, declaration("after-fence", &["host-a"]), Some("agent/roll-authority"));
+    let later = publish_fixture(&store, declaration("after-fence", &["host-a"]), Some("agent/example/roll-authority"));
     assert!(store.claim_by_id(&later).unwrap().unwrap().accepted_at_unix_ms > u128::from(through),
         "a writer prepared with an old cached clock cannot backdate behind a sealed source cut");
 }
@@ -692,7 +713,7 @@ fn native_receipt_backlog_chunks_without_truncating_same_millisecond_coverage() 
         let roll = format!("chunk-{index}");
         ids.push(store.append_claim(&crate::model::ClaimInput {
             subject: format!("{RESOURCE}/{roll}/declaration"), kind: "resource.observed".into(),
-            actor: Some("agent/roll-authority".into()),
+            actor: Some("agent/example/roll-authority".into()),
             fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
                 ("state".into(), json!("declared")), ("facts".into(), serde_json::to_value(declaration(&roll, &["host-a"])).unwrap())]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -734,14 +755,14 @@ fn equivalent_signed_enrollment_preserves_epoch_and_recovers_after_key_rotation_
         original = native_source_fixture(&store);
         enrollment = serde_json::from_value::<Receipt>(store.claim_by_id(&original.source_claim_id)
             .unwrap().unwrap().body["fields"]["facts"].clone()).unwrap();
-        let duplicate = publish_fixture(&store, enrollment.clone(), Some("agent/roll-authority"));
+        let duplicate = publish_fixture(&store, enrollment.clone(), Some("agent/example/roll-authority"));
         assert_ne!(duplicate, original.source_claim_id);
         let now = store.claim_by_id(&duplicate).unwrap().unwrap().accepted_at_unix_ms as u64;
         assert_eq!(ingest(&store, SignedReceipt { claim_id: duplicate }, now).unwrap()["changed"], false);
         assert_eq!(source_configs(&store).unwrap()[0].source_claim_id, original.source_claim_id);
         assert_eq!(source_configs(&store).unwrap()[0].enabled_at_ms, original.enabled_at_ms);
         let key = store.claim_authorization(&original.source_claim_id).unwrap().signature.unwrap().key;
-        store.revoke_device_key("agent/roll-authority", &key, "demo key rotation").unwrap();
+        store.revoke_device_key("agent/example/roll-authority", &key, "demo key rotation").unwrap();
         store.seal_local_batches().unwrap();
         store.judge_claims(true).unwrap();
         rebuild(&store).unwrap();
@@ -752,7 +773,7 @@ fn equivalent_signed_enrollment_preserves_epoch_and_recovers_after_key_rotation_
     let store = Store::open(&path, "host-a").unwrap();
     setup_signer(&store);
     install(&store, root.path()).unwrap();
-    let renewed = publish_fixture(&store, enrollment, Some("agent/roll-authority"));
+    let renewed = publish_fixture(&store, enrollment, Some("agent/example/roll-authority"));
     let accepted = store.claim_by_id(&renewed).unwrap().unwrap().accepted_at_unix_ms as u64;
     ingest(&store, SignedReceipt { claim_id: renewed.clone() }, accepted).unwrap();
     rebuild(&store).unwrap();
@@ -878,10 +899,10 @@ async fn bound_public_declaration_api_rejects_removed_factory_field_including_nu
         let mut facts = serde_json::to_value(declaration("removed-field", &["node"])).unwrap();
         facts["targets"]["node"]["factory_revision"] = removed;
         let body = json!({"subject":format!("{RESOURCE}/removed-field/declaration"),
-            "kind":"resource.observed","actor":"agent/roll-authority",
+            "kind":"resource.observed","actor":"agent/example/roll-authority",
             "fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"declared","facts":facts}});
         let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
-            .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+            .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
             .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -891,12 +912,12 @@ async fn bound_public_declaration_api_rejects_removed_factory_field_including_nu
 fn earlier_native_intent_refines_effective_onset_without_rewriting_immutable_declaration() {
     let mut registry = Registry::default();
     let declared = declaration("same-target", &["host-a"]);
-    record_source(&mut registry, declared, "immutable-declaration", "agent/roll-authority", START);
+    record_source(&mut registry, declared, "immutable-declaration", "agent/example/roll-authority", START);
     let verified = START + DAY - 3_600_000;
     registry.accept(observation("same-target", "host-a", verified, Adoption::Verified), verified).unwrap();
     assert_eq!(sample(&registry,"same-target",verified),Some((verified,false)));
     let earlier = START - 2 * 3_600_000;
-    let onset = Receipt::IntentObserved { version:1,producer:"agent/roll-authority".into(),
+    let onset = Receipt::IntentObserved { version:1,producer:"agent/example/roll-authority".into(),
         host:"host-b".into(),roll_id:"same-target".into(),source_claim_id:"source".into(),
         declaration_claim_id:"immutable-declaration".into(),intent_claim_id:"original-earlier-run".into(),intent_at_ms:earlier };
     registry.accept(onset.clone(),verified).unwrap();
@@ -905,7 +926,7 @@ fn earlier_native_intent_refines_effective_onset_without_rewriting_immutable_dec
     assert_eq!(registry.declaration_ids["same-target"],"immutable-declaration");
     assert_eq!(sample(&registry,"same-target",verified),Some((earlier+DAY,true)));
     assert!(!registry.accept(onset,verified).unwrap());
-    let later = Receipt::IntentObserved { version:1,producer:"agent/roll-authority".into(),
+    let later = Receipt::IntentObserved { version:1,producer:"agent/example/roll-authority".into(),
         host:"host-a".into(),roll_id:"same-target".into(),source_claim_id:"source".into(),
         declaration_claim_id:"immutable-declaration".into(),intent_claim_id:"original-later-run".into(),intent_at_ms:START+1 };
     registry.accept(later,verified).unwrap();
@@ -920,15 +941,15 @@ async fn bound_public_claim_api_cannot_sign_native_intent_onset_even_with_real_a
     let state = crate::api::tests_shared::state(root.path());
     setup_signer(&state.store);
     let app = crate::api::router(state);
-    for actor in [None,Some("agent/roll-authority")] {
-        let facts = Receipt::IntentObserved { version:1,producer:"agent/roll-authority".into(),
+    for actor in [None,Some("agent/example/roll-authority")] {
+        let facts = Receipt::IntentObserved { version:1,producer:"agent/example/roll-authority".into(),
             host:"node".into(),roll_id:"forged-onset".into(),source_claim_id:"source".into(),
             declaration_claim_id:"declaration".into(),intent_claim_id:"invented-run".into(),intent_at_ms:0 };
         let body = json!({"subject":format!("{RESOURCE}/forged-onset/intents/node/invented-run"),
             "kind":"resource.observed","actor":actor,"fields":{"kind":"custom.fractal.fleet-roll-receipt",
                 "state":"intent-observed","facts":facts}});
         let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
-            .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+            .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
             .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
         assert!(!response.status().is_success());
     }
@@ -942,13 +963,13 @@ fn version_one_receipt_corpus_round_trips_every_existing_resource_fact_variant()
             host:"host-a".into(),target:target(),expected_system_path:"/nix/store/system".into(),
             expected_home_path:"/nix/store/home".into(),declaration_claim_id:"declaration".into() },
         observation("corpus","host-a",START+1,Adoption::Verified),
-        Receipt::IntentObserved { version:1,producer:"agent/roll-authority".into(),host:"host-a".into(),
+        Receipt::IntentObserved { version:1,producer:"agent/example/roll-authority".into(),host:"host-a".into(),
             roll_id:"corpus".into(),source_claim_id:"source".into(),declaration_claim_id:"declaration".into(),
             intent_claim_id:"native-creation".into(),intent_at_ms:START-1 },
-        Receipt::SourceEnabled { version:1,producer:"agent/roll-authority".into(),enabled_at_ms:0,
+        Receipt::SourceEnabled { version:1,producer:"agent/example/roll-authority".into(),enabled_at_ms:0,
             mission_prefix:"demo/roll/".into(),resource_input:"main".into(),revision_fact:"head".into(),roll_id_prefix:"demo/".into() },
-        Receipt::SourceFrontier { version:1,producer:"agent/roll-authority".into(),host:"host-a".into(),
-            hosts:BTreeMap::from([("host-a".into(),"public-key".into())]),members:vec!["agent/roll-authority".into()],
+        Receipt::SourceFrontier { version:1,producer:"agent/example/roll-authority".into(),host:"host-a".into(),
+            hosts:BTreeMap::from([("host-a".into(),"public-key".into())]),members:vec!["agent/example/roll-authority".into()],
             source_claim_id:"source".into(),covered_from_ms:0,through_ms:START,previous_frontier_claim_id:None,
             source_index:1,source_lifetime:"database:1".into(),receipt_claim_ids:vec!["native-onset-proof".into()] },
     ];
