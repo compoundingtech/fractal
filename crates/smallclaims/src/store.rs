@@ -8441,6 +8441,10 @@ impl Store {
         if let Some(generation) = generation {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
+        // Admission has returned every writer loan and released its admission mutex. Drain
+        // deferred preparation through paced background loans, including persisted work at
+        // startup; installations with no checkpoint/trim worker must not strand stale rows.
+        self.rebuild_deferred_paced()?;
         Ok(admission)
     }
 

@@ -144,6 +144,7 @@ fn prepare_payload(
             )
         })?;
     let batch = &payload.batch;
+    crate::receive_metrics::envelope_size(batch.claims.len(), payload_bytes.len());
     if batch.origin != envelope.writer
         || batch.replica_sequence != envelope.sequence
         || batch.previous_hash != envelope.previous_hash
