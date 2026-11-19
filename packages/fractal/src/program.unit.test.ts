@@ -77,7 +77,7 @@ describe('pull request waits', () => {
         const caught = Fractal.mission(
           {
             meta, id: 'factory/test', goal: 'Handle missing PR.', reportTo,
-            input: Change, output: Schema.String,
+            input: Change, output: Schema.Union(AwaitPrOutcome, Schema.String),
           },
           () => Fractal.awaitPr(request).pipe(
             Effect.catchTag('AwaitPrFailed', (failure) => {
