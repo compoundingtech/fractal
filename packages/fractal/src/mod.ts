@@ -123,7 +123,7 @@ export const SubjectId = Schema.String.pipe(
       /^[A-Za-z0-9][A-Za-z0-9._@/-]*$/u.test(s) === true &&
       s.endsWith('/') === false &&
       s.split('/').some((part) => part === '..') === false,
-    { message: 'invalid Fractal subject ID' },
+    { message: 'invalid st subject ID' },
   ),
   Schema.brand('SubjectId'),
   Schema.annotate({ identifier: 'Fractal.SubjectId' }),
