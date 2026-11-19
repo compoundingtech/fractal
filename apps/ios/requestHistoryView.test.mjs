@@ -231,14 +231,14 @@ test('history stays collapsed until expanded, rereads on every reopen and closes
   const render = () => { index = 0; return RequestHistory({ client: {}, threadId: 'thread/one' }); };
   const header = tree => findAll(tree, node => node.type === 'Pressable')[0];
   let tree = render();
-  assert.equal(text(header(tree)), '▸ Request history');
+  assert.equal(text(header(tree)), '▸ Related requests');
   assert.deepEqual(header(tree).props.accessibilityState, { expanded: false });
   assert.deepEqual(loads, [], 'nothing is read before an explicit expand');
   header(tree).props.onPress();
   tree = render();
   assert.deepEqual(loads, ['thread/one']);
   assert.ok(texts(tree).includes('History only · requests remain independent'));
-  assert.ok(texts(tree).includes('Loading request history…'));
+  assert.ok(texts(tree).includes('Loading Related requests…'));
 
   header(tree).props.onPress();
   tree = render();
@@ -252,4 +252,19 @@ test('history stays collapsed until expanded, rereads on every reopen and closes
   tree = render();
   assert.equal(closes, 2, 'leaving the screen releases the page');
   assert.deepEqual(header(tree).props.accessibilityState, { expanded: false });
+});
+
+test('Related requests Retry accessibility label agrees with its visible section name', () => {
+  const RequestHistory = compile('export function RequestHistory(', 'function HistoryPage(', 'RequestHistory', {
+    ...views, RequestHistoryReader: class {}, HistoryPage: 'HistoryPage',
+    useMemo: () => reader, useSyncExternalStore: () => ({ kind: 'error', message: 'Temporarily unavailable' }),
+    useCallback: fn => fn, useFocusEffect: () => {}, useState: () => [reader, () => {}],
+  });
+  let loads = 0;
+  const reader = { close() {}, load() { loads++; } };
+  const tree = RequestHistory({ client: {}, threadId: 'thread/original' });
+  assert.ok(texts(tree).some(value => value.includes('Related requests')));
+  const retry = buttons(tree).find(button => button.label === 'Retry');
+  assert.equal(retry.accessibilityLabel, 'Retry loading Related requests');
+  retry.onPress(); assert.equal(loads, 1);
 });

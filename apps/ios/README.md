@@ -121,6 +121,8 @@ Thread close, reopen and rename update every visible thread surface immediately,
 Inline thread read and timeline errors offer an in-place Retry button; a successful re-read clears the error. A revoked thread read grant reads `You no longer have access to this thread.` followed by the server's reason, without an error-code prefix. A refused close, reopen or rename instead shows `Couldn't close this thread.`, `Couldn't reopen this thread.` or `Couldn't rename this thread.`, with the server reason on a separate text line; it does not imply loss of read access. Standalone initial-load errors retain Refresh thread.
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
+The thread's Related requests section uses that same name in its heading, loading
+status and Retry accessibility label.
 
 First Starts are independent, even for the same Inbox source and episode. Each
 attempt owns its thread UUID, action key and delivery slot. Unknown attempts remain
