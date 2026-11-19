@@ -532,3 +532,12 @@ seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
 The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
 The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
 the three-seed cap and majority trim coverage remain enforced.
+
+`claims-v39.json` adds the durable `custom.client.observation-minute` summary kind.
+Versions 1 through 38 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v39.json`.
+The simulation and audit reports select v39. Phone summaries retain source-bound
+minute populations and canonical latency histograms; missing minutes are not
+invented by the native evaluator. Previous seeded trim characterizations remain
+historical; exact per-seed equality, old-build-excusal continuation, the three-seed
+cap and majority trim coverage are unchanged.

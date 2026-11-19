@@ -71,15 +71,16 @@ HTTP error envelope, rejected-write atomicity and receipt replay.
 stream window stays outside owner-prefix truncation, rejects wrong owners, follows
 edits and removes retired subjects without changing unfiltered reads.
 
-## Diagnostic client commands
+## Client observation commands
 
 `client_commands` records `observations.report` separately from fenced graph actions.
 The real paired HTTP router control in `api/client_observations.rs` covers read-only pairing
-authorization, unpaired/revoked refusal, identical retry, conflicting reuse, body limit,
-unchanged graph index and reader/doctor population. Admission/history controls cover
-atomic validation, overlap, filesystem failure, rotation, expiry and retained files across
-fresh process-memory admission state. This is local diagnostic acceptance, without a
-replicated acknowledgement or a full-day live-phone SLO claim.
+authorization, unpaired/revoked refusal, identical retry, conflicting reuse and body limits.
+The shared iOS producer fixture drives real ingestion, signed replication, store reopen,
+destination-pairing identity and all seven native objective rows. Missing minutes stay unknown;
+disconnected foreground remains in the live-share denominator. Store query-plan controls pin
+indexed source/report, minute-subject and live-hour reads. The unchanged response has no
+snapshot or action receipt, and a committed report does not promise that every peer has received it.
 
 The sidebar's existing optional `resources.list` read is covered by
 `observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`

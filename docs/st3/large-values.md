@@ -980,3 +980,21 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+
+### Durable phone service minutes
+
+The `fractal_store::store::observation_minutes` maintainer owns the summary
+report, exact-minute and live-window sinks (`lv-hfcc0104f3a41`,
+`lv-h8d4d7e936cfe`, `lv-h9b74750ad85e`). They read canonical claim bodies through
+source/report, subject and numeric-minute seek indexes, respectively. The phone
+producer limits a report to 32 validated samples and canonical bounded histogram
+bins, but these producer limits do not establish a general physical value-size
+proof. The tracing TODO retains exact source, report and minute identities while
+resolving body/key representation; it is not permission to scan retained history.
+
+The schema site's `lv-h131f2c78b266` identity includes the additive
+`claims_observation_report_index` and `claims_observation_minute_time_index`.
+The first uses source/report strings as variable index keys; the second combines
+a numeric minute with a variable subject key. Both index existing canonical
+claims without adding authoritative tables. Any later reference conversion must
+preserve exact retry, conflict exclusion, minute range and replication semantics.

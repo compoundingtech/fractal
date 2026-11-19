@@ -284,6 +284,7 @@ pub struct Meter {
     targets: Vec<[smallclaims::windows::Series; 2]>,
     /// The member's CPU by closed minute: the daemon's and its replication workers'.
     cpu: smallclaims::windows::cpu_minutes::CpuMinutes,
+    // Member-local diagnostics only; native objectives replace these with graph summaries.
     client_intervals: BTreeMap<(String, String, Option<String>), smallclaims::windows::IntervalSeries>,
 }
 
@@ -516,6 +517,7 @@ impl Meter {
         }
         total.snapshot(now_ms,share)
     }
+
 
     pub fn snapshot(&self) -> Vec<Value> {
         self.routes
