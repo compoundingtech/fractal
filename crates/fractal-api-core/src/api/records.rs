@@ -278,8 +278,25 @@ pub async fn get_document(
 
 pub async fn post_claim(
     State(state): State<AppState>,
+    bound: Option<BoundActor>,
     Json(request): Json<ClaimInput>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    if request.subject == "resource/fleet/roll-completion"
+        || request.subject.starts_with("resource/fleet/roll-completion/") {
+        let actor = request.actor.as_deref();
+        if !matches!(bound.as_ref(), Some(BoundActor::Agent(agent)) if Some(agent.as_str()) == actor)
+            || !state.store.declared_resource_referrers("resource/fleet/roll-completion")
+                .map_err(ApiError::internal)?.iter().any(|binding|
+                    binding["owner"].as_str() == actor && binding["name"] == "roll-authority") {
+            return Err(ApiError { status: StatusCode::FORBIDDEN, code: "roll-authority-required".into(),
+                message: "roll publication requires the bound agent's declared roll-authority resource".into(),
+                details: Box::default() });
+        }
+        serde_json::from_value::<crate::roll_completion::Receipt>(
+            request.fields.get("facts").cloned().unwrap_or(Value::Null))
+            .map_err(|error| ApiError { status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "invalid-roll-receipt".into(), message: error.to_string(), details: Box::default() })?;
+    }
     // A write can wait for the store's writer. It waits on the blocking pool, so the API's
     // workers keep answering other requests meanwhile.
     let store = state.store.clone();
