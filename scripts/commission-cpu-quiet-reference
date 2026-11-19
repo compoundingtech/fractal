@@ -45,6 +45,14 @@ def cpu(report):
     return next(row for row in report["targets"] if row["name"] == "cpu")
 
 
+def build_commit(health):
+    build = health.get("build")
+    commit = build.get("commit") if isinstance(build, dict) else None
+    if not isinstance(commit, str) or not commit.strip():
+        raise ValueError("member health requires a nonempty build.commit")
+    return commit
+
+
 def baseline(minutes, expected_workers):
     """Exact consecutive population; missing/unknown observations are never zero."""
     if len(minutes) != 10 or any(b["minute"] != a["minute"] + 1 for a, b in zip(minutes, minutes[1:])):
@@ -97,8 +105,8 @@ def main():
         parser.error("reference and isolated binaries differ")
     reference_health = get(args.reference_socket, "/v1/health")
     health = get(args.socket, "/v1/health")
-    if not health.get("build") or health["build"] != reference_health.get("build"):
-        raise ValueError("reference and isolated member must report the same nonempty build identity")
+    if build_commit(health) != build_commit(reference_health):
+        raise ValueError("reference and isolated member must report the same nonempty build.commit")
     reference = cpu(get(args.reference_socket, "/v1/client/request-latency"))
     if not reference["minute_evidence"] or reference["minute_evidence"][-1]["expected_workers"] != args.expected_workers:
         raise ValueError("reference member has not demonstrated the requested worker topology")

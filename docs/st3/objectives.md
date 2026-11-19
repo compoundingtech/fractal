@@ -101,8 +101,10 @@ in a complete hour. `not eligible: busy` means productive seat activity alone ru
 idle minutes; the row stays no-data with no error-budget credit. Missing CPU/seat evidence
 remains distinct and visible, even when reasons overlap. A live session's same-incarnation
 runtime heartbeat is not productive work: matching harness `ready`, `idle`, `blocked` or
-`ended` with no background jobs can prove it quiet; starts, new incarnations, work, and missing
-matching harness observations cannot.
+`ended` with no background jobs can prove it quiet only while the source `observed_at_ms`
+is fresh under the existing harness stale/future-skew bounds. Starts, new incarnations,
+work, and missing or expired matching harness observations cannot. Receiving an old report
+again does not refresh its source evidence.
 
 The separately labeled **representative isolated controlled quiet reference** is commissioned
 with the real daemon/worker sampler, never synthetic CPU values and never by pausing live seats.
@@ -119,7 +121,8 @@ python3 scripts/commission-cpu-quiet-reference \
   --expected-workers 1 --isolation-evidence '<launch-and-isolation-receipt>'
 ```
 
-The command only reads both members; it checks equal nonempty build identity, byte-identical
+The command only reads both members; it requires equal nonempty `build.commit` strings in
+both health responses, checks byte-identical
 binary/configuration inputs and reference worker topology, then collects exactly ten **new consecutive**
 closed minutes and waits for seat settlement. The operator's isolation receipt, not the socket
 name, establishes that launch overrides really isolate the member and that these are the files
