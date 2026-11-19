@@ -36,7 +36,7 @@ The first remaining match runs with the caller's arguments, environment, working
 stdio. A bare `argv[0]` such as `git` is passed on unchanged. `PATH` is passed on unchanged too,
 so a `git` that `gh` starts is recorded as its own call.
 
-When no match remains, the recorder prints `st recorder: git: command not found after the
+When no match remains, the recorder prints `fractal recorder: git: command not found after the
 recorder on PATH`, records the call with exit code 127, and exits 127.
 
 ## The log

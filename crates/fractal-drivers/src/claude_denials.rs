@@ -4,7 +4,7 @@
 //! result as `Permission for this action was denied by the Claude Code auto mode classifier.
 //! Reason: [...]` and the model is told not to work around it. The seat then waits on a person
 //! nobody told. The `Stop` hook reads each new denial of the turn that just ended from the
-//! session's transcript; st raises it as an alert for the seat's person, who may allow it once or
+//! session's transcript; Fractal raises it as an alert for the seat's person, who may allow it once or
 //! allow that kind of call for the seat. A `PreToolUse` hook decision of `allow` lets the next
 //! matching call through. Only a call auto mode denied waits on a person: a seat in another mode,
 //! or a call a harness rule refused, raises nothing.
@@ -52,9 +52,9 @@ pub struct Entry {
     pub tool: String,
     pub kind: String,
     pub digest: String,
-    /// The st claim that raised it.
+    /// The Fractal claim that raised it.
     pub claim: Option<String>,
-    /// `approve-once`, `approve-kind` or `dismiss`, once read from st.
+    /// `approve-once`, `approve-kind` or `dismiss`, once read from Fractal.
     pub answer: Option<String>,
 }
 
@@ -240,7 +240,7 @@ pub fn new_denials(agent_dir: &Path, session_id: &str, transcript: &Path) -> Res
     Ok(reported)
 }
 
-/// Remember the st claim that raised the denial of `call_id`.
+/// Remember the Fractal claim that raised the denial of `call_id`.
 pub fn raised(agent_dir: &Path, call_id: &str, claim: &str) -> Result<()> {
     let _lock = harness_state::lock_exclusive(&agent_dir.join(LOCK_FILE))?;
     let mut ledger = load(agent_dir);
@@ -253,7 +253,7 @@ pub fn raised(agent_dir: &Path, call_id: &str, claim: &str) -> Result<()> {
 
 /// Whether the person allowed the call about to run (`tool` with `input`): an approval of that
 /// exact denied call, used once, or of its kind, kept for the seat. `answer` reads a denial's
-/// answer from st, at most once per denial: an answer is final. A dismissed denial is forgotten.
+/// answer from Fractal, at most once per denial: an answer is final. A dismissed denial is forgotten.
 pub fn approved(
     agent_dir: &Path,
     tool: &str,
@@ -527,7 +527,7 @@ mod tests {
         for command in ["git reset --hard HEAD~1", "git reset --hard origin/main"] {
             assert!(approved(dir.path(), "Bash", &json!({"command": command}), &mut answer).unwrap(), "{command}");
         }
-        // Each answer is read from st once.
+        // Each answer is read from Fractal once.
         assert_eq!(asked.iter().filter(|claim| *claim == "claim-3").count(), 1);
     }
 

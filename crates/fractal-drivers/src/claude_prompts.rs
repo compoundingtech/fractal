@@ -18,7 +18,7 @@
 //!
 //! A subagent's prompt is shown as `subagent:<tool>`: its call is in the subagent's own
 //! transcript, not in the seat's conversation where a client shows the pending call, so a client
-//! never offers to allow it beside a call it could not show (st offers only deny for it).
+//! never offers to allow it beside a call it could not show (Fractal offers only deny for it).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

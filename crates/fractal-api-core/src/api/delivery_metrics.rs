@@ -154,8 +154,8 @@ pub(super) fn spawn_worker(
                         registered = true;
                     }
                 }
-                Ok(Err(error)) => eprintln!("st3: WARN delivery metrics refresh failed: {error:#}"),
-                Err(error) => eprintln!("st3: WARN delivery metrics refresh task failed: {error}"),
+                Ok(Err(error)) => eprintln!("fractal: WARN delivery metrics refresh failed: {error:#}"),
+                Err(error) => eprintln!("fractal: WARN delivery metrics refresh task failed: {error}"),
             }
             tokio::time::sleep(refresh_pause.max(started.elapsed())).await;
         }
