@@ -30,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/mailbox/acceptance-frontier", post(acceptance_frontier))
         .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
@@ -39,6 +40,61 @@ pub struct ReceiptRequest {
     receipt: Receipt,
     #[serde(default)]
     native_receipt: Option<crate::conversation_delivery::NativeReceipt>,
+    #[serde(default)]
+    input_acceptance: Option<InputAcceptance>,
+}
+
+#[derive(serde::Deserialize)]
+struct InputAcceptance {
+    accepted_at_unix_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AcceptanceFrontierRequest {
+    #[serde(flatten)]
+    fence: Fence,
+    observed_through_unix_ms: u64,
+}
+
+/// A native producer's sealed, drained source cut. It is not a per-message lifecycle event.
+pub async fn acceptance_frontier(
+    State(state): State<AppState>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    Json(mut request): Json<AcceptanceFrontierRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    request.fence = storage_fence(&state, request.fence)?;
+    authorize(&request.fence, peer.as_ref().map(|peer| &peer.0))?;
+    if request.fence.component != "delivery" {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance-frontier",
+            "only the delivery component publishes acceptance frontiers")));
+    }
+    let peer = peer.expect("authorize checked the native peer").0;
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request.fence),
+    ).await.map_err(ApiError::internal)?;
+    let checked_state = state.clone();
+    let ((record, changed), _) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &request.fence, &peer, None, || {
+            if checked_state.store.has_mailbox_lease(&request.fence)? {
+                authority::with_authority(&checked_state, &request.fence, &peer, || {}, |owner, validate| {
+                    validate()?;
+                    if !checked_state.store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    checked_state.store.record_mail_acceptance_frontier(
+                        &request.fence, request.observed_through_unix_ms,
+                    )
+                })
+            } else {
+                checked_state.store.record_mail_acceptance_frontier(
+                    &request.fence, request.observed_through_unix_ms,
+                )
+            }
+        })
+    }).await?;
+    if changed { signal_local_change(&state); }
+    Ok(Json(record))
 }
 
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
@@ -299,11 +355,11 @@ pub async fn receipt(
     request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
-        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
+        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read" | "accepted")
     {
         return Err(ApiError::bad(FractalError::new(
             "invalid-mailbox-receipt",
-            "only the delivery component can publish staged, delivered or read",
+            "only the delivery component can publish staged, delivered, read or accepted",
         )));
     }
     if payload.native_receipt.as_ref().is_some_and(|proof| !proof.valid())
@@ -312,6 +368,10 @@ pub async fn receipt(
     {
         return Err(ApiError::bad(FractalError::new("invalid-native-receipt",
             "a native record identity requires a Claude consumption receipt")));
+    }
+    if (request.lifecycle == "accepted") != payload.input_acceptance.is_some() {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance",
+            "accepted requires an input acceptance timestamp; other lifecycle receipts cannot carry one")));
     }
     let input = ClaimInput {
         subject: request.message.clone(),
@@ -366,6 +426,15 @@ pub async fn receipt(
         };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
+                if let Some(acceptance) = &payload.input_acceptance {
+                    validate()?;
+                    if !store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    return store.record_mail_input_acceptance(
+                        &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+                    );
+                }
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -376,6 +445,10 @@ pub async fn receipt(
                 store.append_native_mailbox_receipt_outcome(&input, &request.fence,
                     payload.native_receipt.as_ref())
             })?
+        } else if let Some(acceptance) = &payload.input_acceptance {
+            store.record_mail_input_acceptance(
+                &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+            )?
         } else if stream.is_some() {
             record_stream()?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
@@ -3907,6 +3980,12 @@ mod tests {
         report_control_effects(false).await;
     }
 
+    // Admission controls compare the reported reason, not the assessment's elapsed-time suffix.
+    fn delivery_report_reason_is(subject: &str, expected: &str) -> bool {
+        delivery_presence::assess_current(subject, "omp", Some("current")).reason
+            .is_some_and(|reason| reason.split_once("; channel non-ready for ").is_some_and(|(reported, _)| reported == expected))
+    }
+
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     async fn report_control_effects(native: bool) {
         use crate::store::owned_sets::{Options, Source};
@@ -3966,7 +4045,7 @@ mod tests {
         stream.socket.send(Message::Text(baseline.to_string().into())).await.unwrap();
         stream.socket.send(Message::Ping(vec![0].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[0]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         let tap_count = || std::env::var_os("ST3_TEST_ADMITTED_REPORTS").map(|path| {
             std::fs::read_to_string(path).unwrap_or_default().lines().filter(|line|
                 serde_json::from_str::<Value>(line).is_ok_and(|value| value["subject"] == subject)).count()
@@ -3995,7 +4074,7 @@ mod tests {
                 expect_pong(&mut stream.socket, &barrier).await;
                 assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_none(), "{refusal}");
                 assert_eq!(state.store.index().unwrap(), index, "no drain/recovery claim: {refusal}");
-                assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+                assert!(delivery_report_reason_is(&subject, "baseline"));
                 assert_eq!(tap_count(), initial_taps, "no admitted tap: {refusal}");
                 harness_events::write_snapshot(&agent_dir, "harness-state", &raw).unwrap();
             }
@@ -4009,7 +4088,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![4].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[4]).await;
         assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_some());
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         assert_eq!(tap_count(), initial_taps);
         let mut accepted = report("later-admissible");
         accepted["mailbox_replay_ack"] = json!(true);
@@ -4017,7 +4096,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![5].into())).await.unwrap();
         if native { assert!(matches!(next(&mut stream.socket).await, Frame::Replay { .. })); }
         expect_pong(&mut stream.socket, &[5]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("later-admissible"));
+        assert!(delivery_report_reason_is(&subject, "later-admissible"));
         assert_eq!(tap_count(), initial_taps.map(|count| count + 1));
     }
 
@@ -4129,7 +4208,7 @@ mod tests {
             let report = |reason: &str| Message::Text(json!({"transport":"omp-channel","pid":37,"ready":false,"reason":reason}).to_string().into());
             stream.socket.send(report(&original)).await.unwrap();
             let deadline = tokio::time::Instant::now()+Duration::from_secs(2);
-            while delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref()!=Some(&original) {
+            while !delivery_report_reason_is(&subject, &original) {
                 assert!(tokio::time::Instant::now()<deadline,"unchanged argv report was not admitted");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -4170,7 +4249,7 @@ mod tests {
             stream.socket.send(Message::Ping(vec![1].into())).await.unwrap();
             expect_pong(&mut stream.socket, &[1]).await;
             assert_eq!(stream.reads.load(SeqCst), reads, "dirty snapshot processing must remain held");
-            assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(),Some(original.as_str()));
+            assert!(delivery_report_reason_is(&subject, &original));
             assert!(state.store.mailbox_lease_authority(&fence).unwrap().is_none());
         }
     }

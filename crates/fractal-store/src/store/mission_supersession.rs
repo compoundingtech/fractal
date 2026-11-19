@@ -4,9 +4,9 @@ use super::*;
 
 const HEAD_PAGE: usize = 1;
 const SOURCE_PAGE: usize = 32;
-const FAULT_SCOPE: &str = "mission/supersession";
+pub(super) const FAULT_SCOPE: &str = "mission/supersession";
 
-const SUPERSESSION_SOURCE_QUERY: &str =
+pub(super) const SUPERSESSION_SOURCE_QUERY: &str =
     "SELECT r.id FROM json_each(?8) page CROSS JOIN mission_runs r ON r.id=page.value
      JOIN run_generations g ON g.id=r.current_generation_id
      WHERE r.mission_id=?1 AND g.revision<>?2
@@ -190,7 +190,13 @@ impl Store {
                 }
                 let pinned = match automatic_supersession_policy(transaction, &source) {
                     Ok(Some(mission)) => mission,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        if source.phase == "revision-draining" {
+                            changed |= set_supersession_phase_tx(transaction, &self.origin, &source,
+                                "normal", "retained evidence requires an authorized revision cutover")?;
+                        }
+                        continue;
+                    }
                     Err(error) => {
                         refuse_supersession_tx(transaction, &self.origin, &source,
                             &revision, &publication, &error)?;
@@ -212,7 +218,9 @@ impl Store {
                     continue;
                 }
                 transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h880ef8d03231 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ "SAVEPOINT mission_supersession_source").map_err(internal)?;
-                let result = self.create_superseding_mission_run_tx(transaction, &source, &publication, Some(&revision))
+                // This is head intent, unlike an explicitly authorized revision cutover.
+                // The writer transaction keeps the selected head stable through admission.
+                let result = self.create_superseding_mission_run_tx(transaction, &source, &publication, None)
                     .and_then(|replacement| {
                         cancel_mission_run_tx(transaction, &self.origin, &source.subject,
                             &format!("superseded by {} at revision {revision}", replacement.subject),
@@ -553,7 +561,7 @@ fn supersession_owned_runs(connection: &Connection, subject: &str) -> Result<Vec
     Ok(owners)
 }
 
-fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
+pub(super) fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let actual = latest_actual_fields_at(connection, subject, None, &["status", "reachability"])
         .map_err(internal)?;
@@ -722,7 +730,7 @@ fn has_manual_revision_policy(mission: &MissionSpec) -> bool {
         })
 }
 
-fn supersession_idle(connection: &Connection, run: &str) -> Result<bool, FractalError> {
+pub(super) fn supersession_idle(connection: &Connection, run: &str) -> Result<bool, FractalError> {
     let active: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM step_runs
          WHERE generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)
@@ -787,13 +795,61 @@ fn refuse_supersession_tx(
     Ok(())
 }
 
-fn automatic_supersession_policy(
+pub(super) fn automatic_supersession_policy(
     connection: &Connection,
     source: &MissionRunView,
 ) -> Result<Option<MissionSpec>, FractalError> {
+    if missions::mission_run_revision_pinned(connection, source)? {
+        return Ok(None);
+    }
     let pinned = missions::mission_spec_at(connection, &source.mission, Some(&source.revision))
         .map_err(internal)?
         .ok_or_else(|| FractalError::new("missing-mission-revision",
             "the source mission revision is unavailable"))?;
-    Ok((!has_manual_revision_policy(&pinned)).then_some(pinned))
+    // Eager and when-idle choose timing, not permission to replace retained evidence.
+    // The existing proposal approval path calls supersede_mission_run_at_revision_tx
+    // directly and remains the explicit authorization for this cutover.
+    if has_manual_revision_policy(&pinned) || supersession_has_evidence(connection, source)? {
+        return Ok(None);
+    }
+    Ok(Some(pinned))
+}
+
+fn supersession_has_evidence(
+    connection: &Connection,
+    source: &MissionRunView,
+) -> Result<bool, FractalError> {
+    // Retain any answered human gate, even if its authority was later revoked:
+    // automatic replacement is not authorization to discard an earlier decision.
+    let mut query = connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM step_runs step WHERE step.run_id=?1
+         AND (step.status='completed' OR EXISTS(
+           SELECT 1 FROM claims response
+           WHERE response.kind IN ('work.person-done','work.person-cancelled','work.person-override')
+             AND response.subject IN (
+               SELECT subject FROM claims WHERE kind='work.person-asked'
+                 AND json_extract(body,'$.fields.origin_step')=step.subject
+               UNION SELECT step.subject))))
+         OR EXISTS(SELECT 1 FROM claims request
+           JOIN claims response INDEXED BY claims_human_gate_answer_request_index
+             ON response.kind='gate.result'
+               AND json_extract(response.body,'$.fields.request')=request.id
+               AND response.subject=request.subject
+           WHERE request.kind='gate.requested'
+             AND json_extract(request.body,'$.fields.reviewer') IS NOT NULL
+             AND json_extract(request.body,'$.fields.owner') IN (
+               SELECT subject FROM step_runs WHERE run_id=?1
+               UNION SELECT 'mission-run/'||?1))",
+    ).map_err(internal)?;
+    if query.query_row(/* sqlite-large-value: allow-for-now lv-h14287b24821e owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ [&source.id], |row| row.get::<_, bool>(0)).map_err(internal)? {
+        return Ok(true);
+    }
+    // Cancelling a parent also cancels its owned descendants, whose evidence needs
+    // the same protection even when the parent's nested step has not completed.
+    for descendant in descendant_mission_run_ids_tx(connection, generation_id_from_subject(&source.generation)).map_err(internal)? {
+        if query.query_row(/* sqlite-large-value: allow-for-now lv-h0b04cb0418e9 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ [&descendant], |row| row.get::<_, bool>(0)).map_err(internal)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -59,6 +59,7 @@ use crate::store::model_drift::{
 
 pub mod channel_recovery;
 pub mod github_events;
+pub mod github_capture;
 pub mod github_plugin_store;
 pub mod plugin_store;
 pub mod idle_nudge;
@@ -72,6 +73,7 @@ pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
+mod shell_resources;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -83,6 +85,7 @@ mod schedule_replication_block;
 pub mod member_admission;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
+pub use crate::config::{IdleResidencyPolicy, IdleResidencySettings};
 
 /// Register the reconciler's daemon metrics with the meter provider `otel` installed.
 pub fn init_metrics() {
@@ -599,6 +602,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
         anyhow::bail!("runtime does not support generation-fenced execution status")
     }
+    fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support generation-fenced payload cancellation")
+    }
+    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
+        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
@@ -671,6 +680,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// True only after the exact exec generation has exited and its entire work scope is
+    /// proven closed. Missing records, logical containment and delivered signals are not proof.
+    fn leftovers_settled(&self, _runtime_id: &str, _incarnation: &str) -> Result<bool> {
+        Ok(false)
+    }
     /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
@@ -1033,6 +1047,25 @@ impl RuntimeControl for NativeRuntime {
             _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
         }
     }
+    fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+        self.exec.signal_if(id, Some(generation), libc::SIGTERM)
+    }
+    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+        let current = match self.exec.observe(id)? {
+            Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
+                if current.generation_id == generation => current,
+            _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
+        };
+        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let snapshot = fractal_runtime::systemd::snapshot()?;
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
+        match fs::read_to_string(group.join("memory.peak")) {
+            Ok(value) => Ok(Some(value.trim().parse()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
         let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
@@ -1139,6 +1172,9 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.end_leftovers_later(runtime_id);
         }
+    }
+    fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+        self.exec.retired_if(runtime_id, incarnation)
     }
 
     fn end_lane(&self, runtime_id: &str) {
@@ -1478,11 +1514,16 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
+    #[cfg(test)]
+    start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
+    /// Off-by-default residency diagnostics; never author a suspension here.
+    idle_residency: Mutex<IdleResidencyPolicy>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
     /// `run_report`.
     default_stall_reports_since: Mutex<Option<u128>>,
@@ -1626,6 +1667,7 @@ pub struct Reconciler<R = NativeRuntime> {
     disk_paths: Vec<PathBuf>,
     /// When the disk stage last read free space, and whether its episode raised an item.
     disk_check: Mutex<(Option<u128>, bool)>,
+    disk_observations: Mutex<BTreeMap<u64, crate::disk::DiskSpace>>,
     disk_check_every_ms: u128,
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
@@ -1756,13 +1798,17 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
+            #[cfg(test)]
+            start_stage_finished_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -1838,6 +1884,7 @@ impl Reconciler<NativeRuntime> {
             disk_probe: Some(Arc::new(crate::disk::disk_space)),
             disk_paths: vec![state_dir.to_path_buf()],
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
@@ -1947,9 +1994,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .flatten()
             .map(|size| seat_admission::LaneHost {
                 room: fractal_runtime::host::for_lanes(size),
-                outside: fractal_runtime::host::unlaned_seat_memory,
+                outside: fractal_runtime::host::outside_lane_memory,
                 burst_lane: Some(seat_admission::BURST_LANE),
             });
+        self
+    }
+
+    /// Install the host's finite disk/IO policy without creating another accountant.
+    pub fn with_finite_resources(mut self, policy: Option<fractal_runtime::host::FinitePolicy>) -> Self {
+        self.seat_admission.finite_policy = policy.unwrap_or_default();
         self
     }
 
@@ -1980,13 +2033,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
+            #[cfg(test)]
+            start_stage_finished_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -2062,6 +2119,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_probe: None,
             disk_paths: Vec::new(),
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
@@ -2271,6 +2329,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub async fn run(self: Arc<Self>) {
+        // Keep the completion lane scoped to this run. A supervised restart
+        // reuses its durable queue; cancellation never leaves an orphan consumer.
+        tokio::select! {
+            () = self.clone().run_passes() => {},
+            () = self.consume_start_results() => {},
+        }
+    }
+
+    async fn run_passes(self: Arc<Self>) {
         #[cfg(any(test, feature = "test-support"))]
         self.wait_for_test_starts.store(false, Ordering::Release);
         self.notify.notify_one();
@@ -2654,10 +2721,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .iter()
             .filter(|subject| {
                 subject.kind == "agent"
-                    && subject
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.host == self.host)
+                    && crate::graph::canonical_child_value(&subject.desired, "host")
+                        .and_then(Value::as_str)
+                        .filter(|host| *host != "local")
+                        // Older launch declarations already retained their resolved placement.
+                        .or_else(|| subject.member.as_ref().map(|member| member.host.as_str()))
+                        == Some(self.host.as_str())
             })
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
@@ -2739,11 +2808,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         // One reading per filesystem, named by the first path on it. A workspace that does not
         // exist yet has no filesystem to read.
         let mut filesystems = BTreeMap::<u64, (PathBuf, crate::disk::DiskSpace)>::new();
-        for path in self.disk_paths.iter().cloned().chain(workspaces) {
+        let finite = self.store.resource_memberships_for_host(&self.host)?;
+        let finite_paths = finite.iter()
+            .filter(|member| matches!(member.state.as_str(), "queued" | "admitted" | "launched" | "retiring" | "uncertain"))
+            .filter_map(|member| member.request.disk.as_ref().map(|disk| PathBuf::from(&disk.path)));
+        for path in self.disk_paths.iter().cloned().chain(workspaces).chain(finite_paths)
+            .chain(self.seat_admission.finite_policy.disk_floors.keys().cloned()) {
             if let Ok(space) = probe(&path) {
                 filesystems.entry(space.filesystem).or_insert((path, space));
             }
         }
+        let mut observations = self.disk_observations.lock().unwrap_or_else(PoisonError::into_inner);
+        if observations.len() != filesystems.len()
+            || filesystems.iter().any(|(mount, (_, space))| observations.get(mount) != Some(space))
+        {
+            observations.clear();
+            observations.extend(filesystems.iter().map(|(mount, (_, space))| (*mount, *space)));
+            self.incremental.touch("host-lane-disk");
+            self.signal_changed();
+        }
+        drop(observations);
         if filesystems.is_empty() {
             return Ok(());
         }
@@ -3233,6 +3317,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_snapshot = PassPtySnapshot::new();
         self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
+        #[cfg(test)]
+        if let Some(hook) = self.start_stage_finished_hook.lock().unwrap().take() {
+            hook();
+        }
+        self.reconcile_shell_resources()?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -6428,6 +6517,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 smallclaims::touched::note_due(due);
             }
         }
+        self.evaluate_idle_residency(agent, now)?;
 
         if !harness.as_ref().is_some_and(CurrentHarnessView::is_ready) {
             return Ok(());
@@ -7786,10 +7876,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
-            // A harness that ended before the stop, or a stop that could not finish, can leave
-            // processes in the runtime's work scope. They end with it.
-            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
-            self.runtime.end_leftovers(runtime_id, terminal);
+            // A stopped leader can leave descendants. Retry until native whole-scope proof
+            // is finalized durably; never infer settlement from a stopped observation alone.
+            let settled = if let Some(incarnation) = incarnation.filter(|_| !terminal) {
+                self.store.runtime_cleanup_settled(runtime_id, incarnation)?
+            } else {
+                false
+            };
+            if !settled {
+                evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
+                self.runtime.end_leftovers(runtime_id, terminal);
+                if let Some(incarnation) = incarnation.filter(|_| !terminal)
+                    && self.runtime.leftovers_settled(runtime_id, incarnation).unwrap_or(false)
+                {
+                    self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?;
+                }
+            }
             let desired = self.store.selected_desired_token(subject)?;
             let stop = match &desired {
                 Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {
@@ -8508,21 +8610,41 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        // Native drivers must bind before readiness can be established. Publish running
-        // authority at launch completion only for the physically observed incarnation
-        // owned by this start operation; readiness and restart completion remain separate.
-        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
-            self.runtime.observe_start(member)?.is_some_and(|observation| {
-                observation.status == "running"
-                    && observation.incarnation_id.as_deref() == Some(incarnation)
-            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
-                .as_deref() == Some(operation_id)
+        // Adopt only a fresh physical observation of this operation's exact
+        // incarnation. This includes command-only seats and one-shots that
+        // already ended; readiness and restart completion remain separate.
+        let observation = if let Some(incarnation) = incarnation.as_deref() {
+            self.runtime.observe_start(member)?.filter(|observation| {
+                observation.incarnation_id.as_deref() == Some(incarnation)
+                    && matches!(observation.status.as_str(), "running" | "exited" | "stopped" | "vanished")
+            })
         } else {
-            false
+            None
+        };
+        let observation = if let (Some(observation), Some(incarnation)) = (observation, incarnation.as_deref())
+            && self.runtime.start_operation(
+                &member.runtime_id, member.terminal, incarnation,
+            )?.as_deref() == Some(operation_id)
+        {
+            Some(observation)
+        } else {
+            None
         };
         let mut starting = member_fields(
-            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+            member,
+            observation.as_ref().map_or("starting", |observation| observation.status.as_str()),
+            incarnation.as_deref(),
+            observation.is_some(),
         );
+        if let Some(observation) = &observation {
+            if let Some(code) = observation.exit_code {
+                starting.insert("exit_code".into(), Value::from(code));
+            }
+            self.retain_exit_evidence(
+                &subject.subject, &member.runtime_id, member.terminal,
+                incarnation.as_deref(), &mut starting,
+            )?;
+        }
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -8849,9 +8971,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 else {
                     unreachable!("blockers require a bound native session");
                 };
-                if let Err(error) = crate::seat_snapshot::workspace(self.driver_state_dir.parent().unwrap(), agent, &suspension.operation_id, member) {
-                    return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
+                if suspension.cause() == "idle" && harness != "omp" {
+                    return self.fail_suspension(agent, suspension, "driver-unsupported", "idle suspension requires omp".into(), Vec::new());
                 }
+                let mode = match crate::seat_snapshot::capture(self.driver_state_dir.parent().unwrap(), agent, member, suspension) {
+                    Ok(mode) => mode,
+                    Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                };
                 let blocking = suspended::blockers(&self.store, agent, incarnation)?;
                 if !blocking.is_empty() {
                     return self.fail_suspension(agent, suspension, "not-quiescent", "the seat became active while its workspace was captured".into(), blocking);
@@ -8874,7 +9000,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             "runtime_id".into(),
                             Value::String(member.runtime_id.clone()),
                         ),
-                    ]),
+                    ]).into_iter().chain(
+                        (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
+                    ).collect(),
                 )?;
                 stop(observation)?;
                 Ok(())
@@ -8899,9 +9027,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     member.shutdown_timeout_ms,
                     None,
                 )?;
-                // A missing portable transcript does not discard single-host continuity.
-                // Cross-host fetch will refuse until a complete archive exists.
-                let _ = crate::seat_snapshot::seal(self.driver_state_dir.parent().unwrap(), &self.store, agent, member, suspension);
+                // In-place continuity requires a frozen transcript, not only a live path.
+                let sealed = crate::seat_snapshot::seal(self.driver_state_dir.parent().unwrap(), &self.store, agent, member, suspension);
+                if suspension.mode() == "in-place" {
+                    match sealed {
+                        Ok(Some(_)) => {}
+                        // A stopped seat must retain its hold if sealing cannot finish.
+                        // A failed suspend receipt would release it to ordinary fresh launch.
+                        Ok(None) => return Err(crate::model::FractalError::new("driver-unsupported", "in-place suspension requires a portable native transcript").into()),
+                        Err(error) => return Err(error),
+                    }
+                }
                 // The stop is now verified, so a fault from an earlier attempt that timed out
                 // while the process was still exiting is over. Clear it before the completion: a
                 // reader that waits for the suspended phase must not find the seat failed.
@@ -9000,7 +9136,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .source_host
                     .as_deref()
                     .is_some_and(|source| source != self.host);
-                if moved {
+                if suspension.mode() == "in-place" {
+                    if moved {
+                        return self.fail_suspension(agent, suspension, "snapshot-in-place", "an in-place suspension can only resume on its source host".into(), Vec::new());
+                    }
+                    let Some(operation) = suspension.suspend_operation_id.as_deref() else {
+                        return self.fail_suspension(agent, suspension, "snapshot-incomplete", "the suspension has no capture operation".into(), Vec::new());
+                    };
+                    let dir = crate::seat_snapshot::directory(self.driver_state_dir.parent().unwrap(), operation);
+                    match crate::seat_snapshot::restore(&dir.join("payload.tar"), &self.driver_state_dir, agent, operation, member, &session) {
+                        Ok(manifest) => {
+                            let path = manifest.transcript_path.expect("validated in-place transcript path");
+                            crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path.to_string_lossy().into_owned());
+                        }
+                        Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                    }
+                } else if moved {
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 } else if let (Some(incarnation), Some(harness)) =
                     (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
@@ -11041,7 +11192,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let record = if kind == "runtime.observed" {
             let Some(record) = self.store.append_reconciled_runtime_observation(&input)? else {
                 // The worker's durable result superseded this physical capture.
-                // Wake a fresh pass instead of publishing the prior incarnation.
+                // Wake a fresh pass instead of publishing an old incarnation or status.
                 self.record_runtime_observation_admission(subject, true)?;
                 return Ok(());
             };
@@ -12977,6 +13128,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(expected) = &step.produces_mission else {
             return Ok(true);
         };
+        let expected = crate::mission::resolve_produced_mission(
+            expected,
+            view.run.strip_prefix("mission-run/").unwrap_or(&view.run),
+        )?;
         let Some(output) =
             self.store
                 .mission_output(&view.subject, view.attempt, &view.definition_hash)?
@@ -12993,7 +13148,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         Ok(self
             .store
-            .mission_spec(expected, Some(&output.revision))?
+            .mission_spec(&expected, Some(&output.revision))?
             .is_some_and(|mission| mission.state == MissionState::Ready))
     }
 
@@ -16644,6 +16799,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("attempt".into(), Value::from(attempt)),
         ]);
+        let (binding, original_request) = self.store.human_gate_continuity(run, subject, &fields)?;
+        fields.insert("continuity".into(), binding);
         let request_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields)?));
         let operation = format!(
             "gate-operation/{}/{}",
@@ -16651,7 +16808,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &request_hash[..24]
         );
         fields.insert("operation".into(), Value::String(operation.clone()));
-        let request = self.store.append_claim(&ClaimInput {
+        let request = if let Some(original) = original_request { original } else { self.store.append_claim(&ClaimInput {
             subject: operation.clone(),
             kind: "gate.requested".into(),
             actor: None,
@@ -16663,7 +16820,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 &request_hash[..24]
             )),
-        })?;
+        })? };
         // The reviewer's answer, read by the rule that takes an answered review off the
         // reviewers' list: a later result on the operation (another actor's, an unbound one)
         // cannot hide it and leave a gate nobody can answer.
@@ -18826,6 +18983,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .entry(observer.subject.clone()).or_default().clone();
         let look_limit = self.look_limit;
         let github_plugin = self.github_plugin.clone();
+        let capture_state_dir = self.driver_state_dir.parent()
+            .context("observer drivers have no state directory")?.to_path_buf();
         let refill_mirrors = self.refill_mirrors;
         let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
@@ -18932,6 +19091,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     workflow_runs: (spec.provider == "github.repository").then(|| {
                         Arc::new(GraphWorkflowRuns { store: store.clone(), observer: observer_subject.clone() })
                             as Arc<dyn WorkflowRunLedger>
+                    }),
+                    github_capture: (spec.provider == "github.repository").then(|| {
+                        Arc::new(github_capture::GraphGitHubCaptureLedger {
+                            store:store.clone(),state_dir:capture_state_dir.clone(),
+                        }) as Arc<dyn crate::github_capture::GitHubCaptureLedger>
                     }),
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
@@ -20965,8 +21129,27 @@ fn mirror_observation(
             return;
         }
     };
+    // Capture owns durable merge facts for migrated repositories. Keep the mirror's live
+    // transitions (and watches) intact, but never publish a second durable merge history.
+    // In particular, capture replay/backfill must not be turned into live github.event rows.
+    let canonical_merges = if events.iter().any(|event| event["event"] == "merged") {
+        match store.github_source_definitions() {
+            Ok(definitions) => definitions.iter().any(|definition| {
+                definition.enabled
+                    && definition.source.host == "github.com"
+                    && definition.repositories.iter().any(|locator| locator.eq_ignore_ascii_case(&spec.locator))
+            }),
+            Err(error) => {
+                tracing::warn!(observer, "GitHub event ownership could not be read; the mirror keeps the events: {error:#}");
+                return;
+            }
+        }
+    } else { false };
     // Each event is one keyed claim, written once, within the plugin's graph allowlist.
     for event in events {
+        if canonical_merges && event["event"] == "merged" {
+            continue;
+        }
         let Some(subject) = event["subject"].as_str() else { continue };
         let mut fields = BTreeMap::from([
             ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
@@ -21120,6 +21303,7 @@ async fn refill_mirror(
         refresh: false,
         webhook_covered: false,
         workflow_runs: None,
+        github_capture: None,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;

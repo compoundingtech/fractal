@@ -1148,8 +1148,8 @@ fn availability_fixtures_conform_and_refuse_identity_and_unknown_values() {
 async fn daemon_availability_routes_conform_to_client_v0() {
     let root = tempfile::tempdir().unwrap();
     let app = fractal_daemon::api::router(test_state(root.path()));
-    let send = |method: &'static str, uri: &'static str, person: &'static str, body: Option<Value>| {
-        let app = app.clone();
+    let send = |method: &'static str, uri: &str, person: &'static str, body: Option<Value>| {
+        let (app, uri) = (app.clone(), uri.to_owned());
         async move {
             let mut request = Request::builder().method(method).uri(uri).header("x-st3-person", person);
             if body.is_some() {
@@ -1184,6 +1184,48 @@ async fn daemon_availability_routes_conform_to_client_v0() {
         assert_conforms(&contract_validator("Envelope"), "availability read", &read);
         assert_conforms(&contract_validator("PersonAvailabilities"), "availability read", &read["value"]);
         assert_eq!(read["value"]["people"][0]["presence"], presence, "{reader}");
+    }
+    // The last hour's history in ten-minute buckets: the person's view and, without presence, another's.
+    let now = chrono::Utc::now();
+    let from = (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let to = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for (reader, query) in [("person/ada", ""), ("person/avery", "&person=person/ada")] {
+        let uri = format!("/v1/client/availability/history?from={from}&to={to}&bucket_seconds=600{query}");
+        let (status, read) = send("GET", &uri, reader, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_conforms(&contract_validator("Envelope"), "availability history", &read);
+        assert_conforms(&contract_validator("AvailabilityHistory"), "availability history", &read["value"]);
+        let typed: fractal_client::Envelope<fractal_client::AvailabilityHistory> = serde_json::from_value(read.clone()).unwrap();
+        assert_eq!(typed.value.buckets.len(), 6, "{read}");
+        assert_eq!(typed.value.buckets[5].presence.is_some(), reader == "person/ada", "{reader}");
+    }
+}
+
+#[test]
+fn availability_history_fixture_conforms_and_always_names_presence() {
+    let read = json(asset_root().join("fixtures/availability-history.json"));
+    assert_conforms(&contract_validator("Envelope"), "availability history", &read);
+    let history = contract_validator("AvailabilityHistory");
+    assert_conforms(&history, "availability history", &read["value"]);
+    let mut coarse = read["value"].clone();
+    coarse["buckets"][0]["presence"] = Value::Null;
+    assert!(history.is_valid(&coarse), "another reader gets presence as null");
+    let mut missing = read["value"].clone();
+    missing["buckets"][0].as_object_mut().unwrap().remove("presence");
+    assert!(!history.is_valid(&missing), "every key is always present");
+    let mut negative = read["value"].clone();
+    negative["buckets"][0]["status"]["away"] = serde_json::json!(-1);
+    assert!(!history.is_valid(&negative));
+}
+
+#[test]
+fn series_fixtures_conform_to_their_read_and_envelope() {
+    let envelope = contract_validator("Envelope");
+    let series = contract_validator("Series");
+    for file in ["series.json", "series-grouped.json"] {
+        let read = fixture(file);
+        assert_conforms(&envelope, file, &read);
+        assert_conforms(&series, file, &read["value"]);
     }
 }
 
@@ -3244,6 +3286,24 @@ async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_acti
                 .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {body}");
     }
+
+    // A tag-reader requests no terminal capability, unlike the --read-only preset.
+    let tag_reader_scopes = serde_json::json!(["read.projections", "read.glasses", "read.arrangements"]);
+    let (status, challenge) = client_post_json_person(
+        local.clone(), "/v1/client/pairings", "person/ada", begin(tag_reader_scopes.clone()),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{challenge}");
+    let pairing = challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let (status, paired) = client_post_json(
+        gateway.clone(), &format!("/v1/client/pairings/{pairing}/complete"),
+        serde_json::json!({
+            "api_version": "st3.client.v0",
+            "code": challenge["value"]["code"],
+            "device_public_key": "tag-reader-test-display-key-00000000000000000"
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{paired}");
+    assert_eq!(paired["value"]["scopes"], tag_reader_scopes);
 
     let (status, challenge) = client_post_json_person(
         local.clone(),

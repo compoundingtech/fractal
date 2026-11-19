@@ -48,6 +48,11 @@
 //! mission. Each attempt uses its own stable key, so every measured request writes a new run
 //! rather than measuring idempotent replay; source preparation is outside the counted region.
 //!
+//! GitHub capture probes admit fresh root/successor grants and stop fresh writers on every
+//! sample. Source declarations, capture history and predecessor fences are prepared outside
+//! the counted request; replay measures one populated continuation at fixed page size while
+//! its retained capture sequence grows with the generated scale.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
@@ -63,6 +68,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
 use fractal_daemon::HarnessQuestionsStore;
+use fractal_daemon::DeliveryStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -190,6 +196,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/deploy/verify-go",
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
+    ),
+    (
+        "GET /v1/internal/resources",
+        "host-local operator inventory combines shell command history, native memberships, holds and the in-memory accountant, absent from generated claim-history cost stores; shell_resources::tests::durable_commands_are_queryable_without_becoming_second_admission_authority and api::resources ownership tests cover the transport/store boundary; populated host-local inventory and retained command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/exec",
+        "requires a real native invocation/attempt or local operator and connected-host resource authority, absent from generated cost stores; queues one host-local command without granting membership or releasing a payload; api::resources submission and nested-custody tests cover ownership and admission boundaries; command bytes, native owner validation and queue-write cost are not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}",
+        "requires a durable host-local shell execution, absent from generated cost stores; reads the execution by primary key, then scans its host's memberships and operator holds for inspection; api::resources ownership tests cover disclosure, but host-local membership/hold history and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/wait",
+        "event-driven long-poll over one host-local shell execution, not a finite JSON cost sample; each wake rereads the command by primary key and rechecks native ownership; api::resources::tests::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials covers wakeup ordering and disclosure; command-body and wakeup cost are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/cancel",
+        "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
     ),
     (
         "GET /v1/internal/fleet/leave-state",
@@ -397,6 +423,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
     ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
+    ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
+    ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -717,6 +745,53 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/plugins/github/capture/v1/replay",
+        "/v1/plugins/github/capture/v1/replay?source={capture_source}&cursor={capture_cursor}&limit=1",
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/root",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/root",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE,
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/successor",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/successor",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE, "epoch": 2, "predecessor_grant": fixture.items["capture_grant"],
+            "fencing_receipt": fixture.items["capture_fence"],
+            "final_predecessor_commit": fixture.items["capture_frontier"],
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/fence",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/fence",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "authority_grant": fixture.items["capture_grant"],
+        }),
+    ),
+    get(
+        "GET /v1/mission-runs/continuity/startup-preview",
+        "/v1/mission-runs/continuity/startup-preview",
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/preview",
+        "/v1/mission-runs/continuity/preview",
+        |fixture, _| json!({"run": fixture.items["continuity_source"]}),
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/recover",
+        "/v1/mission-runs/continuity/recover",
+        |fixture, _| json!({
+            "run": fixture.items["continuity_source"],
+            "preview_hash": fixture.items["continuity_hash"],
+        }),
+    ),
     get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
     post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
         "actor": "person/bench-operator",
@@ -745,6 +820,10 @@ const PROBES: &[Probe] = &[
         "text":format!("Invented current person context {attempt}"),
     })),
     get("GET /v1/client/availability", "/v1/client/availability"),
+    get(
+        "GET /v1/client/availability/history",
+        "/v1/client/availability/history?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket_seconds=3600",
+    ),
     put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
         "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
     })),
@@ -992,6 +1071,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
+    get(
+        "GET /v1/client/series",
+        "/v1/client/series?objective=cost%2Fseries&from=1000&to=4000&bucket_seconds=1",
+    ),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -1133,6 +1216,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
+    get(
+        "GET /v1/series",
+        "/v1/series?kind=custom.cost.series-event&kind=custom.cost.series-other&subject_prefix=custom%2Fcost%2Fseries%2F&group_by=category&from=1000&to=4000&bucket_seconds=1",
+    ),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -1264,6 +1351,7 @@ const PROBES: &[Probe] = &[
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
     get("GET /v1/hosts/holds", "/v1/hosts/holds"),
+    get("GET /v1/hosts/launch-freeze", "/v1/hosts/launch-freeze"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -1410,6 +1498,29 @@ const PROBES: &[Probe] = &[
             })
         },
     ),
+    // Native physical authority is absent from generated stores. Exercise the real fenced
+    // persistence path, including a fresh incarnation and non-replayed frontier each time.
+    direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
+        let agent = &fixture.subjects.seats[0];
+        let incarnation = format!("cost-mail-frontier-{attempt}");
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: agent.clone(), kind: kind.into(), actor: Some(agent.clone()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).map_err(|error| error.message)?;
+        }
+        let fence = store.bind_mailbox(&fractal_daemon::client::Fence::new(agent, &incarnation, "delivery"))
+            .map_err(|error| error.message)?;
+        let through = u64::try_from(smallclaims::store::now_ms()).unwrap();
+        let (record, written) = store.record_mail_acceptance_frontier(&fence, through)
+            .map_err(|error| error.message)?;
+        assert!(written, "measure an advancing source frontier, not a replay");
+        Ok(serde_json::to_value(record).unwrap())
+    }),
     // The route binds its caller to a live seat process, which a test has none of.
     direct("POST /v1/harness-events", |store, fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -1520,6 +1631,18 @@ const PROBES: &[Probe] = &[
     ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id/plan", "/v1/agents/rename-id/plan", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id/plan", "/v1/missions/rename-id/plan", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
         "from": format!("agent/bench/cost/rename-{attempt}"),
         "to": format!("agent/bench/cost/renamed-{attempt}"),
@@ -1532,6 +1655,10 @@ const PROBES: &[Probe] = &[
         "actor": "person/bench-operator", "reason": "Invented rename",
         "idempotency_key": format!("cost-mission-rename-{attempt}"),
     })),
+    get("GET /v1/agents/rename-proof",
+        "/v1/agents/rename-proof?from=agent%2Fbench%2Fcost%2Frename-0&to=agent%2Fbench%2Fcost%2Frenamed-0"),
+    get("GET /v1/missions/rename-proof",
+        "/v1/missions/rename-proof?from=mission%2Fcost-rename-0&to=mission%2Fcost-renamed-0"),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -2550,7 +2677,7 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
             let mut samples = Vec::new();
             for _ in 0..4 {
                 let scope = work::SqliteWorkScope::start();
-                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
                 let spent = scope.finish();
                 if configured {
                     let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
@@ -3134,6 +3261,106 @@ async fn missing_service_probe_is_fatal_before_cost_aggregation() {
     required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
 }
 
+fn capture_source(fixture: &Fixture) -> Value {
+    json!({"host": "github.com", "id": fixture.items["capture_source"], "generation": 1})
+}
+
+/// Trusted-local operator requests must not carry a client session or bound agent.
+async fn capture_request(app: &Router, method: &str, path: &str, body: Option<&Value>) -> Value {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let bytes = body.map(|body| serde_json::to_vec(body).unwrap()).unwrap_or_default();
+    let response = app.clone().oneshot(Request::builder().method(method).uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(bytes)).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+    assert!(status.is_success(), "capture probe {method} {path}: {status}: {}", String::from_utf8_lossy(&bytes));
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    envelope.get("value").expect("capture response must use the daemon envelope").clone()
+}
+
+async fn prepare_capture_probe(
+    app: &Router, store: &Store, fixture: &mut Fixture, route: &str, attempt: usize, scale: f64,
+) {
+    use fractal_schema::github_capture::{
+        self as capture, CaptureCommit, FactImage, FactReference, MergeFact, ObservedFact, Source,
+    };
+
+    let operation = if route.starts_with("GET ") { "replay" } else { route.rsplit('/').next().unwrap() };
+    let id = format!("cost-{operation}-{attempt}");
+    let subject = format!("github-source/{id}");
+    fixture.items.insert("capture_source", id.clone());
+    let source: Source = serde_json::from_value(capture_source(fixture)).unwrap();
+    let declare = |grant: Option<&str>| {
+        let authority = grant.map(|grant| format!("authority-grant \"{grant}\";")).unwrap_or_default();
+        let kdl = format!("version 2\ngithub-source \"{id}\" {{ host \"github.com\"; generation 1; \
+            {authority} repository \"example/public\"; enabled #false; checkpoint-every-ms 60000; replicate-private #false; }}");
+        let intent = fractal_daemon::parse_intent(&kdl, NODE).unwrap();
+        store.apply_internal(&intent, &format!("cost-{id}-{}", grant.unwrap_or("disabled"))).unwrap();
+    };
+    declare(None);
+    if operation == "root" { return; }
+
+    let base = format!("/v1/plugins/github/capture/v1/sources/{id}");
+    let root = capture_request(app, "POST", &format!("{base}/authority/root"), Some(&json!({
+        "actor": "person/bench-operator", "source": source, "member": NODE,
+    }))).await;
+    let grant = root["id"].as_str().unwrap().to_owned();
+    declare(Some(&grant));
+    fixture.items.insert("capture_grant", grant.clone());
+    let append = |subject: String, kind: &str, record: Value| {
+        store.append_claim(&ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // Grow retained replay history, not the measured page. Authority samples need only one
+    // real capture to exercise the stopped-frontier dependency rather than an empty source.
+    let count = if operation == "replay" { ((1000.0 * scale) as u64).max(3) } else { 1 };
+    let mut frontier = None;
+    for sequence in 1..=count {
+        let fact = ObservedFact {
+            version: capture::VERSION, source: source.clone(), observed_at_ms: sequence,
+            supersedes: None,
+            fact: FactImage::Merge(MergeFact {
+                pull_request_id: format!("pr-{sequence}"), repository_id: "example/public".into(),
+                merged_at_ms: sequence,
+            }),
+        };
+        let fact_claim = append(fact.subject().unwrap(), capture::FACT_KIND, serde_json::to_value(&fact).unwrap());
+        let commit = CaptureCommit {
+            version: capture::VERSION, source: source.clone(), epoch: 1,
+            authority_grant: grant.clone(), sequence, predecessor: frontier,
+            facts: vec![FactReference { claim_id: fact_claim.id, digest: fact.digest().unwrap() }],
+            checkpoint: None, coverage: Vec::new(), observed_at_ms: sequence,
+        };
+        frontier = Some(append(commit.subject().unwrap(), capture::COMMIT_KIND, serde_json::to_value(&commit).unwrap()).id);
+    }
+    fixture.items.insert("capture_frontier", frontier.unwrap());
+    // Finish bounded projection catch-up outside the sample, then retain a finite
+    // continuation after sequence one so measured replay also checks its pinned frontier.
+    let path = format!("/v1/plugins/github/capture/v1/replay?source={id}&limit=1");
+    loop {
+        let first = capture_request(app, "GET", &path, None).await;
+        if first["state"] == "projection-pending" { continue; }
+        assert_eq!(first["state"], "ready");
+        assert_eq!(first["page"]["through_sequence"], count);
+        assert_eq!(first["page"]["records"][0]["commit"]["sequence"], 1);
+        fixture.items.insert("capture_cursor", first["page"]["cursor"].as_str().unwrap().into());
+        break;
+    }
+    if operation == "successor" {
+        let receipt = capture_request(app, "POST", &format!("{base}/fence"), Some(&json!({
+            "actor": "person/bench-operator", "source": source, "authority_grant": grant,
+        }))).await;
+        assert_eq!(receipt["subject"], subject);
+        fixture.items.insert("capture_fence", receipt["id"].as_str().unwrap().into());
+    }
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3177,6 +3404,40 @@ async fn paired_push(
         return Err(format!("paired push {method} did not return its registration status"));
     }
     Ok(response)
+}
+
+/// Keep both series answers fixed while same-kind timestamp history outside the window grows.
+fn seed_series_reads(store: &Store, scale: f64) {
+    let intent = fractal_daemon::parse_intent(r#"version 2
+objective "cost/series" {
+  about "Cost fixture events"
+  indicator "count" {
+    subject-prefix "custom/cost/series/"
+    event "custom.cost.series-event" at="at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, NODE).unwrap();
+    store.apply_internal(&intent, "cost-series-objective").unwrap();
+    let history = ((scale * 10_000.0).round() as usize).max(1);
+    for (name, kind, at) in [
+        ("first".to_owned(), "custom.cost.series-event", 1000),
+        ("second".to_owned(), "custom.cost.series-other", 2000),
+        ("boundary".to_owned(), "custom.cost.series-event", 4000),
+    ].into_iter().chain((0..history).map(|n| {
+        (format!("history-{n}"), "custom.cost.series-event", 10_000)
+    })) {
+        store.append_claim(&ClaimInput {
+            subject: format!("custom/cost/series/{name}"),
+            kind: kind.into(),
+            actor: None,
+            fields: BTreeMap::from([("at".into(), json!(at)), ("category".into(), json!("event"))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
 }
 
 async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u64, u64)) -> Measured {
@@ -3266,6 +3527,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap();
     }
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_series_reads(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -3324,6 +3591,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let service_claim = seed_service_probe(&store);
     let mut service_state = state.clone();
     service_state.owning_person = Some("person/bench-operator".into());
+    let capture_router = fractal_daemon::api::router(service_state.clone());
     let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -3563,6 +3831,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     assert_eq!(page["page"]["has_more"], false);
 
     prepare_custom_fixture(&store, &mut fixture, scale);
+    prepare_continuity(&store, &mut fixture, root);
     let event_page: Value = client
         .get(&fixture.fill("/v1/events/page?after={event_after}&limit=100", 0))
         .await
@@ -3597,7 +3866,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
-        if probe.route == "POST /v1/agents/rename-id" {
+        if probe.route == "POST /v1/agents/rename-id/plan" {
             prepare_renames(&store);
         }
         if probe.route == "POST /v1/mission-runs/{run}/retry" {
@@ -3659,6 +3928,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            if probe.route.contains("/plugins/github/capture/v1/") {
+                prepare_capture_probe(&capture_router, &store, &mut fixture, probe.route, attempt, scale).await;
+            }
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                fixture.items.insert("continuity_hash", preview["preview_hash"].as_str().unwrap().into());
+            }
             // Seed a fresh durable uncertainty outside the measured region. In particular,
             // resolution must write a new receipt on every sample, never an idempotent replay.
             if probe.route.contains("/v1/effects/") {
@@ -3711,6 +3987,40 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.route.contains("/plugins/github/capture/v1/") {
+                let path = fixture.fill(probe.path, attempt);
+                let body = probe.body.map(|body| body(&fixture, attempt));
+                let method = probe.route.split_once(' ').unwrap().0;
+                counted(|| async {
+                    let value = capture_request(&capture_router, method, &path, body.as_ref()).await;
+                    if probe.body.is_none() {
+                        assert_eq!(value["state"], "ready");
+                        assert_eq!(value["page"]["frontier"], fixture.items["capture_frontier"]);
+                        assert_eq!(value["page"]["records"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["records"][0]["commit"]["sequence"], 2);
+                        assert_eq!(value["page"]["records"][0]["facts"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["coverage"], Value::Null);
+                        assert_eq!(value["page"]["snapshot_complete"], false);
+                    } else {
+                        let record = &value["body"]["fields"]["record"];
+                        assert_eq!(record["source"], capture_source(&fixture));
+                        if probe.route.ends_with("/fence") {
+                            assert_eq!(record["authority_grant"], fixture.items["capture_grant"]);
+                            assert_eq!(record["final_commit"], fixture.items["capture_frontier"]);
+                            assert_eq!(value["kind"], fractal_schema::github_capture::FENCED_KIND);
+                        } else {
+                            assert_eq!(record["epoch"], if probe.route.ends_with("/root") { 1 } else { 2 });
+                            assert_eq!(record["member"], NODE);
+                            if probe.route.ends_with("/successor") {
+                                assert_eq!(record["predecessor_grant"], fixture.items["capture_grant"]);
+                                assert_eq!(record["fencing_receipt"], fixture.items["capture_fence"]);
+                                assert_eq!(record["final_predecessor_commit"], fixture.items["capture_frontier"]);
+                            }
+                            assert_eq!(value["kind"], fractal_schema::github_capture::AUTHORITY_KIND);
+                        }
+                    }
+                    Ok(value)
+                }).await
             } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
                 let path = fixture.fill(probe.path,attempt);
                 counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
@@ -3729,7 +4039,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
+                } else if path.starts_with("/v1/mission-runs/continuity/")
+                    || path.starts_with("/v1/client/")
+                    || path.starts_with("/v1/effects/")
+                {
                     person.clone()
                 } else {
                     client.clone()
@@ -3753,6 +4066,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "GET /v1/mission-runs/continuity/startup-preview" {
+                                anyhow::ensure!(value["runs"].is_array(), "startup preview must return its candidate inventory");
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/preview" {
+                                anyhow::ensure!(
+                                    value["preview_hash"].as_str().is_some_and(|hash| hash.len() == 64)
+                                        && value["original_work"][0]["eligibility"] == "eligible",
+                                    "continuity cost probe must inspect eligible original completion evidence",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                                anyhow::ensure!(
+                                    value["recovered_run"].as_str().is_some()
+                                        && value["preview_hash"] == body.as_ref().unwrap()["preview_hash"],
+                                    "continuity cost probe must accept its current preview and create a successor",
+                                );
+                            }
                             if probe.route.contains("/v1/effects/") {
                                 anyhow::ensure!(
                                     value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
@@ -3794,6 +4124,32 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                     "the usage cost probe must answer its exact empty fixture period",
                                 );
                             }
+                            if matches!(probe.route, "GET /v1/series" | "GET /v1/client/series") {
+                                let series = value.get("value").unwrap_or(&value);
+                                let grouped = probe.route == "GET /v1/series";
+                                let mut expected = json!({
+                                    "from": 1000, "to": 4000, "bucket_seconds": 1,
+                                    "buckets": [
+                                        {"start": 1000, "end": 2000, "count": 1},
+                                        {"start": 2000, "end": 3000, "count": if grouped { 1 } else { 0 }},
+                                        {"start": 3000, "end": 4000, "count": 0},
+                                    ],
+                                });
+                                if grouped {
+                                    expected["group_by"] = json!("category");
+                                    for bucket in expected["buckets"].as_array_mut().unwrap() {
+                                        bucket["groups"] = if bucket["count"] == 0 {
+                                            json!([])
+                                        } else {
+                                            json!([{"value": "event", "count": 1}])
+                                        };
+                                    }
+                                }
+                                anyhow::ensure!(
+                                    *series == expected,
+                                    "series cost probes must return their exact fixed, populated histogram",
+                                );
+                            }
                             if probe.route == "POST /v1/internal/client-read/forward"
                                 && (serde_json::from_value::<fractal_daemon::model::ClientResourcePage>(
                                     value.clone(),
@@ -3822,6 +4178,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 assert_eq!(source.status, "failed", "retry must leave its source terminal");
                 assert!(source.steps.iter().all(|step| step.status == "failed"));
                 assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
+            }
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                let target = store.mission_run(preview["target_run"].as_str().unwrap()).unwrap().unwrap();
+                assert_eq!(target.steps[0].status, "completed");
+                let references = store.claims_for(&target.steps[0].subject, Some("step-run.carried")).unwrap();
+                assert_eq!(references.len(), 1, "every sample must adopt original evidence into a fresh successor");
+                let mut source = references[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                let mut seen = std::collections::BTreeSet::from([target.steps[0].subject.clone()]);
+                while source != fixture.items["continuity_step"] {
+                    assert!(seen.insert(source.clone()), "carried evidence must have an acyclic original reference");
+                    assert!(store.claims_for(&source, Some("work.submitted")).unwrap().is_empty());
+                    let previous = store.claims_for(&source, Some("step-run.carried")).unwrap();
+                    assert_eq!(previous.len(), 1, "every intermediate must reference its authentic source");
+                    source = previous[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                }
+                assert!(store.claims_for(&target.steps[0].subject, Some("work.submitted")).unwrap().is_empty());
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -4231,6 +4604,29 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// A superseded run with late original evidence, independent of generated history size.
+fn prepare_continuity(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let definition = "version 2\nmission \"cost-continuity\" state=\"ready\" {\n\
+        goal \"Original goal.\"\nstep \"prepare\" { agentless; }\n}\n";
+    let intent = fractal_daemon::parse_intent(definition, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-original").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-continuity".into(), revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()), mode: None,
+        inputs: BTreeMap::new(), idempotency_key: "cost-continuity-source".into(),
+    }).unwrap();
+    let updated = definition.replace("Original goal.", "Updated goal.");
+    let intent = fractal_daemon::parse_intent(&updated, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-updated").unwrap();
+    store.supersede_mission_publications().unwrap();
+    let current = store.mission_run(&source.subject).unwrap().unwrap();
+    assert!(current.superseded_by.is_some());
+    store.set_step_state(&source.steps[0].subject, "completed", None).unwrap();
+    fixture.items.insert("continuity_step", source.steps[0].subject.clone());
+    fixture.items.insert("continuity_source", source.subject);
 }
 
 /// Keep the source terminal and permit all four independent retries without bypassing admission.

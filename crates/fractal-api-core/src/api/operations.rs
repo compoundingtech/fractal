@@ -522,7 +522,8 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
 
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
 pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
-    let mut rows = slo_rows(store)?;
+    let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
+    let mut rows = slo_rows(store, domain)?;
     rows.extend(crate::readiness_slo::current(store));
     add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
     add_tones(&mut rows);
@@ -581,6 +582,47 @@ pub async fn get_slo_history(
         "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
         "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
     })))
+}
+
+/// Count a declared objective's selection, or explicit claim kinds, per bucket.
+/// Explicit claims use the first present `at`, `occurred_at_unix_ms`, or `occurred_at`
+/// field as event time. Only claims without these fields use `accepted_at_unix_ms`;
+/// a present unreadable event time is excluded rather than shifted to ingestion time.
+pub async fn get_series(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> Result<Json<Value>, ApiError> {
+    let invalid = |message| ApiError::bad(FractalError::new("invalid-series", message));
+    let mut kinds = Vec::new();
+    let mut query = BTreeMap::new();
+    for (key, value) in params {
+        if key == "kind" {
+            kinds.push(value);
+        } else if !matches!(key.as_str(), "objective" | "subject_prefix" | "group_by" | "from" | "to" | "bucket_seconds") {
+            return Err(invalid(format!("unknown series parameter `{key}`")));
+        } else if query.insert(key.clone(), value).is_some() {
+            return Err(invalid(format!("series parameter `{key}` must occur once")));
+        }
+    }
+    let number = |name: &str| -> Result<u64, ApiError> {
+        query.get(name).and_then(|value| value.parse().ok())
+            .ok_or_else(|| invalid(format!("series parameter `{name}` must be an unsigned integer")))
+    };
+    let (from, to, bucket_seconds) = (number("from")?, number("to")?, number("bucket_seconds")?);
+    tokio::task::spawn_blocking(move || {
+        crate::declared_objectives::claim_series(
+            &state.store,
+            query.get("objective").map(String::as_str),
+            &kinds,
+            query.get("subject_prefix").map(String::as_str),
+            query.get("group_by").map(String::as_str),
+            from, to, bucket_seconds,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map(Json)
+    .map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]

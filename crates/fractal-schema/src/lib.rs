@@ -9,6 +9,7 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_capture;
 pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
@@ -24,6 +25,7 @@ pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
+pub mod residency;
 pub mod review;
 pub mod task_grants;
 pub mod usage_limits;
@@ -86,7 +88,7 @@ mod canonical_agent_actor_tests {
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hda2609356de5 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -130,7 +132,7 @@ Storage version 19 adds the owner-local `local_runtime_starts` ledger and its ad
 
 In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
 
-Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial when publishing a differing or absent incarnation; unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial even when publishing the same incarnation: an earlier running snapshot cannot overwrite terminal evidence published by completion. Only runtime-start ledger mutations advance this witness, so heartbeat, work, usage claims and unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The in-memory physical capture also retains the indexed `MAX(claims.store_index)` in the same SQLite snapshot. The completion writer preserves an owning-origin observation of the exact runtime/incarnation whose store index is newer than this frontier, retaining its receipt and terminal evidence while still recording launch success. This covers observations appended by the broad pass, which do not advance the ledger generation. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 
@@ -785,9 +787,11 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        github_capture::validate(subject, kind, fields)?;
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
+        residency::validate(subject, kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -1144,6 +1148,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "gate-admission",
+            "gate-admission/HOST/ID/OUTCOME",
+            "One immutable transitional gate admission lifecycle receipt.",
+            false,
+        ),
+        (
             "fleet-invite",
             "fleet-invite/ID",
             "A single-use fleet join invite.",
@@ -1255,6 +1265,30 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_capture::FACT_FAMILY,
+            "github-fact/REVISION_DIGEST",
+            "One bounded normalized GitHub entity revision, visible only through a committed capture.",
+            false,
+        ),
+        (
+            github_capture::COMMIT_FAMILY,
+            "github-capture/COMMIT_DIGEST",
+            "A bounded source capture visibility marker and coverage frontier.",
+            false,
+        ),
+        (
+            github_capture::AUTHORITY_FAMILY,
+            "github-source/NAME",
+            "An explicitly configured GitHub source and its fenced acquisition authority.",
+            true,
+        ),
+        (
+            "github-scope",
+            "github-scope/NAME",
+            "An effective-dated versioned repository roster for native GitHub objectives.",
+            true,
+        ),
+        (
             github_plugin::EVENT_FAMILY,
             "github-event/RESOURCE/ITEM/NUMBER/KEY",
             "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
@@ -1267,10 +1301,22 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "residency",
+            "residency/HOST/EPISODE/ID",
+            "Durable residency evidence, scoped to an owner host and logical episode.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
             true,
+        ),
+        (
+            "resource-admission",
+            "resource-admission/HOST or resource-admission/HOST/ID",
+            "A host authority's durable admission source cut or membership lifecycle evidence.",
+            false,
         ),
         (
             "repair",
@@ -1589,6 +1635,42 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
         (
+            "resource.admission.observed",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "resource.admission.coverage",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "gate.admission.observed",
+            &["gate-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "resource.exec-receipt",
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
             "person.delegation-set",
             &["person"],
             WritePolicy::SameSubjectActor,
@@ -1889,6 +1971,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "mission-run.supersede-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.gate-carried",
             &["mission-run"],
             WritePolicy::SystemOnly,
             Cardinality::Append,
@@ -2229,6 +2320,42 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_capture::FACT_KIND,
+            &[github_capture::FACT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::COMMIT_KIND,
+            &[github_capture::COMMIT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::FENCED_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::AUTHORITY_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             github_plugin::ITEM_STATE,
@@ -3327,6 +3454,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             },
         );
     }
+    residency::register(&mut claims);
     claims
 }
 
@@ -3338,6 +3466,60 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.admission.observed" => &[
+            ("id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("epoch", required_string()),
+            ("owner", required_object()),
+            ("queued_at", required_integer()),
+            ("admitted_at", integer()),
+            ("retired_at", integer()),
+            ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
+            ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+            ("finite", required_boolean()),
+            ("admission_timeout_ms", integer()),
+            ("clock_uncertain", required_boolean()),
+        ],
+        "resource.admission.coverage" => &[
+            ("host", required_string()),
+            ("epoch", required_string()),
+            ("complete", required_boolean()),
+        ],
+        "gate.admission.observed" => &[
+            ("schema", required_enum(&["gate-slot.admission/v1"])),
+            ("id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["gate", "heavy", "eval"])),
+            ("at_ms", required_integer()),
+            ("onset_ms", required_integer()),
+            ("epoch", required_string()),
+            ("coverage", required_enum(&["logical"])),
+            ("outcome", required_enum(&["accepted", "granted", "failed", "excluded"])),
+            ("reason", required_string()),
+        ],
+        "resource.exec-receipt" => &[
+            ("exec_id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("owner", required_object()),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("state", required_enum(&["completed", "refused", "cancelled"])),
+            ("memory_bytes", integer()),
+            ("disk_reserved_bytes", required_integer()),
+            ("io", enumeration(&["heavy"])),
+            ("head_start", string()),
+            ("head_end", string()),
+            ("clean_start", boolean()),
+            ("clean_end", boolean()),
+            ("exit_code", integer()),
+            ("exit_signal", integer()),
+            ("wall_duration_ms", required_integer()),
+            ("queue_wait_ms", required_integer()),
+            ("memory_peak_bytes", integer()),
+        ],
         "deploy.go" => &[
             ("version", required_integer()),
             ("host", required_string()),
@@ -3375,6 +3557,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_capture::FACT_KIND | github_capture::COMMIT_KIND | github_capture::AUTHORITY_KIND | github_capture::FENCED_KIND =>
+            &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
         github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
@@ -3532,6 +3716,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("state", string()),
             ("body", object()),
+            ("per_run_missions", integer()),
         ],
         "mission.provenance" => &[
             ("mission", required_reference_to(&["mission"])),
@@ -3572,6 +3757,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("root_revision", string()),
             ("root_mission_run", reference()),
             ("workspace", string()),
+            ("workspace_declaration", object()),
             ("requester", reference()),
             ("mode", string()),
             ("inputs", object()),
@@ -3600,6 +3786,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", required_reference_to(&["mission-run"])),
             ("replacement", required_reference_to(&["mission-run"])),
             ("publication", required_string()),
+        ],
+        "mission-run.gate-carried" => &[
+            ("source_run", required_reference_to(&["mission-run"])),
+            ("source_request", required_string()),
+            ("source_answer", required_string()),
+            ("target_generation", required_reference_to(&["run-generation"])),
+            ("continuity", required_object()),
+            ("legacy_confirmed", boolean()),
+            ("source_confirmation", string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3682,6 +3877,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", reference()),
             ("source_step_run", reference()),
             ("source_generation", reference()),
+            ("source_attempt", integer()),
+            ("source_gate_request", string()),
+            ("person_continuity", object()),
             ("definition_hash", string()),
             ("status", string()),
             ("attempt", integer()),
@@ -3720,12 +3918,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("legacy_request", string()),
             ("requester_declaration", string()),
             ("request", object()),
+            ("continuity", object()),
             ("deadline_unix_ms", integer()),
             ("deadline_ms", integer()),
             ("default_answer", string()),
             ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
+            ("continuity", object()),
             ("attempt", integer()),
             ("status", string()),
             ("summary", string()),
@@ -3788,6 +3988,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("waits", array()),
         ],
         "gate.requested" => &[
+            ("continuity", object()),
             ("status", string()),
             ("owner", reference()),
             ("reviewer", reference()),
@@ -4151,6 +4352,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "operational.failure" => &[
             ("episode", string()),
+            ("objective", string()),
             ("condition", string()),
             ("reviewer", reference()),
             ("title", string()),
@@ -4189,6 +4391,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "runtime.action.requested" => &[
             ("action", string()),
+            ("cause", string()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -4207,6 +4410,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         | "runtime.action.failed"
         | "runtime.action.deadline-reached" => &[
             ("action", string()),
+            ("cause", string()),
+            ("mode", string()),
+            ("request_key", string()),
+            ("operation_id", string()),
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
@@ -5342,7 +5549,28 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in ["resource-admission", "gate-admission"] {
+            current.subjects.remove(family).unwrap();
+        }
+        for kind in residency::KINDS {
+            current.claims.remove(*kind).unwrap();
+        }
+        current.subjects.remove("residency").unwrap();
+        for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
+            github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in [github_capture::FACT_FAMILY, github_capture::COMMIT_FAMILY,
+            github_capture::AUTHORITY_FAMILY, "github-scope"] {
+            current.subjects.remove(family).unwrap();
+        }
+        current.claims.get_mut("operational.failure").unwrap().fields.remove("objective").unwrap();
+        current.claims.get_mut("mission.published").unwrap().fields.remove("per_run_missions").unwrap();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
@@ -5369,8 +5597,15 @@ mod tests {
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
-        for field in ["phase", "admission_publication"] {
+        current.claims.remove("mission-run.gate-carried").unwrap();
+        for field in ["phase", "admission_publication", "workspace_declaration"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
+            current.claims.get_mut(kind).unwrap().fields.remove("continuity").unwrap();
+        }
+        for field in ["source_attempt", "source_gate_request", "person_continuity"] {
+            current.claims.get_mut("step-run.carried").unwrap().fields.remove(field).unwrap();
         }
         current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
@@ -5385,6 +5620,12 @@ mod tests {
         current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
+            for field in ["cause", "mode", "request_key", "operation_id"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
         current.claims.get_mut("runtime.observed").unwrap()
             .fields.remove("exit_evidence").unwrap();
         for field in ["host", "dispatch"] {
@@ -6034,5 +6275,37 @@ mod tests {
                 .code,
             "claim-write-forbidden"
         );
+    }
+
+    #[test]
+    fn admission_sources_accept_producer_fields_but_not_public_writes() {
+        let cases = [
+            ("resource-admission/example-host/request", "resource.admission.observed", serde_json::json!({
+                "id": "request", "host": "example-host", "class": "check", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "queued",
+                "refusal": null, "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host", "resource.admission.coverage", serde_json::json!({
+                "host": "example-host", "epoch": "epoch-one", "complete": true
+            })),
+            ("gate-admission/example-host/request/accepted", "gate.admission.observed", serde_json::json!({
+                "schema": "gate-slot.admission/v1", "id": "request", "host": "example-host",
+                "class": "heavy", "at_ms": 200, "onset_ms": 100, "epoch": "epoch-one",
+                "coverage": "logical", "outcome": "accepted", "reason": "test"
+            })),
+        ];
+        for (subject, kind, fields) in cases {
+            let fields: BTreeMap<String, Value> = serde_json::from_value(fields).unwrap();
+            let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+            assert_eq!(spec.retention, Retention::Durable);
+            assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, Some("agent/example/check"))
+                .unwrap_err().code, "claim-write-forbidden");
+            let mut unknown = fields.clone();
+            unknown.insert("grant".into(), serde_json::json!({"generation": "not-evidence"}));
+            assert_eq!(registry().validate_claim(subject, kind, &unknown).unwrap_err().code, "unknown-claim-field");
+            assert_eq!(registry().validate_claim("host/example-host", kind, &fields).unwrap_err().code, "invalid-claim-subject");
+        }
     }
 }

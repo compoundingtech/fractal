@@ -28,7 +28,7 @@ import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
 import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
-import { Button, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
+import { Button, DraftRecoveryNote, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 import { AlertsStrip } from './Alerts';
 
 // Drawn by the Fractal terminal UI's rules (fixtures/clients/conversation-style.json), so both apps look alike. Text
@@ -317,7 +317,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       // typed while it was on its way stay after it. The cache holds the box's text even if the person
       // has left the conversation, so the text is there when they come back.
       const restored = restoreDraft(draftCache.current.get(target) ?? '', text);
-      if (restored) rememberBounded(draftCache.current, target, restored, 24);
+      if (restored) draftCache.current.set(target, restored);
       draftTouched.current = true;
       if (tags) setDictated(true);
       setDraft(restored);
@@ -392,7 +392,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     if (then === 'cancel' || !words) return;
     if (then === 'send') { await send(draft.trim() ? `${draft.trimEnd()} ${words}` : words); return; }
     const text = draft.trim() ? `${draft.trimEnd()} ${words}` : words;
-    setDraft(text); rememberBounded(draftCache.current, target, text, 24);
+    setDraft(text); draftCache.current.set(target, text);
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
@@ -432,6 +432,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const bar = { backgroundColor: palette.mantle, borderTopColor: palette.surface0 };
 
   return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
+    <DraftRecoveryNote />
     <Banners />
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
@@ -508,7 +509,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}

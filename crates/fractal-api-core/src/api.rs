@@ -98,6 +98,7 @@ use crate::store::local_commits;
 pub mod wire_names;
 pub mod seat_freshness;
 mod host_holds;
+mod resources;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -120,6 +121,8 @@ mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
 mod exec_only;
+mod github_capture;
+mod github_capture_authority;
 mod github_plugin;
 mod github_watch;
 pub mod harness_events;
@@ -198,6 +201,7 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod continuity;
 mod agent_invocations;
 pub mod sessions;
 pub mod work;
@@ -512,7 +516,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -655,6 +659,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/{id}", get(resources::show))
+        .route("/v1/internal/resources/{id}/wait", post(resources::wait))
+        .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -669,6 +678,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
         .route("/v1/client/auto-resolved", get(auto_resolved::read))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/availability/history", get(availability::history))
         .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
@@ -769,6 +779,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/plan", post(agents::plan_agent_rename_id))
+        .route("/v1/missions/rename-id/plan", post(agents::plan_mission_rename_id))
+        .route("/v1/agents/rename-proof", get(agents::agent_rename_proof))
+        .route("/v1/missions/rename-proof", get(agents::mission_rename_proof))
         .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
         .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
         .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
@@ -785,6 +799,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/hosts/holds", get(host_holds::list).post(host_holds::place))
         .route("/v1/hosts/holds/release", post(host_holds::release))
         .route("/v1/hosts/holds/recover", post(host_holds::recover))
+        .route("/v1/hosts/launch-freeze", get(host_holds::launch_freeze).post(host_holds::set_launch_freeze))
+        .route("/v1/hosts/launch-freeze/clear", post(host_holds::clear_launch_freeze))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -839,6 +855,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -994,6 +1011,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/evals/{*run}", get(runs::get_eval))
         .route("/v1/mission-runs", get(runs::list_mission_runs))
         .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-runs/continuity/preview", post(continuity::preview))
+        .route("/v1/mission-runs/continuity/recover", post(continuity::recover))
+        .route("/v1/mission-runs/continuity/startup-preview", get(continuity::startup_preview))
         .route("/v1/mission-overview", get(runs::mission_overview))
         .route("/v1/outcome-history", get(runs::outcome_history))
         .route("/v1/performance", get(runs::performance_report))
@@ -1049,6 +1069,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
         .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
+        .route("/v1/plugins/github/capture/v1/replay", get(github_capture::replay))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/root", post(github_capture_authority::root))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/successor", post(github_capture_authority::successor))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/fence", post(github_capture_authority::fence))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/override", post(work::override_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
@@ -1194,6 +1218,8 @@ async fn response_envelope_unbounded(
     let effect_resolution = request.method() == axum::http::Method::POST
         && request.uri().path().starts_with("/v1/effects/")
         && request.uri().path().ends_with("/resolve");
+    let continuity_recovery = request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/mission-runs/continuity/recover";
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1296,6 +1322,7 @@ async fn response_envelope_unbounded(
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
         || effect_resolution
+        || continuity_recovery
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
@@ -1682,12 +1709,14 @@ pub fn request_latency_snapshot() -> Vec<Value> {
 
 /// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
-    request_latency().lock().unwrap().targets_only(Instant::now())
+    let snapshot = request_latency().lock().unwrap().targets_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
-    request_latency().lock().unwrap().windows(Instant::now())
+    let snapshot = request_latency().lock().unwrap().windows_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Note what keeps this minute of the member's CPU from being idle.
@@ -1746,6 +1775,11 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cpu_minutes()
                 .settle(check, busy);
+        }
+        match tokio::task::spawn_blocking(crate::slo::checkpoint_budgets).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("fractal: native SLO accounting checkpoint failed: {error:#}"),
+            Err(error) => eprintln!("fractal: native SLO accounting checkpoint task failed: {error}"),
         }
         let now = client_now_ms() as u64;
         tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
@@ -2093,6 +2127,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -3701,6 +3738,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     json!({
         "action": suspension.action,
         "phase": suspension.phase,
+        "cause": suspension.cause(),
+        "mode": suspension.mode(),
         "operation_id": suspension.operation_id,
         "harness": suspension.harness,
         "native_session_id": suspension.native_session_id,
@@ -3912,6 +3951,7 @@ fn client_agent_cards_presented(
     queues: &CardQueues<'_>,
     selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
+    let idle_residency_policy = crate::config::idle_residency_policy();
     let agent_subjects = status
         .subjects
         .iter()
@@ -4161,6 +4201,15 @@ fn client_agent_cards_presented(
             } else {
                 None
             };
+            let residency = crate::residency::evaluate_at(
+                store,
+                &subject.subject,
+                Some(snapshot_index),
+                idle_residency_policy.settings.after_ms,
+            )?.not_before(
+                idle_residency_policy.enabled_at_unix_ms,
+                idle_residency_policy.settings.after_ms,
+            );
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -4315,6 +4364,12 @@ fn client_agent_cards_presented(
                 } else {
                     None
                 },
+            });
+            value["residency"] = json!({
+                "policy": residency.policy,
+                "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                "refusal_reason": residency.refusal_reason,
             });
             value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
@@ -7181,6 +7236,8 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 /// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
 /// publication and refolds only the cards whose claims changed, when it can tell which.
 pub fn start_agent_roster(state: &AppState) {
+    crate::mail_delivery_objectives::start(state);
+    crate::admission_objectives::start(state);
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
@@ -8349,6 +8406,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
@@ -8407,6 +8469,7 @@ pub async fn guard_bound_request(
         "/v1/agents/native-session",
         "/v1/agents/lane/burst",
         "/v1/hosts/holds",
+        "/v1/hosts/launch-freeze",
         "/v1/delivery/hold",
         "/v1/hosts/holds",
         "/v1/lane-changes",
@@ -8534,6 +8597,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
     });
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;
@@ -11199,6 +11263,11 @@ pub fn request_suspend(
     {
         return Ok(prior);
     }
+    if let Some(prior) = state.store.suspension_manual_request(&subject, &key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
     if crate::rollout::status(&state.store, &subject)
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
@@ -11218,6 +11287,36 @@ pub fn request_suspend(
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
+        let manual_key = crate::suspension::suspend_manual_key(
+            suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
+        );
+        if suspension.cause() == "idle" && suspension.phase == "suspended" {
+            check_suspension_fence(
+                fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
+            )?;
+            let (claim, _) = state.store.append_source_gated(
+                &subject,
+                &ClaimInput {
+                    subject: subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: Some(actor),
+                    fields: BTreeMap::from([
+                        ("action".into(), json!("suspend")),
+                        ("operation_status".into(), json!("manual")),
+                        ("cause".into(), json!("manual")),
+                        ("request_key".into(), json!(key)),
+                        ("operation_id".into(), json!(suspension.operation_id)),
+                    ]),
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or_else(|| suspension.operation_id.clone())],
+                    expected_subject: None,
+                    idempotency_key: Some(manual_key),
+                },
+                crate::store::owned_sets::Verb::Suspend,
+                force_reason,
+            ).map_err(ApiError::bad)?;
+            signal_changed(state);
+            return Ok(claim);
+        }
         return Err(ApiError::bad(
             FractalError::new(
                 "already-suspended",
@@ -11330,6 +11429,14 @@ pub fn request_resume(
         return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
+        )));
+    }
+    if suspension.mode() == "in-place"
+        && suspension.source_host.as_deref() != Some(host.as_str())
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "snapshot-in-place",
+            "an in-place suspension can only resume on its source host",
         )));
     }
     let launch_token = if let Some((incumbent, old)) =
@@ -11650,8 +11757,9 @@ async fn finish_claim_publication(
     Ok(Json(response))
 }
 
-/// Every objective and budget as one list: see `objectives`.
-pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
+/// Every native, source-backed and declared objective and budget as one list.
+/// Domain rows precede declaration evaluation so native bindings see their real source rows.
+pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -11672,7 +11780,16 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         rows.insert(budgets, crate::objectives::divergence(open));
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
+    drop(rows.splice(budgets..budgets, domain_rows));
+    let admission = crate::admission_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, admission));
+    let mail = crate::mail_delivery_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, mail));
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
 
@@ -11989,6 +12106,13 @@ fn accept_message_receipt_authorized(
         }
         _ => None,
     };
+    #[cfg(feature = "test-support")]
+    if let Some((record, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &record.operation_id, "after-intent").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after durable intent")));
+    }
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
@@ -12237,6 +12361,13 @@ fn accept_message_receipt_authorized(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some((effect, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &effect.operation_id, "after-accept").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after provider acceptance")));
     }
     if let Some((effect, _, caller)) = effect.as_ref() {
         state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
@@ -12932,7 +13063,13 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
-    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, WorkResponseOptions::default()).await
+}
+
+#[derive(Default)]
+struct WorkResponseOptions {
+    lease_view: bool,
+    starting_claim: bool,
 }
 
 /// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
@@ -12944,8 +13081,9 @@ async fn work_action_response_viewing(
     request: WorkRequest,
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
-    lease_view: bool,
+    options: WorkResponseOptions,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let WorkResponseOptions { lease_view, starting_claim } = options;
     let actor = request
         .actor
         .as_deref()
@@ -12993,7 +13131,7 @@ async fn work_action_response_viewing(
     }
     // The claim's own incarnation is judged, not the seat's newest runtime record: another
     // host can record the end of its own old runtime for a seat that has moved (#4743).
-    if !state
+    if !starting_claim && !state
         .store
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
@@ -13005,11 +13143,28 @@ async fn work_action_response_viewing(
     }
     let quiet_renewal = action == "renew";
     let store = state.store.clone();
+    let starting_host = starting_claim.then(|| state.node.clone());
     let response = blocking_action(move || {
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
+            store.work_action_admitting(&subject, &action, &request,
+                crate::store::missions::WorkActionOptions {
+                    extend_ms, handoff: None, enrich_renewal: !lease_view,
+                }, |tx| {
+                if let Some(host) = starting_host.as_deref() {
+                    let incarnation = request.incarnation.as_deref().expect("explicit claim fence");
+                    let admitted = crate::store::runtime_starts::admit_starting_work_claim_tx(
+                        &store, tx, &actor, incarnation, host,
+                        fractal_runtime::process_generation_alive,
+                    ).map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
+                    if !admitted {
+                        return Err(FractalError::new("inactive-work-incarnation",
+                            format!("`{incarnation}` is not the current live incarnation of `{actor}`")));
+                    }
+                }
+                Ok(())
+            })?
         };
         if !lease_view {
             work_response::enrich_under(&store, &mut response)?;

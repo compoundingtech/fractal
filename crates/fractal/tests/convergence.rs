@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v33.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v38.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -101,6 +101,69 @@ fn the_corpus_includes_every_registry_kind() {
             corpus().contains_key(kind),
             "add {kind} to a versioned corpus"
         );
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_residency_evidence() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in corpus().keys().filter(|kind| kind.starts_with("residency.")) {
+        let input = world.claim_of(&corpus()[kind], 0).expect("residency input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_continuity_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["mission-run.gate-carried", "step-run.carried", "gate.requested", "work.person-asked"] {
+        let spec = &corpus()[kind];
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current continuity fields, not just retain its kind name"
+        );
+        let input = world.claim_of(spec, 0).expect("generate continuity input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        for (name, field) in &spec.fields {
+            if field.required {
+                assert!(input.fields.contains_key(name), "{kind} requires {name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_coherent_review_heads_and_request_tuples() {
+    let mut world = World::new(1, Sabotage::None);
+    for index in 0..2 {
+        for kind in fractal_schema::review::KINDS.into_iter().chain(["gate.requested"]) {
+            let mut saw_head = false;
+            for _ in 0..16 {
+                let input = world.claim_of(&corpus()[kind], index).unwrap();
+                fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+                if kind == "gate.requested"
+                    && fractal_schema::review::REQUEST_FIELDS.iter().any(|name| input.fields.contains_key(*name))
+                {
+                    for name in fractal_schema::review::REQUEST_FIELDS {
+                        assert!(input.fields.get(name).is_some_and(|value| !value.is_null()), "missing review request {name}");
+                    }
+                }
+                if let Some(value) = input.fields.get("head").or_else(|| input.fields.get("reviewed_head")) {
+                    let head: fractal_schema::review::Head = serde_json::from_value(value.clone()).unwrap();
+                    head.validate().unwrap();
+                    assert_eq!(matches!(head, fractal_schema::review::Head::GitCommit { .. }), index == 0);
+                    if let Some(change) = input.fields.get("change") {
+                        let change: fractal_schema::review::Change = serde_json::from_value(change.clone()).unwrap();
+                        change.validate(fractal_schema::registry(), &head).unwrap();
+                    }
+                    saw_head = true;
+                }
+            }
+            if kind != "gate.review-withdrawn" {
+                assert!(saw_head, "{kind} must exercise its tagged head");
+            }
+        }
     }
 }
 
@@ -171,6 +234,64 @@ fn the_corpus_generates_valid_attention_control_inputs() {
     let expected = world.nodes[0].store.attention_controls(&keys).unwrap();
     assert!(!expected.is_empty());
     assert_eq!(world.oracle.attention_controls(&keys).unwrap(), expected);
+}
+
+#[test]
+fn the_corpus_generates_valid_native_capture_inputs() {
+    use fractal_schema::github_capture::*;
+    let mut world = World::new(1, Sabotage::None);
+    let mut written = BTreeMap::new();
+    for kind in [AUTHORITY_KIND, FACT_KIND, COMMIT_KIND, COMMIT_KIND, FENCED_KIND] {
+        let spec = &corpus()[kind];
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current capture record"
+        );
+        let input = world.claim_of(spec, 0).expect("generate native capture input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        assert_eq!(claim.body.pointer("/fields/record"), input.fields.get("record"));
+        if kind == COMMIT_KIND {
+            let commit: CaptureCommit = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(commit.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(commit.facts[0].claim_id, written[FACT_KIND]);
+            assert_eq!(commit.predecessor.as_ref(), written.get(COMMIT_KIND));
+            assert_eq!(commit.sequence, if written.contains_key(COMMIT_KIND) { 2 } else { 1 });
+        } else if kind == FENCED_KIND {
+            let receipt: FenceReceipt = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(receipt.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(receipt.final_commit.as_ref(), written.get(COMMIT_KIND));
+        }
+        written.insert(kind, claim.id);
+        world.tap(0);
+    }
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written.values() {
+        assert!(replicated.contains_key(id), "capture claim {id} must replicate");
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_admission_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let written = ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"].map(|kind| {
+        let spec = &corpus()[kind];
+        assert_eq!(serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+        let input = world.claim_of(spec, 0).expect("generate native admission evidence");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        assert_eq!(input.fields["host"], world.nodes[0].name);
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        world.tap(0);
+        claim.id
+    });
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written {
+        assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
+    }
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1050,6 +1171,89 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), "resource.admission.observed"
+            | "resource.admission.coverage" | "gate.admission.observed") {
+            let id = self.fresh("admission");
+            let host = self.nodes[index].name.as_str();
+            let epoch = format!("convergence-{host}");
+            let now = self.clock(index);
+            let (subject, fields) = match spec.kind.as_str() {
+                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), BTreeMap::from([
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("check")),
+                    ("coverage".into(), json!("logical")),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("owner".into(), json!({"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null})),
+                    ("queued_at".into(), json!(now)),
+                    ("admitted_at".into(), Value::Null),
+                    ("retired_at".into(), Value::Null),
+                    ("state".into(), json!("queued")),
+                    ("refusal".into(), Value::Null),
+                    ("finite".into(), json!(true)),
+                    ("admission_timeout_ms".into(), Value::Null),
+                    ("clock_uncertain".into(), json!(false)),
+                ])),
+                "resource.admission.coverage" => (format!("resource-admission/{host}"), BTreeMap::from([
+                    ("host".into(), json!(host)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("complete".into(), json!(true)),
+                ])),
+                _ => (format!("gate-admission/{host}/{id}/accepted"), BTreeMap::from([
+                    ("schema".into(), json!("gate-slot.admission/v1")),
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("heavy")),
+                    ("at_ms".into(), json!(now)),
+                    ("onset_ms".into(), json!(now)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("coverage".into(), json!("logical")),
+                    ("outcome".into(), json!("accepted")),
+                    ("reason".into(), json!("queued")),
+                ])),
+            };
+            return Some(ClaimInput {
+                subject, kind:spec.kind.clone(), actor:None,
+                fields, evidence:Vec::new(),
+                expected_subject:None, idempotency_key:Some(id),
+            });
+        }
+        if spec.kind.starts_with("residency.") {
+            let host = self.nodes[index].name.clone();
+            let suffix = match spec.kind.as_str() {
+                "residency.wake-demand" | "residency.resumed" | "residency.first-turn" => "wake",
+                "residency.outcome" => "outcome",
+                "residency.sleep-ended" => "sleep",
+                "residency.eligibility-outcome" => "eligibility",
+                "residency.unrouted" => "unrouted",
+                "residency.host-sample" => "host",
+                _ => unreachable!(),
+            };
+            let id = self.fresh("residency");
+            let mut fields = BTreeMap::from([("host".into(), json!(host))]);
+            for (name, field) in &spec.fields {
+                if !field.required || name == "host" { continue; }
+                let value = match name.as_str() {
+                    "resume_failed" | "useless" | "short_sleep" | "refused" => json!(0),
+                    "memory_coverage" => json!("unavailable"),
+                    _ => self.value_of(field, index),
+                };
+                fields.insert(name.clone(), value);
+            }
+            // The host sample is a continuing host stream, not an episode subject.
+            let subject_id = if suffix == "host" { &host } else { &id };
+            return Some(ClaimInput {
+                subject: format!("residency/{host}/{suffix}/{subject_id}"),
+                kind: spec.kind.clone(), actor: None, fields, evidence: Vec::new(),
+                expected_subject: None, idempotency_key: Some(id),
+            });
+        }
+        if matches!(spec.kind.as_str(), fractal_schema::github_capture::FACT_KIND
+            | fractal_schema::github_capture::COMMIT_KIND | fractal_schema::github_capture::AUTHORITY_KIND
+            | fractal_schema::github_capture::FENCED_KIND)
+        {
+            return self.capture_claim(&spec.kind, index);
+        }
         if matches!(spec.kind.as_str(), fractal_schema::effects::KIND_INTENDED
             | fractal_schema::effects::KIND_IN_FLIGHT | fractal_schema::effects::KIND_CONFIRMED
             | fractal_schema::effects::KIND_UNRESOLVED)
@@ -1194,6 +1398,41 @@ impl World {
             };
             (fields, actor)
         };
+        let mut fields = fields;
+        // Object field specs cannot express tagged review heads or the all-or-none
+        // request tuple. Generate those together, retaining ordinary legacy requests
+        // when no review field was drawn.
+        let review_request = spec.kind == "gate.requested"
+            && fractal_schema::review::REQUEST_FIELDS.iter().any(|name| fields.contains_key(*name));
+        if review_request || fractal_schema::review::KINDS.contains(&spec.kind.as_str()) {
+            if review_request {
+                for name in fractal_schema::review::REQUEST_FIELDS {
+                    if !fields.contains_key(name) {
+                        fields.insert(name.into(), self.value_of(&spec.fields[name], index));
+                    }
+                }
+            }
+            let head_name = if matches!(spec.kind.as_str(), "gate.review-verdict" | "gate.remediation-attached") {
+                "reviewed_head"
+            } else {
+                "head"
+            };
+            if spec.fields.contains_key(head_name) {
+                let (change, head) = if index.is_multiple_of(2) {
+                    (fractal_schema::review::Change {
+                        kind: "git.branch".into(), subject: "resource/convergence-review".into(),
+                    }, fractal_schema::review::Head::GitCommit { sha: "a".repeat(40) })
+                } else {
+                    (fractal_schema::review::Change {
+                        kind: "patch".into(), subject: "doc/convergence-review".into(),
+                    }, fractal_schema::review::Head::PatchManifest { digest: "b".repeat(64) })
+                };
+                fields.insert(head_name.into(), serde_json::to_value(head).unwrap());
+                if spec.fields.contains_key("change") {
+                    fields.insert("change".into(), serde_json::to_value(change).unwrap());
+                }
+            }
+        }
         Some(ClaimInput {
             subject,
             kind: spec.kind.clone(),
@@ -1202,6 +1441,96 @@ impl World {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(self.fresh("any")),
+        })
+    }
+
+    /// Capture records bind their subjects to encoded content and commits to actual admitted
+    /// authority/fact claims. Dependencies may arrive in any replication order.
+    fn capture_claim(&mut self, kind: &str, index: usize) -> Option<ClaimInput> {
+        use fractal_schema::github_capture::*;
+        let source = Source {
+            host: "github.com".into(),
+            id: format!("convergence-{}", self.nodes[index].name),
+            generation: 1,
+        };
+        let source_subject = format!("{AUTHORITY_FAMILY}/{}", source.id);
+        let held = claims(&self.nodes[index].store);
+        let source_record = json!(source);
+        let records = |wanted: &str| {
+            held.values().filter(|claim| {
+                claim.kind == wanted
+                    && claim.body.pointer("/fields/record").is_some_and(|record| record["source"] == source_record)
+            }).collect::<Vec<_>>()
+        };
+        let grants = records(AUTHORITY_KIND);
+        let commits = records(COMMIT_KIND);
+        let previous = commits.iter().max_by_key(|claim| {
+            claim.body["fields"]["record"]["sequence"].as_u64().expect("generated capture sequence")
+        });
+        let now = u64::try_from(self.now()).expect("positive simulation clock");
+        let (subject, record) = match kind {
+            AUTHORITY_KIND => {
+                let grant = AuthorityGrant {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None,
+                };
+                (source_subject, serde_json::to_value(grant).unwrap())
+            }
+            FACT_KIND => {
+                let fact = ObservedFact {
+                    version: VERSION, source: source.clone(), observed_at_ms: now, supersedes: None,
+                    fact: FactImage::Repository(RepositoryFact {
+                        id: self.fresh("repository"), locator: "acme/convergence".into(), is_private: false,
+                    }),
+                };
+                (fact.subject().unwrap(), serde_json::to_value(fact).unwrap())
+            }
+            COMMIT_KIND => {
+                if !records(FENCED_KIND).is_empty() {
+                    return None;
+                }
+                let grant = grants.first()?;
+                let facts = records(FACT_KIND);
+                let claim = facts.last()?;
+                let fact: ObservedFact = serde_json::from_value(claim.body["fields"]["record"].clone()).unwrap();
+                let (_, repository, _) = fact.fact.identity();
+                let commit = CaptureCommit {
+                    version: VERSION, source: source.clone(), epoch: 1, authority_grant: grant.id.clone(),
+                    sequence: previous.map_or(1, |claim| claim.body["fields"]["record"]["sequence"].as_u64().unwrap() + 1),
+                    predecessor: previous.map(|claim| claim.id.clone()),
+                    facts: vec![FactReference { claim_id: claim.id.clone(), digest: fact.digest().unwrap() }],
+                    checkpoint: Some(ScanCheckpoint {
+                        repository_id: repository.into(), pass_started_at_ms: now, cursor: None,
+                        pass_complete: true, pull_request_id: None, upstream_updated_at_ms: None,
+                    }),
+                    coverage: vec![Coverage {
+                        repository_id: repository.into(), family: FactFamily::Repository, complete: true,
+                        authoritative: true, history_from_ms: now, through_ms: now, error: None,
+                    }],
+                    observed_at_ms: now,
+                };
+                (commit.subject().unwrap(), serde_json::to_value(commit).unwrap())
+            }
+            FENCED_KIND => {
+                let grant = grants.first()?;
+                let receipt = FenceReceipt {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, authority_grant: grant.id.clone(),
+                    final_commit: Some(previous?.id.clone()), stopped_at_ms: now,
+                };
+                (source_subject, serde_json::to_value(receipt).unwrap())
+            }
+            _ => unreachable!("capture kind"),
+        };
+        Some(ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(if kind == AUTHORITY_KIND {
+                format!("capture-authority:{}", source.id)
+            } else {
+                self.fresh("capture")
+            }),
         })
     }
 
@@ -2104,7 +2433,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v32 adds durable native effect receipts to v31's explicit person overrides.
+/// Corpus v38 adds native admission evidence, shifting the seeded schedule.
+/// Prior corpus characterizations are recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2117,7 +2447,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v33 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v38 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2126,7 +2456,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v33 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v38 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2134,7 +2464,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v33 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v38 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2347,7 +2677,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v33.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v38.json"
         }))
         .unwrap(),
     )

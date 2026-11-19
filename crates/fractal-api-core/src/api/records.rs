@@ -7,7 +7,7 @@ use super::*;
 use super::client_v0::{ClientSession, require_scope};
 use rusqlite::OptionalExtension as _;
 
-pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
+pub(crate) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
         && !fractal_schema::notice::is_reserved_kind(&claim.kind)
 }

@@ -3441,7 +3441,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 // -------------------------------------------------------------- agent details
 
 /// The pane beside a conversation: what the agent holds, what is next, and how it runs.
-pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
+pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str, expanded: bool) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
     let unknown = || span("Fractal has not said", theme::dim());
@@ -3482,13 +3482,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     doc.section("now", None, width);
     // What its step last reported is the status; the step and its goal say where it comes from.
     if let Some(progress) = &details.progress {
-        doc.lines(text::wrap(
-            &text::inline(progress, theme::bold()),
-            width,
-            &[],
-            &[],
-            None,
-        ));
+        details_text(&mut doc, progress, theme::bold(), width, expanded, &agent.id);
     }
     match (&agent.mission, &agent.step) {
         (Some(mission), Some(step)) => {
@@ -3501,13 +3495,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
             link(&mut doc, "", &format!("{title} › {step}"), mission);
             if let Some(goal) = &details.goal {
-                doc.lines(text::wrap(
-                    &text::inline(goal, theme::soft()),
-                    width,
-                    &[],
-                    &[],
-                    None,
-                ));
+                details_text(&mut doc, goal, theme::soft(), width, expanded, &agent.id);
             }
             if let Some(claimed) = &details.claimed {
                 doc.line(Line::from(span(
@@ -3619,6 +3607,28 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
         None,
     ));
     doc
+}
+
+/// Keep prose from displacing the rest of the details; wrapping defines the preview budget.
+fn details_text(doc: &mut Doc, body: &str, style: Style, width: usize, expanded: bool, agent: &str) {
+    const PREVIEW_LINES: usize = 4;
+    let mut lines = text::wrap(&text::inline(body, style), width, &[], &[], None);
+    let long = lines.len() > PREVIEW_LINES;
+    if long && !expanded {
+        lines.truncate(PREVIEW_LINES);
+    }
+    doc.lines(lines);
+    if long {
+        let hint = if expanded { "less (Enter)" } else { "… more (Enter)" };
+        let line = doc.lines.len();
+        doc.wrap(&text::inline(hint, theme::dim()), width);
+        doc.targets.push(super::doc::Target {
+            line,
+            column: 0,
+            width: text::width(hint).min(width) as u16,
+            hit: Hit::DetailsPreview(agent.to_owned()),
+        });
+    }
 }
 
 // ---------------------------------------------------------------- tree views

@@ -18,12 +18,18 @@ pub mod api;
 pub mod claude_channel;
 pub mod creation;
 pub mod credit_objectives;
+pub(crate) mod admission_objectives;
 pub mod declared_objectives;
 pub mod delivery_hold;
 pub mod file_inventory;
 pub mod gate_check;
 pub mod graph_watch_ivm;
+pub(crate) mod lifecycle_objectives;
+pub mod mail_delivery_objectives;
 pub mod objective_faults;
 pub mod objectives;
 pub mod readiness_slo;
 pub mod subagent_sessions;
+
+#[cfg(test)]
+mod no_launch_fault_delivery;

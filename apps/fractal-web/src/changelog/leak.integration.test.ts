@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -79,6 +79,14 @@ describe('public changelog build gate', () => {
   it('fails when a private changelog module enters the public graph', async () => {
     const registry = privateRegistry()
     await expect(buildPublic(`import leaked from ${JSON.stringify(join(root, 'private/.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects a private module when the configured registry uses a symlink spelling', async () => {
+    privateRegistry()
+    const alias = join(root, 'private-alias')
+    symlinkSync(join(root, 'private'), alias, 'dir')
+    await expect(buildPublic(`import leaked from ${JSON.stringify(join(alias, '.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: join(alias, '.changelog/mod.ts') }))
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 

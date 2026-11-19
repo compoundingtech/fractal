@@ -118,6 +118,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_ask_digest_deferred",
         "local_ask_digest_retry",
         "local_idle_messages",
+        // Disposable wake metadata and pending folds; graph/shard mail remains authoritative.
+        "local_wake_demand_v1",
+        "local_wake_demand_pending_v1",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
         "local_message_staged",
@@ -169,6 +172,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_credit_pending",
         "local_usage_credit_progress",
         "local_latest_slots",
+        // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
+        "local_objective_times_v1",
+        "local_objective_times_pending_v1",
         "local_resource_projection_pending",
         // Member-local mission-head work, rebuilt from selected published revisions.
         "local_mission_supersession_heads_v3",
@@ -195,6 +201,13 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_completion_health_v1_pending",
         "local_completion_health_v1_backfill",
         "local_glass_head_pending",
+        // Retained member-local mail lifecycle/accounting projections and native harness
+        // acceptance custody; none participates in the shared projection digest.
+        "local_mail_delivery_source_v1",
+        "local_mail_delivery_steps_v1",
+        "local_mail_delivery_pending_v1",
+        "local_mail_input_acceptance_v1",
+        "local_mail_acceptance_frontier_v1",
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
@@ -203,11 +216,16 @@ fn every_persistent_table_has_a_projection_scope() {
         "read_positions",
         // Host-authoritative admission state is local, not a replicated projection.
         "local_host_holds",
+        // The connected host's expiring launch barrier is never replicated.
+        "local_launch_freeze",
         // Host-local execution authority, immutable lane policies and membership custody;
         // these are authoritative local records, not replicated claim projections.
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        "shell_resources_v1",
+        // Settled teardown receipts belong only to this host's runtime cleanup.
+        "local_runtime_cleanup_settled",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.
@@ -228,6 +246,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_counts",
         "claim_signature_writer_counts",
         "claim_signature_migration",
+        "claim_signature_originals",
+        "claim_signature_reference_migration",
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",

@@ -5,14 +5,24 @@ graph holds declarations and the claims about them. A plugin holds what it learn
 in a local database, and writes into the graph only a few small, keyed facts that other members
 need. GitHub is the first plugin.
 
+The [durable GitHub fact contract](github-facts.md) extends this boundary for bounded,
+normalized lifecycle evidence, not full source mirrors. Capture is opt-in: declarations,
+an admitted source authority and existing repository observers are all required. Installing
+the implementation does not grant credentials, select a fleet member or activate acquisition.
+
 ## The plugin store contract
 
 - **One local database per plugin.** A plugin owns `<state>/plugins/<name>/` and one SQLite file
   there, `<name>.sqlite3`. The daemon opens it and runs the plugin's migrations at start.
+- **SQLite work is accounted.** Plugin connections use the same `smallclaims::sqlite::observe`
+  registration as graph writers and readers: production profiling includes their statements,
+  and test-support cost samples include their SQLite VM work. Pinned capture read connections
+  register independently; a plugin cache is not an unmeasured request-path database.
 - **A cache, never synced.** The file never syncs to another member and is not in the graph's
-  backup. The plugin can rebuild it from its source, so a file this build cannot use (damaged, or
-  written by a newer build) is renamed to `<name>.sqlite3.set-aside-*` and replaced by an empty
-  one, with a warning. The daemon still starts. Only a directory that cannot be made is an error.
+  backup. Operational mirror content rebuilds from the source; normalized capture projections
+  rebuild from committed claims. A file this build cannot use (damaged, or written by a newer
+  build) is renamed to `<name>.sqlite3.set-aside-*` and replaced by an empty one, with a warning.
+  The daemon still starts. Only a directory that cannot be made is an error.
 - **Graph writes from an allowlist.** A plugin's manifest lists the graph kinds it may write. For
   each kind it names the subject prefix and the largest body. A write outside the list, under
   another subject, larger than the bound, or with fields the registry does not declare for the
@@ -21,8 +31,102 @@ need. GitHub is the first plugin.
 - **Reads are served locally and relayed.** The member that runs the plugin for a source answers
   reads from its database. Every other member relays the read to it through the client read relay
   (the same relay timeline reads use), once that member advertises the plugin.
-- **Shared data gets a shard.** If a plugin ever needs data every member holds, it gets a shard
-  under its name, not tables in the graph.
+- **Shared normalized evidence is claim-backed.** The bounded GitHub capture kinds below
+  are the explicit exception; arbitrary plugin tables and full source payloads are not.
+
+### Durable-fact exception
+
+A plugin admitted under the [durable GitHub fact contract](github-facts.md) writes normalized
+source revisions, capture commits and coverage into claims. Claims and their normal backups
+are the only retained authority; the local plugin SQLite file contains rebuildable projections
+and optional content caches. Such projections rebuild from committed claims, not a fresh source
+scan that would lose observed history. Full bodies, review prose, logs and artifact bytes do not
+become graph facts by this exception.
+
+This exception requires an explicit schema/manifest allowlist, bounded fields and capture pages,
+source authorization, a fenced acquisition authority, and a measured incremental capacity gate.
+It does not permit an authoritative side database, a second historical crawler, or arbitrary
+plugin tables in the graph. The mirror/fill behavior below is not evidence of historical coverage
+and is replaced only for a fact family whose complete cutover has passed its acceptance gates.
+
+### Capture ownership, replay and activation
+
+`github.fact.observed` stages one normalized repository, PR, ready/draft transition,
+merge or retraction (1 KiB fields). `github.capture.committed` publishes at most four
+fact references, a bounded checkpoint or coverage delta (2 KiB fields). Staged facts
+are invisible until a valid admitted commit references them. `github.capture.authority`
+and `github.capture.fenced` bind a source generation to an epoch, member and stopped
+predecessor frontier. A successor replays the predecessor chain; it cannot resume an
+unfenced writer. Corrected images explicitly supersede their previous revision.
+
+Capture runs inside the existing `github.repository` observer, sharing its HTTP/auth
+budget and continuation timer. A `github-source` declaration alone creates neither
+an observer nor an authority. A disabled declaration may omit `authority-grant` and
+publish before grant admission. Enabling without a nonempty grant reference is a
+typed native validation error; select the admitted grant before acquisition starts.
+Private replication requires explicit admission.
+The current routing contract supports `github.com` through `https://api.github.com`;
+undeclared enterprise mappings fail closed rather than guessing a credential route.
+
+For a successfully published acquisition page with `F` changed normalized images
+and `C` changed coverage records, growth is `F` fact claims plus
+`ceil(F / 4) + C + 1` capture markers: one per fact batch, one per changed
+coverage record, and one durable scan checkpoint. Unchanged images and coverage
+are not rewritten. A completed pass starts no new pass before the declared
+`checkpoint-every-ms` cadence (at least 60,000 ms); continuation pages still
+checkpoint individually so crashes resume bounded work. There is no fixed
+lifetime history cap. Measurement snapshot reads advance at most 128 indexed
+rows per continuation, retaining a finite SQLite snapshot and explicit pending
+state until complete rather than truncating at 20,000 rows.
+
+The owning local person controls authority through typed routes, outside client-v0:
+
+| Method and route | Request |
+|---|---|
+| `POST /v1/plugins/github/capture/v1/sources/{source}/authority/root` | `actor`, `source: {host,id,generation}`, `member` |
+| `POST /v1/plugins/github/capture/v1/sources/{source}/authority/successor` | The root fields plus `epoch`, `predecessor_grant`, `fencing_receipt`, `final_predecessor_commit` |
+| `POST /v1/plugins/github/capture/v1/sources/{source}/fence` | `actor`, `source`, exact selected `authority_grant` |
+
+These routes admit no generic claim body. Root grants start at epoch one. A successor
+requires the previous member's stopped receipt, consecutive epoch and exact final
+commit. Requests return the durable claim; the operator explicitly selects the returned
+grant ID in the source declaration. The fence serializes with acquisition and retries
+return the original receipt. Agent/run-bound callers and paired client sessions cannot
+grant authority. Grant admission is not source activation.
+
+`GET /v1/plugins/github/capture/v1/replay?source=ID&limit=64` returns normalized
+committed records and initial coverage. `limit` is 1–128 admitted commits; each commit
+has at most four fact references. A missing projection returns
+`{"state":"projection-pending","page":null}`, never empty authoritative history.
+The ready response is `{"state":"ready","page":{...}}` with:
+
+- `version`, `source`, `authority_grant`, `through_sequence` and `frontier`;
+- `records`, each holding the admitted `claim_id`, `commit` and normalized `facts`;
+- `coverage` at that finite frontier on the first page, then `null` on continuations;
+- `cursor` and `snapshot_complete`.
+
+Pass the opaque cursor back to continue. It binds the source definition, generation,
+grant, repository scope and finite frontier. Consumers retain the initial coverage while
+applying the snapshot. A frontier replacement or scope change invalidates the cursor
+explicitly. Even empty fact pages advance across checkpoint/coverage commits.
+At `snapshot_complete=true`, reusing the returned cursor begins a new finite snapshot
+at the latest admitted frontier without repeating earlier sequences. Replay never
+publishes historical observations as live watch transitions.
+
+For a repository in an enabled `github.com` capture source, canonical capture is
+the durable merge fact writer: the observer no longer writes duplicate `merged`
+`github.event` claims. The operational mirror still records actual live transitions,
+and watches retain their existing transition behavior. The events API remains an
+operational event view, not canonical historical merge coverage: replay, backfill
+and an already-merged baseline never create live events. Repositories without an
+enabled matching source retain their existing event writer.
+
+Activation requires an explicitly admitted current member, credential routing,
+repository observers, enabled source declaration and effective-dated scope declaration.
+Keep deployment/grant approval separate from code landing. For a transfer, fence on
+the old member, retain its receipt, admit the successor, select its grant, and only
+then enable the new member's acquisition. Do not delete an external ledger until all
+of its consumers replay this feed or use native objectives/series.
 
 ## The GitHub plugin
 
@@ -116,7 +220,8 @@ example `github-event/github/acme/garden/pull-request/7/checks/SHA/fail`.
 
 ### The graph kinds
 
-The GitHub plugin's manifest allows three kinds. A poller writes:
+The GitHub plugin's manifest allows the bounded capture kinds and three operational kinds.
+An operational poller writes:
 
 - a `vcs.item.state` in the transaction that records a look, whenever an item's compact facts
   change;

@@ -147,6 +147,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  residency?: (AgentResidency | null);
   resources?: Array<DeclaredResource>;
   rollout?: {
 
@@ -191,6 +192,7 @@ export type AgentDeclaration = {
   accountable?: string;
   declared_admission?: DeclaredAdmission;
   id: Id;
+  idle_suspend?: "never" | "member";
   kdl: string;
   revision: string;
   revisions: Array<string>;
@@ -388,6 +390,13 @@ export type AgentRepository = {
   workspaces: Array<string>;
 };
 
+export type AgentResidency = {
+  due_at: string | null;
+  eligible_since: string | null;
+  policy: string;
+  refusal_reason: string | null;
+};
+
 export type AgentResumeParameters = {
   agent: Id;
   host?: string;
@@ -444,10 +453,12 @@ export type AgentSuspendParameters = {
 export type AgentSuspension = {
   action: "suspend" | "resume";
   blocking: Array<string>;
+  cause?: string | null;
   code?: string | null;
   harness?: string | null;
   host?: string | null;
   incarnation_id?: string | null;
+  mode?: string | null;
   native_session_id?: string | null;
   operation_id: string;
   phase: 
@@ -1263,6 +1274,30 @@ export type AvailabilityDeadlineClockChange = {
   value: "run" | "hold-routine" | "hold-all";
 };
 
+export type AvailabilityDeadlineClockDurations = {
+  "hold-all": number;
+  "hold-routine": number;
+  run: number;
+};
+
+export type AvailabilityHistory = {
+  bucket_seconds: number;
+  buckets: Array<AvailabilityHistoryBucket>;
+  from: Timestamp;
+  person: string;
+  to: Timestamp;
+};
+
+export type AvailabilityHistoryBucket = {
+  covered_ms: number;
+  deadline_clock: AvailabilityDeadlineClockDurations;
+  interruptions: AvailabilityInterruptionsDurations;
+  presence: (AvailabilityPresenceDurations | null);
+  start: Timestamp;
+  status: AvailabilityStatusDurations;
+  status_source: AvailabilityStatusSourceDurations;
+};
+
 export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
 
 export type AvailabilityInterruptionsChange = {
@@ -1270,7 +1305,20 @@ export type AvailabilityInterruptionsChange = {
   value: "all" | "urgent" | "none";
 };
 
+export type AvailabilityInterruptionsDurations = {
+  all: number;
+  none: number;
+  urgent: number;
+};
+
 export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
+
+export type AvailabilityPresenceDurations = {
+  idle: number;
+  locked: number;
+  present: number;
+  unreported: number;
+};
 
 export type AvailabilitySet = {
   deadline_clock?: AvailabilityDeadlineClockChange;
@@ -1285,7 +1333,18 @@ export type AvailabilityStatusChange = {
   value: ("available" | "away" | null);
 };
 
+export type AvailabilityStatusDurations = {
+  available: number;
+  away: number;
+};
+
 export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
+
+export type AvailabilityStatusSourceDurations = {
+  override: number;
+  presence: number;
+  unreported: number;
+};
 
 export type BlobChunk = {
   data: string;
@@ -1945,7 +2004,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | Series | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1993,6 +2052,9 @@ export type ErrorCode = (
   | "unsupported-capability"
   | "peer-too-old"
   | "validation-failed"
+  | "unknown-objective"
+  | "invalid-series"
+  | "unsupported-objective-series"
   | "idempotency-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
@@ -4103,6 +4165,26 @@ export type SchedulesPage = {
 };
 
 export type SenderRef = string;
+
+export type Series = {
+  bucket_seconds: number;
+  buckets: Array<SeriesBucket>;
+  from: number;
+  group_by?: string;
+  to: number;
+};
+
+export type SeriesBucket = {
+  count: number;
+  end: number;
+  groups?: Array<SeriesGroup>;
+  start: number;
+};
+
+export type SeriesGroup = {
+  count: number;
+  value: unknown;
+};
 
 export type Session = ResourceHeader & {
   ended_at?: (Timestamp | null);

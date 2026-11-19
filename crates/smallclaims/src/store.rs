@@ -46,6 +46,9 @@ pub use projection_gate::{ProjectionGate, ProjectionGuard};
 mod proof;
 pub mod prepared_envelope;
 mod replica_record;
+mod wire_archive;
+mod operation_conflict_fence;
+pub use operation_conflict_fence::valid as operation_conflict_discovery_valid;
 use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
@@ -286,6 +289,11 @@ fn projection_failure_log_line(
         "stage": field("projection_stage"), "claim_id": field("projection_claim_id"),
         "subject": field("projection_subject"), "operation_id": field("projection_operation_id"),
         "claim_kind": field("projection_claim_kind"),
+        "operation_conflict_count": details.get("operation_conflict_count"),
+        "canonical_claim_id": field("canonical_claim_id"),
+        "previous_claim_id": field("previous_claim_id"),
+        "projection_degraded": details.get("projection_degraded"),
+        "refold_error_code": field("refold_error_code"),
         "frontier": if details.get("projection_frontier_unknown").and_then(Value::as_bool).unwrap_or(false) { None } else { Some(frontier) }, "target": target,
         "suppressed_errors": emission.suppressed, "rate_bucket_overflow": emission.overflow,
         "context_truncated": details.get("projection_context_truncated").and_then(Value::as_bool).unwrap_or(false)
@@ -841,6 +849,7 @@ const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
+pub use fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION as MAX_SUPPORTED_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -1236,7 +1245,7 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != CURRENT_SCHEMA_VERSION {
+        if version < CURRENT_SCHEMA_VERSION {
             connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
@@ -1246,6 +1255,7 @@ impl Store {
         })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
+        operation_conflict_fence::initialize(connection)?;
         Ok(fresh)
     }
 
@@ -2114,12 +2124,12 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
+        table_count == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
-        version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
+        version == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     Ok(())
 }
@@ -3021,6 +3031,13 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
+        Self::replication_signatures_on(&connection, requests)
+    }
+
+    fn replication_signatures_on(
+        connection: &Connection,
+        requests: &[ReplicaEnvelopeId],
+    ) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
         let mut statement = connection.prepare(
             "SELECT member_key, signature FROM replica_envelope_signatures
              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 ORDER BY member_key",
@@ -4857,6 +4874,9 @@ pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
 /// Maximum repairs applied per writer transaction. On a populated store each repair costs a few
 /// milliseconds even when it is already applied, so a page stays near 50 ms.
 pub const REPAIR_CHUNK_CLAIMS: usize = 16;
+/// Cooperative repair-page allowance. One repair, operation reconciliation and COMMIT
+/// remain indivisible; this is not a hard deadline on an individual writer hold.
+const REPAIR_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 /// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
 /// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
 /// so the set holds roughly twice this plus its structures, and one envelope larger than this is
@@ -6512,6 +6532,35 @@ impl Store {
         )
     }
 
+    /// Visit claims accepted strictly before `end`, newest first, seeking through the
+    /// subject/kind acceptance index rather than visiting newer claims. Canonical tie order
+    /// and the callback's stopping rule are the same as [`Self::claims_in_order`].
+    /// `visit` must not read the store while the statement is open.
+    pub fn claims_in_order_before(
+        &self,
+        subject: &str,
+        kind: &str,
+        end: u128,
+        mut visit: impl FnMut(&ClaimRecord) -> bool,
+    ) -> Result<()> {
+        crate::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        let end = end.to_string();
+        // SQLite cannot seek a row-value inequality whose first element is an indexed
+        // expression. Acceptance times are canonical decimal strings: seek equal-width
+        // timestamps first, then shorter ones, preserving numeric newest-first order.
+        for same_length in [true, false] {
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h95abb0715157 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_in_order_before_query(same_length))?;
+            let mut rows = statement.query(params![subject, kind, end])?;
+            while let Some(row) = rows.next()? {
+                if !visit(&claim_from_row(row)?) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The newest of `subject`'s claims of `kind` that `matches` accepts, reading back from the
     /// newest only until one does: `claims_for(..).into_iter().rev().find(matches)`, bounded.
     #[track_caller]
@@ -7702,20 +7751,32 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        self.export_replication_difference_from(fleet_id, remote, &snapshot, &snapshot.inventory, &snapshot.buckets, None)
+    }
+
+    fn export_replication_difference_from(
+        &self,
+        fleet_id: &str,
+        remote: &ReplicationInventory,
+        snapshot: &ReplicationSnapshot,
+        inventory: &CompactReplicationInventory,
+        buckets: &[ReplicationInventoryBucket],
+        mut archive: Option<&mut crate::wire_archive::ArchiveReaders>,
+    ) -> Result<ReplicationExchange> {
         let digests = {
             let _span = crate::profile::span("replication.digests");
-            self.exported_digests(&snapshot)?
+            self.exported_digests(snapshot)?
         };
         let _timing = time_stage(&self.replication_timers.export);
-        let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
+        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
         if !same && !remote.buckets.is_empty() {
             // The peer sent range digests, so only differing ranges need identities. Each
             // answer lists from the next differing range, so every one is listed in turn.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
-                    &snapshot.inventory,
-                    &snapshot.buckets,
+                    inventory,
+                    buckets,
                     remote,
                     REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
                     self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
@@ -7723,7 +7784,10 @@ impl Store {
             };
             let envelopes = {
                 let _span = crate::profile::span("replication.envelopes");
-                self.replica_envelopes(missing)?
+                match archive.as_deref_mut() {
+                    Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
+                    None => self.replica_envelopes(missing)?,
+                }
             };
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
@@ -7736,9 +7800,9 @@ impl Store {
                 graph_digest: digests.0.clone(),
                 projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
-                    digest: snapshot.inventory.digest.clone(),
+                    digest: inventory.digest.clone(),
                     envelopes: listed,
-                    buckets: snapshot.buckets.clone(),
+                    buckets: buckets.to_vec(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
                     claim_range_query: None,
@@ -7759,7 +7823,7 @@ impl Store {
         };
         if !same {
             note_full_inventory_answer(
-                snapshot.inventory.envelopes.len(),
+                inventory.envelopes.len(),
                 remote.envelopes.len(),
                 remote_is_complete,
             );
@@ -7770,7 +7834,6 @@ impl Store {
             // Only membership is needed. Borrow IDs from the request instead of
             // duplicating the remote's entire inventory on every divergent sync.
             let known = remote.envelopes.iter().collect::<BTreeSet<_>>();
-            let inventory = &snapshot.inventory;
             inventory
                 .envelopes
                 .iter()
@@ -7795,17 +7858,20 @@ impl Store {
                 checkpoint: self.trimmed_checkpoint()?,
                 ..if same {
                     ReplicationInventory {
-                        digest: snapshot.inventory.digest.clone(),
+                        digest: inventory.digest.clone(),
                         // Equality is only true for this snapshot. Keep range proofs so a
                         // concurrent write cannot turn this answer into a full-inventory query.
-                        buckets: snapshot.buckets.clone(),
+                        buckets: buckets.to_vec(),
                         ..Default::default()
                     }
                 } else {
-                    snapshot.inventory.public()
+                    inventory.public()
                 }
             },
-            envelopes: self.replica_envelopes(missing)?,
+            envelopes: match archive {
+                Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
+                None => self.replica_envelopes(missing)?,
+            },
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
@@ -8797,6 +8863,8 @@ impl Store {
         let transaction = connection.transaction()?;
         self.runtime.replay_from_nothing(&transaction)?;
         self.runtime.after_projection(&transaction)?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h362e35c78646 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:deferred-replay'", [])?;
+        operation_conflict_fence::repaired(&transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h9513a9e75a35 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
@@ -8914,6 +8982,106 @@ impl Store {
         }
     }
 
+    /// Discover only the new admitted range, on readers, before lending the projection writer.
+    /// A first upgrade scans the old log once; each metadata page commits its own watermark.
+    /// Receipts beyond this pass's fixed target belong to the next pass, never this scan.
+    fn discover_operation_conflicts(&self, target: u64) -> Result<()> {
+        let (mut scanned, generation, mut unproven) = {
+            let connection = self.readers.get();
+            let tx = connection.unchecked_transaction()?;
+            let generation = operation_conflict_fence::generation(&tx)?;
+            let saved: Option<(u64, Option<String>)> = tx.query_row(
+                "SELECT last_good_store_index,error_message FROM projection_health WHERE aggregate='projection:operation-conflict-scan'",
+                [], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional()?;
+            match saved {
+                Some((scanned, Some(saved_generation))) if saved_generation == generation => (scanned,generation,false),
+                _ => (0,generation,true),
+            }
+        };
+        while scanned < target || unproven {
+            unproven = false;
+            let (through, conflicts) = {
+                let connection = self.readers.get();
+                let tx = connection.unchecked_transaction()?;
+                if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
+                let mut page = tx.prepare(
+                    "SELECT store_index,id,
+                       CASE WHEN json_type(body,'$._operation.id')='text' THEN json_extract(body,'$._operation.id') END,
+                       CASE WHEN json_type(body,'$._operation.request_digest')='text' THEN json_extract(body,'$._operation.request_digest') END
+                     FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
+                )?;
+                let rows = page.query_map(params![scanned,target,PROJECTION_CHUNK_CLAIMS as i64], |row|
+                    Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?))
+                )?.collect::<Result<Vec<_>,_>>()?;
+                let through = rows.last().map_or(target, |row| row.0);
+                let mut conflicts = BTreeMap::new();
+                for (_, claim_id, operation_id, digest) in rows {
+                    let (Some(operation_id), Some(digest)) = (operation_id, digest) else { continue; };
+                    if conflicts.contains_key(&operation_id) { continue; }
+                    if tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate=?1)",
+                        [format!("projection:operation-conflict-fence:{operation_id}")], |row| row.get::<_,bool>(0),
+                    )? { continue; }
+                    let previous: Option<String> = tx.query_row(
+                        "SELECT id FROM claims INDEXED BY claims_operation_index
+                         WHERE json_extract(body,'$._operation.id')=?1
+                           AND json_extract(body,'$._operation.request_digest')<>?2 AND store_index<=?3
+                           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id OR id=?4)
+                         UNION ALL SELECT id FROM checkpoint_claims WHERE operation_id=?1 AND request_digest<>?2
+                           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id OR id=?4)
+                         LIMIT 1",
+                        params![operation_id,digest,target,claim_id], |row| row.get(0),
+                    ).optional()?;
+                    if let Some(previous) = previous {
+                        let mut history = tx.prepare(
+                            "SELECT kind FROM claims INDEXED BY claims_operation_index
+                             WHERE json_extract(body,'$._operation.id')=?1 AND store_index<=?2
+                             UNION ALL SELECT kind FROM checkpoint_claims WHERE operation_id=?1",
+                        )?;
+                        let mut kinds = history.query(params![operation_id,target])?;
+                        let mut graph_projecting = false;
+                        while let Some(row) = kinds.next()? {
+                            if !self.runtime.operation_claim_is_graph_neutral(row.get_ref(0)?.as_str()?) {
+                                graph_projecting = true;
+                                break;
+                            }
+                        }
+                        if !graph_projecting { continue; }
+                        conflicts.insert(operation_id.clone(), (claim_id,operation_id,Some(previous)));
+                    }
+                }
+                (through, conflicts)
+            };
+            // No receipt history is read under this loan: only the bounded page's evidence
+            // and watermark are committed. The evidence set survives subsequent passes.
+            let mut connection = self.connection.write();
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| internal(error)
+                    .with_detail("projection_stage", "begin-immediate")
+                    .with_detail("projection_frontier_unknown", true))?;
+            if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
+            for (operation, evidence) in conflicts {
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hb7532db3c65d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+                     VALUES (?1,'healthy','operation-conflict-fence',?2,?3)
+                     ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message",
+                    params![format!("projection:operation-conflict-fence:{operation}"),serde_json::to_string(&evidence)?,now_ms().to_string()],
+                )?;
+            }
+            tx.execute(
+                /* sqlite-large-value: allow-for-now lv-hb0e4de996f4f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,last_good_store_index,updated_at_unix_ms,error_message)
+                 VALUES ('projection:operation-conflict-scan','healthy',?1,?2,?3)
+                 ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=excluded.last_good_store_index,error_message=excluded.error_message",
+                params![through,now_ms().to_string(),generation],
+            )?;
+            tx.commit()?;
+            scanned = through;
+        }
+        Ok(())
+    }
+
     fn project_replication_backlog_chunks(
         &self,
         mut between: impl FnMut(),
@@ -8932,6 +9100,16 @@ impl Store {
         // Finish the backlog observed at entry. New receives can admit more between chunks;
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
+        self.discover_operation_conflicts(target).map_err(|error| {
+            // Discovery lends the same writer before the projection chunk. Preserve its
+            // typed contention boundary, health and deferred retry state as for that chunk.
+            let error = crate::error::typed(error);
+            if error.is_sqlite_contention() {
+                self.note_projection_contention();
+                self.log_projection_failure(&error, phase, 0, target, &mut log);
+            }
+            error
+        })?;
         let mut chunked = false;
         let mut processed = 0_u64;
         loop {
@@ -9045,6 +9223,17 @@ impl Store {
                                 .map_err(internal)?;
                             match projected {
                                 IncrementalProjection::Projected => None,
+                                IncrementalProjection::ProjectedWithContext { code, details } => {
+                                    let error = FractalError {
+                                        code,
+                                        message: "operation conflict reconciled without full replay".into(),
+                                        details,
+                                    };
+                                    self.log_projection_failure(
+                                        &error, phase, frontier, target, &mut log_staged,
+                                    );
+                                    None
+                                }
                                 IncrementalProjection::Replay(reason) => Some(reason.to_owned()),
                                 IncrementalProjection::ReplayWithContext { reason, details } => {
                                     let message = details
@@ -9086,6 +9275,34 @@ impl Store {
                 drop(incremental);
                 let projected = fallback_reason.is_none();
                 if let Some(reason) = fallback_reason {
+                    // A failed bounded repair must never turn into a whole-log fold merely
+                    // because another guard (or a projector error) requested fallback first.
+                    let conflict: Option<(String, String, Option<String>)> = transaction.query_row(
+                        "SELECT error_message FROM projection_health
+                         WHERE aggregate GLOB 'projection:operation-conflict-fence:*' LIMIT 1",
+                        [], |row| row.get::<_,String>(0),
+                    ).optional().map_err(internal)?
+                        .map(|message| serde_json::from_str(&message)).transpose().map_err(internal)?;
+                    if let Some((claim_id, operation_id, previous_claim_id)) = conflict {
+                        let error = FractalError::new("operation-conflict-projection-degraded",
+                            json!({"operation_id":operation_id,"claim_id":claim_id,
+                                "previous_claim_id":previous_claim_id,
+                                "fallback_refused":reason}).to_string())
+                            .with_detail("projection_stage", "operation-conflict-no-replay")
+                            .with_detail("projection_operation_id", operation_id)
+                            .with_detail("projection_claim_id", claim_id)
+                            .with_detail("previous_claim_id", previous_claim_id);
+                        self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
+                        return Err(error);
+                    }
+                    if !operation_conflict_discovery_valid(&transaction, target).map_err(internal)? {
+                        return Err(FractalError::new("operation-conflict-discovery-unproven", "checkpoint or restored history changed during discovery; retry"));
+                    }
+                    // Replay is not target-bounded. A later admission has not been scanned:
+                    // defer until the next pass discovers that newly admitted range.
+                    if current_index_tx(&transaction).map_err(internal)? != target {
+                        return Err(FractalError::new("projection-target-changed", "retry replay with the newly admitted range"));
+                    }
                     log_staged(&full_replay_log_line(phase, &reason, frontier, target));
                     stages.enter("replay");
                     #[cfg(any(test, feature = "test-support"))]
@@ -9106,6 +9323,12 @@ impl Store {
                             self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             error
                         })?;
+                    // Complete discovery and the graph-conflict fence authorized this full
+                    // repair. Consume its deferred requirement atomically with restored health.
+                    transaction.execute(
+                        /* sqlite-large-value: allow-for-now lv-h15d4a1d1ce13 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:deferred-replay'", [],
+                    ).map_err(internal)?;
+                    operation_conflict_fence::repaired(&transaction).map_err(internal)?;
                 } else {
                     crate::profile::note("projection: incremental");
                 }
@@ -9134,14 +9357,19 @@ impl Store {
                     if source_empty {
                         transaction.rollback()?;
                     } else {
+                        let operation_deferred: bool = transaction.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:deferred-replay')",
+                            [], |row| row.get(0),
+                        ).map_err(internal).map_err(record_error)?;
                         transaction.execute(
                             /* sqlite-large-value: allow-for-now lv-hbfbbc30b5bd5 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms, error_code)
                              VALUES ('graph', ?3, ?1, ?2, ?4)
                              ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status, last_good_store_index=excluded.last_good_store_index,
                                 error_code=?4, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
                             params![through, now_ms().to_string(),
-                                if rebuild_pending { "stale" } else { "healthy" },
-                                rebuild_pending.then_some("pending-projection-work")],
+                                if operation_deferred || rebuild_pending { "stale" } else { "healthy" },
+                                if operation_deferred { Some("operation-conflict-replay-deferred") }
+                                else { rebuild_pending.then_some("pending-projection-work") }],
                         ).map_err(internal).map_err(record_error)?;
                         stages.enter("commit");
                         transaction.commit_with_deferred_runtime()
@@ -9254,7 +9482,7 @@ impl Store {
         let connection = self.readers.get();
         let status: Option<String> = connection
             .query_row(
-                "SELECT status FROM projection_health WHERE aggregate='graph'",
+                "SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:deferred-replay') THEN 'stale' ELSE status END FROM projection_health WHERE aggregate='graph'",
                 [],
                 |row| row.get(0),
             )
@@ -9266,7 +9494,8 @@ impl Store {
     /// Apply each recorded repair on its own. A repair that cannot be applied is recorded as an
     /// unhealthy projection that names it, so one bad repair never stops replication or startup.
     ///
-    /// Repairs are applied in id order, `REPAIR_CHUNK_CLAIMS` to a writer hold. Every call applies
+    /// Repairs are applied in id order, at most `REPAIR_CHUNK_CLAIMS` and 20ms of new steps
+    /// to a writer hold. Every call applies
     /// every recorded repair again, and one already applied changes nothing, so a call stopped
     /// between pages resumes by starting over. A repair recorded after the list is read is applied
     /// by the next call; whoever records one calls this after it.
@@ -9279,8 +9508,12 @@ impl Store {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         let mut changed = 0;
-        for page in repairs.chunks(REPAIR_CHUNK_CLAIMS) {
-            changed += self.apply_replication_repair_page(page)?;
+        let mut next = 0;
+        while next < repairs.len() {
+            let end = (next + REPAIR_CHUNK_CLAIMS).min(repairs.len());
+            let (applied, examined) = self.apply_replication_repair_page(&repairs[next..end])?;
+            changed += applied;
+            next += examined;
             #[cfg(test)]
             if STOP_BETWEEN_REPAIR_PAGES.with(std::cell::Cell::take) {
                 anyhow::bail!("stopped between repair pages");
@@ -9290,12 +9523,26 @@ impl Store {
     }
 
     /// One writer hold of `apply_replication_repairs`: these repairs, in this order.
-    fn apply_replication_repair_page(&self, page: &[String]) -> Result<usize> {
+    fn apply_replication_repair_page(&self, page: &[String]) -> Result<(usize, usize)> {
         let mut connection = self.connection.write();
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let started = if EXPIRE_REPAIR_PAGE_BUDGET.with(std::cell::Cell::take) {
+            started - REPAIR_WRITER_BUDGET
+        } else {
+            started
+        };
         let transaction = connection.transaction()?;
         let mut changed = 0;
+        let mut examined = 0;
         let mut operation_ids = BTreeSet::new();
         for repair_claim in page {
+            // A repair and its operation reconciliation commit together. Do not start
+            // another repair after the 20ms cooperative writer allowance.
+            if examined != 0 && started.elapsed() >= REPAIR_WRITER_BUDGET {
+                break;
+            }
+            examined += 1;
             let Some(body) = transaction
                 .query_row(
                     "SELECT body FROM claims WHERE id=?1 AND kind='record.repaired'",
@@ -9341,12 +9588,12 @@ impl Store {
             repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
-        crate::windows::holds::covered("applied repairs", page.len());
+        crate::windows::holds::covered("applied repairs", examined);
         drop(connection);
         if changed != 0 {
             self.runtime.forget_views();
         }
-        Ok(changed)
+        Ok((changed, examined))
     }
 
     pub fn repair_replica_record(
@@ -10518,6 +10765,30 @@ pub fn claims_in_order_query(newest_first: bool) -> String {
     )
 }
 
+/// One of two disjoint newest-first ranges below `?3`, a decimal millisecond string.
+/// Read `same_length=true` first, then false. Scalar constraints let SQLite seek all
+/// needed parts of the existing expression index rather than filtering newer timestamps.
+pub fn claims_in_order_before_query(same_length: bool) -> String {
+    let bound = if same_length {
+        "length(claims.accepted_at_unix_ms)=length(?3) AND claims.accepted_at_unix_ms<?3"
+    } else {
+        "length(claims.accepted_at_unix_ms)<length(?3)"
+    };
+    // With length fixed, omit that constant sort key. Keeping it makes SQLite sort
+    // the entire range instead of sorting only each acceptance-millisecond tie.
+    let order = canonical::components("claims").into_iter()
+        .skip(usize::from(same_length))
+        .map(|part| format!("{part} DESC"))
+        .collect::<Vec<_>>().join(", ");
+    format!(
+        "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind=?2
+           AND {bound}
+         ORDER BY {order}"
+    )
+}
+
 pub fn claims_for_subject_query(kind: bool) -> String {
     let kind = if kind { " AND claims.kind=?2" } else { "" };
     format!(
@@ -10892,21 +11163,37 @@ pub fn register_operation_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
             )?;
             Ok(dropped.is_empty())
         }
-        Some((stored_digest, canonical, state)) if stored_digest == request_digest => {
+        Some((stored_digest, canonical, state)) if stored_digest == request_digest && state == "active" => {
             if claim.id < canonical {
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h6f9c71946a9a owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET canonical_claim_id=?2 WHERE id=?1",
                     params![operation_id, claim.id],
                 )?;
             }
-            Ok(state == "active" && canonical == claim.id)
+            Ok(canonical == claim.id)
         }
-        Some(_) => {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hc9d2f03397dd owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1",
-                [operation_id],
+        Some((stored_digest, canonical, state)) => {
+            // The row summarizes all earlier receipts. Its minimum digest may survive only
+            // as a tombstone, so include the retained canonical claim's actual digest too.
+            // This is the full replay's reducer, with constant work per new receipt.
+            let canonical_digest: String = transaction.query_row(
+                "SELECT json_extract(body,'$._operation.request_digest') FROM claims WHERE id=?1",
+                [&canonical], |row| row.get(0),
             )?;
-            Ok(false)
+            let mut metadata = OperationMetadata::default();
+            metadata.include(stored_digest.clone(), String::new(), false);
+            metadata.include(canonical_digest, canonical.clone(), true);
+            metadata.include(request_digest.to_owned(), claim.id.clone(), true);
+            let (digest, canonical_claim, mut next_state) = metadata.row().expect("a retained receipt");
+            if state == "conflict" { next_state = state.clone(); }
+            if (digest.as_str(), canonical_claim.as_str(), next_state.as_str())
+                != (stored_digest.as_str(), canonical.as_str(), state.as_str()) {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h60fdf4c7a583 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest=?2,canonical_claim_id=?3,state=?4 WHERE id=?1",
+                    params![operation_id, digest, canonical_claim, next_state],
+                )?;
+            }
+            Ok(state == "active" && stored_digest == request_digest && canonical == claim.id)
         }
     }
 }
@@ -11093,6 +11380,8 @@ thread_local! {
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
     static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// One-shot deterministic elapsed-budget exhaustion after the first repair step.
+    static EXPIRE_REPAIR_PAGE_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A store that holds no claims, and has held none a checkpoint dropped, has projected every

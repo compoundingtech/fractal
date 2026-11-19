@@ -71,7 +71,7 @@ mod managed_declaration_tests {
     use super::*;
 
     fn api_error(code: ClientErrorCode) -> GeneratedClientError {
-        let envelope = fractal_client::ErrorEnvelope {
+        let envelope = fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "test".into(),
@@ -822,6 +822,7 @@ async fn drive_st2_native_loop(
     task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
+    paths.delivery_gate.bind_incarnation(&incarnation);
     let NativePaths {
         session_dir,
         agent_dir,
@@ -1630,6 +1631,33 @@ async fn publish_harness_state(
     Ok(())
 }
 
+fn activate_channel_input_acceptance(
+    catalog: &Path, subject: &str, state: &mut PiChannelResume,
+) -> Result<()> {
+    let seat = hex::encode(Sha256::digest(subject.as_bytes()));
+    let incarnation = hex::encode(Sha256::digest(state.incarnation.as_bytes()));
+    let dir = catalog.join(".st3-input-acceptance").join(seat).join(incarnation);
+    fs::create_dir_all(&dir)?;
+    if let Some(previous) = &state.pending.input_source_dir {
+        if previous != &dir {
+            for (message, timestamp) in fractal_drivers::native_channel::input_attempts(previous)? {
+                fractal_drivers::native_channel::record_input_attempt(&dir, &message, timestamp)?;
+            }
+            for (message, timestamp) in fractal_drivers::native_channel::input_acceptances(previous)? {
+                fractal_drivers::native_channel::record_input_acceptance(&dir, &message, timestamp)?;
+            }
+        }
+    } else {
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    state.pending.input_source_dir = Some(dir);
+    Ok(())
+}
+
 fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
@@ -1750,6 +1778,7 @@ async fn run_pi_channel(
     } else {
         None
     };
+    activate_channel_input_acceptance(catalog, subject, &mut state)?;
     let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
@@ -2007,7 +2036,7 @@ async fn run_pi_channel(
                 let mut report: Value = serde_json::from_str(&native_delivery_report(&transport, None))?;
                 report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
                 if !state.first_idle_seen {
-                    report["reason"] = json!("the channel has not received the provider's initial idle proof");
+                    report["reason"] = json!("the channel has not received the provider's handoff readiness proof");
                 } else if !state.failed_handoffs.is_empty() {
                     report["reason"] = json!("the provider rejected a native handoff; the channel keeps retrying");
                 }
@@ -2081,7 +2110,7 @@ async fn run_pi_channel(
                             continue;
                         }
                     };
-                    let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    let frame = pi_family_message_frame(&message, &body, identity, &incarnation, &attachments);
                     if let Some(text) = frame["content"].as_str()
                         && let Err(error) = publish_native_invocation_input(
                             client, subject, &incarnation, &message, text,
@@ -2089,6 +2118,7 @@ async fn run_pi_channel(
                     {
                         warn_pi_channel(subject, &error, &mut last_warning);
                     }
+                    state.record_input_attempt(&message.subject)?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
@@ -3130,6 +3160,41 @@ async fn run_channel_renewals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_family_acceptance_storage_is_independent_of_optional_todo_observation() {
+        for mode in ["pi", "omp-observed", "omp-todo"] {
+            let root = tempfile::tempdir().unwrap();
+            let subject = format!("agent/{mode}");
+            let mut state = PiChannelResume {
+                incarnation: "runtime-a".into(),
+                ..Default::default()
+            };
+            activate_channel_input_acceptance(root.path(), &subject, &mut state).unwrap();
+            let source = state.pending.input_source_dir.clone().unwrap();
+            if mode == "omp-todo" {
+                state.todo_outbox = Some(prepare_channel_todo_outbox(root.path(), &subject, "runtime-a").unwrap());
+            }
+            // Both Pi and observed OMP run without the optional todo observer; stopping it must
+            // also leave the mandatory pre-frame and acceptance ingress paths fully functional.
+            state.todo_outbox = None;
+            state.record_input_attempt("message/first").unwrap();
+            let mut observer = None;
+            accept_managed_channel_frame(&mut state, &mut observer, &json!({
+                "type":"delivered", "meta":{"messageId":"message/first","inputIncarnation":"runtime-a"},
+                "acceptedAtUnixMs":123,
+            }).to_string(), &subject).unwrap();
+            assert_eq!(state.pending.input_acceptances["message/first"], 123, "{mode}");
+            assert_eq!(fractal_drivers::native_channel::input_acceptances(&source).unwrap()["message/first"], 123);
+            prepare_channel_todo_outbox(root.path(), &subject, "runtime-b").unwrap();
+            assert!(source.join("input-attempts.json").is_file(), "todo cleanup removed {mode} acceptance evidence");
+            let mut replacement = PiChannelResume { incarnation:"runtime-b".into(), ..Default::default() };
+            activate_channel_input_acceptance(root.path(), &subject, &mut replacement).unwrap();
+            assert_ne!(replacement.pending.input_source_dir.as_ref(), Some(&source));
+            assert!(source.join("input-acceptances.json").is_file(), "restart removed old source evidence");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn binding_longer_than_a_lease_keeps_renewing() {
         binding_renewal_case(false).await;

@@ -63,10 +63,16 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
+    Hook { name: "objective-times", run: objective_series::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
 pub const APPEND: &[AppendProjector] = &[
+    AppendProjector {
+        name: "objective-times",
+        takes: Takes::Every,
+        project: |transaction, _| objective_series::flush(transaction),
+    },
     AppendProjector {
         name: "identities",
         takes: Takes::Kinds(&["agent.renamed", "mission.renamed", "intent.desired", "mission.published", "agent.retired", "record.repaired"]),
@@ -108,6 +114,11 @@ pub const APPEND: &[AppendProjector] = &[
         name: "agent-messages",
         takes: Takes::Kinds(&["message.sent"]),
         project: |transaction, _| agent_messages::flush(transaction),
+    },
+    AppendProjector {
+        name: "wake-demand",
+        takes: Takes::Kinds(&["message.sent"]),
+        project: |transaction, _| wake_demand::flush(transaction),
     },
     AppendProjector {
         name: "limits",
@@ -178,6 +189,7 @@ pub const REPLICATED: &[AppendProjector] = &[
 
 /// Catches each domain up with the claims a projection pass admitted.
 pub const FLUSH: &[Hook] = &[
+    Hook { name: "objective-times", run: objective_series::flush },
     Hook { name: "custom", run: custom::flush },
     Hook { name: "identities", run: identities::flush },
     Hook { name: "resources", run: resources::flush },
@@ -185,6 +197,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::flush },
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
+    Hook { name: "wake-demand", run: wake_demand::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
     Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },

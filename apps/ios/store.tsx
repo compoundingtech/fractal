@@ -140,6 +140,7 @@ function useAppStore(proof?: FabricProfile) {
   const lastSnapshot = useRef('');
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
   const [url, setUrl] = useState(proof?.url ?? ''), [urlDraft, setUrlDraft] = useState('');
+  const [urlDraftProfileRevision, setUrlDraftProfileRevision] = useState(0);
   const [credential, setCredential] = useState<string | null>(proof?.credential ?? null);
   const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string; scanned?: true } | null>(null);
   const [data, setData] = useState<Data>(emptyData);
@@ -500,7 +501,7 @@ function useAppStore(proof?: FabricProfile) {
       setFabricMemberList(paired.routing.members);
       setCarrierChoice(paired.routing.carrier);
     }
-    if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
+    if (gateway) { setUrl(gateway); setUrlDraft(gateway); setUrlDraftProfileRevision(revision => revision + 1); }
     // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
     if (bearer) {
@@ -828,7 +829,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { for (const stop of stops) stop(); };
   }, [feed, inventoryGranted]);
 
-  /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
+  /** A fresh same-host snapshot for initial reads and retries; subject revisions stay exact. */
   async function fence(revisions: Record<string, string> = {}) {
     if (!client) throw new Error('Still connecting; try again in a moment.');
     const capability = await client.capabilities();
@@ -931,7 +932,7 @@ function useAppStore(proof?: FabricProfile) {
           setFabricMemberList(next.routing.members);
           setCarrierChoice(next.routing.carrier);
         }
-        setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+        setUrl(gateway); setUrlDraft(gateway); setUrlDraftProfileRevision(revision => revision + 1); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
       });
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
@@ -982,9 +983,9 @@ function useAppStore(proof?: FabricProfile) {
     setFabricMemberList(list);
   }
   const actions = {
-    async saveUrl() {
+    async saveUrl(value: string) {
       if (proof) { setError('Close the fabric proof to change the saved gateway.'); return; }
-      const normalized = normalizeGatewayUrl(urlDraft);
+      const normalized = normalizeGatewayUrl(value);
       if (!normalized) { setError('Enter the paired gateway HTTPS URL, or http:// with a Tailscale address (100.x), a .local name, or a private LAN address (10.x, 172.16-31.x, 192.168.x).'); return; }
       if (normalized !== url) await clearCachedProjection();
       const saved = await SecureStore.getItemAsync(PROFILE_KEY);
@@ -1160,11 +1161,12 @@ function useAppStore(proof?: FabricProfile) {
       setBusy(true);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
       let qualityAccepted = false;
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
       try {
         // An answer that landed is an answer, however the reply came back (Cos, 2026-10-10: the app
         // said it failed for a decision that was recorded, and Nathan answered it again).
         const outcome = await submitAnswer({
-          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
+          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
           send: request => client.workDone(request),
           stillWaiting: async () => {
             try { const current = (await client.attentionGet(item.id)).value; return current.kind !== 'attention' || current.state === 'open'; }
@@ -1201,7 +1203,8 @@ function useAppStore(proof?: FabricProfile) {
     async markRead(item: Attention) {
       if (!client) return false;
       acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id } }); });
     },
     /** Change the person's own availability; Fractal answers with all of it. */
     async changeAvailability(change: AvailabilitySet) {
@@ -1224,7 +1227,8 @@ function useAppStore(proof?: FabricProfile) {
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
@@ -1416,7 +1420,7 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, urlDraftProfileRevision, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,

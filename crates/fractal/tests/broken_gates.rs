@@ -1707,6 +1707,30 @@ mission "supersession" state="ready" timeout="5m" {
 }"#;
 
 #[test]
+fn explicit_cli_revision_pin_survives_a_new_head_publication() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    let publication = fixture.publish(&supersession_parked_source("", "touch broken-ran; exit 1"), "old");
+    let revision = publication["published_missions"][0]["revision"].as_str().unwrap();
+    let started = fixture.daemon.command(&[
+        "missions", "start", "supersession", "--revision", revision,
+        "--id", "pinned", "--workspace", fixture.root.path().to_str().unwrap(),
+        "--as", PUBLISHER,
+    ]);
+    let subject = started["mission_run"]["subject"].as_str().unwrap();
+    fixture.wait_for_review(subject);
+    fixture.publish(SUPERSESSION_FIXED, "fixed");
+    let retained = fixture.view(subject);
+    assert_eq!(retained["revision"], revision);
+    assert!(retained["superseded_by"].is_null(), "{retained}");
+    assert!(retained["supersession_fault"].is_null(), "{retained}");
+    assert!(!fixture.review(subject).is_null(), "{retained}");
+    assert!(!fixture.root.path().join("broken-ran").exists());
+}
+
+#[test]
 fn publishing_fixed_or_removed_steps_never_runs_the_parked_broken_step() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -1852,6 +1876,7 @@ mission "dependency" state="ready" {{
     fixture.publish(&format!(r#"version 2
 mission-run "dependent" {{
   mission "mission/supersession@{revision}"
+  follow-head "true"
   workspace {:?}
   requester "{PUBLISHER}"
   after {dependency_subject:?}

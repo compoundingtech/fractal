@@ -328,6 +328,19 @@ export const AgentRelationship = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
+export const AgentResidency = /*#__PURE__*/ (() => Schema.Struct({
+  /** Exact eligible epoch plus configured threshold. */
+  "due_at": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Exact eligible epoch plus configured threshold." }),
+  /** Start of continuous eligibility, never the received-mail activity clock. */
+  "eligible_since": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Start of continuous eligibility, never the received-mail activity clock." }),
+  /** Effective off, never or member policy. */
+  "policy": Schema.String.annotate({ description: "Effective off, never or member policy." }),
+  /** Why this snapshot cannot become idle-suspended. */
+  "refusal_reason": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Why this snapshot cannot become idle-suspended." })
+}).annotate({ identifier: "AgentResidency" }))()
+export type AgentResidency = typeof AgentResidency.Type
+export type AgentResidencyEncoded = typeof AgentResidency.Encoded
+
 /** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
 export const AgentState = /*#__PURE__*/ (() => openEnum([
   "desired",
@@ -371,12 +384,16 @@ export const AgentSuspension = /*#__PURE__*/ (() => Schema.Struct({
   "action": Schema.Literals(["suspend","resume"]),
   /** Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running. */
   "blocking": Schema.Array(Schema.String).annotate({ description: "Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running." }),
+  /** manual or idle. Absent or null means manual; unknown values are retained. */
+  "cause": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "manual or idle. Absent or null means manual; unknown values are retained." }),
   /** Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable. */
   "code": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable." }),
   "harness": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** The suspended incarnation, or the one a completed resume launched. */
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The suspended incarnation, or the one a completed resume launched." }),
+  /** git or in-place. Absent or null means git; unknown values are retained. */
+  "mode": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "git or in-place. Absent or null means git; unknown values are retained." }),
   /** The harness's own session the seat suspended on and resumes. */
   "native_session_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The harness's own session the seat suspended on and resumes." }),
   /** The request claim; each phase change is a change of this agent. */
@@ -647,6 +664,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed. */
+  "residency": Schema.OptionFromOptionalNullOr(AgentResidency, NULL_NONE).annotate({ description: "Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed." }),
   /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
   "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
@@ -680,6 +699,8 @@ export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
   "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "declared_admission": optionalKey(DeclaredAdmission),
   "id": Id,
+  /** Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change. */
+  "idle_suspend": optionalKey(Schema.Literals(["never","member"])).annotate({ description: "Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change." }),
   "kdl": Schema.String,
   "revision": Schema.String,
   "revisions": Schema.Array(Schema.String),
@@ -1670,6 +1691,76 @@ export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","h
 export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
 export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
 
+/** Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words. */
+export const AvailabilityDeadlineClockDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "hold-all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "hold-routine": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "run": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityDeadlineClockDurations", description: "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words." }))()
+export type AvailabilityDeadlineClockDurations = typeof AvailabilityDeadlineClockDurations.Type
+export type AvailabilityDeadlineClockDurationsEncoded = typeof AvailabilityDeadlineClockDurations.Encoded
+
+/** Milliseconds of each interruptions setting during a history bucket. */
+export const AvailabilityInterruptionsDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "none": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "urgent": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityInterruptionsDurations", description: "Milliseconds of each interruptions setting during a history bucket." }))()
+export type AvailabilityInterruptionsDurations = typeof AvailabilityInterruptionsDurations.Type
+export type AvailabilityInterruptionsDurationsEncoded = typeof AvailabilityInterruptionsDurations.Encoded
+
+/** Milliseconds of each derived presence during a history bucket. */
+export const AvailabilityPresenceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "idle": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "locked": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "present": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityPresenceDurations", description: "Milliseconds of each derived presence during a history bucket." }))()
+export type AvailabilityPresenceDurations = typeof AvailabilityPresenceDurations.Type
+export type AvailabilityPresenceDurationsEncoded = typeof AvailabilityPresenceDurations.Encoded
+
+/** Milliseconds spent in each status during a history bucket. */
+export const AvailabilityStatusDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "available": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "away": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusDurations", description: "Milliseconds spent in each status during a history bucket." }))()
+export type AvailabilityStatusDurations = typeof AvailabilityStatusDurations.Type
+export type AvailabilityStatusDurationsEncoded = typeof AvailabilityStatusDurations.Encoded
+
+/** Milliseconds the status came from each source during a history bucket. */
+export const AvailabilityStatusSourceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "override": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "presence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusSourceDurations", description: "Milliseconds the status came from each source during a history bucket." }))()
+export type AvailabilityStatusSourceDurations = typeof AvailabilityStatusSourceDurations.Type
+export type AvailabilityStatusSourceDurationsEncoded = typeof AvailabilityStatusSourceDurations.Encoded
+
+/** One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range. */
+export const AvailabilityHistoryBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "covered_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "deadline_clock": AvailabilityDeadlineClockDurations,
+  "interruptions": AvailabilityInterruptionsDurations,
+  /** Null for anyone but the person. */
+  "presence": Schema.OptionFromNullOr(AvailabilityPresenceDurations).annotate({ description: "Null for anyone but the person." }),
+  "start": Timestamp,
+  "status": AvailabilityStatusDurations,
+  "status_source": AvailabilityStatusSourceDurations
+}).annotate({ identifier: "AvailabilityHistoryBucket", description: "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range." }))()
+export type AvailabilityHistoryBucket = typeof AvailabilityHistoryBucket.Type
+export type AvailabilityHistoryBucketEncoded = typeof AvailabilityHistoryBucket.Encoded
+
+/** A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available). */
+export const AvailabilityHistory = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(AvailabilityHistoryBucket).check(Schema.isMaxLength(2016)),
+  "from": Timestamp,
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "to": Timestamp
+}).annotate({ identifier: "AvailabilityHistory", description: "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available)." }))()
+export type AvailabilityHistory = typeof AvailabilityHistory.Type
+export type AvailabilityHistoryEncoded = typeof AvailabilityHistory.Encoded
+
 /** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
 export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
 export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
@@ -1839,6 +1930,9 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "unsupported-capability",
   "peer-too-old",
   "validation-failed",
+  "unknown-objective",
+  "invalid-series",
+  "unsupported-objective-series",
   "idempotency-conflict",
   "legacy-action-receipt-untrusted",
   "issuer-required",
@@ -4630,6 +4724,35 @@ export const SchedulesPage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.S
 }), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "SchedulesPage" }))()
 export type SchedulesPage = typeof SchedulesPage.Type
 export type SchedulesPageEncoded = typeof SchedulesPage.Encoded
+
+/** Count grouped by the exact JSON field value; a missing field has value null. */
+export const SeriesGroup = /*#__PURE__*/ (() => Schema.Struct({
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "value": Schema.Unknown
+}).annotate({ identifier: "SeriesGroup", description: "Count grouped by the exact JSON field value; a missing field has value null." }))()
+export type SeriesGroup = typeof SeriesGroup.Type
+export type SeriesGroupEncoded = typeof SeriesGroup.Encoded
+
+/** Half-open Unix millisecond bucket. groups is present only when group_by was requested and is empty for an empty bucket. */
+export const SeriesBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "groups": optionalKey(Schema.Array(SeriesGroup)),
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SeriesBucket", description: "Half-open Unix millisecond bucket. groups is present only when group_by was requested and is empty for an empty bucket." }))()
+export type SeriesBucket = typeof SeriesBucket.Type
+export type SeriesBucketEncoded = typeof SeriesBucket.Encoded
+
+/** Half-open count histogram over selected claims or a declared count/interval objective; no percentiles. At most 31 days and 1000 buckets, with the final bucket clipped to to. */
+export const Series = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(SeriesBucket).check(Schema.isMaxLength(1000)),
+  "from": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "group_by": optionalKey(Schema.String),
+  "to": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "Series", description: "Half-open count histogram over selected claims or a declared count/interval objective; no percentiles. At most 31 days and 1000 buckets, with the final bucket clipped to to." }))()
+export type Series = typeof Series.Type
+export type SeriesEncoded = typeof Series.Encoded
 
 /** What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read. */
 export const SloHistory = /*#__PURE__*/ (() => Schema.Struct({

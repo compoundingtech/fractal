@@ -648,6 +648,84 @@ Native graph execution remains for published KDL missions until each is republis
 The `Fractal.steps.*` catalogue (classify, check, merge, publish, verify, revert, review) is one set
 of program steps that both authoring forms call.
 
+#### W1 graph lowering
+
+`Fractal.lower(graphMission, bindings)` compiles a graph declaration made with
+`Fractal.mission` or `Fractal.defineMission` into a `ProgramMission`. Export the returned
+definition as the module's default export. The ordinary subject-tree loader then produces
+the native program declaration and bundle; there is no separate publisher or execution
+engine for compiled missions.
+
+```ts
+import { Fractal } from 'fractal'
+
+const graph = Fractal.mission({
+  meta: import.meta,
+  state: 'ready',
+  reportTo: { id: 'example/owner' },
+  goal: 'Inspect, then implement.',
+  steps: [
+    Fractal.step({ id: 'inspect', assignedTo: { id: 'example/worker' }, goal: 'Inspect.' }),
+    Fractal.step({
+      id: 'implement', assignedTo: { id: 'example/worker' },
+      dependsOn: 'inspect', goal: 'Implement the inspected change.',
+    }),
+  ],
+})
+
+export default Fractal.lower(graph, {
+  id: 'example/change',
+  host: 'local',
+  workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'goal' } },
+})
+```
+
+Bindings are explicit: `workers` maps an assigned agent id to a published child mission
+and that mission's `goalInput` instruction parameter. Worker children receive every
+declared text input unchanged, plus the expanded step goal under `goalInput`. If that
+key collides with a declared graph input, compilation refuses the binding; choose an
+unused child parameter (for example `instructions` when the graph has `input.text('goal')`).
+A tree using imported agent references supplies `resolveAgent` using its existing
+reference resolver. Resolve context factories before calling `lower`. Missing worker
+bindings are compile refusals; the compiler invents no implicit seat-turn protocol.
+
+The compiler validates a completed-dependency DAG and precomputes its ready sets.
+Each ready set runs through `Effect.all` with unbounded sibling concurrency; a dependent
+set cannot start until every gate of its predecessors has passed. `concurrentRuns`,
+mission budget, authority, timeout, stall threshold, resources and pinned docs remain
+native mission declarations. The returned `graph` projection preserves the original ids,
+edges and gates for inspection.
+
+Assigned steps use native worker turns with their original graph step ids as journal
+keys. `input.text` is a required string input. Run-scoped `product.resource` values are
+decoded from the child run's **full resource subject**, including when a worker declares
+several products, and their scalar constraints are checked durably. Product field gates
+read these typed product records; their producer must be the same step or a dependency
+ancestor. Both a missing field and a mismatched value fail with `GraphGateFailed`.
+
+`gate.human` becomes a native decision ask addressed to the declared reviewer. Only that
+reviewer's named approval lets the step finish; rejection, dismissal and cancellation
+never release dependents. Agentless gate steps need no worker binding. `gate.exec` runs
+`command(['sh', '-c', command])` inside a native journaled step, preserving workspace and
+environment and failing on a nonzero status. Its declared host must equal the supplied
+program-host binding; remote execution is refused, not emulated. Commands retain native
+resource-lane custody behavior. Gates and product checks use subsidiary keys below the
+unchanged graph id; they do not rename graph steps or make contract changes eligible
+for old evidence. Cross-engine journal adoption remains subject to the existing
+step-contract-hash admission contract, not merely matching an id.
+
+This is an explicit W1 subset, not the whole design table above. `GraphCompileRefusal`
+names `step`, `construct` and `reason` before execution for unsupported constructs:
+`waitFor`/`usesMission`, watch/observer/subscription dispatch, `Timing`, `Review`,
+`waitUntil`, loops, non-completed dependency states, retries, compensation/finally,
+custom completion, mission gates/constraints/lanes/report flags, step-owned declarations,
+direct exec/program steps, resource inputs, external product subjects, non-resource
+products, feedback-mode human gates, exec time limits and remote exec hosts. Other gate
+kinds (including merged/document/exists) are also refused. Nothing is silently dropped.
+Existing published graph missions stay on their current runtime until explicitly
+republished from a supported lowered definition.
+
+
 ### 10. Priority
 
 The daemon starts the host directly, so the host and its effects run at the daemon's live-path

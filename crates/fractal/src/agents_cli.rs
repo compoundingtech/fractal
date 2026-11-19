@@ -259,6 +259,9 @@ pub(super) async fn run_agents(
         AgentsCommand::RenameId(args) => {
             run_identity_rename(endpoint, args, true, json_output).await
         }
+        AgentsCommand::RenameProof(args) => {
+            run_identity_rename_proof(endpoint, args, true, json_output).await
+        }
         AgentsCommand::Queue(args) => {
             run_agent_queue(endpoint, configured_person, args, json_output).await
         }
@@ -1539,6 +1542,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Resume(_)
         | AgentsCommand::Rename(_)
         | AgentsCommand::RenameId(_)
+        | AgentsCommand::RenameProof(_)
         | AgentsCommand::Queue(_)
         | AgentsCommand::Hold(_) => {
             unreachable!("agent mutation and queue commands return before inspection")
@@ -1732,12 +1736,15 @@ async fn request_suspension(
         )
         .await?;
     let resume = route.ends_with("/resume");
+    // A manual conversion completes in place; follow the operation whose hold it preserves.
+    let operation = claim.body.pointer("/fields/operation_id")
+        .and_then(Value::as_str).unwrap_or(&claim.id);
     let gateway = generated_client(endpoint, None)?;
     let wait = async {
         loop {
             if let ClientResource::Agent(agent) = gateway.agents_get(subject).await?.value
                 && let Some(suspension) = agent.suspension.clone()
-                && suspension.operation_id == claim.id
+                && suspension.operation_id == operation
             {
                 let failure = || {
                     let blocking = if suspension.blocking.is_empty() {

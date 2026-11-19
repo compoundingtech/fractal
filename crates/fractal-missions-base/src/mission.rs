@@ -22,6 +22,42 @@ pub fn validate_mission_id(value: &str) -> Result<(), FractalError> {
     validate_id(value, "mission")
 }
 
+pub const MISSION_RUN_TEMPLATE: &str = "${ST_MISSION_RUN}";
+
+/// Resolve only the run-scoped output identity, not arbitrary environment or input variables.
+/// `run` is the durable full run ID also exported to workers as `ST_MISSION_RUN`.
+pub fn resolve_produced_mission(value: &str, run: &str) -> Result<String, FractalError> {
+    let resolved = value.replace(MISSION_RUN_TEMPLATE, run);
+    validate_id(&resolved, "mission")?;
+    if value.contains(MISSION_RUN_TEMPLATE)
+        && !resolved.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-._".contains(&byte))
+    {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "run-scoped mission IDs allow only ASCII letters, digits, '/', '-', '.', and '_'",
+        ));
+    }
+    if resolved.contains(['$', '{', '}']) {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "produces-mission supports only the ${ST_MISSION_RUN} template",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Whether this declaration needs the fleet's per-run output admission barrier.
+pub fn declares_per_run_missions(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.produces_mission.as_deref().is_some_and(|id| id.contains(MISSION_RUN_TEMPLATE))
+            || step.nested_mission.as_deref().is_some_and(declares_per_run_missions)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_per_run_missions(branch))
+            })
+    })
+}
+
 pub fn parse_missions(
     document: &KdlDocument,
     default_host: &str,
@@ -1397,7 +1433,7 @@ fn unique_named_child<'a>(
 fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec, FractalError> {
     use crate::model::{ResourceLaneCoverage, ResourceLaneSpec};
     reject_type(node)?;
-    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout"])?;
+    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout", "class", "disk", "disk-path", "io"])?;
     let name = one_string_with_children(node)?;
     validate_id(&name, "resource lane")?;
     let host = property_string(node, "host")?.filter(|host| !host.trim().is_empty())
@@ -1413,6 +1449,29 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         "enforced" => ResourceLaneCoverage::Enforced,
         _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
     };
+    let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "landing" => fractal_runtime::RequestClass::Landing,
+        "check" => fractal_runtime::RequestClass::Check,
+        "agent" => fractal_runtime::RequestClass::Agent,
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+    };
+    let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
+        (None, None) => None,
+        (Some(bytes), Some(path)) if !path.trim().is_empty() => {
+            let bytes = fractal_runtime::parse_lane_memory(&bytes)
+                .map_err(|error| FractalError::new("invalid-step-lane", format!("invalid disk footprint: {error}")))?;
+            if bytes == 0 {
+                return Err(FractalError::new("invalid-step-lane", "disk footprint must be positive"));
+            }
+            Some(fractal_runtime::DiskRequest { bytes, path })
+        }
+        _ => return Err(FractalError::new("invalid-step-lane", "disk and nonempty disk-path must be supplied together")),
+    };
+    let io = match property_string(node, "io")?.as_deref() {
+        None => None,
+        Some("heavy") => Some(fractal_runtime::IoClass::Heavy),
+        Some(_) => return Err(FractalError::new("invalid-step-lane", "io must be heavy")),
+    };
     let admission_timeout_ms = property_string(node, "admission-timeout")?
         .map(|value| parse_duration(&value)).transpose()?;
     let mut capacity = None;
@@ -1424,7 +1483,7 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
             capacity = Some(parse_capacity(child)?);
         }
     }
-    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms })
+    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms, class, disk, io })
 }
 
 fn parse_step(
@@ -2452,7 +2511,8 @@ fn parse_produced_mission(node: &KdlNode) -> Result<String, FractalError> {
         .strip_prefix("mission/")
         .unwrap_or(&values[0])
         .to_owned();
-    validate_id(&id, "mission")?;
+    // Validate the fixed syntax here; the durable run ID and final length are checked on use.
+    resolve_produced_mission(&id, "mission-run/run")?;
     Ok(id)
 }
 
@@ -2953,7 +3013,7 @@ fn normalize_assignee(value: &str, default_host: &str) -> String {
     }
 }
 
-fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
+pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
     let invalid_path = kind != "mission" && value.contains('/');
     if value.is_empty()
         || value.len() > 160
@@ -3391,6 +3451,31 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     #[test]
+    fn whole_input_subjects_use_the_input_id_grammar() {
+        for name in [
+            "vrs-review",
+            "review_name",
+            "review.name",
+            "révision",
+            "v".repeat(160).as_str(),
+        ] {
+            assert!(super::validate_id(name, "mission input").is_ok());
+            assert!(super::validate_full_subject(&format!("${{input.{name}}}")).is_ok());
+        }
+        for name in [
+            "",
+            "review/name",
+            "review name",
+            "review\tname",
+            "v".repeat(161).as_str(),
+        ] {
+            assert!(super::validate_id(name, "mission input").is_err());
+            assert!(super::validate_full_subject(&format!("${{input.{name}}}")).is_err());
+        }
+        assert!(super::validate_full_subject("${input.kind}/${input.name}").is_ok());
+    }
+
+    #[test]
     fn assignees_retain_main_spelling_during_expansion() {
         for (input, expected) in [
             ("example/worker", "example/worker"),
@@ -3595,5 +3680,36 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+}
+
+#[cfg(test)]
+mod produced_mission_tests {
+    use super::*;
+
+    #[test]
+    fn run_scoped_identity_is_stable_and_isolated() {
+        let template = "consent/${ST_MISSION_RUN}";
+        let first = resolve_produced_mission(template, "abc123").unwrap();
+        assert_eq!(first, "consent/abc123");
+        assert_eq!(resolve_produced_mission(template, "abc123").unwrap(), first);
+        assert_ne!(resolve_produced_mission(template, "def456").unwrap(), first);
+        assert_eq!(resolve_produced_mission("consent/shared", "abc123").unwrap(), "consent/shared");
+    }
+
+    #[test]
+    fn output_templates_are_narrow_and_validate_the_expanded_identity() {
+        for invalid in ["consent/${input.id}", "consent/${HOME}", "consent/${ST_MISSION_RUN", "consent/$name"] {
+            assert!(resolve_produced_mission(invalid, "abc123").is_err(), "{invalid}");
+        }
+        for invalid in ["", "/leading", "trailing/", "double//slash", "white space", "non-ascii-é"] {
+            assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", invalid).is_err(), "{invalid}");
+        }
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(152)).is_ok());
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(153)).is_err());
+        let node: KdlDocument = r#"produces-mission "consent/${ST_MISSION_RUN}""#.parse().unwrap();
+        assert_eq!(parse_produced_mission(&node.nodes()[0]).unwrap(), "consent/${ST_MISSION_RUN}");
+        let node: KdlDocument = r#"produces-mission "consent/${input.id}""#.parse().unwrap();
+        assert!(parse_produced_mission(&node.nodes()[0]).is_err());
     }
 }

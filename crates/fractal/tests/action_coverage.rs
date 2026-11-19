@@ -28,6 +28,66 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_continuity_previews_and_hash_bound_recovery_survive_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let definition = "version 2\nmission \"example/continuity\" state=\"ready\" {\n\
+        goal \"Original goal.\"\nstep \"prepare\" { agentless; }\n}\n";
+    daemon.apply(definition, "continuity-original");
+    let source = daemon.start("example/continuity", "continuity-source");
+    daemon.apply(&definition.replace("Original goal.", "Updated goal."), "continuity-updated");
+    daemon.store().supersede_mission_publications().unwrap();
+    let source = daemon.store().mission_run(&source.subject).unwrap().unwrap();
+    let target = source.superseded_by.as_ref().expect("new publication supersedes pending work");
+    // Model original evidence received after cutover: the successor has not adopted it.
+    let original = &source.steps[0].subject;
+    daemon.store().set_step_state(original, "completed", None).unwrap();
+    let before = daemon.store().index().unwrap();
+    let preview = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "preview", &source.subject,
+    ]).await);
+    assert_eq!(preview["source_run"], source.subject);
+    assert_eq!(preview["target_run"], *target);
+    assert_eq!(preview["original_work"][0]["source_step_run"], *original);
+    assert_eq!(preview["original_work"][0]["eligibility"], "eligible");
+    let startup = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "startup-preview",
+    ]).await);
+    assert!(startup["runs"].is_array());
+    assert_eq!(daemon.store().index().unwrap(), before, "both previews are read-only");
+    daemon.restart().await;
+    assert_eq!(cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "preview", &source.subject,
+    ]).await), preview);
+    assert_eq!(cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "startup-preview",
+    ]).await), startup);
+    let before = daemon.store().index().unwrap();
+    assert!(!daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "recover", &source.subject,
+        "--preview-hash", "stale", "--as", PERSON,
+    ]).await.status.success());
+    assert_eq!(daemon.store().index().unwrap(), before, "stale recovery writes nothing");
+    let recovered = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "recover", &source.subject,
+        "--preview-hash", preview["preview_hash"].as_str().unwrap(), "--as", PERSON,
+    ]).await);
+    let recovered = recovered["recovered_run"].as_str().unwrap().to_owned();
+    assert_ne!(recovered, *target);
+    daemon.restart().await;
+    let run = daemon.store().mission_run(&recovered).unwrap().unwrap();
+    assert_eq!(run.steps[0].status, "completed");
+    let evidence = daemon.store().claims_for(&run.steps[0].subject, Some("step-run.carried")).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].body["fields"]["source_step_run"], *original);
+    for kind in ["work.submitted", "work.person-done", "gate.result"] {
+        assert!(daemon.store().claims_for(&run.steps[0].subject, Some(kind)).unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -63,6 +123,49 @@ async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
     ]).await);
     assert!(released["released_at_unix_ms"].is_number());
     assert!(cli_value(daemon.cli(PERSON, &["hosts", "ls"]).await).as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_launch_freeze_sets_shows_and_clears_owned_barriers() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let server = daemon.server.take().unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    std::fs::remove_file(daemon.socket()).unwrap();
+    daemon.state.owning_person = Some(PERSON.into());
+    daemon.serve().await;
+    let initial = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert!(initial["freeze"].is_null());
+    let placed = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "set", "--id", "daemon-replacement",
+        "--reason", "Replace daemon", "--duration-ms", "60000", "--wait-ms", "0",
+        "--as", PERSON,
+    ]).await);
+    assert_eq!(placed["id"], "daemon-replacement");
+    assert_eq!(placed["owner"], PERSON);
+    assert_eq!(placed["reason"], "Replace daemon");
+    assert!(placed["expires_at_unix_ms"].is_u64());
+    let shown = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert_eq!(shown["freeze"], placed);
+    assert_eq!(shown["deferred"], json!([]));
+    for (id, actor) in [("wrong-id", PERSON), ("daemon-replacement", "person/other")] {
+        assert!(!daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "clear", "--id", id, "--as", actor,
+        ]).await.status.success());
+        assert_eq!(cli_value(daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "show",
+        ]).await)["freeze"], placed);
+    }
+    let cleared = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "clear", "--id", "daemon-replacement", "--as", PERSON,
+    ]).await);
+    assert_eq!(cleared["cleared"], true);
+    assert!(cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "show",
+    ]).await)["freeze"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3178,6 +3281,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["slo", "ls"],
         vec!["slo", "explain", "cpu"],
         vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
+        vec!["series", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec![
+            "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+            "--subject-prefix", "custom/acme/inbox/", "--group-by", "type",
+            "--from", "1000", "--to", "4000", "--bucket-seconds", "1",
+        ],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -3235,6 +3344,20 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 assert_eq!(response["value"]["mission"], "mission/example/inspect");
                 assert_eq!(response["value"]["person"], PERSON);
                 assert_eq!(response["value"]["inclusive"], 0);
+            }
+            if command.first() == Some(&"series") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["from"], 1000);
+                assert_eq!(response["to"], 4000);
+                let grouped = command.contains(&"--group-by");
+                assert_eq!(response["bucket_seconds"], if grouped { 1 } else { 86_400 });
+                let buckets = response["buckets"].as_array().unwrap();
+                assert_eq!(buckets.len(), if grouped { 3 } else { 1 });
+                assert!(buckets.iter().all(|bucket| bucket["count"] == 0));
+                if grouped {
+                    assert_eq!(response["group_by"], "type");
+                    assert!(buckets.iter().all(|bucket| bucket["groups"] == json!([])));
+                }
             }
         }
         daemon.restart().await;
@@ -3388,17 +3511,37 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
             family, "rename-id", from, to, "--as", "person/robin",
             "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
+        let before_plan = daemon.store().index().unwrap();
+        let mut plan_arguments = arguments.to_vec();
+        plan_arguments.push("--plan");
+        let plan = cli_value(daemon.cli("person/robin", &plan_arguments).await);
+        assert_eq!(plan["admissible"], true);
+        assert_eq!(plan["request"]["from"], from);
+        assert_eq!(plan["request"]["to"], to);
+        assert_eq!(daemon.store().index().unwrap(), before_plan);
+        let digest = plan["request_digest"].as_str().unwrap();
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
         assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let proof_arguments = [family, "rename-proof", from, to, "--request-digest", digest];
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["request_digest"], digest);
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["claim"]["body"]["fields"]["request"], plan["request"]);
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(replay["claim_id"], receipt["claim_id"]);
         assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["request_digest"], digest);
         assert_eq!(daemon.store().index().unwrap(), index);
     }
 }

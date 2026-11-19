@@ -76,6 +76,79 @@ An interval or count keeps a sample or event only when its start (or event) clai
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
 
+### Declared admission budgets (breaking change)
+
+Agents and missions, including `fractal/effect` program missions, author admission
+metadata only through `budget`:
+
+```ts
+budget: {
+  scheduling: { priority: 'background', lane: 'check' },
+  resources: { memoryMax: '8G', diskMax: '20G' },
+}
+```
+
+Mission resources additionally accept positive safe-integer `cpuSeconds` and
+`tokenBudget`: per mission run, cumulative across attempts, with token pricing
+pinned at admission. Sizes are positive integer strings with an optional K/M/G/T
+suffix (case-insensitive). These are declared metadata, not enforced limits.
+Unknown keys are refused at every budget level. Steps, loops and rounds have no
+budget. Keep mission and step `timeout` at the top level, never in `budget`.
+
+This ports effect-utils #2480. The retired authoring keys are refused, including
+when a decoder ignores excess properties:
+
+| Removed            | Replacement                  |
+| ------------------ | ---------------------------- |
+| `declaredPriority` | `budget.scheduling.priority` |
+| `declaredLane`     | `budget.scheduling.lane`     |
+| `declaredBudgets`  | `budget.resources`           |
+
+Native KDL is unchanged: `declared-priority`, `declared-lane` and
+`declared-budgets` retain their order and spelling. Omission emits nothing;
+`resources: {}` emits an empty `declared-budgets` block. Agents must move
+`cpuSeconds` and `tokenBudget` to the mission budget.
+
+### Native declared-resource references
+
+Agents and top-level missions accept `resourceReferences`, including agent intents
+in `Fractal.agent`/`defineAgent` and kit seat inputs derived from `AgentIntent`:
+
+```ts
+resourceReferences: [
+  {
+    name: 'roll-authority',
+    subject: 'resource/demo/release-completion',
+    reason: 'Read the declared roll authority.',
+  },
+  { name: 'source', uri: 'git+ssh://example.org/demo%2Frepo' },
+]
+```
+
+Each entry requires a unique `name` within its owner and exactly one of `subject`
+or `uri`. `reason` is optional but must be nonblank when supplied. Names and the
+local portion after `resource/` follow native subject-name validation: at most
+512 ASCII characters, starting alphanumeric, then alphanumeric or `._-@/`, with
+no empty or `..` path segments or trailing slash. URIs follow native absolute-URI
+validation: any scheme, at most 4096 ASCII bytes, valid percent escapes, and no
+whitespace or forbidden URI characters. URI bytes are preserved, not normalized;
+native publication derives their `resource/uri/<sha256>` identity.
+
+Lowering preserves array order and emits actual native children:
+
+```kdl
+resource "roll-authority" subject="resource/demo/release-completion" reason="Read the declared roll authority."
+resource "source" uri="git+ssh://example.org/demo%2Frepo"
+```
+
+Omission and an empty array emit no children. These are declared reference edges,
+not kit metadata, admission `budget.resources`, or mission-owned `resources`
+(managed resource bodies). Those fields remain independent.
+`ResourceReferenceSchema` and its encoded `ResourceReference` type expose the
+same reusable validation contract. The native-shape golden is
+`fixtures/resource-references.kdl`; `src/resource-references.unit.test.ts`
+covers lowering, parsed-node roundtrips, omission, ordering and malformed inputs.
+
 ### Harness startup messages
 
 OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
@@ -222,7 +295,7 @@ the resource-capable SDK before using `lane.run`; legacy detached host `spawn` i
 this context rather than silently escaping containment.
 
 `ResourceError.code` distinguishes `admission-expired`, `unsupported-coverage`,
-`impossible-capacity`, `clock-uncertain`, `execution-timeout` and exact-generation
+`impossible`, `clock-uncertain`, `execution-timeout` and exact-generation
 retirement/cancellation outcomes. Queue expiry is not a failed payload execution.
 The tagged failure retains both `code` and the host's `message` through program-result
 encoding, so admission diagnostics remain available to callers and on replay.

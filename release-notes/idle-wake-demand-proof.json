@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cover wake-demand classification, receipt sources, mirror replay, restartable backfill and indexed selection.",
+  "replay": {"status": "none", "detail": "Tests only; no production replay changes."},
+  "schema": {"status": "none", "detail": "Exercises the existing versioned disposable wake-demand schema without changing it."},
+  "rules": {"status": "none", "detail": "Tests preserve canonical silent, person and reserved-event classification."},
+  "compatibility": {"status": "none", "detail": "No wire, client or claim changes."},
+  "downtime": {"status": "none", "detail": "No production runtime changes."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Adds regression coverage for a saved backfill cursor and independent mirror cursors."}
+}

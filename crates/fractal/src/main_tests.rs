@@ -1,4 +1,29 @@
 #[test]
+fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!((args.objective.as_deref(), args.from, args.to, args.bucket_seconds), (Some("factory/work-throughput"), 1000, 4000, 86_400));
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+        "--subject-prefix", "custom/acme/inbox/", "--group-by", "type", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!(args.kind, ["custom.acme.arrived", "custom.acme.resolved"]);
+    assert_eq!(args.group_by.as_deref(), Some("type"));
+    for args in [
+        vec!["fractal", "series", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--group-by", "type", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--from", "1000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--to", "4000"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
     for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
         for actor in ["agent/example", "agent/other", "person/example"] {
@@ -544,6 +569,21 @@ fn omp_delivery_readiness_does_not_clear_the_reopened_human_block() {
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
 #[test]
+fn active_channels_require_handoff_proof_not_an_idle_edge() {
+    for _ in 0..2 {
+        // A fresh channel cannot inherit readiness from a previous process or activity report.
+        let mut state = PiChannelResume::default();
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"ready","sessionId":"native-example"}"#);
+        state.accept_frame(r#"{"type":"state","state":"active"}"#);
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"delivery_ready"}"#);
+        assert!(state.first_idle_seen);
+        assert_eq!(state.pending.state.as_ref().unwrap().0, "working");
+    }
+}
+
+#[test]
 fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
         .unwrap()
@@ -570,6 +610,66 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
+}
+
+
+#[test]
+fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume {
+        incarnation: "runtime-a".into(),
+        pending: PiFamilyReports {
+            input_source_dir: Some(root.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut observer = None;
+    // Historical delivered/read frames have no native clock, so cannot become certificates.
+    accept_managed_channel_frame(&mut state, &mut observer,
+        r#"{"type":"delivered","meta":{"messageId":"message/example"}}"#, "agent/example").unwrap();
+    assert!(state.pending.input_acceptances.is_empty());
+    for timestamp in [123, 999] {
+        let frame = json!({"type":"delivered","meta":{"messageId":"message/example","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":timestamp}).to_string();
+        accept_managed_channel_frame(&mut state, &mut observer, &frame, "agent/example").unwrap();
+    }
+    let stale = json!({"type":"delivered","meta":{"messageId":"message/old","inputIncarnation":"runtime-b"},
+        "acceptedAtUnixMs":100}).to_string();
+    accept_managed_channel_frame(&mut state, &mut observer, &stale, "agent/example").unwrap();
+    assert!(!state.pending.input_acceptances.contains_key("message/old"));
+    assert_eq!(state.pending.input_acceptances["message/example"], 123);
+    let recovered = fractal_drivers::native_channel::input_acceptances(root.path()).unwrap();
+    assert_eq!(recovered["message/example"], 123);
+    let resumed: PiChannelResume =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[tokio::test]
+async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::native_channel::record_input_attempt(
+        root.path(), "message/example", Some(100)).unwrap();
+    fractal_drivers::native_channel::record_input_acceptance(
+        root.path(), "message/example", 123).unwrap();
+    let fence = fractal_daemon::mailbox::Fence::new("agent/example", "runtime-a", "delivery");
+    let mut reports = PiFamilyReports {
+        fence: Some(fence),
+        input_source_dir: Some(root.path().into()),
+        input_source_ready: true,
+        input_acceptances: fractal_drivers::native_channel::input_acceptances(root.path()).unwrap(),
+        acknowledgements: BTreeSet::from(["message/example".into()]),
+        ..Default::default()
+    };
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(reports.publish(&client, "agent/example", "pi", "runtime-a", "native").await.is_err());
+    assert_eq!(reports.input_acceptances["message/example"], 123);
+    assert!(reports.acknowledgements.contains("message/example"),
+        "read/delivered cannot prune native proof before the acceptance POST is acknowledged");
+    let restored: PiFamilyReports =
+        serde_json::from_value(serde_json::to_value(reports).unwrap()).unwrap();
+    assert_eq!(restored.input_acceptances["message/example"], 123);
 }
 
 #[test]
@@ -738,7 +838,7 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
     let api = fractal_client::ClientError::Api(
         fractal_client::ErrorCode::StaleFence,
         "the client snapshot changed before the action was submitted".into(),
-        Box::new(fractal_client::ErrorEnvelope {
+        Box::new(fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "request/test".into(),
@@ -1844,7 +1944,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         status_from: None,
         attachments: Vec::new(),
     };
-    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(omp["deliverAs"], "steer");
     assert_eq!(
         omp["content"],
@@ -2428,8 +2528,9 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                     runtime_id: "worker",
                 }
             };
-            // Replay requires no backward staging or invented consumption receipt.
-            mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
+            // Replay requires no backward staging or invented consumption receipt. The
+            // absent daemon cannot ACK a completeness frontier, but queued mail still replays.
+            assert!(mailbox.pump(&client, &agent_dir, receipts).await.is_err());
             let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),
@@ -2760,6 +2861,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",
@@ -2768,6 +2892,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
         "end_reason": end_reason
     }))
     .unwrap()
+}
+
+#[test]
+fn agent_card_residency_is_optional_and_names_policy_epoch_deadline_and_refusal() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("RESIDENCY"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "member".into(),
+        eligible_since: Some("2026-11-18T10:00:00Z".into()),
+        due_at: Some("2026-11-18T10:30:00Z".into()),
+        refusal_reason: None,
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    member\n"));
+    assert!(rendered.contains("  ELIGIBLE   2026-11-18T10:00:00Z\n"));
+    assert!(rendered.contains("  DUE        2026-11-18T10:30:00Z\n"));
+    assert!(!rendered.contains("  REFUSAL"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "off".into(),
+        eligible_since: None,
+        due_at: None,
+        refusal_reason: Some("policy-off".into()),
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    off\n  REFUSAL    policy-off\n"));
+    assert!(!rendered.contains("  DUE"));
 }
 
 #[test]
@@ -3674,6 +3824,12 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
             .is_some_and(|command| command.is_hide_set()),
         "the expert ST3 channel lifecycle must remain callable but hidden"
     );
+    assert!(
+        command
+            .find_subcommand("resource-payload")
+            .is_some_and(|command| command.is_hide_set()),
+        "the admitted shell payload entry point must remain callable but hidden"
+    );
 
     for legacy in [
         "claude",
@@ -3726,6 +3882,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("claims", CLAIMS_SOURCE),
+        ("continuity", /* sqlite-large-value: allow-for-now lv-h3eca7c6c5a2f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("continuity_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
@@ -3736,6 +3893,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("resources", /* sqlite-large-value: allow-for-now lv-h588676c0bda2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("resources_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
         ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
@@ -3790,11 +3948,19 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         "EvalArgs",
         "GraphArgs",
     ] {
-        assert!(
-            !cli_source.contains(&format!("struct {command_type}"))
-                && !cli_source.contains(&format!("enum {command_type}")),
-            "legacy CLI type {command_type} remains compiled"
-        );
+        for (name, source) in std::iter::once(("main", main_source))
+            .chain(command_files.iter().copied())
+        {
+            // Only the native finite-shell command owns this new ExecArgs type.
+            // The removed top-level exec handler/type stays forbidden everywhere else;
+            // every other legacy type and every legacy handler is still scanned here.
+            let native_exec_args = name == "resources" && command_type == "ExecArgs";
+            assert!(
+                (native_exec_args || !source.contains(&format!("struct {command_type}")))
+                    && !source.contains(&format!("enum {command_type}")),
+                "legacy CLI type {command_type} remains compiled in {name}"
+            );
+        }
     }
 
     let server_source = /* sqlite-large-value: allow-for-now lv-h62a14b16df0b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../fractal-api-core/src/api.rs");
@@ -5441,6 +5607,7 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                 &run_id,
                 mission,
                 &"a".repeat(64),
+                false,
                 Path::new("/work/demo"),
                 "agent/operator",
                 &BTreeMap::new(),
@@ -5456,6 +5623,67 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                     .contains_key(&format!("mission-run/{mission}/2026-10-07"))
             );
             assert!(!intent.mission_runs.contains_key("mission-run/2026-10-07"));
+        }
+    }
+}
+
+#[test]
+fn mission_start_preserves_explicit_revision_pin_intent() {
+    let revision = "a".repeat(64);
+    for follow_head in [false, true] {
+        let kdl = mission_run_intent(
+            "release/demo/pin-intent",
+            "release/demo",
+            &revision,
+            follow_head,
+            Path::new("/work/demo"),
+            "person/operator",
+            &BTreeMap::new(),
+            "run",
+            None,
+            None,
+            false,
+        );
+        let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+        let creation = intent.mission_runs["mission-run/release/demo/pin-intent"]
+            .creation.as_ref().unwrap();
+        assert_eq!(creation.revision, revision);
+        assert_eq!(creation.follow_head, follow_head);
+    }
+}
+
+#[test]
+fn mission_start_keeps_exact_declarations_for_older_daemons() {
+    let revision = "a".repeat(64);
+    for (health, supported) in [
+        (json!({}), false),
+        (json!({"capabilities": {}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 0}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 1}}), true),
+    ] {
+        for explicit_revision in [None, Some(revision.as_str())] {
+            let follow_head = mission_start_follows_head(explicit_revision, &health);
+            assert_eq!(follow_head, supported && explicit_revision.is_none());
+            let kdl = mission_run_intent(
+                "release/demo/skew",
+                "release/demo",
+                &revision,
+                follow_head,
+                Path::new("/work/demo"),
+                "person/operator",
+                &BTreeMap::new(),
+                "run",
+                None,
+                None,
+                false,
+            );
+            assert!(kdl.contains(&format!("mission \"mission/release/demo@{revision}\"")), "{kdl}");
+            assert_eq!(kdl.contains("follow-head"), follow_head, "{kdl}");
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+            let creation = intent.mission_runs["mission-run/release/demo/skew"]
+                .creation.as_ref().unwrap();
+            assert_eq!(creation.revision, revision);
+            assert_eq!(creation.follow_head, follow_head);
         }
     }
 }
@@ -5552,6 +5780,7 @@ fn mission_start_after_names_the_run_to_wait_for() {
         "release/demo/2",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5601,6 +5830,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/3",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5634,6 +5864,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/4",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -6021,15 +6252,26 @@ fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value(
         pid: Some(42),
         created_at: Some("2026-09-22T12:00:00.000Z".into()),
         display_name: None,
-        tags: BTreeMap::from([("st3.subject".into(), "agent/run/worker".into())]),
+        tags: BTreeMap::from([
+            ("st3.subject".into(), "agent/run/worker".into()),
+            ("st3.start-operation".into(), "exact-start".into()),
+        ]),
     }];
 
     assert_eq!(
-        pty_observation_incarnation("agent/run/worker", &observations).as_deref(),
+        pty_observation_incarnation("agent/run/worker", &observations, None).as_deref(),
         Some("42:2026-09-22T12:00:00.000Z")
     );
     assert_eq!(
-        pty_observation_incarnation("agent/run/other", &observations),
+        pty_observation_incarnation("agent/run/other", &observations, None),
+        None
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("exact-start")).as_deref(),
+        Some("42:2026-09-22T12:00:00.000Z")
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("predecessor")),
         None
     );
 }
@@ -7606,6 +7848,72 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
         .is_err(),
         "read-only and full-control pairing must be mutually exclusive"
     );
+}
+
+#[test]
+fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
+    let base = ["fractal", "devices", "--as", "person/alex", "pair", "tag-reader"];
+    let scopes = [
+        "--person-scope", "read.projections",
+        "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain(scopes)).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { person_scopes, .. }), ..
+    }) = cli.command else {
+        panic!("expected a person pairing command")
+    };
+    assert_eq!(person_scopes, ["read.projections", "read.glasses", "read.arrangements"]);
+    for conflict in ["--read-only", "--full-control", "--assistant"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn person_scope_pairing_sends_exact_request_and_preserves_daemon_error() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send(body).unwrap();
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+                    "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                    "request_id": "request/pairing-test", "code": "validation",
+                    "message": "daemon scope validation detail", "retryable": false, "details": {}
+                })))
+            }
+        }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("pairing.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let endpoint = Endpoint::Unix(socket);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cli = Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/alex", "pair", "tag-reader",
+        "--person-scope", "read.projections", "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ]).unwrap();
+    let Command::Devices(args) = cli.command else { panic!("expected devices") };
+    let error = run_devices(endpoint, &Config::default(), args, true).await.unwrap_err();
+    assert!(error.to_string().contains("daemon scope validation detail"), "{error}");
+    let request: PersonPairingBegin = serde_json::from_value(received.await.unwrap()).unwrap();
+    assert_eq!(request.device_name, "tag-reader");
+    assert_eq!(request.person_id, "person/alex");
+    assert_eq!(request.scopes.unwrap(), ["read.projections", "read.glasses", "read.arrangements"]);
+    assert_eq!(request.full_control, None);
+    assert_eq!(request.fabric_gateway, None);
+    server.abort();
 }
 
 #[test]
@@ -10566,4 +10874,40 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
     assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
+
+#[test]
+fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
+    for family in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", family, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/operator", "--reason", "Clarify responsibility",
+            "--idempotency-key", "example-plan", "--plan", "--json",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename plan"),
+        };
+        assert!(args.plan);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-plan"));
+        for digest in [None, Some("sha256:example&exact")] {
+            let mut argv = vec![
+                "st", family, "rename-proof", "agent/example-old", "agent/example-new", "--json",
+            ];
+            if let Some(digest) = digest {
+                argv.extend(["--request-digest", digest]);
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let args = match cli.command {
+                Command::Agents { command: AgentsCommand::RenameProof(args) }
+                | Command::Missions { command: MissionViewCommand::RenameProof(args) } => args,
+                _ => panic!("expected local rename proof"),
+            };
+            assert_eq!(args.from, "agent/example-old");
+            assert_eq!(args.to, "agent/example-new");
+            assert_eq!(args.request_digest.as_deref(), digest);
+        }
+        assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
+    }
 }
