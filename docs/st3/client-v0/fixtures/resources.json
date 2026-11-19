@@ -79,6 +79,9 @@
       "action": "resume", "phase": "resumed", "operation_id": "resume/sample",
       "cause": "idle", "mode": "git", "updated_at": "2026-09-20T11:06:30Z", "blocking": []
     },
+    "residency": {
+      "policy": "off", "eligible_since": null, "due_at": null, "refusal_reason": "policy-off"
+    },
     "subagents": [{
       "id": "019a-thread-review", "subagent_type": null, "description": "review the changelog", "driver": "codex",
       "session_id": "019a-thread-main", "work_id": "step-run/release/build", "started_at": "2026-09-20T11:07:10Z",
