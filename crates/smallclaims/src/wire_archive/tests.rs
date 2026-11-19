@@ -42,6 +42,11 @@ fn sealed_export_and_restore_preserve_every_wire_cell_byte_identically() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("segment");
     let seal = write_segment(&mut source, &ids, &path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o400);
+    }
     let mut reader = SegmentReader::open(&path, &seal).unwrap();
     assert_eq!(reader.identities().cloned().collect::<Vec<_>>(), ids);
     for id in &ids {

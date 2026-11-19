@@ -163,7 +163,14 @@ pub fn write_segment(source: &mut Connection, ids: &[ReplicaEnvelopeId], destina
     let directory = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let temporary = directory.join(format!(".{}.wire-segment", uuid::Uuid::now_v7()));
     let result = (|| {
-        let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(&temporary)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
         let snapshot = source.transaction()?;
         file.write_all(MAGIC)?;
         let mut index = Vec::with_capacity(ids.len());
