@@ -2848,6 +2848,7 @@ pub async fn agent_declaration(
     let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
     let declared_admission = fractal_api_core::api::client_declared_admission(&tree);
+    let idle_suspend = crate::model::declared_idle_suspend(Some(&tree));
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2858,6 +2859,9 @@ pub async fn agent_declaration(
     if let Some(person) = accountable { value["accountable"] = json!(person); }
     if let Some(admission) = declared_admission {
         value["declared_admission"] = serde_json::to_value(admission).map_err(ApiError::internal)?;
+    }
+    if let Some(policy) = idle_suspend {
+        value["idle_suspend"] = json!(policy);
     }
     Ok(Json(value))
 }
@@ -14316,6 +14320,26 @@ mission "differential" state="ready" {
         assert_eq!(value["accountable"], "person/avery");
         let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
+    }
+
+    #[tokio::test]
+    async fn idle_suspend_declaration_read_exposes_the_typed_opt_out() {
+        for policy in ["never", "member"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let source = format!("version 2\nagent \"example/root\" {{ command \"true\"; idle-suspend \"{policy}\"; }}");
+            let intent = crate::graph::parse_intent(&source, "terminal-test").unwrap();
+            let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+            state.store.apply_as(&intent, &expected, "idle-policy-read", Some("person/example")).unwrap();
+            let value = agent_declaration(State(state),
+                Extension(ClientSession::local(Some("person/example")).unwrap()),
+                AxumPath("example/root".into()), Query(AgentDeclarationQuery {
+                    revision: None, show_env_values: false,
+                })).await.unwrap().0;
+            assert_eq!(value["idle_suspend"], policy);
+            let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.idle_suspend.as_deref(), Some(policy));
+        }
     }
 
     #[tokio::test]
