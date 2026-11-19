@@ -23,7 +23,7 @@
     "write-ack",
     "writer-hold"
   ],
-  "valid": ["custom-row/read_hold-v2", "custom/reader_v2"],
+  "valid": ["custom-row/read_hold-v2", "custom/reader_v2", "fleet/roll-completion"],
   "invalid": [
     "",
     "/cpu",

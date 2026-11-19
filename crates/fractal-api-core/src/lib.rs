@@ -26,4 +26,5 @@ pub mod graph_watch_ivm;
 pub mod objective_faults;
 pub mod objectives;
 pub mod readiness_slo;
+pub mod roll_completion;
 pub mod subagent_sessions;

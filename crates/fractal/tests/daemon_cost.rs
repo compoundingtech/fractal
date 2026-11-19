@@ -1214,6 +1214,14 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage", "/v1/usage?since_ms={usage_since}&until_ms={usage_until}"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
+    post("POST /v1/slo", "/v1/slo", |_, attempt| json!({
+        "version": 1, "kind": "roll-declared", "roll_id": format!("cost-roll-{attempt}"),
+        "declared_at_ms": 1000, "targets": {"cost-host": {
+            "dotfiles_revision": "1111111111111111111111111111111111111111",
+            "factory_revision": "2222222222222222222222222222222222222222",
+            "daemon_revision": "3333333333333333333333333333333333333333",
+        }},
+    })),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
     get(
         "GET /v1/series",
@@ -2687,6 +2695,34 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     }
 }
 
+/// The roll source owns local durable receipts; SLO reads must not scan that ledger.
+#[test]
+fn slo_roll_source_reads_do_no_sql_independently_of_receipt_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("cost-node").unwrap();
+    fractal_daemon::roll_completion::install(&store, root.path()).unwrap();
+    let target = json!({
+        "dotfiles_revision": "1111111111111111111111111111111111111111",
+        "factory_revision": "2222222222222222222222222222222222222222",
+        "daemon_revision": "3333333333333333333333333333333333333333",
+    });
+    for index in 0..1000 {
+        let receipt = serde_json::from_value(json!({
+            "version": 1, "kind": "roll-declared", "roll_id": format!("roll-{index}"),
+            "declared_at_ms": 1000, "targets": {"host-a": target},
+        })).unwrap();
+        fractal_daemon::roll_completion::ingest(&store, receipt, 1000).unwrap();
+        if matches!(index, 99 | 999) {
+            let scope = work::SqliteWorkScope::start();
+            let row = fractal_daemon::roll_completion::row(&store, 2000);
+            let spent = scope.finish();
+            assert_eq!(row["measurement"]["accepted_declarations"], index + 1);
+            assert_eq!(spent.statements, 0, "native source reads must not query SQLite");
+            assert_eq!(spent.vm_steps, 0);
+        }
+    }
+}
+
 #[test]
 fn v2_arrangement_renames_are_bounded_with_hidden_and_absent_membership_history() {
     let mut measurements = Vec::new();
@@ -3558,6 +3594,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     };
+    std::fs::create_dir_all(&state.state_dir).unwrap();
+    fractal_daemon::roll_completion::install(&store, &state.state_dir).unwrap();
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),
     ));
