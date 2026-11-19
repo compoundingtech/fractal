@@ -67,13 +67,17 @@ fn exact_age_boundary_is_retained_and_recent_update_protects_whole_envelope() {
 fn absent_sqlite_sidecar_paths_are_refused_before_output_creation() {
     let temp = root();
     let source = temp.path().join("source.sqlite");
-    drop(Store::open(&source, "alder").unwrap());
+    // Dropping a Store does not guarantee absent SQLite sidecars. Build a standalone
+    // snapshot so this regression actually exercises previously nonexistent output paths.
+    let seed = temp.path().join("seed.sqlite");
+    drop(Store::open(&seed, "alder").unwrap());
+    vacuum(&readonly(&seed).unwrap(), &source).unwrap();
     let before = input_identity(&source).unwrap();
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut output = source.as_os_str().to_owned();
         output.push(suffix);
         let output = PathBuf::from(output);
-        assert!(!output.exists(), "closed fixture must have no sidecar");
+        assert!(!output.exists(), "standalone fixture must have no sidecar");
         let error = construct(&source, &output, AS_OF).unwrap_err();
         assert!(format!("{error:#}").contains("output overlaps source"));
         assert!(!output.exists(), "refusal must not create the source sidecar path");

@@ -212,7 +212,9 @@ fn private_tree(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// SQLite can ignore a corrupt/uncommitted WAL tail. Offline evidence capture must not.
+/// Validate committed evidence, not the physical extent of SQLite's recycled WAL.
+/// A copied WAL-index supplies a checksummed commit bound; without it every physical
+/// frame must validate. Never let SQLite recovery silently shorten committed history.
 fn validate_wal(path: &Path) -> Result<()> {
     let wal_path = siblings(path)[1].clone();
     let mut wal = match File::open(&wal_path) {
@@ -241,31 +243,70 @@ fn validate_wal(path: &Path) -> Result<()> {
     let database_page_size = if encoded_size == 1 { 65536 } else { usize::from(encoded_size) };
     ensure!(page_size == database_page_size, "WAL/database page size mismatch");
     ensure!((length - 32) % (24 + page_size as u64) == 0, "truncated WAL frame");
-    let checksum = |bytes: &[u8], mut sum: [u32; 2]| {
+    let checksum = |bytes: &[u8], mut sum: [u32; 2], big_endian: bool| {
         for chunk in bytes.chunks_exact(8) {
             let a: [u8; 4] = chunk[..4].try_into().expect("four-byte checksum word");
             let b: [u8; 4] = chunk[4..].try_into().expect("four-byte checksum word");
-            let a = if magic & 1 == 0 { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) };
-            let b = if magic & 1 == 0 { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) };
+            let a = if big_endian { u32::from_be_bytes(a) } else { u32::from_le_bytes(a) };
+            let b = if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) };
             sum[0] = sum[0].wrapping_add(a).wrapping_add(sum[1]);
             sum[1] = sum[1].wrapping_add(b).wrapping_add(sum[0]);
         }
         sum
     };
-    let mut sum = checksum(&header[..24], [0, 0]);
+    let big_endian = magic & 1 != 0;
+    let mut sum = checksum(&header[..24], [0, 0], big_endian);
     ensure!(sum == [word(&header[24..28]), word(&header[28..32])], "WAL header checksum mismatch");
+    let physical_frames = (length - 32) / (24 + page_size as u64);
+    // WAL-index fields are host-endian except the salt bytes. Check both published
+    // copies before trusting mxFrame, and bind it to this WAL generation and seal.
+    let index = match File::open(siblings(path)[2].clone()) {
+        Ok(mut shm) => {
+            let mut bytes = [0_u8; 96];
+            shm.read_exact(&mut bytes).context("truncated WAL-index header")?;
+            ensure!(bytes[..48] == bytes[48..], "inconsistent WAL-index header copies");
+            let index_big_endian = word(&bytes[..4]) == 3_007_000;
+            let index_word = |field: &[u8]| {
+                let field = field.try_into().expect("four-byte WAL-index field");
+                if index_big_endian { u32::from_be_bytes(field) } else { u32::from_le_bytes(field) }
+            };
+            ensure!(index_word(&bytes[..4]) == 3_007_000 && bytes[12] == 1, "uninitialized or unknown WAL-index");
+            ensure!(checksum(&bytes[..40], [0, 0], index_big_endian) == [index_word(&bytes[40..44]), index_word(&bytes[44..48])], "WAL-index checksum mismatch");
+            let size = [bytes[14], bytes[15]];
+            let size = if index_big_endian { u16::from_be_bytes(size) } else { u16::from_le_bytes(size) };
+            let size = if size == 1 { 65536 } else { usize::from(size) };
+            ensure!(size == page_size && bytes[13] == u8::from(big_endian) && bytes[32..40] == header[16..24], "WAL-index generation mismatch");
+            let frames = u64::from(index_word(&bytes[16..20]));
+            ensure!(frames <= physical_frames, "WAL is shorter than its committed WAL-index bound");
+            Some((frames, index_word(&bytes[20..24]), [index_word(&bytes[24..28]), index_word(&bytes[28..32])]))
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let committed_frames = index.map_or(physical_frames, |entry| entry.0);
     let mut page = vec![0; page_size];
-    let mut committed = true;
-    for _ in 0..(length - 32) / (24 + page_size as u64) {
+    let mut database_pages = 0;
+    for number in 1..=physical_frames {
         let mut frame = [0_u8; 24];
         wal.read_exact(&mut frame)?;
         wal.read_exact(&mut page)?;
+        if number > committed_frames {
+            // Reset/reuse overwrites the beginning, leaving older-generation frames
+            // allocated at the end. The index proves these are not current evidence.
+            // Current-generation bytes beyond its commit bound instead indicate an
+            // uncommitted transaction or an inconsistent offline sidecar capture.
+            ensure!(frame[8..16] != header[16..24], "current-generation WAL tail beyond committed WAL-index bound");
+            continue;
+        }
         ensure!(frame[8..16] == header[16..24] && word(&frame[..4]) != 0, "inconsistent WAL frame identity");
-        sum = checksum(&page, checksum(&frame[..8], sum));
+        sum = checksum(&page, checksum(&frame[..8], sum, big_endian), big_endian);
         ensure!(sum == [word(&frame[16..20]), word(&frame[20..24])], "WAL frame checksum mismatch");
-        committed = word(&frame[4..8]) != 0;
+        database_pages = word(&frame[4..8]);
     }
-    ensure!(committed, "uncommitted WAL tail; require a clean offline copy");
+    ensure!(committed_frames == 0 || database_pages != 0, "uncommitted WAL tail; require a clean offline copy");
+    if let Some((frames, pages, seal)) = index {
+        ensure!(frames == 0 || (database_pages == pages && sum == seal), "WAL commit does not match WAL-index seal");
+    }
     Ok(())
 }
 
