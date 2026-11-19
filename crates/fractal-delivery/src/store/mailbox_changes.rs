@@ -42,8 +42,8 @@ pub trait MailboxChangesStore {
             previous: &MailboxWatermark,
             messages: &[MessageView],
         ) -> Result<MailboxChanges>;
-    /// `sort_messages_canonically`, reading keys only for subjects missing from `keys`, all in
-    /// one statement. A key is the subject's first send or declaration, so it changes only
+    /// Canonical send order across graph and message-shard mail, reading missing keys in one
+    /// statement per store. A key is the subject's first send or declaration, so it changes only
     /// with a claim on that subject: callers remove each changed subject before ordering.
     /// Keeps only the current mailbox's keys.
     fn order_mailbox_messages(
@@ -161,17 +161,26 @@ impl MailboxChangesStore for Store {
             keys: &mut MailboxOrder,
         ) -> Result<()> {
         let mut current = MailboxOrder::new();
-        let mut missing = Vec::new();
+        let mut missing_graph = Vec::new();
+        let mut missing_stream = Vec::new();
         for message in messages.iter() {
             match keys.remove(&message.subject) {
                 Some(key) => {
                     current.insert(message.subject.clone(), key);
                 }
-                None if mailbox_reads::is_stream_item(message) => {}
-                None => missing.push(&message.subject),
+                None if mailbox_reads::is_stream_item(message) => missing_stream.push(&message.subject),
+                None => missing_graph.push(&message.subject),
             }
         }
-        if !missing.is_empty() {
+        let shard = fractal_store::store::messages_shard::shard(self);
+        for (store, missing) in [
+            (Some(&self.graph), &missing_graph),
+            (shard.as_deref(), &missing_stream),
+        ] {
+            if missing.is_empty() {
+                continue;
+            }
+            let store = store.ok_or_else(|| anyhow::anyhow!("mailbox stream has no messages shard"))?;
             static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
                 let position = canonical::position_sql("claims");
                 format!("SELECT claims.subject, claims.accepted_at_unix_ms, batches.origin,
@@ -180,7 +189,7 @@ impl MailboxChangesStore for Store {
                     WHERE claims.subject IN (SELECT value FROM json_each(?1))
                       AND claims.kind IN ('message.sent','intent.desired')")
             });
-            let connection = self.readers.get();
+            let connection = store.readers.get();
             let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-haad2d3144fbc owner=fractal_delivery::store::mailbox_changes TODO=trace-statement-and-value-representation */ &QUERY)?;
             let mut rows = statement.query([serde_json::to_string(&missing)?])?;
             // ClaimKey order is the canonical order, so a subject's least key is its first claim.
@@ -195,11 +204,11 @@ impl MailboxChangesStore for Store {
             }
         }
         if let Some(message) = messages.iter().find(|message| {
-            !mailbox_reads::is_stream_item(message) && !current.contains_key(&message.subject)
+            !current.contains_key(&message.subject)
         }) {
             anyhow::bail!("mailbox message {} has no send or declaration claim", message.subject);
         }
-        messages.sort_by(|left, right| mailbox_reads::mail_order(&current, left, right));
+        messages.sort_by(|left, right| current[&left.subject].cmp(&current[&right.subject]));
         *keys = current;
         Ok(())
     }
