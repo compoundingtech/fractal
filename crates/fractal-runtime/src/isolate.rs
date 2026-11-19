@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 
 mod retirement;
+pub mod darwin_slot;
 pub use retirement::{CgroupEnding, ScopeRetirementProof, end_scope_with_proof};
 pub(crate) use retirement::observe_closed_scope;
 
@@ -39,6 +40,7 @@ pub enum Isolation {
 static MODE: OnceLock<Isolation> = OnceLock::new();
 static SCOPE_EXPANSION_FLAG: OnceLock<bool> = OnceLock::new();
 static WARNED: AtomicBool = AtomicBool::new(false);
+static DARWIN_HELPER_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static SCOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn mode() -> Isolation {
@@ -108,6 +110,12 @@ pub fn warn_if_degraded(product: &str) {
             "{product}: WARN systemd user scopes are unavailable; tasks lack cgroup isolation. A daemon restart can stop them. Enable a user systemd manager with linger."
         );
     }
+    if cfg!(target_os = "macos") && !WARNED.swap(true, Ordering::Relaxed) {
+        let available = *DARWIN_HELPER_AVAILABLE.get_or_init(|| {
+            darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some()
+        });
+        eprintln!("{product}: WARN {}", darwin_slot::degradation_report(available));
+    }
 }
 
 fn detect() -> Isolation {
@@ -115,6 +123,11 @@ fn detect() -> Isolation {
 }
 
 fn detect_in(environment: &std::collections::BTreeMap<String, String>) -> Isolation {
+    if cfg!(target_os = "macos") {
+        let _ = DARWIN_HELPER_AVAILABLE.set(darwin_slot::Helper::detect_in(environment).is_some());
+        // Capability detection does not claim custody before the finite launch protocol is wired.
+        return Isolation::Detached;
+    }
     if !cfg!(target_os = "linux") {
         return Isolation::Detached;
     }
@@ -661,6 +674,12 @@ fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unset_darwin_helper_retains_detached_isolation() {
+        assert_eq!(detect_in(&std::collections::BTreeMap::new()), Isolation::Detached);
+    }
 
     #[test]
     fn scope_version_selects_only_known_argv_semantics() {
