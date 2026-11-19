@@ -998,3 +998,11 @@ The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
+
+The separately held diagnostic cutover reuses these exact indexed readers for
+`GET /v1/client/request-latency`; it introduces no SQL, schema, corpus or stored
+representation change. Native and diagnostic folds share graph authority after
+the process-local phone meter and Admission/JSONL writer are removed. The cutover
+needs an FPL client-v0 freeze exemption before landing or activation. Existing
+local JSONL is neither imported nor deleted; it cannot establish authenticated
+fleet coverage.

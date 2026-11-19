@@ -44,13 +44,13 @@ Exact retries collapse by source/target/carrier/path/minute. Conflicting replica
 content for the same minute supplies unknown evidence, not a chosen winner or a
 second population. Native iOS objectives fold these claims fleet-wide; absent
 minutes and absent foreground time are never inferred to be zero or healthy.
-The held client request-latency diagnostic retains its existing local admission,
-JSONL and in-memory phone windows until its separately authorized cutover.
-Those local windows are diagnostic-only and never supply native objective rows
-or doctor verdicts. A replacement pairing on the same process can still meet the
-legacy diagnostic report-scope conflict after the durable graph deduplicates it;
-activation must resolve that boundary rather than interpreting the refusal as
-missing fleet evidence.
+The client request-latency diagnostic, native objective rows and doctor verdicts
+fold the same durable minute claims. No process-local Admission cache, JSONL writer
+or phone meter is involved in acknowledgment or evaluation. Same-device exact replay
+through a replacement pairing is accepted without adding another population.
+Historical local JSONL is not imported: it lacks authenticated stable-source provenance.
+This diagnostic reader cutover is prepared separately and requires an FPL client-v0
+freeze exemption before landing or activation; preparation is not rollout approval.
 
 ## Large inline values
 
