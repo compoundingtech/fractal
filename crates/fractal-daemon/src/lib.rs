@@ -99,6 +99,7 @@ pub(crate) use fractal_kernel::publication;
 pub use fractal_telemetry::recorder;
 /// Imports local command receipts into durable resource observations.
 pub use fractal_store::recorder_receipts;
+pub use fractal_store::gate_admission_receipts;
 pub use fractal_telemetry::recorder_report;
 /// Finds references a publication or the graph names that do not resolve.
 /// Attaches a local terminal to a terminal another fleet host owns.
