@@ -146,11 +146,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         let (exited, receiver) = std::sync::mpsc::channel();
         let mut running = Vec::new();
         for mut execution in self.store.shell_resources(&self.host, true)? {
-            let Some(root) = members.iter().flat_map(|member| &member.roots)
-                .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()) else { continue; };
+            let Some((member, root)) = members.iter().find_map(|member| member.roots.iter()
+                .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some())
+                .map(|root| (member, root))) else { continue; };
             let generation = root.execution.as_ref().context("released shell has no generation")?.generation_id.clone();
             execution.started_at = root.payload_released_at;
-            if !self.read_shell_payload_result(&mut execution)? && execution.result.is_none() {
+            if !self.read_shell_payload_result(&mut execution)? && execution.result.is_none() && member.state != "retired" {
                 if let Ok(bytes) = fs::read(self.shell_result_path(&execution.command.id).with_extension("started")) {
                     let (head, clean) = serde_json::from_slice(&bytes)?;
                     execution.head_start = head; execution.clean_start = clean;
@@ -222,13 +223,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The native root is the observer, not the payload. Only its result file can
         // identify the payload's exit code/signal; missing publication means unknown.
         execution.exit_code = None; execution.exit_signal = None;
-        if !self.read_shell_payload_result(execution)? {
-            let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
-            if let Some(previous) = &execution.result {
-                result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
-                result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
+        // Recovery captured live observations before rotating authority or retiring custody.
+        // Keep that durable capture unless the observer subsequently published its result.
+        // A retired membership with no capture retains unknown payload facts: its old grant
+        // cannot authorize a fresh elapsed/peak sample. OOM evidence is independently read
+        // from the generation slice; a missing slice remains typed unknown, never false/zero.
+        if !self.read_shell_payload_result(execution)? && execution.result.is_none() && member.state != "retired" {
+            execution.result = Some(self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
+        } else if execution.result.is_none() {
+            if let Some(wall_duration_ms) = root.execution_ended_at.zip(root.payload_released_at)
+                .and_then(|(ended, released)| ended.checked_sub(released))
+            {
+                execution.result = Some(PayloadResult {
+                    head_start: execution.head_start.clone(), clean_start: execution.clean_start,
+                    head_end: None, clean_end: None, exit_code: None, exit_signal: None,
+                    wall_duration_ms, memory_peak_bytes: None,
+                });
             }
-            execution.result = Some(result);
         }
         Ok(())
     }

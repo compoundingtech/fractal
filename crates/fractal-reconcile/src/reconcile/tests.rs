@@ -1759,8 +1759,10 @@ mission "shell-owner" state="ready" {{
         // Model daemon loss after generic membership retirement but before shell
         // finalization: recovery still reads the execution's generation slice.
         assert!(runtime.retire_resource_lane(&store, &request).unwrap());
-        reconciler.prepare_shell_resource_recovery().unwrap();
-        reconciler.reconcile_shell_resources().unwrap();
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
         execution = store.shell_resource(&id).unwrap();
         assert_eq!(execution.state, "completed", "{}", execution.reason);
         let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource(&id).unwrap());
@@ -1794,7 +1796,7 @@ mission "shell-owner" state="ready" {{
             recovered.driver_state_dir = root.path().join("drivers");
             recovered.reconcile_shell_resources().unwrap();
             let execution = store.shell_resource("outcome").unwrap();
-            assert_eq!(execution.state, "completed");
+            assert_eq!(execution.state, "completed", "{count:?}: {}", execution.reason);
             assert_eq!(execution.oom_kills, count);
             assert_eq!(execution.oom_killed, count.map(|count| count > 0));
             assert_eq!(execution.reason == "payload-oom-killed", count.is_some_and(|count| count > 0));
