@@ -139,10 +139,14 @@ mod tests {
     }
 
     fn append(store: &Store, time: u128, status: &str) -> ClaimRecord {
+        append_from(store, "alder", time, status)
+    }
+
+    fn append_from(store: &Store, origin: &str, time: u128, status: &str) -> ClaimRecord {
         store.set_write_clock_at(time).unwrap();
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
-        let claim = append_claim_tx(&tx, "alder", "agent/example", "runtime.observed",
+        let claim = append_claim_tx(&tx, origin, "agent/example", "runtime.observed",
             None, &json!({"fields":{"status":status}}), &[], None).unwrap();
         tx.commit().unwrap();
         claim
@@ -170,8 +174,16 @@ mod tests {
         assert_eq!(read(&store, first.store_index), 0);
         let second = append(&store, 200, "stopped");
         assert_eq!(read(&store, second.store_index), 1);
-        // A late arrival sorts before the cached canonical maximum: replay, not append.
-        let late = append(&store, 150, "running");
+        // write_time floors a local writer at its newest batch, so moving alder's
+        // simulation clock backwards cannot produce a late canonical arrival.
+        // A previously unseen remote writer has no such local floor.
+        let late = append_from(&store, "birch", 150, "running");
+        assert_eq!(late.accepted_at_unix_ms, 150);
+        assert!(late.accepted_at_unix_ms < second.accepted_at_unix_ms);
+        {
+            let connection = store.readers.get();
+            assert!(key(&connection, &late.id).unwrap() < key(&connection, &second.id).unwrap());
+        }
         assert_eq!(read(&store, late.store_index), 3);
         // Historical readers cannot resume from a future prefix.
         assert_eq!(read(&store, first.store_index), 1);
