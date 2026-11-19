@@ -32,3 +32,13 @@ export {
 } from './program-engine.ts'
 export { LaneMembership, type Lane, type LaneOptions, type LaneCommandOptions } from './resources.ts'
 export { StepExecution, StepExecutionUsage } from './step-execution.ts'
+export {
+  ReviewError,
+  ReviewFinding,
+  ReviewResult,
+  ReviewRubric,
+  ReviewSubject,
+  ReviewVerdict,
+  ReviewerSeat,
+  type ReviewOptions,
+} from './review.ts'

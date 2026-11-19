@@ -1940,6 +1940,7 @@ impl Backend for MainBackend {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: smallclaims::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
         let started = std::time::Instant::now();
         self.client
@@ -1951,6 +1952,7 @@ impl Backend for MainBackend {
                     exchange: exchange.clone(),
                     round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
                     carrier,
+                    authenticated_member_key: authenticated_member_key.map(str::to_owned),
                 },
             )
             .await.map_err(|error| Self::exchange_error(
