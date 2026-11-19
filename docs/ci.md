@@ -1543,10 +1543,22 @@ nix flake check --no-build
 The same input supplies `otelite`, so updating its pin changes the collector used by
 release-integration and the default shell.
 
+`nix.yml` also publishes the exact `packages.x86_64-linux.fractal` output on protected
+main pushes and main-only manual dispatch. This separate hosted Linux job does not
+enable the disabled persistent-store verification job or occupy merge-serving workers.
+Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
+`FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
+Only the main publication step receives the write token; PRs never execute it.
+The producer uploads the complete output closure, including already-cached references,
+then queries the remote store recursively and retains the exact source/output/cache
+receipt and closure manifest as `fractal-native-publication`. Consumers must configure
+read access and trust for that same cache through their fleet cache-client declarations;
+no consumer should substitute an unrelated installed binary when this output is absent.
+
 | Workflow | What it runs |
 | --- | --- |
 | `fleet.yml` | Workspace CI on pull requests, merge groups and manual dispatch; required checks use the selected source and evidence policy. |
-| `nix.yml` | Defines the persistent-store Nix release check. Its job is disabled in the generated workflow; schedule or manual dispatch does not qualify a native check. |
+| `nix.yml` | Publishes the exact Linux native package closure on main pushes or main-only dispatch. The separate persistent-store release check remains disabled; publication is not a native check qualification. |
 | `release-fractal.yml` | Release archives on main pushes, tags, dispatch and relevant PRs. Linux builds use the selected owned priority pool outside PR validation; macOS and installer/assembly/publish jobs use their declared hosted runners. This workflow is separate from required merge checks. |
 | `debug-assertions-daily.yml` | Scheduled and manually dispatched test coverage with dev/test debug assertions enabled; reports failures through its daily issue. |
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
