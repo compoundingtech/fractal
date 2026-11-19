@@ -335,7 +335,9 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
             ),
         }),
         None => json!({
-            "current": if verdict.minutes < 60 {
+            "current": if crate::slo::cpu_idle_busy(target) {
+                "not eligible: busy".to_owned()
+            } else if verdict.minutes < 60 {
                 format!("unknown: {} of 60 minutes held", verdict.minutes)
             } else {
                 format!("unknown: {}, needs {needed}", plural(verdict.idle_minutes, "idle minute"))
@@ -977,6 +979,13 @@ mod tests {
         let (_, idle) = both(target(Some(0.4), 60, 9, Some(0.01)));
         assert_eq!((idle["status"].as_str(), idle["current"].as_str()), (Some("no-data"), Some("unknown: 9 idle minutes, needs 10")));
         assert_eq!(idle["remaining_percent"], Value::Null);
+        let mut busy = target(None, 60, 0, None);
+        busy["targets"][0]["idle"]["not_idle"]["seat"] = json!(59);
+        let (hour, idle) = both(busy);
+        assert_eq!(idle["current"], "not eligible: busy");
+        assert_eq!(idle["status"], "no-data");
+        assert_eq!(idle["remaining_percent"], Value::Null);
+        assert_eq!(hour["status"], "no-data", "ineligibility must not hide missing whole-hour CPU");
         // A daemon up less than the hour: both unknown.
         let (hour, idle) = both(target(None, 42, 30, Some(0.01)));
         assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("no-data"), Some("no-data")));
