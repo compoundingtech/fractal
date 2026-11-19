@@ -2185,6 +2185,8 @@ struct SloArgs {
 enum SloCommand {
     /// List every objective and budget: target, current value, window and what is left.
     Ls,
+    /// Durably ingest one immutable fleet roll declaration or host observation JSON file.
+    IngestRoll { receipt: std::path::PathBuf },
     /// Explain one objective or budget in plain words.
     Explain {
         /// An id from `fractal slo ls`, or the start of one.
@@ -7803,6 +7805,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     })?);
     fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
         .context("opening native SLO accounting before serving requests")?;
+    fractal_daemon::roll_completion::install(&store, &config.state_dir)
+        .context("opening immutable native roll receipts before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -11615,9 +11619,16 @@ async fn run_series(client: &Client, args: SeriesArgs, json_output: bool) -> Res
 }
 
 async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    if let Some(SloCommand::IngestRoll { receipt }) = &args.command {
+        let receipt: Value = serde_json::from_slice(&std::fs::read(receipt)?)?;
+        let result: Value = client.post("/v1/slo", &receipt).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let report: Value = client.get("/v1/slo").await?;
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     match args.command.unwrap_or(SloCommand::Ls) {
+        SloCommand::IngestRoll { .. } => unreachable!("ingestion returns before reading rows"),
         SloCommand::Ls => {
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&report)?);

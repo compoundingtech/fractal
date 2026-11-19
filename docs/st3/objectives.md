@@ -173,6 +173,129 @@ targets retain count semantics (`met`/`missed`); ratio/gauge budgets retain the 
 coverage remains `no-data`, never a recovery of an open episode. Measured-only
 ready-to-merged has no success verdict and cannot acquire one through ownership.
 
+### Fleet roll completion
+
+`fleet/roll-completion` measures **whole rolls**, not host-roll pairs: 90% must have
+every immutable target host verified within 24 hours of declaration. The 30-day
+budget allows 10% bad rolls and uses the common paired burns (14.4× over 1h+5m,
+6× over 6h+30m, at least one known roll in each window). Holds, admission waits,
+retries and rollback do not pause or reset the declaration clock. There is no
+public fleet roster or personal owner embedded in this generic source.
+
+The deployment authority submits immutable version-1 JSON files with
+`fractal slo ingest-roll FILE --json` (the same typed ingestion is `POST /v1/slo`):
+
+```json
+{
+  "version": 1,
+  "kind": "roll-declared",
+  "roll_id": "example-roll-42",
+  "declared_at_ms": 1795000000000,
+  "targets": {
+    "host-a": {
+      "dotfiles_revision": "1111111111111111111111111111111111111111",
+      "factory_revision": "2222222222222222222222222222222222222222",
+      "daemon_revision": "3333333333333333333333333333333333333333"
+    }
+  }
+}
+```
+
+Declare the complete nonempty cohort **before the first build/admission, drain,
+hold or activation effect**. The three revisions are nonempty exact pinned
+identities. Optional `system_path` and `home_path` pin already known expected
+realized paths; do not delay declaration until evaluation/build produces paths.
+A held host remains in the cohort. Same roll ID/time/targets is an idempotent
+retry; changing the time or cohort is refused, never treated as a new attempt.
+
+```json
+{
+  "version": 1,
+  "kind": "host-observed",
+  "roll_id": "example-roll-42",
+  "declared_at_ms": 1795000000000,
+  "host": "host-a",
+  "observed_at_ms": 1795000600000,
+  "target": {
+    "dotfiles_revision": "1111111111111111111111111111111111111111",
+    "factory_revision": "2222222222222222222222222222222222222222",
+    "daemon_revision": "3333333333333333333333333333333333333333"
+  },
+  "adoption": "verified",
+  "evidence": {
+    "system_path": "/nix/store/example-system",
+    "home_path": "/nix/store/example-home",
+    "expected_system_path": "/nix/store/example-system",
+    "expected_home_path": "/nix/store/example-home",
+    "daemon_ready": true,
+    "daemon_revision": "3333333333333333333333333333333333333333",
+    "factory_revision": "2222222222222222222222222222222222222222"
+  }
+}
+```
+
+Observation `target` repeats the immutable declaration, including any declared
+paths. The producer must resolve expected outputs from the declared dotfiles
+revision, inspect active system/home, independently query the **running** daemon's
+ready health and full compiled revision, and read independently applied factory
+revision. Source pin, downloaded executable and service-active alone are not
+verification. Native validation requires nonempty expected paths, exact
+active/expected path equality, any declared path constraints, daemon ready, and
+exact daemon/factory revisions. It trusts the admitted deployment authority's
+evidence acquisition; ingestion does not remotely probe a host.
+
+Adoption is `verified`, `not-adopted` or `unknown`. Only unknown observations may
+omit evidence. Known negative observations require the same complete, nonempty
+independent evidence as verification and at least one actual mismatch or
+not-ready daemon; a missing probe is unknown, not a negative proof, and an
+all-matching negative label is refused. Missing receipt, unknown adoption and predeadline nonadoption
+remain unknown even after the deadline; only an observed **post-deadline**
+nonadoption or eventual late verification proves a miss. Completion is the last
+target host's earliest exact verification, not inferred installation time. A
+timely completed roll remains known despite later unknown readings. A mixed
+verified/unknown cohort is not a completed roll. Timely events account at final
+verification; late events account at the original deadline, so late ingestion
+does not move failures into the current accounting window. Historical evidence
+can revise earlier windows without creating another denominator event.
+
+`state_dir/roll-receipts.sqlite3` is authoritative local-only source state, not a
+replicated claim kind or disposable projection. Keep it and its SQLite WAL when
+backing up this source; graph-only export does not preserve it. Retention is
+indefinite: immutable source receipts permit restart reconstruction and historical
+accounting, while only 30-day outcomes spend budget. Declaration and observation
+keys (`roll_id`; `roll_id,host,observed_at_ms`) reject immutable conflicts. A failed
+append publishes nothing; restart replays committed receipts before API serving.
+Receipt ingestion wakes native projections immediately; there is no file poll.
+SLO reads use only the maintained in-memory source, never ledger I/O or its
+writer lock, including within caller-owned graph read snapshots.
+
+Coverage is explicitly **accepted-declarations-only**. The native authority's
+population frontier is the current local admission cut; last receipt time is
+reported separately, and external population coverage is always unknown. No
+receipt-import blanket certifies external fleet activity or missing declarations.
+Unknown open rolls stay visible separately and never erase independently known
+completed outcome counts or become good/bad denominator events. In each budget
+window, overdue unknown rolls with deadlines in that window reduce coverage:
+known outcomes / (known outcomes + relevant overdue unknowns). Each window
+requires at least 90% coverage and one known outcome. Not-yet-due open rolls are
+pending, not coverage failures. Insufficient coverage is `no-data`, not healthy
+recovery; known good/bad counts remain visible. No known outcomes means
+`no-data`, not green. `measurement` exposes the frontier, receipt time,
+population, open unknowns and each budget window's coverage and unknown count.
+
+Bind ownership with the existing declaration mechanism; no new owner route:
+
+```kdl
+objective "example/roll-completion" {
+  about "Deployment outcome owned by the deployer"
+  indicator "native" { objective "fleet/roll-completion"; }
+  on-breach "fault" owner="agent/example/deployer" condition="roll-completion"
+}
+```
+
+The binding inherits measurement and opens the existing member-local owner
+episode for burning/exhausted budgets. Unknown data never recovers an episode.
+
 ### Native ratios, covered-time gauges and ownership
 
 The native budget contract measures failures directly rather than turning a percentile miss

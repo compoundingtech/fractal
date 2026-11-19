@@ -520,6 +520,17 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     Ok(Json(body))
 }
 
+/// Append immutable roll evidence and wake the same projections as other native writes.
+pub async fn ingest_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::Receipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_completion::ingest(&store, receipt, client_now_ms() as u64)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
 pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
     let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
