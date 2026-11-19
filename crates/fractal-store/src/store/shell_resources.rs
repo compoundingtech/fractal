@@ -54,9 +54,12 @@ pub struct Execution {
     pub ended_at: Option<u64>,
     pub exit_code: Option<i32>,
     pub exit_signal: Option<i32>,
-    /// Confirmed by the retained systemd scope Result or a measured OOM kill counter.
+    /// Daemon-measured generation OOM outcome; None means unknown, never false.
     #[serde(default)]
-    pub oom_killed: bool,
+    pub oom_killed: Option<bool>,
+    /// Cumulative kernel memory.events oom_kill count of this exclusive generation.
+    #[serde(default)]
+    pub oom_kills: Option<u64>,
     pub stdout: String,
     pub stderr: String,
     pub cancel: bool,
@@ -204,7 +207,7 @@ impl Store {
         // Serialize submission with launch lookup; absence after restart refuses launch.
         let mut environments = self.shell_environments.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
-            queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None, oom_killed: false,
+            queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None, oom_killed: None, oom_kills: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
         let mut connection = self.connection.write();
@@ -395,10 +398,6 @@ pub struct PayloadResult {
     pub exit_signal: Option<i32>,
     pub wall_duration_ms: u64,
     pub memory_peak_bytes: Option<u64>,
-    /// Cumulative scope memory.events oom_kill count, only when the observer survived.
-    /// None means unknown, never a measured zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oom_kills: Option<u64>,
 }
 
 #[cfg(test)]
@@ -490,7 +489,7 @@ mod tests {
             execution.exit_code = Some(37);
             execution.result = Some(PayloadResult {
                 head_start: None, head_end: None, clean_start: None, clean_end: None,
-                exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None, oom_kills: None,
+                exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
             });
             store.update_shell_resource(&execution).unwrap();
         }
@@ -627,7 +626,7 @@ mod tests {
         terminal.state = "completed".into(); terminal.ended_at = Some(50); terminal.exit_code = Some(0);
         terminal.result = Some(PayloadResult {
             head_start: None, head_end: None, clean_start: None, clean_end: None,
-            exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None, oom_kills: None,
+            exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None,
         });
         store.update_shell_resource(&terminal).unwrap();
         let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();

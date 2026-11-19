@@ -3,15 +3,15 @@
   "summary": "Resource execution receipts distinguish confirmed memory OOM kills from external signals without changing CLI exit-code mapping.",
   "schema": {
     "status": "changed",
-    "detail": "Execution adds oomKilled (historical records default false). PayloadResult adds optional oomKills, the exact cumulative scope memory.events oom_kill count when the observer survives; absent means unknown, not zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason. Confirmed OOM outcomes use reason payload-oom-killed. Show includes the typed execution fields."
+    "detail": "Execution adds optional oomKilled and oomKills. The daemon reads the exact cumulative kernel memory.events oom_kill count from the exclusive per-generation slice; a positive count selects reason payload-oom-killed. A missing slice or historical record is typed unknown (oomKilled=null, oomKills=null), never false or measured zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason; show includes the execution fields. Payload result files are not an OOM authority."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Finite scopes no longer use --collect. Failed scopes retain systemd Result after their cgroup and observer disappear. The daemon generation-fences the recorded scope identity, durably captures Result=oom-kill before retirement and again after whole-tree retirement, then explicitly resets the failed unit. Startup recovery captures retained results before retiring predecessor executions. Successful empty scopes unload normally. This avoids racing a daemon-side memory.events read against automatic cgroup removal and never invents a kill count from Result."
+    "detail": "The existing finite generation slice contains only its uniquely named payload scope, while nested and sibling executions have separate generation slices. Its hierarchical kernel counter survives automatic scope collection. The daemon validates persisted generation, membership binding and scope identity, then snapshots this slice before retirement and again after scope retirement, before any lane teardown. Startup recovery reads it even when membership retirement already finished. If the slice is gone, the outcome stays unknown rather than guessing from signals or stale samples."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Additive fields preserve historical record decoding. Existing exit code, exit signal, timeout mapping and Darwin logical coverage remain unchanged. Ordinary nonfinite seat scopes still use --collect."
+    "detail": "Additive optional fields preserve historical record decoding. Exit code, exit signal, timeout mapping, Darwin logical coverage, --collect and OOMPolicy=continue remain unchanged. There is no new cgroup or retained-unit lifecycle."
   },
   "downtime": {
     "status": "none",

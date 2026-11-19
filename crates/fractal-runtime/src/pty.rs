@@ -787,7 +787,6 @@ impl PtyRuntime {
                 launcher_environment.as_ref(),
                 lane.as_ref(),
                 self.unlaned_seat.as_ref(),
-                false,
             );
             if launcher_environment.is_none() {
                 command.envs(&terminal_env);

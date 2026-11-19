@@ -164,7 +164,7 @@ pub(crate) fn sanitize(value: &str) -> String {
 }
 
 pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
-    wrap_in(unit, program, arguments, None, None, None, false)
+    wrap_in(unit, program, arguments, None, None, None)
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
@@ -176,7 +176,6 @@ pub(crate) fn wrap_in(
     environment: Option<&std::collections::BTreeMap<String, String>>,
     lane: Option<&crate::lane::Lane>,
     unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
-    retain_failed: bool,
 ) -> Command {
     wrap_for_mode(
         mode(),
@@ -185,7 +184,7 @@ pub(crate) fn wrap_in(
         program,
         arguments,
         environment,
-        ScopePlacement { lane, unlaned_seat, retain_failed },
+        ScopePlacement { lane, unlaned_seat },
     )
 }
 
@@ -199,7 +198,6 @@ pub(crate) fn systemd_254() -> bool {
 struct ScopePlacement<'a> {
     lane: Option<&'a crate::lane::Lane>,
     unlaned_seat: Option<&'a crate::UnlanedSeatPlacement>,
-    retain_failed: bool,
 }
 
 fn wrap_for_mode(
@@ -215,12 +213,14 @@ fn wrap_for_mode(
         Isolation::Scope => {
             begin_scope_join(unit);
             let mut command = Command::new("systemd-run");
-            command.args(["--user", "--scope"]);
-            // Keep finite failures until their Result is committed by the daemon.
-            if !placement.retain_failed {
-                command.arg("--collect");
-            }
-            command.args(["--quiet", "--no-ask-password"])
+            command
+                .args([
+                    "--user",
+                    "--scope",
+                    "--collect",
+                    "--quiet",
+                    "--no-ask-password",
+                ])
                 .arg(format!("--unit={unit}"))
                 .arg("--description=Fractal seat");
             if expansion_flag {
@@ -293,41 +293,6 @@ pub(crate) fn systemctl() -> Command {
         }
     }
     command
-}
-
-/// Finite scopes retain failed units (no --collect), so Result outlives their cgroup.
-/// A collected successful unit is not an OOM; a failed unit must remain until reset.
-pub(crate) fn scope_oom_killed(unit: &str, reset: bool) -> Result<bool> {
-    anyhow::ensure!(is_work_scope(unit), "OOM observation requires a work scope");
-    let output = crate::systemd::output(systemctl()
-        .args(["--user", "show", "--property=LoadState,Result", "--", unit]))?;
-    let properties = String::from_utf8(output.stdout)?;
-    let result = scope_result(&properties)?;
-    if reset && result.is_some_and(|result| result != "success") {
-        let output = crate::systemd::output(systemctl().args(["--user", "reset-failed", "--", unit]))?;
-        anyhow::ensure!(output.status.success(), "reset finite scope result: {}", String::from_utf8_lossy(&output.stderr));
-        crate::systemd::invalidate();
-    }
-    Ok(result == Some("oom-kill"))
-}
-
-fn scope_result(properties: &str) -> Result<Option<&str>> {
-    let property = |name: &str| -> Result<&str> {
-        let mut values = properties.lines().filter_map(|line| line.split_once('='))
-            .filter_map(|(key, value)| (key == name).then_some(value));
-        let value = values.next().context("scope result response is incomplete")?;
-        anyhow::ensure!(values.next().is_none(), "scope result response is contradictory");
-        Ok(value)
-    };
-    match property("LoadState")? {
-        "not-found" => Ok(None),
-        "loaded" => {
-            let result = property("Result")?;
-            anyhow::ensure!(!result.is_empty(), "scope Result is empty");
-            Ok(Some(result))
-        }
-        _ => anyhow::bail!("scope load state is unverified"),
-    }
 }
 
 /// How long the processes left in a work scope get to exit on SIGTERM before SIGKILL.
@@ -915,23 +880,12 @@ mod tests {
     }
 
     #[test]
-    fn finite_scope_retains_failure_until_explicit_retirement() {
-        let command = wrap_for_mode(Isolation::Scope, true, "st3-finite-123-1.scope",
-            OsStr::new("payload"), &[], None, ScopePlacement { retain_failed: true, ..ScopePlacement::default() });
-        assert!(!command.get_args().any(|argument| argument == "--collect"));
-        assert_eq!(scope_result("LoadState=loaded\nResult=oom-kill\n").unwrap(), Some("oom-kill"));
-        assert_eq!(scope_result("LoadState=not-found\n").unwrap(), None);
-        assert!(scope_result("LoadState=loaded\n").is_err());
-        assert!(scope_result("LoadState=loaded\nResult=success\nResult=oom-kill\n").is_err());
-    }
-
-    #[test]
     fn unlaned_daemon_seat_placement_is_explicit_and_never_overrides_a_lane() {
         let policy = crate::seat_placement::tests::policy();
         let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
         let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
             wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
-                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy, ..ScopePlacement::default() })
+                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy })
                 .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
         };
         assert_eq!(arguments(None, None), [
@@ -946,7 +900,7 @@ mod tests {
             "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
         ].map(std::ffi::OsString::from));
         let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
-            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy), ..ScopePlacement::default() });
+            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy) });
         assert!(detached.get_args().next().is_none());
     }
 
@@ -964,7 +918,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("--flag")],
             Some(&environment),
-            ScopePlacement { lane: Some(&lane), unlaned_seat: None, ..ScopePlacement::default() },
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         let arguments = command.get_args().collect::<Vec<_>>();
         let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
@@ -990,7 +944,7 @@ mod tests {
             OsStr::new("provider"),
             &[],
             Some(&environment),
-            ScopePlacement { lane: Some(&lane), unlaned_seat: None, ..ScopePlacement::default() },
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         assert!(detached.get_args().next().is_none());
         assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));

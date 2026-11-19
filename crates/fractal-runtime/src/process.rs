@@ -486,7 +486,6 @@ impl ExecRuntime {
             Some(&env),
             lane.as_ref(),
             self.unlaned_seat.as_ref(),
-            self.finite_lane.is_some(),
         );
         command
             .current_dir(cwd)
@@ -1017,19 +1016,20 @@ impl ExecRuntime {
         Ok(current)
     }
 
-    /// Query only the exact persisted generation's finite scope. Reset is called only
-    /// after the daemon durably records the result and proves whole-tree retirement.
-    pub fn resource_oom_killed(&self, id: &str, expected_generation: &str, reset: bool) -> Result<bool> {
+    /// Read the kernel counter of the exclusive finite generation slice, which outlives
+    /// its collected payload scope. None means the slice is gone, not a measured zero.
+    pub fn resource_oom_kills(&self, id: &str, expected_generation: &str, lane_name: &str) -> Result<Option<u64>> {
         let generation = match self.observe(id)?.context("resource OOM generation missing")? {
             ExecObservation::Running(generation) | ExecObservation::Exited(generation) => generation,
             ExecObservation::Indeterminate(reason) => anyhow::bail!("resource OOM generation indeterminate: {reason}"),
         };
-        anyhow::ensure!(generation.generation_id == expected_generation && generation.resource_membership.is_some(),
-            "resource OOM observation belongs to another generation or a nonfinite execution");
+        anyhow::ensure!(generation.generation_id == expected_generation,
+            "resource OOM observation belongs to another generation");
+        let binding = generation.resource_membership.as_ref().context("resource OOM membership missing")?;
         let unit = generation.scope_unit.as_deref().context("resource OOM scope missing")?;
         anyhow::ensure!(crate::isolate::scope_identity("st3", unit) == Some(crate::isolate::sanitize(id).as_str()),
             "resource OOM scope differs from execution identity");
-        crate::isolate::scope_oom_killed(unit, reset)
+        crate::lane::finite_oom_kills(lane_name, binding, unit)
     }
 
     /// Exact-generation whole-tree retirement. A missing/replaced record is not empty evidence.

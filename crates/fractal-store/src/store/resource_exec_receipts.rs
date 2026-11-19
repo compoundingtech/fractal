@@ -70,7 +70,7 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("clean_end", result.and_then(|result| result.clean_end).map(|clean| json!(clean))),
         ("exit_code", execution.exit_code.map(|code| json!(code))),
         ("exit_signal", execution.exit_signal.map(|signal| json!(signal))),
-        ("oom_kills", result.and_then(|result| result.oom_kills).map(|count| json!(count))),
+        ("oom_kills", execution.oom_kills.map(|count| json!(count))),
         ("memory_peak_bytes", result.and_then(|result| result.memory_peak_bytes)
             .filter(|_| request.coverage == Coverage::Enforced).map(|peak| json!(peak))),
     ] {
@@ -115,7 +115,7 @@ mod tests {
         execution.result = Some(PayloadResult {
             head_start: Some("abc123".into()), head_end: Some("abc123".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
-            wall_duration_ms: 1234, memory_peak_bytes: None, oom_kills: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None,
         });
         execution
     }
@@ -131,17 +131,18 @@ mod tests {
         let mut execution = terminal(&store, "oom", "completed");
         let mut historical = serde_json::to_value(&execution).unwrap();
         historical.as_object_mut().unwrap().remove("oomKilled");
-        historical["result"].as_object_mut().unwrap().remove("oomKills");
+        historical.as_object_mut().unwrap().remove("oomKills");
         let historical: Execution = serde_json::from_value(historical).unwrap();
-        assert!(!historical.oom_killed);
-        assert_eq!(historical.result.unwrap().oom_kills, None);
-        execution.oom_killed = true;
+        assert_eq!(historical.oom_killed, None);
+        assert_eq!(historical.oom_kills, None);
+        assert_eq!(receipt_fields(&historical)["oom_killed"], Value::Null);
+        execution.oom_killed = Some(true);
         execution.reason = "payload-oom-killed".into();
         let fields = receipt_fields(&execution);
         assert_eq!(fields["oom_killed"], true);
         assert_eq!(fields["reason"], "payload-oom-killed");
         assert!(!fields.contains_key("oom_kills"));
-        execution.result.as_mut().unwrap().oom_kills = Some(3);
+        execution.oom_kills = Some(3);
         assert_eq!(receipt_fields(&execution)["oom_kills"], 3);
     }
 
