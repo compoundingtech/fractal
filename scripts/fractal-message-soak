@@ -177,67 +177,16 @@ probe() {
   return 1
 }
 
-state_field() {
-  local direction=$1 field=$2
-  /usr/bin/jq -r --arg field "$field" '.[$field] // empty' "$STATE_DIR/$direction.json" 2>/dev/null || true
-}
-
-save_state() {
-  local direction=$1 streak=$2 episode=$3 attention=$4 pending=$5 temporary
-  temporary=$(/usr/bin/mktemp "$STATE_DIR/$direction.XXXXXX")
-  /usr/bin/jq -nc --argjson streak "$streak" --argjson episode "$episode" \
-    --arg attention "$attention" --arg pending "$pending" \
-    '{streak:$streak,episode:$episode,attention:$attention,pending:$pending}' >"$temporary"
-  /usr/bin/mv "$temporary" "$STATE_DIR/$direction.json"
-}
-
 record_result() {
-  local direction=$1 succeeded=$2 streak episode attention pending response
-  streak=$(state_field "$direction" streak)
-  episode=$(state_field "$direction" episode)
-  attention=$(state_field "$direction" attention)
-  pending=$(state_field "$direction" pending)
-  streak=${streak:-0}
-  episode=${episode:-0}
-  if [[ $succeeded == true ]]; then
-    if [[ -n $attention ]]; then
-# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      if /usr/bin/timeout 20s "${FRACTAL_BIN-${ST3_BIN-}}" attention withdraw "$attention" --as "${FRACTAL_AGENT-${ST_AGENT-}}" \
-        --reason "Cross-host delivery recovered; a fresh exact linked receipt passed." --json >/dev/null; then
-        log "withdrew recovered delivery attention=$attention direction=$direction"
-        attention=
-      else
-        log "warning: could not withdraw recovered delivery attention=$attention direction=$direction"
-      fi
-    fi
-    save_state "$direction" 0 "$episode" "$attention" ''
-    return
+  local direction=$1 succeeded=$2 streak=0 pending= temporary
+  if [[ $succeeded != true ]]; then
+    streak=$(/usr/bin/jq -r '(.streak // 0) + 1' "$STATE_DIR/$direction.json" 2>/dev/null) || streak=1
+    pending=${LAST_SUBJECT:-send-failed}
   fi
-  if (( streak == 0 )); then
-    episode=$((episode + 1))
-  fi
-  streak=$((streak + 1))
-  pending=${LAST_SUBJECT:-send-failed}
-  save_state "$direction" "$streak" "$episode" "$attention" "$pending"
-  if (( streak < 3 )) || [[ -n $attention ]]; then
-    return
-  fi
-  local -a target_args=()
-  if [[ $pending == message/* ]]; then
-    target_args=(--target "$pending")
-  fi
-# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  if response=$(/usr/bin/timeout 20s "${FRACTAL_BIN-${ST3_BIN-}}" attention request --as "${FRACTAL_AGENT-${ST_AGENT-}}" --for person/alex \
-    --title "st3 cross-host delivery failing: $direction" \
-    --reason "Three consecutive exact-receipt probes failed in $direction; latest message $pending, token ${LAST_TOKEN:-unknown}. Inspect the st3-message-soak service journal and both recipient agents." \
-    "${target_args[@]}" --severity error \
-    --idempotency-key "st3-message-soak:$direction:$episode" --json); then
-    attention=$(/usr/bin/jq -er '.subject' <<<"$response") || attention=
-    save_state "$direction" "$streak" "$episode" "$attention" "$pending"
-    log "requested delivery attention=$attention direction=$direction streak=$streak"
-  else
-    log "warning: could not publish delivery attention direction=$direction streak=$streak"
-  fi
+  temporary=$(/usr/bin/mktemp "$STATE_DIR/$direction.XXXXXX")
+  /usr/bin/jq -nc --argjson streak "$streak" --arg pending "$pending" \
+    '{streak:$streak,pending:$pending}' >"$temporary"
+  /usr/bin/mv "$temporary" "$STATE_DIR/$direction.json"
 }
 
 if [[ ${1:-} == --recover-sent-subject ]]; then

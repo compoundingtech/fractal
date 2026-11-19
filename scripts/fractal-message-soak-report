@@ -27,7 +27,7 @@ if [[ ${FRACTAL_SOAK_REPORT_SKIP_RUNTIME_CHECKS-${ST3_SOAK_REPORT_SKIP_RUNTIME_C
     echo 'soak monitor service is not active' >&2; exit 1;
   }
   for direction in example-linux-to-example-mac example-mac-to-example-linux; do
-    jq -e '(.streak == 0) and (.attention == "")' "$STATE_DIR/$direction.json" >/dev/null || {
+    jq -e '(.streak == 0)' "$STATE_DIR/$direction.json" >/dev/null || {
       echo "soak monitor has unresolved failures: $direction" >&2; exit 1;
     }
   done

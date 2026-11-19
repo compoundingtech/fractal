@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove nonfunctional delivery-soak attention mutations.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or backfill."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or stored identity changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or fleet coordination rule changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional daemon startup work or service interruption; timings were not measured."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored-data conversion to undo; roll forward with canonical CLI callers."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The soak no longer requests or withdraws legacy attention; journal probes and streak-based report checks remain. Existing state files remain readable."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Use the delivery-soak journal and report to inspect probe failures; no historical attention records are deleted."
+  }
+}
