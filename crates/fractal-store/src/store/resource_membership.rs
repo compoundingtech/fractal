@@ -727,6 +727,7 @@ impl Store {
     pub fn withdraw_resource_membership(&self, id: &str, owner: &Owner, now_ms: u64) -> Result<()> {
         let mut connection = self.connection.write(); let tx = connection.transaction()?;
         let mut member = read(&tx, id)?; authorized(&member, owner)?;
+        member.request.class.ensure_supported()?;
         let previous = member.state.clone();
         if member.state == "queued" {
             member.state = "retired".into(); member.reason = "cancelled before admission".into(); member.retired_at = Some(now_ms);
