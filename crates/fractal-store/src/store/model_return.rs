@@ -34,7 +34,7 @@ impl Store {
     /// A single exact deadline, not a retry poll, when a prior admission spends the budget.
     pub fn model_return_budget_resumes_at(&self, agent: &str) -> Result<Option<u128>> {
         smallclaims::touched::note_read(|| agent.to_owned());
-        let latest: Option<i64> = self.connection.read().query_row(
+        let latest: Option<i64> = self.readers.get().query_row(
             "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')=?2",
             params![agent, OPERATION], |row| row.get(0))?;
         Ok(latest.map(|at| (at.max(0) as u128).saturating_add(3_600_001)))
