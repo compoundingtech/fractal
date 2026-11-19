@@ -10,6 +10,8 @@ pub mod otel_client_class;
 pub mod reconcile_telemetry;
 /// Inert residency metrics and precomputed summaries.
 pub mod residency;
+/// Disabled-by-default host sensor primitives, with explicit missing coverage.
+pub mod residency_host_sample;
 /// Observes git and gh calls without changing their command behavior.
 pub mod recorder;
 /// Summarizes command recorder logs from one or more hosts.
