@@ -968,6 +968,7 @@ pub struct Store {
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
+    pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1337,6 +1338,7 @@ impl Store {
             connection,
             admitted: None,
             checkpoint_verify_latest: Default::default(),
+            checkpoint_worker: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,

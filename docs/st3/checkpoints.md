@@ -11,6 +11,15 @@ Agreement inputs and proof identities are unchanged. Startup revisions replicate
 member and contain no secret. Native Cargo, archive release and Nix stamp generators reject identities longer than
 128 bytes before producing a release binary. Startup also checks that bound as a defensive guard.
 
+Status also reports process-local `worker` evidence: the last entered phase, its update time,
+and any failure retained at that phase until the next attempt. This distinguishes disabled
+checkpointing, activation, scratch cleanup, catch-up, capture, seal, proof and trim work.
+`blocking` in text status and the `checkpoint` doctor check name each participant still missing
+a seal or verification and distinguish differing seals. A missing worker field means the daemon
+has no worker evidence, not that it is enabled or healthy. These diagnostics read cached worker
+metadata and existing agreement claims; they do not start a capture, proof copy or envelope walk.
+They are not agreement inputs, do not excuse removed members, and do not enable checkpoints.
+
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it
 holds is old observation: a seat's state a minute ago, a diagnostic that has since repeated, a usage
 reading that a later reading includes. A checkpoint is how every node of a fleet agrees to delete

@@ -8270,6 +8270,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     .map(|fault| (store.clone(), fault.reviewer.clone())),
             ));
             let activation_store = store.clone();
+            use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+            activation_store.checkpoint_worker_phase(if config.checkpoint.enabled || config.trim.local {
+                CheckpointPhase::Activation
+            } else {
+                CheckpointPhase::Disabled
+            });
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
             let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
@@ -8297,10 +8303,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
+                        activation_store.checkpoint_worker_error(format!("{error:#}"));
                         stderr_message("st", format_args!("replication history activation failed: {error:#}"));
                         return;
                     }
                     Err(error) => {
+                        activation_store.checkpoint_worker_error(error.to_string());
                         stderr_message("st", format_args!("replication history activation stopped: {error}"));
                         return;
                     }
@@ -13917,6 +13925,9 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
                 "  verifications disagree, so this checkpoint is not stable; the next due \
                  checkpoint tries again\n",
             );
+        }
+        if let Some(blocking) = status.blocking_summary() {
+            output.push_str(&format!("  blocking    {blocking}\n"));
         }
     }
     output
@@ -22898,6 +22909,8 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
 /// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    store.checkpoint_worker_phase(CheckpointPhase::ScratchCleanup);
     // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
     // proof or a cleanup error stays visible and prevents a later proof from consuming space.
     let sweep_store = store.clone();

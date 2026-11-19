@@ -6828,6 +6828,23 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
 }
 
 #[test]
+fn doctor_distinguishes_disabled_checkpoint_worker_from_missing_participant_seals() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet/checkpoint-diagnostics".into());
+    state.configured_peers.push("absent-writer".into());
+    state.store.checkpoint_worker_phase(CheckpointPhase::Disabled);
+    let report = doctor_report(&state).unwrap().0;
+    let check = report.checks.iter().find(|check| check.name == "checkpoint").unwrap();
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=Disabled"));
+    assert!(check.message.contains("disabled by config on 1 node"));
+    assert!(check.message.contains("newest stable none"));
+    assert!(check.message.contains("absent-writer phase=seal (no seal)"));
+}
+
+#[test]
 fn doctor_lists_attention_items_open_for_more_than_a_day() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
