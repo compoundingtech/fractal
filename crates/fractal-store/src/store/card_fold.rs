@@ -187,6 +187,9 @@ impl CardReads {
     /// Resume each subject's canonical reduction from its indexed arrival suffix. A
     /// late canonical predecessor or a mutation of the prefix restarts only that subject.
     fn load_actual(&mut self, store: &Store, connection: &Connection, subjects: &[String]) -> Result<()> {
+        // A writer transaction may roll back and reuse its arrival indexes. Only
+        // committed/autocommit reads and physically read-only snapshots may share state.
+        let share = connection.is_autocommit() || connection.is_readonly(rusqlite::DatabaseName::Main)?;
         let missing = subjects.iter().filter(|subject| !self.actual.contains_key(*subject))
             .collect::<BTreeSet<_>>();
         let mut revision = connection.prepare_cached(
@@ -207,8 +210,10 @@ impl CardReads {
         for subject in missing {
             let key = (subject.clone(), self.hide_reserved);
             let revision: u64 = revision.query_row([subject], |row| row.get(0))?;
-            let kept = store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner)
-                .get(&key).filter(|entry| entry.through <= self.index && entry.revision == revision).cloned();
+            let kept = if share {
+                store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner)
+                    .get(&key).filter(|entry| entry.through <= self.index && entry.revision == revision).cloned()
+            } else { None };
             let mut after = kept.as_ref().map_or(0, |entry| entry.through);
             let reduction = loop {
                 let statement = if after == 0 { &mut full } else { &mut suffix };
@@ -244,9 +249,11 @@ impl CardReads {
                 .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok())
                 .map(|member| member.host);
             self.actual.insert(subject.clone(), reduction.state(host.as_deref()));
-            let mut cache = store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner);
-            if cache.len() >= ACTUAL_CACHE_LIMIT && !cache.contains_key(&key) { cache.clear(); }
-            cache.insert(key, Arc::new(reduction));
+            if share {
+                let mut cache = store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner);
+                if cache.len() >= ACTUAL_CACHE_LIMIT && !cache.contains_key(&key) { cache.clear(); }
+                cache.insert(key, Arc::new(reduction));
+            }
         }
         Ok(())
     }
@@ -843,3 +850,7 @@ impl Store {
         Ok(reads)
     }
 }
+
+#[cfg(test)]
+#[path = "card_actual_regression_tests.rs"]
+mod actual_regression_tests;

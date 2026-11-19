@@ -79,24 +79,26 @@ pub(super) fn install(connection: &Connection) -> Result<()> {
         ("repair_delete", "AFTER DELETE ON projection_digest_repaired_claims", "(SELECT subject FROM claims WHERE id=OLD.id)"),
         ("repair_update_old", "AFTER UPDATE ON projection_digest_repaired_claims", "(SELECT subject FROM claims WHERE id=OLD.id)"),
         ("repair_update_new", "AFTER UPDATE ON projection_digest_repaired_claims", "(SELECT subject FROM claims WHERE id=NEW.id)"),
-        ("record_update", "AFTER UPDATE ON replica_records", "(SELECT subject FROM claims WHERE id=OLD.claim_id)"),
-        ("record_update_new", "AFTER UPDATE OF claim_id ON replica_records", "(SELECT subject FROM claims WHERE id=NEW.claim_id)"),
-        ("record_delete", "AFTER DELETE ON replica_records", "(SELECT subject FROM claims WHERE id=OLD.claim_id)"),
+        ("position_insert", "AFTER INSERT ON claim_positions", "(SELECT subject FROM claims WHERE id=NEW.claim_id)"),
+        ("position_update", "AFTER UPDATE ON claim_positions WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id", "(SELECT subject FROM claims WHERE id=OLD.claim_id)"),
+        ("position_update_new", "AFTER UPDATE OF claim_id ON claim_positions WHEN OLD.claim_id IS NOT NEW.claim_id", "(SELECT subject FROM claims WHERE id=NEW.claim_id)"),
+        ("position_delete", "AFTER DELETE ON claim_positions", "(SELECT subject FROM claims WHERE id=OLD.claim_id)"),
     ] {
         connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS card_actual_{name} {event}
             BEGIN {} END;", bump(subject)))?;
     }
-    connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS card_actual_batch_update
+    // Position admission can lower an existing claim's canonical position without
+    // inserting another replica row. Observe the authoritative position table itself.
+    connection.execute_batch("DROP TRIGGER IF EXISTS card_actual_record_insert;
+        DROP TRIGGER IF EXISTS card_actual_record_update;
+        DROP TRIGGER IF EXISTS card_actual_record_update_new;
+        DROP TRIGGER IF EXISTS card_actual_record_delete;
+        CREATE TRIGGER IF NOT EXISTS card_actual_batch_update
         AFTER UPDATE OF origin, replica_sequence ON batches
         WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence BEGIN
         INSERT INTO card_actual_revisions(subject,revision)
         SELECT DISTINCT subject,1 FROM claims WHERE batch_id=OLD.id
-        ON CONFLICT(subject) DO UPDATE SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS card_actual_record_insert AFTER INSERT ON replica_records
-        WHEN NEW.position IS NOT (SELECT COUNT(*) FROM claims preceding JOIN claims current
-            ON preceding.batch_id=current.batch_id AND preceding.store_index<current.store_index
-            WHERE current.id=NEW.claim_id)
-        BEGIN {} END;", bump("(SELECT subject FROM claims WHERE id=NEW.claim_id)")))?;
+        ON CONFLICT(subject) DO UPDATE SET revision=revision+1; END;")?;
     Ok(())
 }
 
