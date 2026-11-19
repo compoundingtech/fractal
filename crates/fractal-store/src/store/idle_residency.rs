@@ -655,7 +655,9 @@ mod tests {
         let incremental = crate::incremental::Incremental::default();
         incremental.observe(&store).unwrap();
         incremental.evaluated("member:garden", reads, Some(due));
-        claim(&store, "message/orchard", "message.closed", Some("person/avery"), json!({"status":"closed"}));
+        for status in ["delivered", "read", "closed"] {
+            claim(&store, "message/orchard", &format!("message.{status}"), Some(orchard), json!({"status":status}));
+        }
         assert_eq!(store.admit_idle_wake(orchard, 1, now + 1).unwrap(), IdleWakeAdmission::default());
         assert_eq!(crate::suspension::current(&store, orchard).unwrap().unwrap().operation_id, suspend.id,
             "the leader disappeared without producing a resume action");
