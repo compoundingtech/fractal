@@ -627,7 +627,7 @@ fn schedule_work_request(host: &Host, schedule: &str, mission_revision: &str) ->
                 ),
                 (
                     "workspace".into(),
-                    Value::String("/tmp/st3-fault-isolation".into()),
+                    Value::String("/tmp/fractal-fault-isolation".into()),
                 ),
                 ("inputs".into(), Value::Object(Default::default())),
             ]),
@@ -645,7 +645,7 @@ fn schedule_source(name: &str, revision: &str) -> String {
     at "2099-01-01T00:00:00.000Z"
     work {{
       mission "worker@{revision}"
-      workspace "/tmp/st3-fault-isolation"
+      workspace "/tmp/fractal-fault-isolation"
     }}
   }}"#
     )
@@ -768,7 +768,7 @@ fn scheduled_work_that_cannot_start_fails_without_freezing_its_schedule() {
                 ("mission_revision".into(), Value::String(revision.clone())),
                 (
                     "workspace".into(),
-                    Value::String("/tmp/st3-fault-isolation".into()),
+                    Value::String("/tmp/fractal-fault-isolation".into()),
                 ),
                 (
                     "inputs".into(),
@@ -825,7 +825,7 @@ fn subscription_request(
                 ("resource_input".into(), Value::String("source".into())),
                 (
                     "workspace".into(),
-                    Value::String("/tmp/st3-fault-isolation".into()),
+                    Value::String("/tmp/fractal-fault-isolation".into()),
                 ),
                 ("discovery".into(), Value::String(discovery.into())),
             ]),
@@ -865,7 +865,7 @@ mission "review" state="ready" {
     delivery "mission" {{
       mission "review@{revision}"
       resource "source"
-      workspace "/tmp/st3-fault-isolation"
+      workspace "/tmp/fractal-fault-isolation"
     }}
   }}"#
     ));
@@ -948,7 +948,7 @@ mission "review" state="ready" {
     delivery "mission" {{
       mission "review@{review}"
       resource "source"
-      workspace "/tmp/st3-fault-isolation"
+      workspace "/tmp/fractal-fault-isolation"
     }}
   }}"#
             )
