@@ -353,8 +353,9 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
         assert_eq!(count,1,"recovery must not synthesize {kind}");
     }
     drop(reader);
+    let changed_input_scratch = tempfile::tempdir().unwrap();
     let changed_input = store.create_mission_run(&crate::model::MissionRunRequest {
-        mission:"answer".into(),revision:None,workspace:".".into(),requester:Some("person/test".into()),mode:Some("run".into()),
+        mission:"answer".into(),revision:None,workspace:changed_input_scratch.path().to_string_lossy().into_owned(),requester:Some("person/test".into()),mode:Some("run".into()),
         inputs:BTreeMap::from([("head".into(),"head-b".into()),("context".into(),"context-a".into())]),idempotency_key:"changed-root-head".into(),
     }).unwrap();
     assert!(continuity::eligible_root_gate_requests_tx(&store.readers.get(),&source,&changed_input,&confirmed).unwrap().is_empty());
