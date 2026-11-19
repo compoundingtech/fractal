@@ -311,8 +311,10 @@ fn expired_audit_history_is_not_materialized_on_unrelated_events() {
     let expired = sent + DEADLINE + HORIZON + FRESHNESS + 1;
     assert_eq!(capture(&store, expired).unwrap().source_work, [0, 0, 0]);
     store.append_claim(&ClaimInput {
-        subject: "node/example-unrelated".into(), kind: "node.observed".into(), actor: None,
-        fields: BTreeMap::from([("status".into(), json!("online"))]),
+        subject: "agent/example-unrelated".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/example-unrelated".into()),
+        fields: serde_json::from_value(json!({"status":"running",
+            "runtime_id":"example-unrelated-runtime","incarnation_id":"unrelated-one"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
     assert_eq!(capture(&store, expired).unwrap().source_work, [0, 0, 0]);
