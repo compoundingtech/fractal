@@ -51,15 +51,15 @@ done
 [ -n "$new_incarnation" ]
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-duplicate_message="$(st3 conversations send "$subject" \
+duplicate_message="$(fractal conversations send "$subject" \
   --from "${FRACTAL_SUBJECT-${ST3_SUBJECT-}}" \
   --subject "Repeated pre-restart work" \
   --tags "mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}},duplicate-work:process-before-restart" \
-  -m "DUPLICATE-BATCH-RC-7B9D: This repeats work assigned before the cold restart. Read the durable st3 missions, PROGRESS.md, and git history. Do not redo items 1 or 2. Continue only ready assigned work." \
+  -m "DUPLICATE-BATCH-RC-7B9D: This repeats work assigned before the cold restart. Read the durable Fractal missions, PROGRESS.md, and git history. Do not redo items 1 or 2. Continue only ready assigned work." \
   --json | jq -er .subject)"
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st3 claim "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" resource.observed \
+fractal claim "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/restart" resource.observed \
   --actor "${FRACTAL_SUBJECT-${ST3_SUBJECT-}}" \
   --field kind=custom.st3.cold-restart \
   --field state=injected \

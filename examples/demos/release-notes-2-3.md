@@ -10,4 +10,4 @@
 - The wind rose no longer flips north and south on stations below the equator.
 - Exported CSV files name their columns in the station's own units.
 
-Copperwren is an invented product used in st's example demos.
+Copperwren is an invented product used in Fractal's example demos.

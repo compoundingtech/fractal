@@ -2,7 +2,7 @@
 
 This walkthrough uses two complete files. A seat file declares a durable project worker, and a
 finite work mission assigns work to that worker. All names and data are invented. Use a disposable
-ST installation with a working login for one harness, from the repository root.
+Fractal installation with a working login for one harness, from the repository root.
 
 ## Failure first: a mission is not a durable agent
 
@@ -19,7 +19,7 @@ generated round mission, which holds the step:
 mission `mission/__st3/example/garden-work/loop/prepare-note/round` references missing eligible agent `agent/example/worker`
 ```
 
-A durable agent is a top-level seat, applied with `st apply`. It has no mission owner, so
+A durable agent is a top-level seat, applied with `fractal apply`. It has no mission owner, so
 no mission's end can stop it. Work reaches it as mission steps assigned to its exact subject.
 
 ## Supported way: apply a seat, then run work
@@ -41,44 +41,44 @@ before publication. This example's gate is a single command; its equivalent synt
 /bin/bash -n -c '/usr/bin/test -s garden-note.md # round 1'
 ```
 
-Then run these four ST commands in order.
+Then run these four Fractal commands in order.
 
 1. Apply the seat:
 
    ```sh
-   st apply examples/fractal/seats/omp.kdl --as person/operator
+   fractal apply examples/fractal/seats/omp.kdl --as person/operator
    ```
 
    **This is the step that creates the agent.** Verify it:
 
    ```sh
-   st agents show agent/example/worker
+   fractal agents show agent/example/worker
    ```
 
 2. Publish the finite work definition:
 
    ```sh
-   st apply examples/fractal/walkthrough-work.kdl --as person/operator
+   fractal apply examples/fractal/walkthrough-work.kdl --as person/operator
    ```
 
    Publication stores an immutable ready definition; it does not start a run. The missing-agent
-   warning above does not appear now that the seat exists. `st missions ls --all` lists
+   warning above does not appear now that the seat exists. `fractal missions ls --all` lists
    `mission/example/garden-work` with zero runs.
 
 3. Start the work and follow it:
 
    ```sh
-   st missions start example/garden-work --id example/garden-work/first-change \
+   fractal missions start example/garden-work --id example/garden-work/first-change \
      --workspace "$walkthrough_workspace" --as person/operator --follow
    ```
 
-   The run joins the seat's queue, and st wakes the seat for `write-note`. `--follow` returns when
+   The run joins the seat's queue, and Fractal wakes the seat for `write-note`. `--follow` returns when
    the run is terminal.
 
 4. Inspect the result:
 
    ```sh
-   st missions show mission-run/example/garden-work/first-change
+   fractal missions show mission-run/example/garden-work/first-change
    ```
 
 `apply FILE --as ACTOR` previews and publishes exact authored KDL. A person actor is an
@@ -95,11 +95,11 @@ successful loop after the loop and depend on the loop step.
 
 A gate result is cached by the gate's definition, and an `until` gate belongs to the loop rather
 than to one round. The gate command therefore ends with the shell comment `# round ${loop.round}`.
-st substitutes the round number, so each round runs the check again. Without it, the first
+fractal substitutes the round number, so each round runs the check again. Without it, the first
 round's failure would be reused for every later round.
 
 Mechanical gates use the captured interactive login-shell environment. Tools resolve through
-that PATH; the example's `/usr/bin/test` also works as an explicit path. `st doctor` shows the
+that PATH; the example's `/usr/bin/test` also works as an explicit path. `fractal doctor` shows the
 daemon PATH. Keep the owning step or loop timeout longer than the gate's
 `time-limit`; here 30 minutes exceeds one minute. Syntax-check nontrivial shell with
 `/bin/bash -n` before publishing it.
@@ -113,6 +113,6 @@ the gate results. A failed loop also puts an attention item in the operator's in
 does not depend on anyone reading a message.
 
 After the run, `garden-note.md` is in the disposable workspace and the seat remains running for
-the next mission. Stop it with `st agents stop agent/example/worker --as person/operator` when you
+the next mission. Stop it with `fractal agents stop agent/example/worker --as person/operator` when you
 are done. Remove the workspace; immutable definitions and the completed run remain in graph
 history by design.

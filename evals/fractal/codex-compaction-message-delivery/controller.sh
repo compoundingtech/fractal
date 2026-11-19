@@ -46,7 +46,7 @@ is_harness_state() {
 
 target_work_claimed() {
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  st3 missions show "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" --json 2>/dev/null \
+  fractal missions show "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" --json 2>/dev/null \
     | jq -e --arg agent "$AGENT" '
         any(.steps[];
           .step == "message-target"
