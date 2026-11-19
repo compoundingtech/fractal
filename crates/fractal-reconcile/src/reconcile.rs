@@ -2889,6 +2889,57 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Raise one host item while the current replication worker is missing, stale, or has not
+    /// exchanged with a current peer past the grace period. Stored envelope history is not
+    /// evidence: only what this daemon has observed about the live worker is.
+    fn reconcile_replication_health(&self) -> Result<()> {
+        let configured = self.store.bound_fleet()?.is_some();
+        let health = self.store.replication_health(configured)?;
+        let daemon = format!("daemon/{}", self.host);
+        let title = format!("Replication is not healthy on {}", self.host);
+        let pending = self
+            .store
+            .pending_operational_failures(RECONCILER_ACTOR, &self.host)?
+            .into_iter()
+            .filter(|request| request.title == title && request.targets == [daemon.as_str()])
+            .collect::<Vec<_>>();
+        if health.status() == "fail" {
+            if pending.is_empty() {
+                let key = format!("replication-unhealthy:{}:{}", self.host, self.store.index()?);
+                let digest = hex::encode(sha2::Sha256::digest(key.as_bytes()));
+                self.store.record_operational_failure(
+                    &format!("attention/{}", &digest[..32]),
+                    &AttentionRequest {
+                        reviewer: "person/operator".into(),
+                        title,
+                        reason: format!(
+                            "On {}, {}: {}. This item closes once a live worker exchanges \
+                             successfully with a current peer again.",
+                            self.host,
+                            health,
+                            health.message(),
+                        ),
+                        severity: "error".into(),
+                        targets: vec![daemon],
+                        actor: RECONCILER_ACTOR.into(),
+                        idempotency_key: key,
+                    },
+                )?;
+                self.signal_changed();
+            }
+            return Ok(());
+        }
+        for request in pending {
+            self.store.recover_operational_failure(
+                &request.subject,
+                "the replication worker is live and a current peer exchanged successfully",
+                &format!("replication-recovered:{}", request.request),
+            )?;
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
     /// Raise one host item while whole reconcile passes fail or the reconciler panics. Nothing on
     /// the host advances in that time. The first cause names the item; later failures keep it.
     fn request_reconciler_attention(&self, cause: &str) -> Result<()> {
@@ -4409,6 +4460,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
+        });
+        self.isolate("stage/replication-health", &daemon, || {
+            self.reconcile_replication_health()
         });
         self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
