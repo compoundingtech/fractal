@@ -251,6 +251,9 @@
     "slo/objectives.kdl"
    ]
   },
+  "fractal-mac-custody": {
+   "extra": []
+  },
   "fractal-migrate": {
    "extra": []
   },

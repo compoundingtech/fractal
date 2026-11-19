@@ -94,6 +94,45 @@ fn contained_path(path: &Path, root: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Open only bounded regular plans beneath the slot, without following symlinks
+/// in any relative component. Nonblocking open prevents a FIFO from parking root.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub(crate) fn read_plan_under(path: &Path, root: &Path) -> Result<Plan, String> {
+    use std::{ffi::CString, fs::{File, OpenOptions}, io::Read,
+        os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::OpenOptionsExt}}};
+    const MAX_PLAN_BYTES: u64 = 1024 * 1024;
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err("plan path must be absolute and inside the selected slot, without '..'".into());
+    }
+    let relative = path.strip_prefix(root).map_err(|_| "plan path is outside the selected slot")?;
+    if root.canonicalize().map_err(|e| format!("slot root: {e}"))? != root {
+        return Err("slot root must be canonical".into());
+    }
+    let flags = libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+    let mut file = OpenOptions::new().read(true).custom_flags(flags | libc::O_DIRECTORY)
+        .open(root).map_err(|e| format!("open plan root: {e}"))?;
+    let mut components = relative.components().peekable();
+    if components.peek().is_none() { return Err("plan path must name a regular file".into()); }
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else { return Err("invalid plan path component".into()); };
+        let name = CString::new(name.as_bytes()).map_err(|_| "plan path contains NUL")?;
+        let directory_flag = if components.peek().is_some() { libc::O_DIRECTORY } else { 0 };
+        // SAFETY: directory fd is owned and valid; the component is NUL-terminated.
+        // NOFOLLOW and descriptor-relative traversal prevent symlink replacement.
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | flags | directory_flag) };
+        if fd < 0 { return Err(format!("open plan: {}", std::io::Error::last_os_error())); }
+        // SAFETY: successful openat returns a new descriptor owned by this File.
+        file = unsafe { File::from_raw_fd(fd) };
+    }
+    let metadata = file.metadata().map_err(|e| format!("stat plan: {e}"))?;
+    if !metadata.is_file() { return Err("plan must be a regular file".into()); }
+    if metadata.len() > MAX_PLAN_BYTES { return Err("plan exceeds 1 MiB".into()); }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PLAN_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("read plan: {e}"))?;
+    if bytes.len() as u64 > MAX_PLAN_BYTES { return Err("plan exceeds 1 MiB".into()); }
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid plan: {e}"))
+}
+
 
 #[derive(Debug, Clone)]
 pub struct Invocation { pub verb: String, pub slot: String, pub plan_file: Option<PathBuf>, pub job_id: Option<String> }
@@ -169,6 +208,48 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
         let mut p = plan(&root); p.cwd = root.join("escape"); assert!(p.validate_under(&root).is_err());
         assert!(plan(&root).validate_under(&root).is_ok());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn plan_file_requires_contained_absolute_path() {
+        let dir = scratch(); let outside = scratch();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("plan.json");
+        std::fs::write(&path, serde_json::to_vec(&plan(&root)).unwrap()).unwrap();
+        assert!(read_plan_under(&path, &root).is_ok());
+        assert!(read_plan_under(&outside.path().join("plan.json"), &root).is_err());
+        assert!(read_plan_under(Path::new("plan.json"), &root).is_err());
+        assert!(read_plan_under(&root.join("nested/../plan.json"), &root).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn plan_file_rejects_symlinks_in_every_component() {
+        let dir = scratch(); let root = dir.path().canonicalize().unwrap();
+        let path = root.join("plan.json");
+        std::fs::write(&path, serde_json::to_vec(&plan(&root)).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&path, root.join("linked.json")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("linked-directory")).unwrap();
+        assert!(read_plan_under(&root.join("linked.json"), &root).is_err());
+        assert!(read_plan_under(&root.join("linked-directory/plan.json"), &root).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn plan_file_rejects_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch(); let root = dir.path().canonicalize().unwrap();
+        let path = root.join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path in this test's owned directory; no privileges.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(read_plan_under(&path, &root).unwrap_err().contains("regular file"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn plan_file_rejects_oversize() {
+        let dir = scratch(); let root = dir.path().canonicalize().unwrap();
+        let path = root.join("oversize.json");
+        std::fs::File::create(&path).unwrap().set_len(1024 * 1024 + 1).unwrap();
+        assert!(read_plan_under(&path, &root).unwrap_err().contains("1 MiB"));
     }
     #[test]
     fn strict_invocation_and_receipt_wire() {
