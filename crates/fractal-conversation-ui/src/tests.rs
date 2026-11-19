@@ -365,16 +365,18 @@ fn selection_uses_display_columns_in_both_drag_directions() {
 }
 
 #[test]
+#[cfg(feature = "ratatui")]
 fn selection_copies_text_without_the_message_edge_indent_or_fences() {
-    // Nathan, 2026-10-03: a command copied out of a message came with the "▎" edge on every
-    // line.
+    use crate::text::{Line, Span};
+    let style = ratatui::style::Style::default();
+    let body = |text: &'static str| crate::text::prefixed(vec![Span::decoration("▎   ", style)], Line::raw(text));
     let lines = vec![
-        "▎ you · 10:02",
-        "▎ Run this:",
-        "▎ ```sh",
-        "▎   mkdir -p ~/.config/demo",
-        "▎     touch ~/.config/demo/keys.env",
-        "▎ ```",
+        body("you · 10:02"),
+        crate::text::prefixed(vec![Span::decoration("▎ ", style)], Line::raw("Run this:")),
+        body("```sh").decoration(),
+        body("mkdir -p ~/.config/demo"),
+        body("  touch ~/.config/demo/keys.env"),
+        body("```").decoration(),
     ];
     let mut selection = Selection {
         pane: "session/a".into(),
