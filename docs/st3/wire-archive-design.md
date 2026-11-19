@@ -31,7 +31,7 @@ Signature responses independently read the hot signature table even when its env
 
 ### Third PR: separate native filesystem-capacity gauge
 
-The daemon's existing hourly database sampling lane also measures the dedicated `wire-archive` directory beside its graph database. It never creates that directory or enables an archive writer. A missing never-measured root is `not-activated`, not zero; a previously measured missing root, unknown root category, symlink, special file, incomplete listing/stat or capacity overflow is unavailable. An existing and successfully inventoried empty root may report zero.
+The daemon's existing hourly database sampling lane also measures the dedicated `wire-archive` directory beside its graph database. It never creates that directory or enables an archive writer. A missing never-measured root is `not-activated`, not zero; a previously measured missing root in the same scope, unknown root category, symlink, special file, incomplete listing/stat or capacity overflow is unavailable. Copying or moving a graph does not transfer activation history to its new archive scope. An existing and successfully inventoried empty root may report zero.
 
 The layout has `segments`, `index`, `overlays`, `staging`, `orphans` and `backups` categories. Segment filenames are lowercase SHA-256 plus `.wire`; private `.wire-segment` files are staging and other segment-directory names are orphans. Hardlinks count once by device/inode, with deterministic category ownership. `archive_bytes` counts segment-file, index and overlay lengths; `capacity_bytes` additionally includes staging, orphan and backup-owned lengths. Sparse-file allocation and remote replicas are not inferred from these logical file lengths.
 

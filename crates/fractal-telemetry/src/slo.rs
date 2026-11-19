@@ -845,6 +845,7 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
             }
             "cpu" => lines.extend(cpu_lines(target)),
             "database" => lines.push(database_line(target)),
+            "database-archive" => lines.push(database_archive_line(target)),
             "writer-hold" => lines.push(writer_hold_line(target)),
             _ => {
                 let own = verdict(&target["windows"], true);
@@ -948,6 +949,33 @@ pub fn divergence_line(open: u64) -> (String, &'static str, String) {
     )
 }
 
+/// Archive capacity is observational: neither fresh bytes nor an absent baseline proves health.
+fn database_archive_line(target: &Value) -> (String, &'static str, String) {
+    let size = &target["size"];
+    let current = if size.is_null() {
+        "not measured yet".to_owned()
+    } else if target["fresh"] != true {
+        "stale measurement; current archive size and growth unknown".to_owned()
+    } else {
+        match target["status"].as_str() {
+            Some("not-activated") => "not activated; archive size and growth unknown".to_owned(),
+            Some("available") => {
+                let bytes = size["archive_bytes"].as_u64()
+                    .map_or_else(|| "archive bytes unknown".to_owned(), |bytes| format!("archive {bytes} bytes"));
+                let capacity = size["capacity_bytes"].as_u64()
+                    .map_or_else(|| "capacity bytes unknown".to_owned(), |bytes| format!("capacity {bytes} bytes"));
+                let growth = size["growth_bytes_per_day"].as_i64()
+                    .map_or_else(|| "growth unknown (daily baseline not available)".to_owned(), |bytes| format!("growth {bytes:+} bytes a day"));
+                format!("{bytes}, {capacity}, {growth}")
+            }
+            _ => "measurement unavailable; archive size and growth unknown".to_owned(),
+        }
+    };
+    ("slo/database-archive".into(), "info", format!(
+        "{current}; observational only, no configured target or budget; integrity not assessed; catalogue coverage unknown"
+    ))
+}
+
 /// `st doctor`'s line for the store's size: met when the pages in use and their daily growth are
 /// both within target. Growth needs an hour of samples; until then only the size is judged.
 fn database_line(target: &Value) -> (String, &'static str, String) {
@@ -1016,6 +1044,40 @@ mod tests {
         assert!(row["size"]["archive_bytes"].is_null());
         assert!(row["size"]["growth_bytes_per_day"].is_null());
         assert!(row["budget"].is_null());
+    }
+
+    #[test]
+    fn archive_doctor_uses_observations_never_latency_or_a_pass() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::Available, bytes: Some(ArchiveBytes::default()),
+            archive_bytes: Some(42), capacity_bytes: Some(64), growth_bytes_per_day: None,
+            growth_span_ms: None, baseline_at_unix_ms: None, error: None };
+        let mut inactive = size.clone();
+        inactive.status = ArchiveSizeStatus::NotActivated;
+        inactive.bytes = None;
+        inactive.archive_bytes = None;
+        inactive.capacity_bytes = None;
+        let mut unavailable = inactive.clone();
+        unavailable.status = ArchiveSizeStatus::Unavailable;
+        for (row, expected) in [
+            (database_archive_row(None, 100), "not measured yet"),
+            (database_archive_row(Some(size.clone()), 7_200_101), "stale measurement"),
+            (database_archive_row(Some(size), 100), "archive 42 bytes, capacity 64 bytes, growth unknown"),
+            (database_archive_row(Some(inactive), 100), "not activated"),
+            (database_archive_row(Some(unavailable), 100), "measurement unavailable"),
+        ] {
+            let lines = doctor_lines(&json!({"targets": [row]}));
+            assert_eq!(lines.len(), 1);
+            let (id, status, text) = &lines[0];
+            assert_eq!(id, "slo/database-archive");
+            assert_eq!(*status, "info");
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("no configured target or budget"));
+            assert!(text.contains("integrity not assessed"));
+            assert!(text.contains("catalogue coverage unknown"));
+            assert!(!text.contains("p99"));
+            assert!(!text.contains("≤"));
+        }
     }
 
     #[test]
