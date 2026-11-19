@@ -720,6 +720,8 @@ mod tests {
             "size": null, "integrity": "not-assessed", "catalogue_coverage": null, "budget": null}));
         let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
         emitted.push(divergence(0));
+        let store = crate::store::Store::open_memory("node").unwrap();
+        emitted.push(crate::roll_completion::row(&store, 0));
         let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
         actual.sort_unstable();
         let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();

@@ -3432,7 +3432,7 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
         expected_subject: None,
         idempotency_key: Some(format!("wake-usage-{tokens}")),
     };
-    let post = |input: ClaimInput| post_claim(State(state.clone()), Json(input));
+    let post = |input: ClaimInput| post_claim(State(state.clone()), None, Json(input));
     let reconciler_woke = || async {
         tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
             .await
