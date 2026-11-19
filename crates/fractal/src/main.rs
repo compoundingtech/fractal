@@ -8923,6 +8923,7 @@ async fn start_mission_run(
         &run_id,
         mission_id,
         &mission.revision,
+        mission_start_follows_head(args.revision.as_deref(), &health),
         &workspace,
         &requester,
         &inputs,
@@ -8975,6 +8976,15 @@ async fn start_mission_run(
         print!("{}", cli_help::mission_next_steps(&started));
     }
     follow_mission_run(client, started, response.store_index, json_output, 50).await
+}
+
+fn mission_start_follows_head(revision: Option<&str>, health: &Value) -> bool {
+    // Older daemons reject the authored follow-head child. Preserve their exact-revision
+    // declaration during rolling upgrades, even though they will record it as pinned.
+    revision.is_none()
+        && health["capabilities"]["mission_run_follow_head"]
+            .as_u64()
+            .is_some_and(|version| version >= 1)
 }
 
 fn mission_start_run_id(mission_id: &str, requested: Option<&str>) -> String {
@@ -9245,6 +9255,7 @@ fn mission_run_intent(
     run_id: &str,
     mission_id: &str,
     revision: &str,
+    follow_head: bool,
     workspace: &Path,
     requester: &str,
     inputs: &BTreeMap<String, String>,
@@ -9259,6 +9270,9 @@ fn mission_run_intent(
     let exact_mission = format!("mission/{mission_id}@{revision}");
     body.nodes_mut()
         .push(kdl_node("mission", [exact_mission.as_str()]));
+    if follow_head {
+        body.nodes_mut().push(kdl_node("follow-head", ["true"]));
+    }
     body.nodes_mut().push(kdl_node(
         "workspace",
         [workspace.to_string_lossy().as_ref()],
