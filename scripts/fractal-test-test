@@ -711,6 +711,40 @@ class NativeAdmissionTest(unittest.TestCase):
             self.assertEqual(st_test.governed(command, 'linux-gate'), command)
             self.assertFalse(st_test.is_native_exec(command))
 
+    def test_relative_caller_target_is_canonical_across_payload_trees_and_recovered(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            tree0, tree1, storage = (Path(home, name) for name in ('tree-0', 'tree-1', 'storage'))
+            for path in (tree0, tree1, storage):
+                path.mkdir()
+            Path(home, 'shared-target').symlink_to(storage, target_is_directory=True)
+            os.environ['CARGO_TARGET_DIR'] = '../shared-target'
+            st_test.shared_target(directory=tree0)
+            canonical = str(storage.resolve())
+            self.assertEqual(os.environ['CARGO_TARGET_DIR'], canonical)
+            first = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()),
+                                        {'cwd': tree0, 'env': dict(os.environ)})
+            self.assertIn(canonical, first.entry['pins'])
+            # The tree-0 supervisor crashes; tree-1 receives the same relative input.
+            os.environ['CARGO_TARGET_DIR'] = '../shared-target'
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.shared_target(directory=tree1)
+                cancel.assert_called_once_with(first.command, mock.ANY)
+            self.assertFalse(first.path.exists())
+            execution = dict(os.environ)
+            st_test.build_beside(execution, None, tree1)
+            self.assertEqual(execution['CARGO_TARGET_DIR'], canonical)
+            self.assertEqual(execution['CARGO_BUILD_BUILD_DIR'], canonical)
+            payload = subprocess.run([sys.executable, '-I', '-c', 'import os; print(os.environ["CARGO_TARGET_DIR"])'],
+                                     cwd=tree1, env=execution, capture_output=True, text=True, check=True)
+            self.assertEqual(payload.stdout.strip(), canonical)
+            second = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()),
+                                         {'cwd': tree1, 'env': execution})
+            self.assertIn(canonical, second.entry['pins'])
+            self.assertEqual(second.environment['CARGO_TARGET_DIR'], canonical)
+            with mock.patch.object(st_test, 'cancel_native_request'):
+                second.retire()
+
     @contextlib.contextmanager
     def crash_fixture(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \

@@ -36,7 +36,7 @@ done
 # Direct callers enter the same native phase as st-test; an inherited native
 # phase already owns setup and every stage. Profile flags are provisional until
 # the native profile contract merges. No legacy admission fallback is permitted.
-if [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
+if [ "$(uname -s)" != Darwin ] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
   receipt_root=$real_home/.cache/st-test/admission
   mkdir -p "$receipt_root"
   request=$(uuidgen)

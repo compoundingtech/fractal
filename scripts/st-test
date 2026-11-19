@@ -800,12 +800,17 @@ def build_beside(environment, target, directory):
     environment['CARGO_BUILD_BUILD_DIR'] = environment.get('CARGO_TARGET_DIR') or str(Path(directory) / 'target')
 
 
-def shared_target(tree_target=None):
+def shared_target(tree_target=None, directory=None):
     """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
     With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
     caller_target = os.environ.get('CARGO_TARGET_DIR')
     if caller_target:
+        # Cargo resolves a caller target from the payload tree, not the
+        # orchestrator checkout. Keep this one real path through recovery,
+        # request recording and every phase's execution environment.
+        caller_target = str((Path(directory or Path.cwd()) / caller_target).resolve())
+        os.environ['CARGO_TARGET_DIR'] = caller_target
         recover_native_tree(caller_target)
         return None, None
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off':
@@ -1136,7 +1141,7 @@ class NativePhase:
         pins = {str(tree)}
         target = self.environment.get('CARGO_TARGET_DIR')
         if target:
-            pins.add(str((tree / target).resolve()))
+            pins.add(target)  # shared_target resolved the payload-relative path once
         self.path = native_record_root() / f'{self.request}.json'
         self.entry = {
             'version': 1, 'request_id': self.request, 'owner': native_owner(self.environment),
@@ -3439,7 +3444,7 @@ def run_main(argv, cleanup):
                 lanes = lane_names(base_commit)
                 unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
                 if target is None and any(name in BUILDS for name in checks):
-                    target, target_lock = shared_target(tree_target)  # once: a top-up round builds in the same target, under the same lock
+                    target, target_lock = shared_target(tree_target, directory=directory)  # top-ups keep the canonical target
                 # Tree and target recovery must fence stale native work before
                 # considering any old run scratch for reclamation.
                 sweep_run_tmp(run_tmp_root())

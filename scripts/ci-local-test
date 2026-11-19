@@ -121,6 +121,8 @@ class CiLocal(unittest.TestCase):
         self.umask = 0o022
         self.tmp_root = root / 'short-tmp'
         self.tmp_root.mkdir()
+        (self.bin / 'uname').write_text('#!/bin/sh\necho Linux\n')
+        (self.bin / 'uname').chmod(0o755)
 
     def run_local(self, *stages, ci_linux=None, entry='ci-local', **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
@@ -143,6 +145,15 @@ class CiLocal(unittest.TestCase):
                               preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
+
+    def test_darwin_direct_call_does_not_enter_native_admission(self):
+        (self.bin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (self.bin / 'fractal').write_text('#!/bin/sh\necho unexpected-native-admission >&2\nexit 99\n')
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['argv'], ['mail-redelivery-canaries'])
+        self.assertNotIn('FRACTAL_RESOURCE_PARENT', calls[-1]['env'])
+        self.assertFalse(Path(str(self.log) + '.admission').exists())
 
     def test_direct_call_names_one_native_profile_and_receipt(self):
         done, calls = self.run_local('mail-redelivery-canaries')

@@ -2074,7 +2074,7 @@ no longer used by default and can be deleted.
 `st-test-build` covers preparation, Rust build/check suites and web; `st-test-run` covers the standalone Rust test phase.
 The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
 missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
-Darwin keeps its direct-execution path; it does not invoke native resources admission.
+Darwin keeps its direct-execution path through st-test and both ci-local shell entrypoints; none invokes native resources admission.
 The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
@@ -2088,6 +2088,8 @@ It contains the request ID, owner, endpoints, scratch paths and exact tree/targe
 The record directory is 0700; records are 0600 and published with file fsync, rename and directory fsync before launch.
 That record is also the scratch preservation authority: there is no second scratch-marker or tree/target journal to reconcile.
 A later owner matches the exact tree/target pins (including caller `CARGO_TARGET_DIR`) and rebuilds cancel argv from trusted code.
+Caller `CARGO_TARGET_DIR` is resolved once from the payload tree, following symlinks; that identical absolute path is used for recovery,
+request recording and the payload environment, including across pool-tree changes.
 Recovery cancels/confirms retirement once per record, removes unshared scratch (already missing is success), then deletes the
 record last. Every step is safe to repeat across a crash. Other checkouts' requests are not recovered by the scratch sweep.
 Tree/target recovery precedes sweeping; an old scratch directory with its own record is recovered rather than leaked.

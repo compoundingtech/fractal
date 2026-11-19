@@ -2,6 +2,8 @@
 """scripts/ci-local-web: the web lane runs as one shard that covers everything, in a home of its own on the account's disk, with no
 st, GitHub or SSH agent variable and none of the account's tool wrappers. The two lane scripts are stubs that record what they saw."""
 import json
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +11,7 @@ import socket
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 RECORD = '''#!/usr/bin/env bash
@@ -46,17 +49,39 @@ class CiLocalWeb(unittest.TestCase):
                           'export FRACTAL_RESOURCE_PARENT=fixture FRACTAL_RESOURCE_EXEC_ID=fixture-root\n'
                           'export ST3_ENDPOINT=unix:/fixture-native FRACTAL_ENDPOINT=unix:/fixture-native\nexec "$@"\n')
         native.chmod(0o755)
+        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Linux\n')
+        (self.wrappers / 'uname').chmod(0o755)
 
-    def run_web(self, **extra):
+    def run_web(self, command=None, **extra):
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.wrappers}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_WEB_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'ST_AGENT': 'agent/x', 'FRACTAL_AGENT': 'agent/x', 'GH_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x',
                'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_WALL_GUARD_SECONDS': '268', 'APP_TEST_SET': 'related',
                'FRACTAL_WEB_BUCK_ROOT': '/nix/store/x-buck-root', 'FRACTAL_WEB_OTHER': '/var/elsewhere', **extra}
-        done = subprocess.run(['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
+        done = subprocess.run(command or ['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(0o002))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
+
+    def test_darwin_fractal_web_command_runs_the_lane_without_native_admission(self):
+        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (self.wrappers / 'fractal').write_text('#!/bin/sh\necho unexpected-native-admission >&2\nexit 99\n')
+        nix = self.wrappers / 'nix'
+        nix.write_text('#!/bin/sh\nwhile [ "$1" != -c ]; do shift; done\nshift\nexec "$@"\n')
+        nix.chmod(0o755)
+        loader = importlib.machinery.SourceFileLoader('darwin_web_st_test', str(ROOT / 'scripts/st-test'))
+        runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(runner)
+        with mock.patch.object(runner.sys, 'platform', 'darwin'):
+            command = runner.governed(runner.LOCAL[runner.WEB], runner.WEB)
+        self.assertEqual(command, runner.LOCAL[runner.WEB])
+        done, calls = self.run_web(command=command)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(calls), 2, 'the fractal-web command must reach both web lane stages')
+        self.assertFalse(Path(str(self.log) + '.admission').exists())
+        for call in calls:
+            self.assertNotIn('FRACTAL_RESOURCE_PARENT', call['env'])
+            self.assertEqual(call['env']['KIT_PLAY_SET'], 'all')
 
     def test_its_scratch_is_removed_unless_kept_and_a_kept_one_is_named_where_fractal_test_reads_it(self):
         done, calls = self.run_web()
