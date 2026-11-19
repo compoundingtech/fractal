@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Authorize native landing admission and reserve existing host headroom",
+  "replay": {"status": "none", "detail": "Existing membership classes and custody records remain readable; granted custody is retained."},
+  "schema": {"status": "changed", "detail": "Finite host policy adds landing.allowedActors, landing.memoryBytes and landing.heavyIoSlots with empty/zero defaults. Shell execution and terminal receipts add optional typed refusal codes and receipt refusal reasons."},
+  "rules": {"status": "changed", "detail": "Landing requires host-authorized native ownership and strict FIFO. Ordinary work and seats cannot consume unused landing headroom; total host memory and IO capacity do not grow."},
+  "compatibility": {"status": "changed", "detail": "An unconfigured host visibly refuses landing with unauthorized-landing. Ordinary admission retains its existing capacity when reservations are zero. Declared priority remains metadata."},
+  "downtime": {"status": "none", "detail": "No automatic restart or host activation."},
+  "manual": {"status": "changed", "detail": "Deploy the supporting daemon before setting the new deny-unknown-fields host policy keys. Configure exact authorized actor subjects and a carve-out of existing host totals."},
+  "recovery": {"status": "none", "detail": "Existing generation fencing and confirmed-retirement custody rules remain unchanged."}
+}

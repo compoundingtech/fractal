@@ -138,7 +138,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| "seat-admission".into());
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
-        let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, landing: policy.landing.clone(), ..Fit::default() };
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
@@ -289,6 +289,40 @@ mod tests {
 
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
+    }
+
+    #[test]
+    fn host_landing_policy_reaches_finite_admission_and_shared_seat_accounting() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            heavy_io_slots: Some(2),
+            landing: fractal_runtime::host::LandingPolicy {
+                allowed_actors: BTreeSet::from(["person/operator".into()]),
+                memory_bytes: 40, heavy_io_slots: 1,
+            }, ..Default::default()
+        };
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy.clone()));
+        let mut candidate = LaneRequest {
+            id: "landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 40 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Landing, disk: None, io: Some(fractal_runtime::IoClass::Heavy),
+            owner: Owner { run: "person/operator".into(), step: "shell".into(), attempt: 1, invocation: None },
+        };
+        assert_eq!(reconciler.held_lanes("seat", 1).unwrap(), 40);
+        let mut fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert_eq!(fit.landing, policy.landing);
+        fit.room = Some(fractal_runtime::Capacity { cores: 8, memory: 100 });
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 1).unwrap(), Admission::Admitted(_)));
+        assert_eq!(reconciler.held_lanes("seat", 1).unwrap(), 40, "landing custody replaces, rather than doubles, its carve-out");
+        candidate.id = "denied".into();
+        candidate.owner.run = "person/other".into();
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 2).unwrap(),
+            Admission::Refused { code: crate::store::resource_membership::RefusalCode::UnauthorizedLanding, .. }));
     }
 
     #[test]

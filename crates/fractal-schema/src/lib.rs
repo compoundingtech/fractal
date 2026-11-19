@@ -3519,6 +3519,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("wall_duration_ms", required_integer()),
             ("queue_wait_ms", required_integer()),
             ("memory_peak_bytes", integer()),
+            ("refusal_code", string()),
+            ("refusal_reason", string()),
         ],
         "deploy.go" => &[
             ("version", required_integer()),

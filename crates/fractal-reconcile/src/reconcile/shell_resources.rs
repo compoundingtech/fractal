@@ -262,6 +262,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Admission::Refused { code, reason } => {
                     let record = self.store.resource_membership_record(&request.id, &request.owner)?;
                     execution.state = "refused".into(); execution.reason = format!("{}: {reason}", code.as_str()); execution.blocked_by = record.blocked_by;
+                    execution.refusal_code = Some(code);
                     execution.ended_at = Some(now);
                     return Ok(());
                 }
