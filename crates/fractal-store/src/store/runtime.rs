@@ -630,16 +630,17 @@ impl Runtime for FractalRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        use smallclaims::receive_metrics::{Finalizer, finalizer};
         // Replication admission/import, repair and pruning can dirty preparation
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
-        resources::flush_preparation(transaction)?;
+        finalizer(Finalizer::Resources, || resources::flush_preparation(transaction))?;
         // Desired/liveness projections can change after the final claim projector.
         // The connection-local hint keeps unrelated commits SQL-free.
-        custom::flush(transaction)?;
-        completion_state::flush(transaction)?;
-        run_eta::flush(transaction)?;
-        let budget = client_messages::finalize_commit(transaction)?;
+        finalizer(Finalizer::Custom, || custom::flush(transaction))?;
+        finalizer(Finalizer::Completion, || completion_state::flush(transaction))?;
+        finalizer(Finalizer::RunEta, || run_eta::flush(transaction))?;
+        let budget = finalizer(Finalizer::ClientMessages, || client_messages::finalize_commit(transaction))?;
         #[cfg(any(test, feature = "test-support"))]
         {
             *self.client_message_commit_budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;

@@ -8,6 +8,9 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub envelopes_admitted: usize,
+    /// Decoded claims and wire bytes for each prepared envelope, in preparation order.
+    pub envelope_sizes: Vec<(usize, usize)>,
+    pub finalizer_time: [Duration; 5],
     pub admit_time: Duration,
     pub project_time: Duration,
     pub projection_chunks: u64,
@@ -96,6 +99,30 @@ fn record(update: impl FnOnce(&mut Counters)) {
 
 pub fn envelopes_admitted(count: usize) {
     record(|counters| counters.envelopes_admitted += count);
+}
+
+pub fn envelope_size(claims: usize, bytes: usize) {
+    record(|counters| counters.envelope_sizes.push((claims, bytes)));
+}
+
+#[derive(Clone, Copy)]
+pub enum Finalizer {
+    Resources,
+    Custom,
+    Completion,
+    RunEta,
+    ClientMessages,
+}
+
+/// Attribute runtime finalization without changing its error or commit boundary.
+pub fn finalizer<T>(part: Finalizer, work: impl FnOnce() -> T) -> T {
+    if capture().is_none() {
+        return work();
+    }
+    let started = std::time::Instant::now();
+    let result = work();
+    record(|counters| counters.finalizer_time[part as usize] += started.elapsed());
+    result
 }
 
 pub fn projection_chunk() {
@@ -355,6 +382,23 @@ impl Drop for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_sizes_and_failed_finalizers_remain_request_local() {
+        let metrics = RequestMetrics::new("sizes".into());
+        {
+            let _scope = metrics.enter();
+            envelope_size(3, 1024);
+            envelope_size(7, 2048);
+            let failed: Result<(), &str> = finalizer(Finalizer::Resources, || Err("fixture"));
+            assert_eq!(failed, Err("fixture"));
+        }
+        envelope_size(99, 99);
+        let counters = metrics.snapshot();
+        assert_eq!(counters.envelope_sizes, [(3, 1024), (7, 2048)]);
+        assert!(counters.finalizer_time[Finalizer::Resources as usize] > Duration::ZERO);
+        assert_eq!(counters.finalizer_time[Finalizer::Custom as usize], Duration::ZERO);
+    }
 
     #[test]
     fn captured_phase_crosses_threads_and_restores_after_unwind() {

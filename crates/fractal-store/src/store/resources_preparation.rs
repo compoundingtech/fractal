@@ -1,7 +1,7 @@
 //! Current-cut preparation state, maintained transactionally alongside the presentation projection.
 use super::*;
 
-const PREPARATION_VERSION: &str = "1";
+const PREPARATION_VERSION: &str = "2";
 const RELEVANT: &str = "(substr(claims.subject,1,9)='resource/' OR claims.kind='resource.observed'
     OR EXISTS (SELECT 1 FROM local_resource_preparation state WHERE state.subject=claims.subject))";
 
@@ -15,7 +15,7 @@ pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLo
     )
 });
 const PREPARATION_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-h6926004f4a7e owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    /* sqlite-large-value: allow-for-now lv-h5e37b3b6cae7 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
     r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_dirty (
     subject TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_resource_preparation_deferred (
+    subject TEXT PRIMARY KEY
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_resource_preparation_stale (
     subject TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_resource_preparation_rebuild (
@@ -148,6 +151,28 @@ pub fn preparation_observation(
     connection: &Connection,
     subject: &str,
 ) -> Result<PreparationObservation> {
+    let deferred: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_stale stale
+         JOIN local_resource_preparation_deferred deferred USING(subject) WHERE stale.subject=?1)",
+        [subject], |row| row.get(0),
+    )?;
+    if deferred {
+        // Only query-only readers may fold history. A writer must not move a background
+        // rebuild back into its own transaction merely by reading preparation.
+        let query_only: bool = connection.pragma_query_value(None, "query_only", |row| row.get(0))?;
+        anyhow::ensure!(query_only, "resource-preparation-not-caught-up: {subject}");
+        let observed_at: Option<String> = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-hff18045b742d owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed'
+                 ORDER BY COALESCE(json_extract(body,'$.fields.attribution_only'),0), CANONICAL_DESC(claims) LIMIT 1"),
+            [subject], |row| row.get(0),
+        ).optional()?;
+        return Ok(PreparationObservation {
+            actual: latest_actual(connection, subject)?,
+            kind: latest_resource_kind(connection, subject)?,
+            observed_at: observed_at.and_then(|value| value.parse().ok()).unwrap_or(0),
+        });
+    }
     let row: Option<(Option<String>, Option<String>, String)> = connection.prepare_cached(
         "SELECT actual,kind,observed_at FROM local_resource_preparation WHERE subject=?1",
     )?.query_row(/* sqlite-large-value: allow-for-now lv-ha22cf6bb4692 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
@@ -350,12 +375,16 @@ pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    if version.as_deref() != Some(PREPARATION_VERSION) {
+    if !matches!(version.as_deref(), Some("1") | Some(PREPARATION_VERSION)) {
         rebuild_preparation(transaction)?;
+    } else {
+        // Version 1's complete rows and keys have the same meaning. An older binary
+        // seeing v2 rebuilds before serving, rather than treating a stale row as current.
+        flush(transaction)?;
+    }
+    if version.as_deref() != Some(PREPARATION_VERSION) {
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h9843ae4c1661 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('resource_preparation_version',?1)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value", [PREPARATION_VERSION])?;
-    } else {
-        flush(transaction)?;
     }
     Ok(())
 }
@@ -370,11 +399,12 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h407801ac4b65 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7195b921ea2f owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
         DELETE FROM local_resource_preparation_deferred;
+        DELETE FROM local_resource_preparation_stale;
         DELETE FROM local_resource_preparation_rebuild;
         INSERT INTO local_resource_preparation_dirty(subject)
         SELECT DISTINCT subject FROM claims
@@ -688,6 +718,7 @@ fn step_deferred(transaction: &Transaction<'_>, subject: &str, deadline: std::ti
 fn end_deferral(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h4de9c4537b6c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hccdb0d69eb62 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_stale WHERE subject=?1", [subject])?;
     Ok(())
 }
 
@@ -735,7 +766,7 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
             |row| row.get(0),
         )?;
         if deferred {
-            rebuild_subject(transaction, &subject)?;
+            defer_insert(transaction, &subject, &id, &key)?;
             continue;
         }
         let latest: Option<Vec<u8>> = transaction
@@ -746,8 +777,10 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
             )
             .optional()?
             .flatten();
-        if previous.is_some() || latest.as_ref().is_some_and(|latest| key <= *latest) {
+        if previous.is_some() {
             rebuild_subject(transaction, &subject)?;
+        } else if latest.as_ref().is_some_and(|latest| key <= *latest) {
+            defer_insert(transaction, &subject, &id, &key)?;
         } else {
             // A subject first becoming a resource may already have eligible flat claims.
             let has_state: bool = transaction.query_row(
@@ -763,6 +796,24 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hcdda1d8d7ef2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_pending", [])?;
+    Ok(())
+}
+
+/// Insert an immutable ordering key without rebuilding the subject's history.
+fn defer_insert(transaction: &Transaction<'_>, subject: &str, id: &str, key: &[u8]) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h9a465c53bd9c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_claims(claim_id,subject,sort_key) VALUES(?1,?2,?3)
+         ON CONFLICT(claim_id) DO UPDATE SET subject=excluded.subject,sort_key=excluded.sort_key",
+        params![id, subject, key],
+    )?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h33084e5bf0d7 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_resource_preparation_deferred(subject) VALUES(?1)", [subject],
+    )?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hd3082b2cbd8e owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_resource_preparation_stale(subject) VALUES(?1)", [subject],
+    )?;
+    // The new key can precede the staged cursor. Restart rather than publish a partial fold.
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0479515b6e53 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
     Ok(())
 }
 

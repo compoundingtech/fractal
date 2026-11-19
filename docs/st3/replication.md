@@ -577,6 +577,21 @@ decoded, the set takes roughly twice its payload, plus its structures. The compa
 millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
 
+An out-of-order claim on an already prepared resource subject inserts only its immutable
+canonical sort key during admission. It marks preparation stale and queues the existing
+paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
+New arrivals reset a staged cursor so it cannot skip an earlier key. Query-only readers
+use the canonical snapshot fold until publication; writer-context reads report
+`resource-preparation-not-caught-up` rather than doing that unbounded fallback.
+Envelope admission remains atomic, including its source rows and stale marker.
+The deferred worker publishes the complete observation only after its indexed walk finishes.
+Preparation cache version 2 adopts complete version-1 rows without a history rebuild;
+an older binary sees the version change and rebuilds before serving its readers.
+Admission drains this queue through paced background writer loans after releasing its
+transactions and admission mutex, even without checkpointing enabled. Startup admission
+also drains persisted stale marks after an interrupted run.
+
+
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
 envelope hash commits its original payload and chain metadata. Thus members holding the same
