@@ -254,7 +254,11 @@ fn native_planning_must_not_invent_unsealed_wire_evidence() {
     {
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
-        append_claim_tx(&transaction,&store.origin,"agent/alder.worker","harness.timeline",Some("agent/alder.worker"),&json!({"fields":{"incarnation_id":"main","entry":"unsealed"}}),&[],None).unwrap();
+        append_claim_tx(&transaction,&store.origin,"agent/alder.worker","harness.timeline",Some("agent/alder.worker"),&json!({"fields":{
+            "incarnation_id":"main","driver":"codex","entry_id":"unsealed",
+            "entry_type":"message","operation":"append","revision":1,
+            "role":"assistant","final":true,"body":{"text":"unsealed"}
+        }}),&[],None).unwrap();
         transaction.commit().unwrap();
     }
     drop(store);
