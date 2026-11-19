@@ -157,6 +157,16 @@ run when the mission has multiple runs. The published missions list is the same 
 window: `active_runs`, `total_runs`, and `run_counts` count the entire history, while the
 card previews at most three runs and `runs_truncated` says when the preview is incomplete.
 
+`fractal missions show RUN --follow` captures the daemon's event cursor before reading
+the run, then blocks on `/v1/events/page` with that cursor. Mission-run and step-run
+lifecycle events refresh the run and its bounded tree; empty long-poll responses and
+other graph events do not. The lifecycle subscription is global so new children beyond
+the displayed page are not missed. It does not periodically fetch run snapshots.
+Transport interruptions use the normal follow reconnection diagnostics and resume at
+the same cursor. A lost or expired cursor fails visibly rather than skipping changes.
+`completed` and `standing` exit successfully; `failed` and `cancelled` exit 2. JSON
+follow prints only the successful final run, as before.
+
 To investigate outcomes in a time window, or every terminal transition of one mission:
 
 ```sh
@@ -223,7 +233,7 @@ statement wall time includes row processing, and concurrent statement times over
 Doctor also counts requests by client over the same window: the total request count and rate,
 the twenty clients that sent the most requests, and the twenty client and request-kind pairs with
 the most requests, each with total wall time and CPU. A local client is named by its first command
-words under the agent it is bound to, such as `agent/example · st3 driver claude`; requests from
+words under the agent it is bound to, such as `agent/example · fractal driver claude`; requests from
 fabric or TCP peers count as `(tcp)`. Idle load is usually many cheap requests, so these rows are
 sorted by count.
 

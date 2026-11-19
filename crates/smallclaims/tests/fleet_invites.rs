@@ -461,3 +461,135 @@ fn an_incomplete_join_replays_verdicts_only_on_the_paced_worker_after_removal() 
         assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
     }
 }
+
+#[test]
+fn replication_health_rejects_an_exchange_from_a_removed_incarnation() {
+    use smallclaims::replication::ReplicationHealth;
+    let store = sponsor();
+    let created = invite(&store, None, false);
+    assert!(matches!(
+        store.redeem_fleet_invite(&request(&code(&created, false), &joiner(), "birch", "listening")).unwrap(),
+        FleetRedemption::Admitted { .. }
+    ));
+    let old_key = store.fleet_view_sealed().unwrap().members.into_iter()
+        .find(|member| member.name == "birch").unwrap().member_key;
+    let now = now_ms();
+    store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+    {
+        let mut progress = store.replication_sync.lock().unwrap();
+        let peer = progress.entry("birch".into()).or_default();
+        peer.observe(0, Some((0, 0)), now);
+        peer.measured_member_key = Some(old_key.clone());
+    }
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+    store.remove_fleet_member("birch", "sample", "person/example").unwrap();
+    let rejoin = invite(&store, None, false);
+    assert!(matches!(
+        store.redeem_fleet_invite(&request(&code(&rejoin, false), &joiner(), "birch", "listening")).unwrap(),
+        FleetRedemption::Admitted { .. }
+    ));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+    let source = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    let exchange = source.export_replication_summary(FLEET).unwrap();
+    store.receive_replication_exchange_via(
+        "birch", FLEET, &exchange, false, Default::default(), Some(&old_key),
+    ).unwrap();
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+    store.receive_replication_exchange_via(
+        "birch", FLEET, &exchange, false, Default::default(), None,
+    ).unwrap();
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+    let current_key = store.fleet_view_sealed().unwrap().members.into_iter()
+        .find(|member| member.name == "birch" && member.state == "current").unwrap().member_key;
+    store.receive_replication_exchange_via(
+        "birch", FLEET, &exchange, false, Default::default(), Some(&current_key),
+    ).unwrap();
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+}
+
+#[test]
+fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
+    use smallclaims::replication::ReplicationHealth;
+    let _clock = Clock::at(1_000_000);
+    let store = sponsor();
+    let key = Arc::new(joiner());
+    let created = invite(&store, None, false);
+    assert!(matches!(
+        store.redeem_fleet_invite(&request(&code(&created, false), &key, "birch", "listening")).unwrap(),
+        FleetRedemption::Admitted { .. }
+    ));
+    store.replication_worker_observed_for_test(Some(now_ms() - 120_000), Some(now_ms()));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+
+    let peer = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    peer.bind_fleet(FLEET).unwrap();
+    peer.pin_fleet_anchor(&store.fleet_anchor().unwrap().unwrap()).unwrap();
+    peer.set_member_key(Some(key.clone())).unwrap();
+    let exchange = store.export_replication_exchange_answering(
+        FLEET, &peer.replication_inventory().unwrap(), &peer.replication_signature_requests().unwrap(),
+    ).unwrap();
+    peer.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    peer.validate_replication_backlog().unwrap();
+    peer.apply_replication_repairs().unwrap();
+    peer.project_replication_backlog().unwrap();
+    assert!(peer.fleet_view_sealed().unwrap().members.iter()
+        .any(|member| member.name == "birch" && member.state == "current"
+            && member.member_key == key.public()));
+    // Plain has no product hook that replaces leave_fleet's zero high-water
+    // placeholder with the signed envelope sequence. Match the production
+    // leave claim explicitly, as the worker's LeaveFixture does.
+    let high_water = peer.replication_inventory().unwrap().envelopes.iter()
+        .filter(|envelope| envelope.writer == "birch")
+        .map(|envelope| envelope.sequence).max().unwrap_or(0) + 1;
+    peer.append_claim(&smallclaims::ClaimInput {
+        subject: "host/birch".into(),
+        kind: "fleet.member-left".into(),
+        // The node key authenticates this departure; no person signer is installed.
+        actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "member_key": key.public(), "high_water": high_water,
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let exchange = peer.export_replication_exchange_answering(
+        FLEET, &store.replication_inventory().unwrap(), &store.replication_signature_requests().unwrap(),
+    ).unwrap();
+    assert!(exchange.envelopes.iter().filter(|envelope| envelope.writer == "birch")
+        .any(|envelope| envelope.member_key.as_deref() == Some(key.public())
+            && envelope.signature.as_deref().is_some_and(|signature| {
+                smallclaims::fleet::verify_signature(
+                    key.public(),
+                    &smallclaims::fleet::envelope_signature_message(
+                        FLEET, &envelope.writer, envelope.sequence, &envelope.hash,
+                    ),
+                    signature,
+                )
+            })));
+    assert!(peer.fleet_view_sealed().unwrap().members.iter()
+        .any(|member| member.name == "birch" && member.state == "ended"
+            && member.ended.as_deref() == Some("left")));
+    store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    store.validate_replication_backlog().unwrap();
+    store.apply_replication_repairs().unwrap();
+    store.project_replication_backlog().unwrap();
+    let view = store.fleet_view_sealed().unwrap();
+    assert!(view.members.iter().any(|member| member.name == "birch"
+        && member.state == "ended" && member.ended.as_deref() == Some("left")));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::NoTargets);
+    store.replication_worker_observed_for_test(Some(now_ms() - 120_000), None);
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::WorkerMissing);
+}
+
+#[test]
+fn an_initially_missing_worker_uses_the_store_start_time_for_its_grace() {
+    use smallclaims::replication::ReplicationHealth;
+    let _clock = Clock::at(1_000_000);
+    let store = sponsor();
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Starting);
+    set_thread_clock(Some(1_010_000));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Starting);
+    set_thread_clock(Some(1_060_000));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::WorkerMissing);
+}

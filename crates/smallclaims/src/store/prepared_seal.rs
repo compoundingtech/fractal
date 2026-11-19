@@ -5,11 +5,11 @@
 //! signs each claim that has no stored signature, encodes and hashes each envelope, encodes each
 //! record, and signs each envelope with the member key.
 //!
-//! [`Store::seal_prepared_tx`] runs under the writer. It writes the prepared rows in the order
-//! `seed_replica_envelopes_signed_tx` always has, but only after reading again every fact the
-//! preparation read and finding each unchanged:
-//! - the chunk's unsealed batches;
-//! - each batch's claims;
+//! [`Store::seal_prepared_tx`] runs under the writer. It writes an atomic prefix of the
+//! prepared batches, yielding between batches after the same 10 ms cooperative budget used
+//! by verdict loans. Counts and payload bytes alone do not bound writer occupancy.
+//! The chunk's batch headers are rechecked, and each published batch rechecks:
+//! - its claims;
 //! - which named blobs are stored;
 //! - each claim's stored signature;
 //! - the member key and the fleet id;
@@ -20,9 +20,11 @@
 //!   view of the keyring (see `Keyring::settled`). A change to keys no claim of the chunk is
 //!   signed with does not matter.
 //!
-//! When any fact has changed, the transaction is not committed and the caller prepares the
-//! chunk again, off the writer. A committed chunk therefore holds what sealing under the writer
-//! would have stored from the same state, apart from the nonces of claim signatures made now.
+//! When any checked fact has changed, the transaction is not committed and the caller prepares
+//! again off the writer. Otherwise the published prefix and its frontier commit together;
+//! an interrupted pass resumes from that durable frontier. Unpublished batches stay unsealed.
+//! Each committed batch holds what sealing under the writer would have stored from the same
+//! state, apart from the nonces of claim signatures made now.
 //! A retry follows a change to one of these facts, a keyring change that overlaps the writer's
 //! brief read of it, or a preparation handed to another store.
 //!
@@ -529,20 +531,24 @@ impl Store {
         }))
     }
 
-    /// Under the writer, write `prepared` when nothing it was prepared from has changed, and
-    /// return whether it did. When this returns `false`, the caller must not commit
-    /// `transaction`: it may hold part of the chunk.
+    /// Publish a prefix of `prepared`, returning its frontier, or `None` if inputs changed.
+    /// On `None` the caller must roll back, including any prefix already written.
+    /// Like verdict loans, always advance one atomic batch, then yield after the budget.
+    /// A batch's claims, records, envelope, signatures and frontier must commit together;
+    /// a whole preparation need not. One batch and COMMIT remain non-preemptible.
     pub(crate) fn seal_prepared_tx(
         &self,
         transaction: &Transaction<'_>,
         prepared: &PreparedSeal,
-    ) -> Result<bool> {
+        loan_started: std::time::Instant,
+        loan_budget: std::time::Duration,
+    ) -> Result<Option<i64>> {
         if prepared.origin != self.origin {
-            return Ok(false);
+            return Ok(None);
         }
         let signer = self.envelope_signer(transaction)?;
         if signer.as_ref().map(|(_, signer)| signer) != prepared.signer.as_ref() {
-            return Ok(false);
+            return Ok(None);
         }
         let unsealed = unsealed_batches(
             transaction,
@@ -555,36 +561,43 @@ impl Store {
                 .zip(&prepared.batches)
                 .any(|(now, sealed)| *now != sealed.batch)
         {
-            return Ok(false);
-        }
-        for sealed in &prepared.batches {
-            if !sealed_batch_current(transaction, sealed)? {
-                return Ok(false);
-            }
+            return Ok(None);
         }
         // Each claim sealing signed itself is signed as the keyring would sign it now: one
         // selection per distinct signer input. A change to the keyring in progress or
         // overlapping this read counts as a change.
         if !prepared.signers_agree {
-            return Ok(false);
+            return Ok(None);
         }
-        if !prepared.signers.is_empty() {
+        let mut selected = BTreeSet::new();
+        let mut through = prepared.through;
+        for (position, sealed) in prepared.batches.iter().enumerate() {
+            // Do not validate or write the tail under this loan. Preparation (including all
+            // encoding, digesting and signing) used a read snapshot without the writer.
+            if position != 0 && loan_started.elapsed() >= loan_budget {
+                through = prepared.batches[position - 1].batch.rowid;
+                break;
+            }
+            if !sealed_batch_current(transaction, sealed)? {
+                return Ok(None);
+            }
             let signers_unchanged = self.keyring.settled(|| {
-                prepared.signers.iter().all(|(input, signature)| {
+                sealed.fresh.iter().all(|(input, _)| {
+                    if !selected.insert(input) {
+                        return true;
+                    }
                     #[cfg(test)]
                     SIGNERS_SELECTED.with(|count| count.set(count.get() + 1));
-                    match (self.claim_signer_for(input), signature) {
+                    match (self.claim_signer_for(input), &prepared.signers[input]) {
                         (Some(signer), Some(signature)) => signer.signed(signature),
                         (None, None) => true,
                         _ => false,
                     }
                 })
             });
-            if signers_unchanged != Some(true) {
-                return Ok(false);
+            if !sealed.fresh.is_empty() && signers_unchanged != Some(true) {
+                return Ok(None);
             }
-        }
-        for sealed in &prepared.batches {
             write_sealed_batch_tx(transaction, &self.origin, sealed)?;
         }
         if let Some((
@@ -600,10 +613,10 @@ impl Store {
                 &self.origin,
                 key.public(),
                 Some(prepared.seeded_through),
-                Some(prepared.through),
+                Some(through),
             )? {
                 let Some(signature) = prepared.envelope_signatures.get(&envelope) else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-hf26ab9520d69 owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
@@ -620,6 +633,6 @@ impl Store {
                 )?;
             }
         }
-        Ok(true)
+        Ok(Some(through))
     }
 }

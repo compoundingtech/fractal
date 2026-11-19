@@ -13,7 +13,7 @@ pub(crate) fn state_root() -> PathBuf {
 static HARNESS_STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Keep this process's harness-session state (Claude resume bindings, OpenCode delivery ledgers,
-/// omp and Codex session state) beneath `root` instead of `$XDG_STATE_HOME/st2`. st3 calls this in
+/// omp and Codex session state) beneath `root` instead of `$XDG_STATE_HOME/st2`. Fractal calls this in
 /// its drivers and hooks, so a seat it launches never writes st2's state directory. The first
 /// call wins.
 pub fn use_harness_state_root(root: PathBuf) {

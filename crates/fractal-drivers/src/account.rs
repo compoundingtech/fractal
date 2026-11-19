@@ -4,7 +4,7 @@
 //! The label is `PROVIDER/` plus a short digest of the provider's own account identity, so the same
 //! account reads the same on every host and harness version while the graph, the OpenTelemetry
 //! export and the CLI never carry an email address or a provider account ID. A harness that does
-//! not expose its account leaves responses without one; st reports those as an unknown account
+//! not expose its account leaves responses without one; Fractal reports those as an unknown account
 //! instead of guessing.
 
 use std::fs;

@@ -1057,6 +1057,7 @@ fn credential_loading_leaves_many_skipped_batches_for_resumable_history_activati
             )
             .unwrap();
     }
+    let partial_frontier;
     {
         let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
         store.load_member_key(Some(key.clone())).unwrap();
@@ -1075,13 +1076,27 @@ fn credential_loading_leaves_many_skipped_batches_for_resumable_history_activati
         store.recover_sealing_frontier().unwrap();
         assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
         assert!(store.seal_local_batch_chunk(256).unwrap());
-        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 64);
+        partial_frontier = store.seeded_batch_rowid.load(Ordering::Acquire);
+        assert!(
+            partial_frontier > 0
+                && partial_frontier <= prepared_seal::SEAL_CHUNK_BATCHES as i64,
+            "one cooperative loan commits a positive, count-bounded prefix"
+        );
+        let durable: i64 = store.readers.get().query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='seeded_batch_rowid'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(durable, partial_frontier);
+        let published: i64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(published, partial_frontier);
     }
     let resumed = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
-    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 64);
+    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), partial_frontier);
     resumed.load_member_key(Some(key.clone())).unwrap();
     resumed.recover_sealing_frontier().unwrap();
-    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 64);
+    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), partial_frontier);
     resumed.complete_replication_activation().unwrap();
     assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 256);
     assert_eq!(

@@ -341,12 +341,12 @@ fn check_environment(host: &CheckHost<'_>) -> Result<BTreeMap<String, String>> {
             .into_owned(),
     );
     let link = crate::reconcile::st_binary_link(host.state_dir);
-    let st_binary = if link.exists() {
+    let fractal_binary = if link.exists() {
         link
     } else {
         crate::reconcile::launch_executable()?
     };
-    crate::environment::set(&mut environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
+    crate::environment::set(&mut environment, "ST3_BIN", fractal_binary.to_string_lossy().into_owned());
     if let Some(endpoint) = ENDPOINT.get() {
         crate::environment::set(&mut environment, "ST3_ENDPOINT", endpoint.clone());
     }

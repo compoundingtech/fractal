@@ -1,4 +1,4 @@
-//! In-process input for native protocol pumps. st owns the durable mailbox; these queues contain
+//! In-process input for native protocol pumps. Fractal owns the durable mailbox; these queues contain
 //! no files and are repopulated by a daemon subscription after reexec. st2 retains its file bus.
 use crate::message::Message;
 use std::collections::{BTreeSet, HashMap};

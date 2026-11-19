@@ -2012,6 +2012,30 @@ fn a_hung_delivery_request_fails_instead_of_holding_the_fifo_forever() {
 }
 
 #[test]
+fn a_native_rpc_rejection_after_recipient_archive_releases_its_retained_source_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = delivery_config(tmp.path());
+    let filename = message::send_to_inbox(
+        &config.inbox, "h.sender", Some("pending"), None, &[], "body",
+    ).unwrap();
+    let mut delivery = inbox_delivery(tmp.path(), config.clone());
+    let idle = subscribed_state(CodexObservedState::Idle);
+    let request = delivery.maybe_request(&idle).unwrap().unwrap();
+    let start = delivery.ledger.entry(&filename).unwrap().attempted_at_unix_ms.unwrap();
+    let cut = start + 10_000;
+    let incarnation = delivery.runtime.incarnation().to_owned();
+    message::archive_msg(&config.inbox, &message::archive_dir(&config.agent_dir), &filename).unwrap();
+    delivery.reconcile_inbox(&message::list_inbox(&config.inbox).unwrap()).unwrap();
+    assert!(delivery.ledger.entry(&filename).is_none());
+    assert_eq!(delivery.ledger.receipt_snapshot().input_acceptance_frontier(&incarnation, cut), Some(start - 1));
+    assert!(delivery.accept_response(
+        &json!({"id":request["id"],"error":{"code":-32600,"message":"request refused"}}),
+        idle.observed(),
+    ).unwrap());
+    assert_eq!(delivery.ledger.receipt_snapshot().input_acceptance_frontier(&incarnation, cut), Some(cut));
+}
+
+#[test]
 fn a_rejected_delivery_retries_after_backoff_in_the_same_observed_state() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
@@ -5806,13 +5830,13 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
         None
     );
 
-    // Until the request's wait is written, nothing names the prompt and st is not asked.
+    // Until the request's wait is written, nothing names the prompt and Fractal is not asked.
     approval.observe(&request(8, "thread-main"), "thread-main");
     assert_eq!(
         approval.answer_if_due(tick(), record, |_, _| unreachable!()),
         None
     );
-    // Then st is asked about exactly that observation, and again only a second later.
+    // Then Fractal is asked about exactly that observation, and again only a second later.
     write(waiting());
     let prompt = sequences();
     let mut asked = Vec::new();
@@ -5846,7 +5870,7 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     );
 
     // A second request whose wait wrote nothing new would find the first one's observation, and
-    // with it the first one's answer: it never binds, so st never answers it.
+    // with it the first one's answer: it never binds, so Fractal never answers it.
     approval.observe(&request(10, "thread-main"), "thread-main");
     assert_eq!(sequences(), prompt);
     assert_eq!(
@@ -5867,7 +5891,7 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     );
     assert!(approval.pending.is_empty());
 
-    // A request whose wait is a new transition binds to it; st reporting it gone forgets it.
+    // A request whose wait is a new transition binds to it; Fractal reporting it gone forgets it.
     write(active());
     write(waiting());
     approval.observe(&request(11, "thread-main"), "thread-main");
@@ -5921,7 +5945,7 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
 
 /// Codex can ask twice before either is answered. Each request is its own prompt: the oldest
 /// waits first, the next becomes the prompt once the first is resolved, and its wait is a new
-/// transition, so st's answer to one is never sent to the other.
+/// transition, so Fractal's answer to one is never sent to the other.
 #[test]
 fn two_approvals_wait_in_turn_and_each_binds_to_its_own_transition() {
     use crate::session_control::PromptAnswer;
@@ -7104,7 +7128,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
         &permissions
     ));
 
-    // This is the standing st3 seat's exact policy declaration. It is the regression that
+    // This is the standing Fractal seat's exact policy declaration. It is the regression that
     // originally exposed Codex rejecting permission flags on automatic remote resume: the TUI
     // argv must be compatible, while the redundant typed resume restores Full Access.
     let standing_seat = vec![
@@ -8697,7 +8721,7 @@ fn the_control_pump_keeps_a_retryable_disconnect_alive_for_the_next_turn() {
 /// "exceeded retry limit, last status: 429 Too Many Requests" (seen on 2026-10-26). The
 /// frames below are in the order that night's app-server log shows: the thread's `systemError`,
 /// the typed `error` with `willRetry: false`, then the failed `turn/completed`. The seat must stay
-/// up, read `rateLimited`, and take the turn st sends when its backoff resumes the session.
+/// up, read `rateLimited`, and take the turn Fractal sends when its backoff resumes the session.
 #[test]
 fn a_429_past_codexs_retries_keeps_the_seat_up_rate_limited_for_st_to_resume() {
     let tmp = crate::canonical_tempdir();
@@ -8735,7 +8759,7 @@ fn a_429_past_codexs_retries_keeps_the_seat_up_rate_limited_for_st_to_resume() {
         ] {
             write_json_message(&mut websocket, &frame).unwrap();
         }
-        // Wait for the test to read the rate-limited record, then resume as st's backoff does.
+        // Wait for the test to read the rate-limited record, then resume as Fractal's backoff does.
         finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
         let filename = message::send_to_inbox(
             &server_config.inbox,
@@ -8889,7 +8913,7 @@ fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence(
         );
         let observation = observed_record(&agent_dir);
         // A connection cause, Codex's own retries spent or not, leaves a thread that takes the
-        // next turn: the seat stays idle and st backs off. Any other final cause ends it.
+        // next turn: the seat stays idle and Fractal backs off. Any other final cause ends it.
         let retryable = final_error.is_none()
             || final_error == Some(json!("other"))
             || final_error == Some(json!("responseStreamDisconnected"));

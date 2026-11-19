@@ -398,7 +398,7 @@
         # need. One named list, a reason and an owner per entry; central CI and the wrapper path
         # still run every one of them. The check fails if an entry no longer names exactly one
         # test, and any test not listed here must pass.
-        st3Exclusions =
+        fractalExclusions =
           let
             list = (builtins.fromJSON (builtins.readFile ./nix/fractal-check-exclusions.json)).exclusions;
             key = e: "${e.package}/${e.binary}/${e.test}";
@@ -410,9 +410,9 @@
             builtins.length (pkgs.lib.unique (map key list)) == builtins.length list
           ) "Fractal check exclusions must be unique";
           list;
-        st3ExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
+        fractalExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
-        ) st3Exclusions;
+        ) fractalExclusions;
 
         fractalWeb = import ./nix/fractal-web.nix {
           inherit effect-utils system version buildStamp;
@@ -424,7 +424,7 @@
           installation = fractalWeb.installation;
         };
 
-        st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+        fractalCheck = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
           pkgs.rustPlatform.buildRustPackage {
           pname = "fractal";
@@ -542,20 +542,20 @@
             # Every exclusion must still name exactly one test, or the list has gone stale.
             cargo nextest list --release --offline --target ${rustHostTarget} \
               --build-jobs "$NIX_BUILD_CORES" \
-              ${pkgs.lib.escapeShellArgs (pkgs.lib.remove "--no-fail-fast" st3Check.cargoTestFlags)} \
-              --message-format json -E ${pkgs.lib.escapeShellArg st3ExcludedFilter} > excluded-tests.json
+              ${pkgs.lib.escapeShellArgs (pkgs.lib.remove "--no-fail-fast" fractalCheck.cargoTestFlags)} \
+              --message-format json -E ${pkgs.lib.escapeShellArg fractalExcludedFilter} > excluded-tests.json
             matched=$(jq '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches")] | length' excluded-tests.json)
-            if [ "$matched" -ne ${toString (builtins.length st3Exclusions)} ]; then
-              echo "nix/fractal-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
+            if [ "$matched" -ne ${toString (builtins.length fractalExclusions)} ]; then
+              echo "nix/fractal-check-exclusions.json lists ${toString (builtins.length fractalExclusions)} tests but $matched match; remove or fix the stale entries" >&2
               exit 1
             fi
             cargo nextest run --release --offline --target ${rustHostTarget} \
               --build-jobs "$NIX_BUILD_CORES" --test-threads "$NIX_BUILD_CORES" --retries 0 \
-              -E ${pkgs.lib.escapeShellArg "not (${st3ExcludedFilter})"} \
-              ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags} \
-              -- ${pkgs.lib.escapeShellArgs st3Check.checkFlags}
+              -E ${pkgs.lib.escapeShellArg "not (${fractalExcludedFilter})"} \
+              ${pkgs.lib.escapeShellArgs fractalCheck.cargoTestFlags} \
+              -- ${pkgs.lib.escapeShellArgs fractalCheck.checkFlags}
             cargo test --doc --release --offline --target ${rustHostTarget} \
-              -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags}
+              -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs fractalCheck.cargoTestFlags}
             runHook postCheck
           '';
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
@@ -647,9 +647,9 @@
         }) { };
 
         # Installing the current tools must not depend on running the full runtime suite.
-        # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
+        # Keep that suite as checks.st3; Fractal CI also runs it in the native test environment.
         fractal = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
-          (st3Check.override { inherit deployPolicyFile; }).overrideAttrs (_: {
+          (fractalCheck.override { inherit deployPolicyFile; }).overrideAttrs (_: {
             doCheck = false;
           })
         ) { };
@@ -666,7 +666,7 @@
         });
         unreadableDeployPolicy = pkgs.runCommand "unreadable-deploy-policy" { } ''mkdir "$out"'';
         mkDeployPolicyCheck = name: deployPolicyFile: pkgs.rustPlatform.buildRustPackage {
-          pname = "st3-deploy-policy-${name}";
+          pname = "fractal-deploy-policy-${name}";
           inherit version cargoDeps;
           src = self;
           dontCargoUseSystemLibs = true;
@@ -733,7 +733,7 @@
           };
         };
 
-        st3Help = pkgs.runCommand "st3-help-${version}" {
+        fractalHelp = pkgs.runCommand "fractal-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
           test "$(readlink ${fractal}/bin/st)" = fractal
@@ -766,7 +766,7 @@
           assert self.packages.${system}.default.drvPath == st3.drvPath;
           assert self.packages.${system}.st.drvPath == st3.drvPath;
           assert self.packages.${system}.small-talk.drvPath == st3.drvPath;
-          pkgs.runCommand "st3-install-layout-${version}" { } ''
+          pkgs.runCommand "fractal-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
             test ! -L ${fractal}/bin/fractal
             test "$(readlink ${fractal}/bin/st)" = fractal
@@ -972,13 +972,13 @@
         # commits on every rebase. The devShell ships rustfmt + clippy for whoever
         # wants them.
         checks.shared-drivers = sharedDriverCheck;
-        checks.st3 = st3Check;
+        checks.st3 = fractalCheck;
         checks.bundled-sqlite-env =
           assert builtins.all (package:
             package.drvAttrs.dontCargoUseSystemLibs
             && package.drvAttrs.LIBSQLITE3_SYS_USE_PKG_CONFIG == "0"
           ) [
-            sharedDriverCheck st3Check fractal fractalChatgpt fractalMcp fractalFabricAdapter
+            sharedDriverCheck fractalCheck fractal fractalChatgpt fractalMcp fractalFabricAdapter
             (mkDeployPolicyCheck "absent" null) providerRuntimeCheck
           ];
           pkgs.runCommand "bundled-sqlite-env" { } ''
@@ -989,7 +989,7 @@
         checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;
         # Keep derivation-path assertions lazy until the check's builder is evaluated:
         # flake discovery must not force package inputs (including the installation hash guard).
-        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
+        checks.st3-runtime-inputs = pkgs.runCommand "fractal-runtime-inputs" { } (
           assert import ./nix/fractal-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
@@ -997,8 +997,8 @@
           };
           ''touch $out''
         );
-        checks.st3-help = st3Help;
-        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
+        checks.st3-help = fractalHelp;
+        checks.st3-check-input-isolation = pkgs.runCommand "fractal-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
@@ -2076,7 +2076,7 @@
           assert pkgs.lib.hasInfix executable args;
           assert pkgs.lib.hasInfix "${builtins.dirOf executable}/pty" args;
           # Includes the declaration wrapper's store path: neither it nor a unit
-          # may change when the unused st3 or PTY package changes.
+          # may change when the unused Fractal or PTY package changes.
           assert unitText == units successor;
           pkgs.runCommand "fractal-hm-module-external-binary-eval" { } ''
             ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
@@ -2120,7 +2120,7 @@
               hash = "sha256-ATysqeRVcLEeqPuz+LnjJ0NpNrNiiAZAtZ+f4qz93sk=";
             };
           in
-          pkgs.runCommand "st-pi-extension-types-${version}" {
+          pkgs.runCommand "fractal-pi-extension-types-${version}" {
             nativeBuildInputs = [
               pkgs.gnutar
               pkgs.nodejs
@@ -2245,12 +2245,12 @@
             libghosttyVT
             # Local Fractal OTLP export tests use the same collector as Nix checks.
             effect-utils.packages.${system}.otelite
-            # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
+            # Fractal's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
             pkgs.nodejs
             # Program steps run on a Bun host; the engine tests start a real one.
             pkgs.bun
-            # st3's completion tests drive the installed stub in each supported shell.
+            # Fractal's completion tests drive the installed stub in each supported shell.
             pkgs.fish
             pkgs.zsh
           ];
@@ -2281,7 +2281,7 @@
             libghosttyVT
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
-          # st3's compiler cache even when its sources have not changed.
+          # Fractal's compiler cache even when its sources have not changed.
           shellHook = sccacheShellHook + cargoDebugShellHook + ''
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';

@@ -26,6 +26,9 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"resource.admission.observed" = { class = "durable" }
+"resource.admission.coverage" = { class = "durable" }
+"gate.admission.observed" = { class = "durable" }
 "residency.wake-demand" = { class = "durable" }
 "residency.resumed" = { class = "durable" }
 "residency.first-turn" = { class = "durable" }
@@ -50,6 +53,8 @@
 "agent.launcher-bound" = { class = "durable", log = "local" }
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
+# Completed client minute summaries are durable history, not local observation samples.
+"custom.client.observation-minute" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }

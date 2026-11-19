@@ -5,15 +5,15 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/../script_process.py" --check-platform
 umask 077
 
 usage() {
-  printf '%s\n' 'Usage: scripts/omp-parity-e2e/run --st3 BINARY --out DIRECTORY [--corpus OMP.jsonl] [--keep]'
+  printf '%s\n' 'Usage: scripts/omp-parity-e2e/run --fractal BINARY --out DIRECTORY [--corpus OMP.jsonl] [--keep]'
 }
-ST3='' OUT='' CORPUS='' KEEP=0
+FRACTAL='' OUT='' CORPUS='' KEEP=0
 while (($#)); do
   case "$1" in
-    --st3|--out|--corpus)
+    --fractal|--out|--corpus)
       (($# >= 2)) || { usage >&2; exit 2; }
       case "$1" in
-        --st3) ST3=$2;; --out) OUT=$2;; --corpus) CORPUS=$2;;
+        --fractal) FRACTAL=$2;; --out) OUT=$2;; --corpus) CORPUS=$2;;
       esac
       shift 2;;
     --keep) KEEP=1; shift;;
@@ -21,7 +21,7 @@ while (($#)); do
     *) usage >&2; exit 2;;
   esac
 done
-[[ -n "$ST3" && -n "$OUT" ]] || { usage >&2; exit 2; }
+[[ -n "$FRACTAL" && -n "$OUT" ]] || { usage >&2; exit 2; }
 mkdir -p -- "$OUT"
 OUT=$(realpath "$OUT")
 REPORT="$OUT/report.txt"
@@ -52,9 +52,9 @@ has_command() { command -v "$1" >/dev/null; }
 for dependency in curl jq node tmux realpath mktemp; do
   require "dependency $dependency" has_command "$dependency"
 done
-ST3=$(realpath "$ST3")
+FRACTAL=$(realpath "$FRACTAL")
 [[ -z "$CORPUS" ]] || CORPUS=$(realpath "$CORPUS")
-require 'st3 executable' test -x "$ST3"
+require 'Fractal executable' test -x "$FRACTAL"
 ROOT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/../..")
 FIXTURE="$ROOT/crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl"
 CHILD_FIXTURE="$ROOT/crates/fractal-daemon/fixtures/native-records/omp-parity-child.jsonl"
@@ -126,13 +126,13 @@ if [[ -n "$CORPUS" ]]; then
     (.[] | select(.type != "session"))
   ' "$CORPUS" > "$CORPUS_COPY"
 fi
-"$ST3" up --node omp-parity-e2e --state-dir "$ISO/state/st3" --socket "$SOCKET" --client-gateway-socket "$CLIENT_SOCKET" > "$ISO/daemon.log" 2>&1 &
+"$FRACTAL" up --node omp-parity-e2e --state-dir "$ISO/state/st3" --socket "$SOCKET" --client-gateway-socket "$CLIENT_SOCKET" > "$ISO/daemon.log" 2>&1 &
 DAEMON=$!
 TIMEOUT=${OMP_E2E_TIMEOUT:-45}
 [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || require 'positive OMP_E2E_TIMEOUT' false
 wait_doctor() {
   local deadline=$((SECONDS + TIMEOUT))
-  until "$ST3" --endpoint "$SOCKET" doctor >/dev/null 2>&1; do
+  until "$FRACTAL" --endpoint "$SOCKET" doctor >/dev/null 2>&1; do
     kill -0 "$DAEMON" 2>/dev/null || return 1
     ((SECONDS < deadline)) || return 1
     sleep 0.1
@@ -322,7 +322,7 @@ done
 # No host-wide fake OMP process: the fixture remains a historical session.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_ENDPOINT="$SOCKET" ST3_ENDPOINT="$SOCKET" FRACTAL_PERSON='person/tester' ST3_PERSON='person/tester'
-printf -v UI_COMMAND '%q ui --local' "$ST3"
+printf -v UI_COMMAND '%q ui --local' "$FRACTAL"
 check 'start isolated Fractal terminal' tmux -f /dev/null -S "$TMUX_SOCKET" new-session -d -s omp-e2e -n fractal-tui -x 240 -y 100 "$UI_COMMAND"
 TMUX_STARTED=1
 printf 'INFO monitor: tmux -S %s attach -t omp-e2e\n' "$TMUX_SOCKET" | tee -a "$REPORT"

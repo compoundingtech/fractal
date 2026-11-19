@@ -8,7 +8,7 @@ version 2
 //
 // Play it (it erases and reseeds the `demo` instance each time, never your own fleet):
 //
-//   st --instance demo demo play examples/demos/release-day.kdl
+//   fractal --instance demo demo play examples/demos/release-day.kdl
 //
 // Press F8 for each beat without `after`; Ctrl+Q ends the demo. Every name here is invented.
 

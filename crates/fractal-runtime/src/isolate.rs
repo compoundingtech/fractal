@@ -515,7 +515,7 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
                 return;
             };
             if let Err(error) = job() {
-                eprintln!("st3: WARN {error:#}");
+                eprintln!("fractal: WARN {error:#}");
             }
             LATER
                 .lock()

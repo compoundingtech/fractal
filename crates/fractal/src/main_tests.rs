@@ -493,6 +493,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
         left: Default::default(),
         machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
         verification_attempt: None,
+        worker: None,
     };
     let output = render_checkpoint_status(&status);
     assert!(output.contains("last daemon start (advertised build)"));
@@ -506,6 +507,17 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     })).unwrap());
     assert!(status.pending.as_ref().unwrap().terms.is_none());
     assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
+    let output = render_checkpoint_status(&status);
+    assert!(output.contains("alder phase=seal (no seal)"));
+    assert!(output.contains("birch phase=seal (no seal)"));
+    status.pending = None;
+    status.worker = Some(serde_json::from_value(serde_json::json!({
+        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
+    })).unwrap());
+    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
 }
 
 #[test]
@@ -610,6 +622,66 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
+}
+
+
+#[test]
+fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume {
+        incarnation: "runtime-a".into(),
+        pending: PiFamilyReports {
+            input_source_dir: Some(root.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut observer = None;
+    // Historical delivered/read frames have no native clock, so cannot become certificates.
+    accept_managed_channel_frame(&mut state, &mut observer,
+        r#"{"type":"delivered","meta":{"messageId":"message/example"}}"#, "agent/example").unwrap();
+    assert!(state.pending.input_acceptances.is_empty());
+    for timestamp in [123, 999] {
+        let frame = json!({"type":"delivered","meta":{"messageId":"message/example","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":timestamp}).to_string();
+        accept_managed_channel_frame(&mut state, &mut observer, &frame, "agent/example").unwrap();
+    }
+    let stale = json!({"type":"delivered","meta":{"messageId":"message/old","inputIncarnation":"runtime-b"},
+        "acceptedAtUnixMs":100}).to_string();
+    accept_managed_channel_frame(&mut state, &mut observer, &stale, "agent/example").unwrap();
+    assert!(!state.pending.input_acceptances.contains_key("message/old"));
+    assert_eq!(state.pending.input_acceptances["message/example"], 123);
+    let recovered = fractal_drivers::native_channel::input_acceptances(root.path()).unwrap();
+    assert_eq!(recovered["message/example"], 123);
+    let resumed: PiChannelResume =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[tokio::test]
+async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::native_channel::record_input_attempt(
+        root.path(), "message/example", Some(100)).unwrap();
+    fractal_drivers::native_channel::record_input_acceptance(
+        root.path(), "message/example", 123).unwrap();
+    let fence = fractal_daemon::mailbox::Fence::new("agent/example", "runtime-a", "delivery");
+    let mut reports = PiFamilyReports {
+        fence: Some(fence),
+        input_source_dir: Some(root.path().into()),
+        input_source_ready: true,
+        input_acceptances: fractal_drivers::native_channel::input_acceptances(root.path()).unwrap(),
+        acknowledgements: BTreeSet::from(["message/example".into()]),
+        ..Default::default()
+    };
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(reports.publish(&client, "agent/example", "pi", "runtime-a", "native").await.is_err());
+    assert_eq!(reports.input_acceptances["message/example"], 123);
+    assert!(reports.acknowledgements.contains("message/example"),
+        "read/delivered cannot prune native proof before the acceptance POST is acknowledged");
+    let restored: PiFamilyReports =
+        serde_json::from_value(serde_json::to_value(reports).unwrap()).unwrap();
+    assert_eq!(restored.input_acceptances["message/example"], 123);
 }
 
 #[test]
@@ -1884,7 +1956,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         status_from: None,
         attachments: Vec::new(),
     };
-    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(omp["deliverAs"], "steer");
     assert_eq!(
         omp["content"],
@@ -2468,8 +2540,9 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                     runtime_id: "worker",
                 }
             };
-            // Replay requires no backward staging or invented consumption receipt.
-            mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
+            // Replay requires no backward staging or invented consumption receipt. The
+            // absent daemon cannot ACK a completeness frontier, but queued mail still replays.
+            assert!(mailbox.pump(&client, &agent_dir, receipts).await.is_err());
             let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),

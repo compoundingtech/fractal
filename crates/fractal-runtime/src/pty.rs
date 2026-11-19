@@ -657,7 +657,7 @@ impl PtyRuntime {
             cutover.map(|(predecessor, _)| predecessor),
         ) {
             eprintln!(
-                "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
+                "fractal: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
         }
         let operation = self.launch_operation.as_ref().map(|operation| &operation.0);
@@ -697,7 +697,7 @@ impl PtyRuntime {
         let mut terminal_env = env.clone();
         for key in crate::pty_launch_environment::PTY_PLACEMENT_ENV {
             if key != "PTY_ROOT" && terminal_env.remove(key).is_some() {
-                eprintln!("st: ignoring runtime-owned placement variable {key}");
+                eprintln!("fractal: ignoring runtime-owned placement variable {key}");
             }
         }
         terminal_env

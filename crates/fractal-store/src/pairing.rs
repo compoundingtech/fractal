@@ -18,7 +18,10 @@ pub const OPERATION_AUTHORIZED: &str = "client.operation-authorized";
 /// Admission receipts use a separate subject so the operation's CAS head is unchanged.
 pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     anyhow::ensure!(claim.kind.starts_with("custom.client.pairing")
-        || claim.kind.starts_with("custom.client.terminal"), "a client operation record is required");
+        || claim.kind.starts_with("custom.client.terminal")
+        || claim.kind == crate::store::observation_minutes::KIND
+        || matches!(claim.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed"),
+        "a client operation record is required");
     let hash = record_hash(&claim.origin, claim.actor.as_deref(), &claim.body["fields"])?;
     let mut fields = serde_json::json!({
         "record_id":claim.id,
@@ -238,7 +241,69 @@ fn legacy_allowance_deadline(
     Ok((now_unix_ms < deadline && hash == record_hash(origin, actor, fields)?).then_some(deadline))
 }
 
+/// The exact native worker claim whose live lease admits a client-control effect.
+pub struct ClientWorkClaimFence<'a> {
+    pub run: &'a str,
+    pub step: &'a str,
+    pub generation: &'a str,
+    pub attempt: u32,
+    pub actor: &'a str,
+    pub incarnation: Option<&'a str>,
+    pub claim_id: &'a str,
+    pub expires_at: u128,
+}
+
 impl Store {
+    /// Revalidate native ownership in the same writer transaction as the client receipt.
+    /// A grant-module mutex cannot serialize native cancellation, release or retry.
+    pub fn append_client_operation_claim_for_work(
+        &self,
+        input: &ClaimInput,
+        owner: &ClientWorkClaimFence<'_>,
+    ) -> Result<ClaimRecord, crate::FractalError> {
+        if !matches!(input.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed")
+            || input.actor.as_deref() != Some(owner.actor) {
+            return Err(crate::FractalError::new("claim-write-forbidden", "a work-bound client admission record is required"));
+        }
+        let admission = |connection: &Connection| {
+            let now = smallclaims::store::now_ms();
+            if now >= owner.expires_at {
+                return Err(crate::FractalError::new("grant-expired", "the grant expired before client admission committed"));
+            }
+            let now = now.to_string();
+            let live: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM step_runs step
+                 JOIN mission_runs run ON run.id=step.run_id
+                 LEFT JOIN mission_run_deadlines deadline ON deadline.run_id=run.id
+                 JOIN claims claim ON claim.id=?8
+                 WHERE run.id=?1 AND step.subject=?2 AND step.generation_id=?3
+                   AND run.current_generation_id=step.generation_id
+                   AND run.status='running' AND run.phase!='terminal' AND run.phase NOT LIKE 'cleanup-%'
+                   AND (deadline.deadline_at_unix_ms IS NULL OR CAST(deadline.deadline_at_unix_ms AS INTEGER)>CAST(?9 AS INTEGER))
+                   AND step.status IN ('claimed','working','verifying') AND step.attempt=?4
+                   AND step.lease_owner=?5 AND step.lease_incarnation IS ?6
+                   AND CAST(step.lease_expires_at_unix_ms AS INTEGER)>CAST(?9 AS INTEGER)
+                   AND claim.subject=step.subject AND claim.kind='work.claimed' AND claim.actor=?5 AND claim.origin=?7
+                   AND json_extract(claim.body,'$.fields.attempt')=?4
+                   AND json_extract(claim.body,'$.fields.claim_incarnation') IS ?6
+                   AND claim.id=(SELECT id FROM claims WHERE subject=step.subject AND kind='work.claimed' AND origin=?7 ORDER BY store_index DESC LIMIT 1))",
+                params![owner.run.trim_start_matches("mission-run/"), owner.step,
+                    owner.generation.trim_start_matches("run-generation/"), owner.attempt,
+                    owner.actor, owner.incarnation, self.origin(), owner.claim_id, now],
+                |row| row.get(0),
+            ).map_err(smallclaims::error::internal)?;
+            if live { Ok(()) } else {
+                Err(crate::FractalError::new("grant-expired", "the native worker claim ended before client admission committed"))
+            }
+        };
+        let subjects = [owner.step.to_owned()];
+        crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
+            crate::store::ClaimCommitContext {
+                client_operation: true, admission: Some(&admission),
+                run_projection_subjects: &subjects, ..Default::default()
+            }).map(|(claim, _)| claim)
+    }
+
     pub fn append_client_operation_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, crate::FractalError> {
         if !input.kind.starts_with("custom.client.pairing") && !input.kind.starts_with("custom.client.terminal") {
             return Err(crate::FractalError::new("claim-write-forbidden", "a dedicated client operation record is required"));

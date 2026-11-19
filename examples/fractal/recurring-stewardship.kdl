@@ -8,15 +8,15 @@ version 2
 //
 // Schedules belong to a mission run. A mission with no step would complete at once and stop its
 // schedule, so `retire` keeps this run open until the operator approves it in
-// `st attention ls --as person/operator`, or cancels the run. The seat is durable and belongs to
+// `fractal attention ls --as person/operator`, or cancels the run. The seat is durable and belongs to
 // neither mission.
 //
-//   st apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
-//   st apply examples/fractal/recurring-stewardship-cycle.kdl --as person/operator
+//   fractal apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
+//   fractal apply examples/fractal/recurring-stewardship-cycle.kdl --as person/operator
 //   # Replace the zero revision below with the hash that recurring-stewardship-cycle.kdl shows how
 //   # to read.
-//   st apply examples/fractal/recurring-stewardship.kdl --as person/operator
-//   st missions start example/stewardship --id example/stewardship/main \
+//   fractal apply examples/fractal/recurring-stewardship.kdl --as person/operator
+//   fractal missions start example/stewardship --id example/stewardship/main \
 //     --workspace /srv/example/stewardship --as person/operator
 
 mission "example/stewardship" state="ready" {
