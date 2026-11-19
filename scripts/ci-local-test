@@ -432,7 +432,7 @@ class CiLocal(unittest.TestCase):
         (self.devshell / 'cargo').unlink()
         self.log.unlink()
         # The tools the script needs, from directories that hold no cargo.
-        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3')}
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3', 'uuidgen', 'date')}
         tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
         done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)
