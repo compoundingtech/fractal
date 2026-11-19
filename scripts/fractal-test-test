@@ -2511,6 +2511,15 @@ finally:
         self.assertEqual(done.returncode, 129, done.stderr)
         self.assertEqual(marker.read_text(), 'unwound')
 
+    def test_relative_caller_target_is_canonical_before_members_of_a_light_check(self):
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        seen = Path(self.tmp.name) / 'member-target'
+        command = ['sh', '-c', f'printf "%s" "$CARGO_TARGET_DIR" > {seen}']
+        with mock.patch.object(st_test, 'members_command', return_value=command):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'CARGO_TARGET_DIR': '../shared-target'})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(seen.read_text(), str((self.pool() / 'shared-target').resolve()))
+
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         elsewhere = self.home / 'elsewhere'
         self.commit('b.txt', 'two')

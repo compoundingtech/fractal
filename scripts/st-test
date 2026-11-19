@@ -3443,7 +3443,7 @@ def run_main(argv, cleanup):
                 rows, failed, unsigned = [], False, False
                 lanes = lane_names(base_commit)
                 unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
-                if target is None and any(name in BUILDS for name in checks):
+                if target is None and (any(name in BUILDS for name in checks) or os.environ.get('CARGO_TARGET_DIR')):
                     target, target_lock = shared_target(tree_target, directory=directory)  # top-ups keep the canonical target
                 # Tree and target recovery must fence stale native work before
                 # considering any old run scratch for reclamation.
