@@ -79,6 +79,37 @@ Diagnostic aspirations retain their strict meanings: a p99 is missed in a window
 uses its slow-event or bad-covered-time allowance, retained coverage and paired burns. A `met`
 operational row does not claim that its diagnostic p99 or max aspiration was met.
 
+#### Organic terminal attachment and sparse reads
+
+`terminal-attach` counts successful server-side first-screen observations, not a terminal
+listing or viewer click-to-paint. Its exact keys are `GET /v1/client/terminals/{id}/screen`
+and **singular** `stream terminal`. The collections socket records the latter only after
+successfully sending a terminal screen. **Plural** `stream terminals` measures the terminal
+list's initial snapshot and must never count as attachment evidence.
+
+The dedicated local and remote terminal screen streams do not currently record that
+first-screen latency. Their successful send boundaries are in `terminal_stream_socket`
+and `remote_terminal_stream_socket` in `crates/fractal-api-client-v0/src/api/client_v0.rs`.
+Consequently, absent attachment samples cannot establish that no viewer attached. Until
+those producers are instrumented, the native objective covers only its instrumented organic
+paths; the existing exact key mapping is not a substitute for a missing producer.
+
+When no organic observations qualify in the last hour, `terminal-attach` and
+`person-read-fresh` explicitly display **No qualifying events**. With no retained qualifying
+events they remain `no-data`, with no remaining-budget verdict, even when observation-time
+coverage is complete. Native operational rows expose `coverage` as the observed fraction
+over their accounting horizon, or `null` when unavailable; their explanation states the
+same coverage explicitly. Coverage of observation time does not prove every viewer or
+attempt was instrumented. Missing coverage is unknown, never an invented zero or success.
+An hour without new events does not erase a verdict supported by retained eligible history.
+After a restart, an empty process-local diagnostic histogram is not evidence of an empty
+hour: retained hourly events remain visible, with the diagnostic p99 explicitly unavailable
+in the new process rather than mislabeled as no qualifying events.
+
+Synthetic probes are not organic attachment or fresh-read traffic. Any future availability
+probe must have its own separately named objective rather than filling these sparse rows.
+
+
 ### Source-backed GitHub measurements
 
 `github-merged-count` and `github-ready-to-merged` read the canonical committed GitHub projection,
