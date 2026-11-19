@@ -53,7 +53,11 @@ impl Ui {
 
     fn copy_body_key(&mut self, key: KeyEvent) -> bool {
         if key.code != KeyCode::Char('y') || !key.modifiers.is_empty()
-            || self.frame.borrow().hits.iter().any(|(_, hit)| *hit == Hit::Key('y'))
+            || (matches!(self.tab(), 0 | 2) && self.attention_focus().is_some()
+                && (self.current_kind() == Some("request")
+                    || self.attention_focus().is_some_and(|id| self.closed.contains(&id))
+                    || self.current_item().is_some_and(|item|
+                        item.actions.iter().any(|action| action == "custom.reply"))))
         {
             return false;
         }
@@ -121,11 +125,24 @@ mod tests {
     }
 
     #[test]
-    fn y_keeps_an_existing_answer_shortcut_and_modified_keys() {
-        let mut ui = fixture();
-        ui.frame.borrow_mut().hits.push((Rect::new(0, 2, 40, 1), Hit::Key('y')));
-        assert!(!ui.copy_body_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    fn y_keeps_active_request_commands_even_without_rendered_keycaps() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_home();
+        let id = ui.world.attention.items().iter()
+            .find(|item| matches!(item.kind, view::AttentionKind::Request { .. }))
+            .expect("demo request").id.clone();
+        let index = ui.listing(60).ids.iter().position(|item| item == &id).unwrap();
+        ui.select(index);
         ui.frame.borrow_mut().hits.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(ui.confirm, Some('y'));
+        ui.confirm = None;
+        ui.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(ui.confirm, Some('n'));
+        ui.confirm = None;
+        ui.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(ui.editing || ui.answering.is_some());
+        ui.editing = false;
         assert!(!ui.copy_body_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)));
         assert!(ui.flash.is_none());
     }

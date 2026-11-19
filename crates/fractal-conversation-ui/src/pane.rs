@@ -114,7 +114,8 @@ impl<T: SelectionLine + ?Sized> SelectionLine for &T {
     fn table_header(&self) -> Vec<Vec<CopyFragment>> { (*self).table_header() }
 }
 
-/// Equal targets may be distinct occurrences; wrapping shares the original target allocation.
+/// Equal targets may be distinct occurrences; styling and wrapping must share each
+/// source link's original target allocation.
 pub(crate) fn same_link(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => Arc::ptr_eq(left, right),
