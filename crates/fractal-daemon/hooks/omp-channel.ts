@@ -1149,6 +1149,7 @@ export default function (pi: ExtensionAPI) {
           const run = Promise.resolve(pi.sendUserMessage(content)).then(() => {
             reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
           }).catch((error: unknown) => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
             console.error("OMP mailbox run failed:", error);
             throw error;
           });

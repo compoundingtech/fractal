@@ -703,14 +703,18 @@ for (const heldBy of ["batch", "ask"]) {
 
 // The correlation deadline is observational, not a delivery timeout. Drive it
 // explicitly so each reason is tested without waiting thirty seconds.
-for (const reason of ["content-mismatch", "no-message-start", "timeout", "matched"]) {
+for (const outcome of ["content-mismatch", "no-message-start", "timeout", "matched",
+  "reject-content-mismatch", "reject-no-message-start"]) {
+  const rejected = outcome.startsWith("reject-");
+  const reason = rejected ? outcome.slice("reject-".length) : outcome;
   holdIdle = true;
   await handlers.get("session_start")({}, holdCtx);
   let finishRun;
+  let rejectRun;
   let expireCorrelation;
-  const run = new Promise(resolve => { finishRun = resolve; });
+  const run = new Promise((resolve, reject) => { finishRun = resolve; rejectRun = reject; });
   handoffSend = () => run;
-  const meta = { messageId: `message/fallback-${reason}`, identity: "fixture.worker",
+  const meta = { messageId: `message/fallback-${outcome}`, identity: "fixture.worker",
     inputIncarnation: "fixture-incarnation" };
   const content = `private mail ${reason}`;
   const nativeTimeout = globalThis.setTimeout;
@@ -737,8 +741,16 @@ for (const reason of ["content-mismatch", "no-message-start", "timeout", "matche
     assert.deepStrictEqual(fallbacks(), [{ type: "admission_fallback", reason, meta }]);
     assert.ok(!acknowledged().includes(meta.messageId), "deadline never fabricates admission");
   }
-  finishRun();
-  await awaitAcknowledgement(meta.messageId);
+  if (rejected) {
+    rejectRun(new Error("unmatched run rejected"));
+    await pause(100);
+    assert.strictEqual(readFrames().filter(frame => frame.type === "failed" &&
+      frame.meta?.messageId === meta.messageId).length, 1);
+    assert.ok(!acknowledged().includes(meta.messageId), "rejected run never fabricates admission");
+  } else {
+    finishRun();
+    await awaitAcknowledgement(meta.messageId);
+  }
   await pause(50);
   assert.deepStrictEqual(fallbacks(), reason === "matched" ? [] : [{
     type: "admission_fallback", reason, meta,
