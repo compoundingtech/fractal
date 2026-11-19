@@ -345,10 +345,13 @@ final class SpeechServiceClientTests: XCTestCase {
     defer { unlink(path) }
     let server = try StandInSocket(path: path)
     let received = Lines()
+    let answered = expectation(description: "answered")
     Thread.detachNewThread {
       received.append(server.answer(lines: [#"{"affected":["attention/one#claim/1"],"event":"ok"}"#]))
+      answered.fulfill()
     }
     await SpeechServiceClient(socketPath: path).skip(id: "attention/one#claim/1")
+    await fulfillment(of: [answered], timeout: 5)
     XCTAssertEqual(
       try JSONSerialization.jsonObject(with: Data(received.all.joined().utf8)) as? [String: String],
       ["op": "skip", "id": "attention/one#claim/1"])
