@@ -492,3 +492,18 @@ The full registry-kind coverage assertion remains intact.
 Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
 not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
 the three-seed cap, and majority trim coverage remain enforced.
+
+`claims-v37.json` adds the durable native admission evidence kinds
+`resource.admission.observed`, `resource.admission.coverage`, and `gate.admission.observed`.
+Versions 1 through 36 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v37.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v37.
+Native admission draws use the originating simulation host, a coherent epoch and simulation
+clock, a typed queued owner, and a finite admission request. Gate evidence records a durable
+accepted outcome with the same onset and observation clock; these facts confer no build grant.
+The focused `the_corpus_generates_valid_native_admission_inputs` regression checks all three
+specifications against the live registry, validates and admits their generated inputs, and
+replicates every resulting claim to the oracle. Full registry-kind coverage remains intact.
+New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
+old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
+must come from actual v37 outcomes rather than assuming historical results still apply.

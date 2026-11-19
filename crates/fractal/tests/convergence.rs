@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v36.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v37.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -261,6 +261,28 @@ fn the_corpus_generates_valid_native_capture_inputs() {
     let replicated = claims(&world.oracle);
     for id in written.values() {
         assert!(replicated.contains_key(id), "capture claim {id} must replicate");
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_admission_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut written = Vec::new();
+    for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+        let spec = &corpus()[kind];
+        assert_eq!(serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+        let input = world.claim_of(spec, 0).expect("generate native admission evidence");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        assert_eq!(input.fields["host"], world.nodes[0].name);
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        written.push(claim.id);
+        world.tap(0);
+    }
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written {
+        assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
     }
 }
 
@@ -1141,6 +1163,34 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), "resource.admission.observed"
+            | "resource.admission.coverage" | "gate.admission.observed") {
+            let id = self.fresh("admission");
+            let host = self.nodes[index].name.as_str();
+            let epoch = format!("convergence-{host}");
+            let now = self.clock(index);
+            let (subject, fields) = match spec.kind.as_str() {
+                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), json!({
+                    "id":id, "host":host, "class":"check", "coverage":"logical", "epoch":epoch,
+                    "owner":{"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null},
+                    "queued_at":now, "admitted_at":null, "retired_at":null, "state":"queued",
+                    "refusal":null, "finite":true, "admission_timeout_ms":null, "clock_uncertain":false
+                })),
+                "resource.admission.coverage" => (format!("resource-admission/{host}"), json!({
+                    "host":host, "epoch":epoch, "complete":true
+                })),
+                _ => (format!("gate-admission/{host}/{id}/accepted"), json!({
+                    "schema":"gate-slot.admission/v1", "id":id, "host":host, "class":"heavy",
+                    "at_ms":now, "onset_ms":now, "epoch":epoch, "coverage":"logical",
+                    "outcome":"accepted", "reason":"queued"
+                })),
+            };
+            return Some(ClaimInput {
+                subject, kind:spec.kind.clone(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:Vec::new(),
+                expected_subject:None, idempotency_key:Some(id),
+            });
+        }
         if matches!(spec.kind.as_str(), fractal_schema::github_capture::FACT_KIND
             | fractal_schema::github_capture::COMMIT_KIND | fractal_schema::github_capture::AUTHORITY_KIND
             | fractal_schema::github_capture::FENCED_KIND)
@@ -2326,8 +2376,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v36 adds native GitHub capture inputs, shifting the seeded schedule.
-/// The prior v35 characterization is recorded in fixtures/convergence/README.md.
+/// Corpus v37 adds native admission evidence, shifting the seeded schedule.
+/// Prior corpus characterizations are recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2340,7 +2390,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v36 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v37 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2349,7 +2399,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v36 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v37 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2357,7 +2407,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v36 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v37 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2570,7 +2620,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v36.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v37.json"
         }))
         .unwrap(),
     )
