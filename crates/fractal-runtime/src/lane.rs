@@ -950,8 +950,8 @@ mod tests {
 
     #[test]
     fn finite_properties_keep_member_and_parent_envelopes_separate() {
-        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None).unwrap();
-        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2)).unwrap();
+        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None, None).unwrap();
+        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2), None).unwrap();
         assert!(parent.iter().any(|value| value == "CPUQuota=400%"));
         assert!(parent.iter().any(|value| value == "MemoryMax=4294967296"));
         assert!(parent.iter().any(|value| value == "MemoryHigh=infinity"));
@@ -961,10 +961,10 @@ mod tests {
         for properties in [&parent, &child] {
             assert!(properties.iter().any(|value| value == "IOAccounting=yes"));
         }
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0)).is_err());
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB)).is_err());
-        assert!(finite_properties(None, Some(GIB)).is_err());
-        assert!(finite_properties(None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0), None).is_err());
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB), None).is_err());
+        assert!(finite_properties(None, Some(GIB), None).is_err());
+        assert!(finite_properties(None, None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
     }
 
     #[test]

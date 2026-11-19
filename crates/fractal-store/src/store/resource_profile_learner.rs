@@ -120,7 +120,9 @@ pub enum RecordOutcome {
 pub fn create_schema(connection: &Connection) -> Result<()> {
     // All identifiers are validated below; counters are at most 20 decimal bytes. One immutable
     // row per qualified execution is retained, including outside the estimator's trailing window.
+    // Transitional debt: retention does not bound sample-window growth or reclamation work.
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hac7950642ca2 owner=fractal_store::store::resource_profile_learner TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS resource_profile_samples_v1 (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             host TEXT NOT NULL CHECK(length(host) BETWEEN 1 AND 128),
@@ -160,6 +162,8 @@ pub fn record_retirement_tx(
     }
     let peak = sample.memory_peak_bytes.context("qualified sample has no peak")?;
     let inserted = transaction.execute(
+        // Transitional debt: sample rows are inline until reclamation gains a bounded driver.
+        /* sqlite-large-value: allow-for-now lv-h753b486e3fbb owner=fractal_store::store::resource_profile_learner TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO resource_profile_samples_v1
             (host,profile_key,semantic_revision,execution,generation,memory_peak,disk_growth)
          VALUES (?1,?2,?3,?4,?5,?6,?7)
