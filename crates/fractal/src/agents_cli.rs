@@ -982,7 +982,7 @@ async fn agent_start_declaration(
             {
                 return Err(fractal_daemon::FractalError::new(
                     "start-suspended",
-                    format!("`{subject}` is {}; use `fractal agents resume {subject}` to resume its recorded native session",
+                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
                         suspension.phase),
                 ).into());
             }

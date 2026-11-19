@@ -76,9 +76,9 @@ fn environment(command: &mut Command, root: &Path, socket: &Path) {
         .env("ST3_COMPLETION_DEADLINE_MS", "10000");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let fractal_cli = bin.join("fractal");
-    if !fractal_cli.exists() {
-        std::os::unix::fs::symlink(fractal_cli(), &fractal_cli).unwrap();
+    let executable_link = bin.join("fractal");
+    if !executable_link.exists() {
+        std::os::unix::fs::symlink(fractal_cli(), &executable_link).unwrap();
     }
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
