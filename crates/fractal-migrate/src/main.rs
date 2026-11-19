@@ -1303,10 +1303,10 @@ fn rewrite_bus_command(value: &str) -> String {
 }
 
 fn rewrite_eval_prompt(value: &str) -> String {
-    let mut output = rewrite_bus_command(value).replace(
-        "wait for a Fractal graph message notification",
+    let mut output = rewrite_bus_command(&value.replace(
+        "wait for an st2 channel message",
         "end the turn and stay idle",
-    );
+    ));
     if !output.ends_with(char::is_whitespace) {
         output.push(' ');
     }
