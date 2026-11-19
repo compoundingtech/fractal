@@ -230,16 +230,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         // from the generation slice; a missing slice remains typed unknown, never false/zero.
         if !self.read_shell_payload_result(execution)? && execution.result.is_none() && member.state != "retired" {
             execution.result = Some(self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
-        } else if execution.result.is_none() {
-            if let Some(wall_duration_ms) = root.execution_ended_at.zip(root.payload_released_at)
-                .and_then(|(ended, released)| ended.checked_sub(released))
-            {
-                execution.result = Some(PayloadResult {
-                    head_start: execution.head_start.clone(), clean_start: execution.clean_start,
-                    head_end: None, clean_end: None, exit_code: None, exit_signal: None,
-                    wall_duration_ms, memory_peak_bytes: None,
-                });
-            }
+        }
+        execution.payload_outcome_unknown = execution.result.is_none() && member.state == "retired";
+        if execution.payload_outcome_unknown && execution.oom_killed != Some(true) {
+            execution.reason = "payload-outcome-unknown".into();
         }
         Ok(())
     }

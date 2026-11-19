@@ -61,6 +61,10 @@ pub struct Execution {
     /// starts there. Not authenticated against deliberate same-user interference.
     #[serde(default)]
     pub oom_kills: Option<u64>,
+    /// Explicit recovery evidence that retired custody has no payload observation.
+    /// Historical records default to false; only daemon retirement may set this marker.
+    #[serde(default)]
+    pub payload_outcome_unknown: bool,
     pub stdout: String,
     pub stderr: String,
     pub cancel: bool,
@@ -209,6 +213,7 @@ impl Store {
         let mut environments = self.shell_environments.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None, oom_killed: None, oom_kills: None,
+            payload_outcome_unknown: false,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
         let mut connection = self.connection.write();

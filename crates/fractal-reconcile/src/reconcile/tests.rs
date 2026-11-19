@@ -1756,6 +1756,11 @@ mission "shell-owner" state="ready" {{
         execution.started_at = generation.payload_released_at_unix_ms;
         execution.state = "running".into();
         store.update_shell_resource(&execution).unwrap();
+        match fs::remove_file(&path) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => panic!("remove observer publication: {error}"),
+        }
         // Model daemon loss after generic membership retirement but before shell
         // finalization: recovery still reads the execution's generation slice.
         assert!(runtime.retire_resource_lane(&store, &request).unwrap());
@@ -1767,6 +1772,10 @@ mission "shell-owner" state="ready" {{
         assert_eq!(execution.state, "completed", "{}", execution.reason);
         let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource(&id).unwrap());
         assert!(fields["oom_kills"].as_u64().unwrap() >= 1, "{fields:?}");
+        assert!(execution.result.is_none());
+        assert!(execution.payload_outcome_unknown);
+        assert_eq!(fields["outcome_known"], false);
+        assert_eq!(fields["wall_duration_ms"], serde_json::Value::Null);
         assert_eq!(fields["oom_killed"], true);
         assert_eq!(fields["reason"], "payload-oom-killed");
         assert!(runtime.exec.resource_oom_kills(&id, &generation.generation_id, &request.name).unwrap().unwrap() >= 1);

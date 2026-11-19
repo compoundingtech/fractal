@@ -48,12 +48,13 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("coverage", json!(request.coverage)),
         ("state", json!(execution.state)),
         ("timed_out", json!(execution.timed_out)),
+        ("outcome_known", json!(result.is_some())),
         ("oom_killed", json!(execution.oom_killed)),
         ("reason", json!(execution.reason)),
         ("refusal_code", json!(execution.refusal_code)),
         ("disk_reserved_bytes", json!(request.disk.as_ref().map_or(0, |disk| disk.bytes))),
         ("queue_wait_ms", json!(execution.queue_wait_ms)),
-        ("wall_duration_ms", json!(result.map_or(0, |result| result.wall_duration_ms))),
+        ("wall_duration_ms", if execution.payload_outcome_unknown { Value::Null } else { json!(result.map_or(0, |result| result.wall_duration_ms)) }),
     ] { fields.insert(name.into(), value); }
     // Absent observations stay absent. In particular a logical execution never
     // turns an unavailable cgroup peak into a measured zero.
@@ -83,7 +84,19 @@ pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: 
     let request = &execution.command.lane;
     anyhow::ensure!(request.host == origin, "only the executing host may record its receipt");
     let result = execution.result.as_ref();
-    anyhow::ensure!(execution.started_at.is_none() || result.is_some(),
+    let retired_unknown = execution.payload_outcome_unknown && result.is_none()
+        && execution.started_at.is_some()
+        && execution.exit_code.is_none() && execution.exit_signal.is_none()
+        && (execution.reason == "payload-outcome-unknown"
+            || (execution.reason == "payload-oom-killed" && execution.oom_killed == Some(true)));
+    if retired_unknown {
+        let member = resource_membership::read(transaction, &request.id)?;
+        resource_membership::authorized(&member, &request.owner)?;
+        anyhow::ensure!(member.state == "retired" && member.roots.iter()
+            .any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()),
+            "unknown payload outcome requires durably retired execution custody");
+    }
+    anyhow::ensure!(execution.started_at.is_none() || result.is_some() || retired_unknown,
         "launched shell execution must persist its outcome before terminal retirement");
     let subject = subject(origin, execution);
     let fields = receipt_fields(execution);
@@ -123,6 +136,49 @@ mod tests {
     fn claims(store: &Store, prefix: Option<&str>) -> Vec<ClaimRecord> {
         store.claims_page_matching(ClaimsFilter { kind: Some(KIND), subject_prefix: prefix,
             ..ClaimsFilter::default() }, None, 0, None, false, 100).unwrap().claims
+    }
+
+    #[test]
+    fn oom_retired_unknown_payload_reaches_completed_without_fabricated_result() {
+        use resource_membership::{Admission, Fit};
+        let store = Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let mut execution = store.submit_shell_resource(command("unknown"), 10).unwrap();
+        let request = &execution.command.lane;
+        let Admission::Admitted(grant) = store.request_resource_membership(
+            request, Fit { room: request.capacity, ..Fit::default() }, 10).unwrap()
+        else { panic!("fixture admission refused"); };
+        store.prepare_resource_membership(&grant, "unknown").unwrap();
+        let generation = serde_json::from_value(json!({
+            "schema":"st.runtime.exec-generation.v1", "pid":1, "createdAtUnixMs":10,
+            "startToken":1, "generationId":"unknown-generation", "payloadReleasedAtUnixMs":10
+        })).unwrap();
+        store.launch_resource_membership(&grant, "unknown", &generation, 10).unwrap();
+        // Durable crash image: retired custody, missing publication and end clock.
+        let mut member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        member.state = "retired".into();
+        assert!(member.roots[0].execution_ended_at.is_none());
+        {
+            let connection = store.connection.write();
+            connection.execute("UPDATE resource_memberships_v1 SET state='retired', body=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_string(&member).unwrap(), request.id]).unwrap();
+        }
+        execution.started_at = Some(10);
+        execution.ended_at = Some(20);
+        execution.state = "completed".into();
+        execution.reason = "payload-outcome-unknown".into();
+        assert!(store.update_shell_resource(&execution).unwrap_err().to_string()
+            .contains("must persist its outcome"));
+        execution.payload_outcome_unknown = true;
+        store.update_shell_resource(&execution).unwrap();
+        let completed = store.shell_resource("unknown").unwrap();
+        assert_eq!(completed.state, "completed");
+        assert!(completed.result.is_none());
+        let page = claims(&store, None);
+        let fields = &page[0].body["fields"];
+        assert_eq!(fields["outcome_known"], false);
+        assert_eq!(fields["wall_duration_ms"], Value::Null);
+        assert_eq!(fields["reason"], "payload-outcome-unknown");
     }
 
     #[test]

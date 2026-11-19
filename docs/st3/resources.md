@@ -405,6 +405,12 @@ count sets `oom_killed=true` and `reason=payload-oom-killed`; a measured zero se
 null and `oom_kills` is absent, never an invented false/zero. Historical receipts may
 omit these fields. Payload result files and exit signals cannot establish this outcome.
 
+Retired recovery may have no payload publication or durable observation. Such executions
+carry an explicit `payloadOutcomeUnknown` marker, `outcome_known=false`, and a null
+`wall_duration_ms` in receipts; they do not fabricate a `PayloadResult`. The terminal
+reason is `payload-outcome-unknown` unless independently measured OOM evidence establishes
+`payload-oom-killed`. Only durably retired execution custody permits this terminal case.
+
 Subjects use this layout, where `hex` is lowercase hexadecimal encoding of the exact UTF-8 bytes:
 
 ```text
