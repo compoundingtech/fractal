@@ -52,11 +52,11 @@ export function RequestHistory({ client, threadId, StartAction }: {
     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityValue={{ text: expanded ? 'Expanded' : 'Collapsed' }}
       accessibilityHint={expanded ? 'Hides earlier requests related to this thread' : 'Loads earlier requests related to this thread'}
       onPress={toggle} style={{ minHeight: 44, justifyContent: 'center' }}>
-      <T bold color={theme.accent}>{expanded ? '▾' : '▸'} Request history</T>
+      <T bold color={theme.accent}>{expanded ? '▾' : '▸'} Related requests</T>
     </Pressable>
     {expanded ? <T dim>History only · requests remain independent</T> : null}
     {!expanded ? null
-      : snapshot.kind === 'loading' ? <T dim>Loading request history…</T>
+      : snapshot.kind === 'loading' ? <T dim>Loading related requests…</T>
       : snapshot.kind === 'error' ? <View style={{ gap: 6 }}>
         <T color={theme.waiting}>{snapshot.message}</T>
         <Button label="Retry" accessibilityLabel="Retry loading request history" onPress={() => void reader.load()} />
@@ -76,7 +76,6 @@ function HistoryPage({ page, loadingMore, issue, reload, more, StartAction }: {
   const grouped = new Set<string>();
   const groups = page.source_episodes.map(group => ({
     sourceId: group.source_id,
-    episodes: group.episodes.length,
     items: group.episodes.flatMap(key => {
       const item = byKey.get(requestHistoryKey(key));
       if (!item) return [];
@@ -97,7 +96,7 @@ function HistoryPage({ page, loadingMore, issue, reload, more, StartAction }: {
     {!page.complete ? <Note tone="warning">Some related requests could not be read. This page is incomplete.</Note> : null}
     {!rows.length ? <T dim>No earlier requests.</T> : null}
     {groups.map(group => group.items.length ? <View key={group.sourceId} style={{ gap: 8 }}>
-      <T dim selectable>{group.sourceId} · {group.episodes === 1 ? '1 episode' : `${group.episodes} episodes`}</T>
+      <T dim selectable>{group.sourceId} · {group.items.length === 1 ? '1 episode' : `${group.items.length} episodes`} · each has its own status</T>
       {group.items.map(row)}
     </View> : null)}
     {ungrouped.map(row)}
@@ -126,7 +125,7 @@ function HistoryRow({ item, boundary, follows, title, StartAction }: {
         {payload.title ? <T bold selectable>{payload.title}</T> : <T dim>The original title is unavailable.</T>}
         {payload.text ? <Markdown text={payload.text} color={theme.subtext0} /> : <T dim>This request has no text.</T>}
       </>
-      : <T dim>{UNAVAILABLE[payload.reason]}</T>}
+      : <><T bold>Original request unavailable</T><T dim>{UNAVAILABLE[payload.reason]}</T></>}
     <T dim selectable>episode {key.episode}{boundary ? ' · boundary' : ''}{item.complete ? '' : ' · incomplete'}</T>
     {state.availability === 'available'
       ? <>
@@ -134,7 +133,7 @@ function HistoryRow({ item, boundary, follows, title, StartAction }: {
         {state.answers.map((answer, index) => <T key={index} dim selectable>answer {JSON.stringify(answer)}</T>)}
       </>
       : <T dim>Answer state unavailable.</T>}
-    {follows.map((relation, index) => <T key={index} dim>follows {relation.predecessor} · {relation.reason}</T>)}
+    {follows.map((relation, index) => <T key={index} dim>Requested after {relation.predecessor} · {relation.reason}</T>)}
     {payload.availability === 'available' ? payload.references.map((reference, index) => <ReferenceLine key={index} reference={reference} />) : null}
     {current ? <Button label="Open current source" hint="Opens this exact episode's current Inbox item"
       onPress={() => navigation.navigate('Attention', { id: current.id })} /> : null}

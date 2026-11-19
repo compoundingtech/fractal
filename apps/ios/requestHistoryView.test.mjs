@@ -88,6 +88,7 @@ test('an available payload without a title says the original title is unavailabl
 test('an unavailable payload states its reason and never falls back to the current source text', () => {
   const tree = HistoryRow({ item: unavailable, boundary: true, follows: [] });
   const lines = texts(tree);
+  assert.ok(lines.includes('Original request unavailable'));
   assert.ok(lines.includes('The request wording as it was shown is unavailable.'));
   assert.ok(!lines.some(line => line.includes(current.title)), 'the current Inbox wording never stands in');
   assert.equal(findAll(tree, node => node.type === 'Markdown').length, 0);
@@ -196,7 +197,7 @@ test('a page keeps boundary rows, server grouping and only relations whose endpo
   };
   let more = 0;
   const tree = HistoryPage({ page, loadingMore: false, reload() {}, more: () => more++ });
-  assert.ok(texts(tree).includes('step-run/review · 2 episodes'));
+  assert.ok(texts(tree).includes('step-run/review · 2 episodes · each has its own status'));
   const rows = findAll(tree, node => node.type === 'HistoryRow');
   assert.deepEqual(rows.map(row => row.props.item.key.episode), [unavailable.key.episode, available.key.episode]);
   assert.deepEqual(rows.map(row => row.props.boundary), [true, false]);
@@ -207,6 +208,56 @@ test('a page keeps boundary rows, server grouping and only relations whose endpo
   const unsupported = HistoryPage({ page: { ...page, items: [], boundary_items: [], source_episodes: [], relations: [], next_cursor: null, source_support: 'unsupported-source', complete: false }, loadingMore: false, reload() {}, more() {} });
   assert.ok(findAll(unsupported, node => node.type === 'Note').length >= 2);
   assert.ok(texts(unsupported).includes('No earlier requests.'));
+});
+
+test('same-source revisions render retained abc separately from current def and independent answers', () => {
+  const retained = {
+    ...available,
+    payload: { ...available.payload, title: 'Approve abc', text: 'Original abc request' },
+    state: { availability: 'available', status: 'completed', answers: [{ summary: 'Approved abc' }] },
+  };
+  const revised = {
+    ...available,
+    key: { ...available.key, episode: 'episode/2026-11-19' },
+    payload: { ...available.payload, title: 'Approve def', text: 'Review def instead' },
+    state: { availability: 'available', status: 'ready', answers: [] },
+  };
+  const page = {
+    items: [retained, revised], boundary_items: [], complete: true, next_cursor: null, source_support: 'person-step',
+    source_episodes: [{ source_id: retained.key.source_id, episodes: [retained.key, revised.key] }], relations: [],
+  };
+  const tree = HistoryPage({ page, loadingMore: false, reload() {}, more() {} });
+  const rows = findAll(tree, node => node.type === 'HistoryRow');
+  assert.deepEqual(rows.map(row => row.props.item.key.episode), [retained.key.episode, revised.key.episode]);
+  assert.deepEqual(rows.map(row => row.props.follows), [[], []], 'grouping never creates predecessor semantics');
+  const oldTree = HistoryRow(rows[0].props);
+  const newTree = HistoryRow(rows[1].props);
+  assert.ok(texts(oldTree).includes('Approve abc'));
+  assert.ok(texts(oldTree).includes('status completed'));
+  assert.ok(texts(oldTree).includes('answer {"summary":"Approved abc"}'));
+  assert.equal(findAll(oldTree, node => node.type === 'Markdown')[0].props.text, 'Original abc request');
+  assert.ok(!texts(oldTree).some(line => line.includes('def')));
+  assert.ok(texts(newTree).includes('Approve def'));
+  assert.ok(texts(newTree).includes('status ready'));
+  assert.ok(!texts(newTree).some(line => line.includes('Approved abc')));
+});
+
+test('boundary predecessor reason is explicit and episode counts include only rendered rows', () => {
+  const absent = { source_id: available.key.source_id, episode: 'episode/not-on-page' };
+  const page = {
+    items: [available], boundary_items: [unavailable], complete: true, next_cursor: null, source_support: 'person-step',
+    source_episodes: [{ source_id: available.key.source_id, episodes: [unavailable.key, available.key, absent] }],
+    relations: [
+      { predecessor: unavailable.key, request: available.key, reason: 'A separate approval request' },
+      { predecessor: absent, request: available.key, reason: 'DO NOT SHOW' },
+    ],
+  };
+  const tree = HistoryPage({ page, loadingMore: false, reload() {}, more() {} });
+  assert.ok(texts(tree).includes('step-run/review · 2 episodes · each has its own status'));
+  const rows = findAll(tree, node => node.type === 'HistoryRow');
+  const lines = texts(HistoryRow(rows[1].props));
+  assert.ok(lines.includes('Requested after step-run/review · episode episode/2026-10-01 · A separate approval request'));
+  assert.ok(!lines.some(line => line.includes('DO NOT SHOW')));
 });
 
 test('history stays collapsed until expanded, rereads on every reopen and closes on collapse or blur', () => {
@@ -231,14 +282,14 @@ test('history stays collapsed until expanded, rereads on every reopen and closes
   const render = () => { index = 0; return RequestHistory({ client: {}, threadId: 'thread/one' }); };
   const header = tree => findAll(tree, node => node.type === 'Pressable')[0];
   let tree = render();
-  assert.equal(text(header(tree)), '▸ Request history');
+  assert.equal(text(header(tree)), '▸ Related requests');
   assert.deepEqual(header(tree).props.accessibilityState, { expanded: false });
   assert.deepEqual(loads, [], 'nothing is read before an explicit expand');
   header(tree).props.onPress();
   tree = render();
   assert.deepEqual(loads, ['thread/one']);
   assert.ok(texts(tree).includes('History only · requests remain independent'));
-  assert.ok(texts(tree).includes('Loading request history…'));
+  assert.ok(texts(tree).includes('Loading related requests…'));
 
   header(tree).props.onPress();
   tree = render();

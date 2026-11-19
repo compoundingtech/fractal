@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { EnvelopeOf, FractalClient, RequestHistoryItem, RequestHistoryPage } from '../../clients/typescript/fractal-client/index.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { REQUEST_HISTORY_LIMIT, RequestHistoryReader, requestHistoryKey, requestHistoryRelations, requestHistoryRows } from './requestHistory.ts';
 
 // Typed client presentation fixtures, not fabricated live-server observations.
@@ -136,4 +137,31 @@ test('refresh supersedes an in-flight page without resurrecting older private ro
   const result = reader.getSnapshot();
   assert.equal(result.kind, 'ready');
   if (result.kind === 'ready') assert.deepEqual(result.page.items, []);
+});
+
+test('denied continuation removes the previous page, its boundary and predecessor reasons', async () => {
+  const first = {
+    ...page([later]), boundary_items: [old], next_cursor: 'opaque-authorized-page',
+    relations: [{ predecessor: old.key, request: later.key, reason: 'PRIVATE predecessor reason' }],
+  };
+  let reads = 0;
+  const client: Pick<FractalClient, 'threadRequestHistory'> = {
+    threadRequestHistory: async () => {
+      if (reads++ === 0) return envelope(first);
+      throw new ClientError({
+        api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0',
+        request_id: 'request/history-denied', code: 'forbidden', message: 'PRIVATE denial detail',
+        retryable: false, details: {},
+      }, 403);
+    },
+  };
+  const reader = new RequestHistoryReader(client, 'thread/history');
+  await reader.load();
+  const pending = reader.more();
+  assert.deepEqual(reader.getSnapshot(), { kind: 'loading' });
+  await pending;
+  assert.deepEqual(reader.getSnapshot(), { kind: 'error', message: 'Request history is unavailable. Refresh to try again.' });
+  assert.ok(!JSON.stringify(reader.getSnapshot()).includes('PRIVATE'));
+  await reader.more();
+  assert.equal(reads, 2, 'denial leaves no continuation cursor');
 });

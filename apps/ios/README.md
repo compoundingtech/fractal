@@ -116,6 +116,17 @@ Inline thread read and timeline errors offer an in-place Retry button; a success
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
+The thread's **Related requests** section expands on demand using the generated
+`threadRequestHistory` reader, with 20 requests per page. Each retained episode
+shows its original wording, independent status and answer; missing original
+content is explicitly unavailable, never replaced by today's Inbox wording.
+Same-source episodes remain separate and show their own statuses. “Requested
+after” displays only server-returned predecessor/reason pairs with both endpoints
+on the page or its authorized boundary. Episode counts describe rendered rows
+only. Next page replaces rather than accumulates authorized data; refresh,
+collapse, blur and failed reads discard the prior page. Source navigation and
+document/external reference links retain their existing routes, not snapshots.
+
 First Starts are independent, even for the same Inbox source and episode. Each
 attempt owns its thread UUID, action key and delivery slot. Unknown attempts remain
 retained without replay. Unconfirmed starts appear separately in Inbox recovery,
