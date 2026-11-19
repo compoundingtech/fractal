@@ -371,4 +371,14 @@ mod tests {
         doc.field("owner", "Copper gardener with a long description", 24, theme::text());
         assert_eq!(copied(&doc), "owner Copper gardener with a long description");
     }
+
+    #[test]
+    fn subject_link_prefixes_copy_one_gap_without_alignment_padding() {
+        let mut doc = Doc::new();
+        super::super::screens::link(&mut doc, "agent    ", "Copper", "agent/copper");
+        super::super::screens::link(&mut doc, "mission  ", "Garden", "mission/garden");
+        assert_eq!(copied(&doc), "agent Copper\nmission Garden");
+        assert_eq!(doc.targets[0].column, 9);
+        assert_eq!(doc.lines[0].width(), 15);
+    }
 }
