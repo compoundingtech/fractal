@@ -9224,9 +9224,6 @@ async fn follow_mission_run_to(
     let mut prior = String::new();
     let mut event_feed = LocalEventFeed::default();
     loop {
-        if !json_output {
-            load_run_source_provenance(client, &mut run).await?;
-        }
         if cli_output::closed() {
             return Ok(());
         }
@@ -9247,6 +9244,7 @@ async fn follow_mission_run_to(
             String::new()
         };
         if summary != prior && let Some(page) = &page {
+            load_run_source_provenance(client, &mut run).await?;
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             let publications = mission_publications(
                 client,
