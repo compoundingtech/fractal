@@ -142,7 +142,8 @@ impl Store {
              WHERE kind='resource.exec-receipt' AND json_extract(body,'$.fields.owner.step')=?1
                AND json_extract(body,'$.fields.owner.attempt')=?2 AND ?3 IS NULL LIMIT 2"
         };
-        let mut statement = connection.prepare_cached(sql).map_err(internal)?;
+        // A two-row ambiguity probe does not bound claim bytes; trace both selector templates and receipt values.
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3b485fbfd664 owner=fractal_store::store::resource_exec_receipts TODO=trace-statement-and-value-representation */ sql).map_err(internal)?;
         let mut rows = statement.query_map(rusqlite::params![query.step_run, query.attempt, query.generation], claim_from_row)
             .map_err(internal)?;
         let Some(mut claim) = rows.next().transpose().map_err(internal)? else {

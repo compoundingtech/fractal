@@ -1036,3 +1036,26 @@ a bound on encoded bytes or query cost. The
 `trace-statement-and-value-representation` task is to trace the canonical SQL
 expansion, subject key and extracted principal through a bounded/reference
 representation without substituting requester attribution for creation authority.
+
+### Native retirement receipt lookup (#6842)
+
+The `fractal_store::store` maintainer owns revised schema site
+`lv-h2b3b79aad3be`, replacing `lv-hfc9ed02b4ad7`. Its added
+`claims_resource_exec_owner_attempt_index` indexes owner step TEXT, attempt and
+runtime-generation values extracted from immutable receipt JSON, restricted to
+`resource.exec-receipt`. Existing schema columns/indexes remain covered by the
+revised whole-template identity; the owned-set subject index is unchanged.
+These keys remain inline to preserve exact owner/attempt/generation lookup, not
+because their encoded size or index-build cost is proved bounded. The
+`chunk-or-reference-variable-columns` task must retain those exact selector and
+partial-index semantics when moving variable keys to bounded units or references.
+
+The `fractal_store::store::resource_exec_receipts` maintainer owns
+`lv-h3b485fbfd664`, the cached-query sink selecting at most two authoritative
+claims for ambiguity detection. Both templates read subject/identity/origin,
+body and predecessor values; a row limit is not a bound on their encoded bytes.
+They remain inline to validate immutable host-owned retirement authority without
+substituting desired state. The `trace-statement-and-value-representation` task
+must follow both generation selectors and their bound owner/attempt values into
+a bounded/reference representation while preserving missing, stale-generation
+and ambiguous-receipt refusals.
