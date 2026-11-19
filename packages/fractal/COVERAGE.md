@@ -18,7 +18,7 @@ remain unchanged.
 
 ## Native grammar coverage
 
-Authoritative grammar: `compoundingtech/smalltalk`, `crates/st3/src/graph.rs` and `mission.rs` at native revision `d5e2302`. This library validates authoring inputs; the st daemon remains the final parser and runtime authority. Constructor field names are TypeScript camelCase only where KDL uses hyphens.
+Authoritative grammar: `compoundingtech/smalltalk`, `crates/st3/src/graph.rs` and `mission.rs` at native revision `d5e2302`. This library validates authoring inputs; the Fractal daemon remains the final parser and runtime authority. Constructor field names are TypeScript camelCase only where KDL uses hyphens.
 
 | Grammar node                                                                                       | Status      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | -------------------------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -45,12 +45,12 @@ TS modules export an intent, a context factory, or `defineAgent|defineMission|de
 
 Objective modules export `Fractal.objective(...)`, its plain fields, a context factory, or `defineObjective({ meta: import.meta, intent })`. The subject is `objective/<id>`; a `name` field, if present, must equal the ID. Typed agent refs in `onBreach` `owner`/`backup` lower to `agent/<id>`, then `Fractal.objective` checks the result. Only an interval over claims named `NAMESPACE/NAME` loads, from TS or KDL; the native telemetry indicators are Fractal's own.
 
-Mission modules pass through `missionWire` before strict schema decoding, preserving scoped step handles, input/product identities and text templates until assembly. Reference lowering leaves unchanged authoring objects intact. Extra properties and invalid current declarations remain errors. Named module exports are retained beside the decoded intent. KDL declarations are checked for version, root kind and path-derived ID; native st remains their grammar authority.
+Mission modules pass through `missionWire` before strict schema decoding, preserving scoped step handles, input/product identities and text templates until assembly. Reference lowering leaves unchanged authoring objects intact. Extra properties and invalid current declarations remain errors. Named module exports are retained beside the decoded intent. KDL declarations are checked for version, root kind and path-derived ID; native Fractal remains their grammar authority.
 
 Native conformance is opt-in: `ST_BIN` selects the production binary for the agent-attributed round-trip; `ST_FIXTURE_BIN` selects upstream's separately compiled, pinned `st3-fixture` test-support binary for synthetic-person gate semantics. Both use isolated private runtime directories. The fixture mode does not prove production person authentication; see [the acceptance boundary](./HUMAN_GATE_ACCEPTANCE.md).
 The unified conformance target is native `d5e2302`. Assertions derive run subjects from the native start response, including mission-scoped run IDs; they do not assume the legacy `mission-run/ID` shape.
 
-Both native modes use `scratchDaemonLayer` from the Node-only `fractal/testing` export. It scopes `st up`, HOME/XDG directories, private config, state, PTY root and sockets to one temporary directory, stops the daemon and its scratch processes, and removes the directory on scope close. `ScratchDaemon` exposes the directory, endpoint, isolated environment and an Effect-based `run` command with a timeout. Options select the binary, node, optional private-config person, readiness/command timeouts and directory retention. PATH defaults to `/nonexistent`; native conformance explicitly supplies the caller's PATH to exercise host shell commands.
+Both native modes use `scratchDaemonLayer` from the Node-only `fractal/testing` export. It scopes `fractal up`, HOME/XDG directories, private config, state, PTY root and sockets to one temporary directory, stops the daemon and its scratch processes, and removes the directory on scope close. `ScratchDaemon` exposes the directory, endpoint, isolated environment and an Effect-based `run` command with a timeout. Options select the binary, node, optional private-config person, readiness/command timeouts and directory retention. PATH defaults to `/nonexistent`; native conformance explicitly supplies the caller's PATH to exercise host shell commands.
 
 ## Native parse parity
 
@@ -76,7 +76,7 @@ The renderer emits one `depends-on` block with a `step` child per entry, preserv
 
 Every `MissionSchema` declaration requires `reportTo: importedAgent`, where `importedAgent` is an agent declaration satisfying `typeof AgentSchema.Encoded`. Import the supervisor's seat declaration (or the manager's when there is no supervisor); do not author a subject string. The reference retains the imported declaration and any kit metadata, while only its ID is lowered to the native mission-header property `report-to="agent/ID"`. It does not copy launch configuration into the mission.
 
-Omission, bare agent/person strings, and `reportTo: 'none'` are rejected. There is intentionally no opt-out: requiring a recipient prevents silently unobserved failures. Native st accepts agents only; reach a person through that person's agent. The DSL does not add unsupported person targets or step-level reporting.
+Omission, bare agent/person strings, and `reportTo: 'none'` are rejected. There is intentionally no opt-out: requiring a recipient prevents silently unobserved failures. Native Fractal accepts agents only; reach a person through that person's agent. The DSL does not add unsupported person targets or step-level reporting.
 
 Native support starts at `compoundingtech/smalltalk` commit `3e7efce0663826a4e2bb517b2481b284e8df5f76` (#1984). Use that commit or a descendant for `ST_BIN` and before publishing generated missions. The daemon sends one message per failed, cancelled, or stalled run event; stalls default to 30 minutes without progress. Optional mission-level `stalledAfter` overrides that interval, using the same positive durations as `timeout`: native compact strings (`ms`, `s`, `m`, `h`, or `d`), Effect readable duration strings, or Effect Duration values. Durations must be finite and lossless integer milliseconds within native bounds. Canonical values normalize to millisecond strings; native lowering uses the largest exact unit (`d`, `h`, `m`, `s`, then `ms`) without rounding. For example, `stalledAfter: '45m'` emits `stalled-after="45m"`, not a child node or a numeric value. This property and native duration parsing are confirmed against native revision `d56fcea` in `crates/st3/src/mission.rs` (`parse_mission`, `parse_run_report`, and `parse_duration`). Omission leaves the native default unchanged. Completion reporting is controlled separately by `reportCompleted`. Messages identify the run, mission, and relevant steps, not failure reasons or step output. An unavailable reporting agent produces a native `report-to` fault rather than a delivered message.
 
@@ -185,7 +185,7 @@ Mission `reportCompleted?: boolean` lowers directly to the native `report-comple
 
 The field remains `goal`: author one nonempty string or a nonempty array of one to three strings. Scalar and singleton-array declarations emit exactly the same `goal` node; arrays preserve authored order. There is no plural `goals` alias. Mission goals are required, while step goals are optional.
 
-`retry: { attempts, backoff? }` counts the initial attempt in its 1–100 bound. Backoff accepts positive native durations and explicit zero durations. Native exec gates preserve command, host, workspace, environment and time-limit semantics; reserved st context keys cannot be overridden, while application keys and `PATH` remain authorable.
+`retry: { attempts, backoff? }` counts the initial attempt in its 1–100 bound. Backoff accepts positive native durations and explicit zero durations. Native exec gates preserve command, host, workspace, environment and time-limit semantics; reserved Fractal context keys cannot be overridden, while application keys and `PATH` remain authorable.
 
 Mission `steps` preserves ordered step/loop nodes. `completion` selects `all-steps-exhausted` or an explicit step-state frontier, which cannot reference final steps. `finally` contains final-phase steps; dependencies cannot cross the normal/final boundary. Loops require `maxRounds` 1–100 and an explicitly completed step-only `round`; `until` is optional. Exhaustion can fail or succeed, and only failure can request attributed warning/error attention. Feedback human gates remain restricted to worker step gates, not mission or loop-until gates.
 
@@ -193,7 +193,7 @@ Mission `steps` preserves ordered step/loop nodes. `completion` selects `all-ste
 
 `document({ id, hash })` binds a name to existing immutable bytes; step `documents` always contains exact `doc/NAME@64hex` pins. `doc` is a tagged-template subject reference for `gate.document`, not a declaration writer. Document gates can wait for a name or a pinned version. The generator does not upload or invent document content.
 
-`observer({ id, resource, provider: 'github.ref', locator, fields, every? })` accepts `OWNER/REPO@REF`, including slash-containing branch names, and unique nonempty `head`/`ancestors` fields. `subscription` models message delivery with unique nonempty `on` fields and optional `is`/`starts-with`/`contains` field conditions. Resources, documents, observers and subscriptions can also be declared on missions, steps and loop rounds. Native st owns run-scoped IDs and subscription alias rewriting.
+`observer({ id, resource, provider: 'github.ref', locator, fields, every? })` accepts `OWNER/REPO@REF`, including slash-containing branch names, and unique nonempty `head`/`ancestors` fields. `subscription` models message delivery with unique nonempty `on` fields and optional `is`/`starts-with`/`contains` field conditions. Resources, documents, observers and subscriptions can also be declared on missions, steps and loop rounds. Native Fractal owns run-scoped IDs and subscription alias rewriting.
 
 The public upstream-repin fixture preserves the full bounded retry/loop/goal graph. Its independent KDL and typed form include the same required reporting agent; the opt-in native round-trip compares their normalized revision without starting network-dependent work. The same isolated daemon stores real document bytes and checks run-scoped watcher declarations.
 
@@ -205,7 +205,7 @@ Plain `MissionSchema.Encoded` declarations remain first-class. For graph loaders
 
 ## Per-run inputs and graph products
 
-`input.text('commit')` and `input.resource({ name: 'pr', kind: 'vcs.pull-request' })` are declared in mission `inputs`. Native input declarations contain `name` and text/resource `kind`; resource kind metadata is static authoring intent, not a native input schema property. Native st pins the actual supplied resource observation when the run starts.
+`input.text('commit')` and `input.resource({ name: 'pr', kind: 'vcs.pull-request' })` are declared in mission `inputs`. Native input declarations contain `name` and text/resource `kind`; resource kind metadata is static authoring intent, not a native input schema property. Native Fractal pins the actual supplied resource observation when the run starts.
 
 `t` returns an identity-bearing text template; mission assembly and gate constructors resolve it to native text while retaining the exact input/product objects used in it. `doc` and `childMission` templates retain the same provenance, including nested text templates. `runId` denotes `${ST_MISSION_RUN}` and is not a declared-input reference. Plain `${input.NAME}` strings remain native wire authoring; escaped `$${input.NAME}` remains literal text. Input names respect the native 160 UTF-8 byte limit. No `${input.pr.head_sha}` resource-field projection is invented: companion text inputs supply exact commit/locator values when needed.
 
@@ -258,12 +258,12 @@ This lowers to the runtime's `calendar { at "08:00"; timezone "Europe/Berlin" }`
 block, with `host`, `catch-up` and `work` remaining schedule children. `at` is
 validated as a 24-hour `HH:MM` local time. The timezone is required, branded by
 `IanaTimezoneSchema`, and checked against the JavaScript runtime's IANA timezone
-data; st remains authoritative with its bundled `chrono-tz` database, which may
+data; Fractal remains authoritative with its bundled `chrono-tz` database, which may
 differ in version or accepted aliases.
 
 Omit `days` for a daily schedule. `days: ['Mon']` emits `at "Mon 08:00"` for a
 weekly schedule. The typed tuple accepts exactly one of `Mon`, `Tue`, `Wed`,
-`Thu`, `Fri`, `Sat`, `Sun`: st does not accept multi-day rules or a KDL `days`
+`Thu`, `Fri`, `Sat`, `Sun`: Fractal does not accept multi-day rules or a KDL `days`
 child. Calendar schedules cannot also contain `every` or `anchor`.
 Use `Timing.every({ every: '6h', anchor: '2026-01-01T00:00:00Z' })` for an anchored interval and `Timing.at('2026-01-01T00:00:00Z')` for a one-shot instant. Interval durations normalize to milliseconds and instants normalize to UTC. The constructors produce schema-derived PascalCase tags, not native override wrappers.
 
@@ -272,10 +272,10 @@ Native duration spelling uses the largest exact unit, while canonical values rem
 Recurring timings default to `catchUp: 'latest'`, preserving the library's latest-only
 policy: an already reached occurrence is not replayed, missed occurrences
 collapse to the latest one, and a prior active mission run prevents starting
-another occurrence. Calendar keys are local dates. st resolves a spring DST
+another occurrence. Calendar keys are local dates. Fractal resolves a spring DST
 gap to the first valid instant after the gap and an autumn fold to its earlier
-instant, firing only once. No `misfire` field is accepted by st or this library;
-st's broader `all`/`skip` catch-up controls are not modeled here.
+instant, firing only once. No `misfire` field is accepted by Fractal or this library;
+Fractal's broader `all`/`skip` catch-up controls are not modeled here.
 
 Runtime contract: [`mission-graph-runtime.md`, Continuous missions](https://github.com/compoundingtech/smalltalk/blob/main/docs/st3/mission-graph-runtime.md#continuous-missions),
 with grammar validation in `crates/st3/src/graph.rs` (`validate_schedule` and
