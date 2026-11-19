@@ -123,3 +123,40 @@ fn cold_signatures_keep_exact_bytes_and_retired_payloads_never_resurrect() {
     assert!(exchange.inventory.envelopes.contains(&ids[0]), "retired identity remains a tombstone");
     assert!(exchange.envelopes.iter().all(|envelope| envelope.hash != ids[0].hash));
 }
+
+#[cfg(test)]
+#[test]
+fn signature_only_receipt_exports_without_any_envelope() {
+    let source = node("alder");
+    let target = node("birch");
+    let id = ReplicaEnvelopeId { writer: "alder".into(), sequence: 42, hash: "a".repeat(64) };
+    let (key, _) = crate::fleet::MemberKey::generate().unwrap();
+    let signature = crate::claim::ReplicaEnvelopeSignature {
+        writer: id.writer.clone(), sequence: id.sequence, hash: id.hash.clone(), member_key: key.public().into(),
+        signature: key.sign(&crate::fleet::envelope_signature_message(FLEET, &id.writer, id.sequence, &id.hash)),
+    };
+    let mut exchange = source.export_replication_exchange(FLEET, &target.replication_inventory().unwrap()).unwrap();
+    assert!(exchange.envelopes.is_empty());
+    exchange.signatures.push(signature.clone());
+    target.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    assert!(target.replica_envelopes(vec![id.clone()]).unwrap().is_empty());
+    assert_eq!(target.replication_signatures_for(std::slice::from_ref(&id)).unwrap(), vec![signature.clone()]);
+    let mut archives = ArchiveReaders::new(Vec::new());
+    assert_eq!(target.replication_signatures_with_archive(&[id], &mut archives).unwrap(), vec![signature]);
+}
+
+#[cfg(test)]
+#[test]
+fn conflicting_signature_only_hot_receipt_is_not_preferred_over_cold_evidence() {
+    let holder = populated();
+    let ids = holder.replication_inventory().unwrap().envelopes;
+    holder.connection.write().execute("INSERT INTO replica_envelope_signatures VALUES(?1,?2,?3,'member','original','1')",
+        params![ids[0].writer, ids[0].sequence, ids[0].hash]).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let segment = archive(&holder, &directory.path().join("segment"), &ids);
+    let mut readers = ArchiveReaders::new(vec![segment]);
+    holder.connection.write().execute_batch("DELETE FROM replica_records; DELETE FROM replica_envelopes; UPDATE replica_envelope_signatures SET signature='contradictory';").unwrap();
+    assert!(holder.replica_envelopes(ids.clone()).unwrap().is_empty());
+    let error = holder.replication_signatures_with_archive(&ids, &mut readers).unwrap_err();
+    assert!(error.to_string().contains("contradictory hot/archive envelope signatures"));
+}
