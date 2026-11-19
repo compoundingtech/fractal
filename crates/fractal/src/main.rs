@@ -22770,6 +22770,13 @@ async fn sample_database_size(store: &Arc<Store>) {
         Ok(Err(error)) => stderr_message("fractal", format_args!("database size sample failed: {error:#}")),
         Err(error) => stderr_message("fractal", format_args!("database size sample stopped: {error}")),
     }
+    let archive_store = store.clone();
+    match archive_store.connection.write_workers().spawn_blocking(move ||
+        fractal_daemon::task_cpu::blocking("observations.database_archive_size", ||
+            archive_store.record_database_archive_size(now_ms()))).await {
+        Ok(size) => fractal_daemon::slo::note_database_archive_size(&size),
+        Err(error) => stderr_message("fractal", format_args!("archive size sample stopped: {error}")),
+    }
 }
 
 /// Ten to fifteen minutes: past the reconnects after a start, and spread so members restarted by
