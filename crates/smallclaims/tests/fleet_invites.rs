@@ -461,3 +461,32 @@ fn an_incomplete_join_replays_verdicts_only_on_the_paced_worker_after_removal() 
         assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
     }
 }
+
+#[test]
+fn replication_health_rejects_an_exchange_from_a_removed_incarnation() {
+    use smallclaims::replication::ReplicationHealth;
+    let store = sponsor();
+    let created = invite(&store, None, false);
+    assert!(matches!(
+        store.redeem_fleet_invite(&request(&code(&created, false), &joiner(), "birch", "listening")).unwrap(),
+        FleetRedemption::Admitted { .. }
+    ));
+    let old_key = store.fleet_view_sealed().unwrap().members.into_iter()
+        .find(|member| member.name == "birch").unwrap().member_key;
+    let now = now_ms();
+    store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+    {
+        let mut progress = store.replication_sync.lock().unwrap();
+        let peer = progress.entry("birch".into()).or_default();
+        peer.observe(0, Some((0, 0)), now);
+        peer.measured_member_key = Some(old_key);
+    }
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+    store.remove_fleet_member("birch", "sample", "person/example").unwrap();
+    let rejoin = invite(&store, None, false);
+    assert!(matches!(
+        store.redeem_fleet_invite(&request(&code(&rejoin, false), &joiner(), "birch", "listening")).unwrap(),
+        FleetRedemption::Admitted { .. }
+    ));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+}
