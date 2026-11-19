@@ -641,14 +641,13 @@ pub struct Ui {
     stalled: HashMap<String, String>,
 }
 
-/// What clicking a link says it did: an address is pasted in a browser; a path names a file on the
-/// machine the writer works on, which Fractal TUI cannot open.
+/// What a written clipboard request contains: a browser address or a path on the writer's machine.
 fn link_note(target: &str) -> String {
     let shown = text::truncate(target, 60);
     if target.starts_with('/') || target.starts_with("~/") {
-        format!("Copied {shown} · a file on the writer's machine")
+        format!("Clipboard request sent (OSC 52) for {shown} · a file on the writer's machine")
     } else {
-        format!("Copied {shown} · paste it in a browser")
+        format!("Clipboard request sent (OSC 52) for {shown} · paste it in a browser")
     }
 }
 
@@ -6125,8 +6124,7 @@ impl Ui {
                 self.find_in(&agent, "");
             }
             ('c', None) => {
-                copy(&agent);
-                self.flash(format!("Copied {agent}"));
+                self.copy_text(&agent);
             }
             _ => {}
         }
@@ -6565,7 +6563,7 @@ impl Ui {
                 self.dragging = false;
                 let click = self.pending_content_click.take();
                 if let Some(selection) = &self.conversation_state.selection {
-                    // A drag over nothing copies nothing (and does not say "Copied 0 lines").
+                    // A drag over nothing copies nothing and requests no clipboard write.
                     if selection.anchor == selection.head {
                         self.conversation_state.selection = None;
                         if let Some(hit) = click {
@@ -6772,12 +6770,7 @@ impl Ui {
             return;
         };
         if let Some(copied) = asked.copied {
-            let count = copied.lines().count().max(1);
-            copy(&copied);
-            self.flash(format!(
-                "The terminal copied {count} line{}",
-                if count == 1 { "" } else { "s" }
-            ));
+            self.copy_text(&copied);
         } else if asked.bell && !self.terminal_focused() {
             self.flash("🔔 The terminal rang its bell");
         }
@@ -6802,12 +6795,12 @@ impl Ui {
                 self.availability_press(letter);
             }
             Hit::Link(url) => {
-                copy(&url);
+                let copied = send_clipboard(&url, &mut io::stdout());
                 let opened = open_in_browser(&url);
-                self.flash(if opened {
-                    link_opened_note(&url)
-                } else {
-                    link_note(&url)
+                self.flash(match copied {
+                    Err(error) => format!("Clipboard request failed: {error}"),
+                    Ok(()) if opened => link_opened_note(&url),
+                    Ok(()) => link_note(&url),
                 });
             }
             Hit::Split(right) => self.split(right),
@@ -7179,10 +7172,6 @@ fn simplified(prefs: &prefs::Prefs) -> bool {
 }
 
 /// Request a clipboard write; OSC 52 has no delivery acknowledgement.
-fn copy(text: &str) {
-    let _ = send_clipboard(text, &mut io::stdout());
-}
-
 fn send_clipboard(text: &str, writer: &mut impl Write) -> io::Result<()> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = text.as_bytes();
@@ -8475,11 +8464,11 @@ mod tests {
     fn clicking_a_link_says_whether_it_copied_an_address_or_a_file_path() {
         assert_eq!(
             link_note("https://example.com/a"),
-            "Copied https://example.com/a · paste it in a browser"
+            "Clipboard request sent (OSC 52) for https://example.com/a · paste it in a browser"
         );
         assert_eq!(
             link_note("/srv/repo/spec.md"),
-            "Copied /srv/repo/spec.md · a file on the writer's machine"
+            "Clipboard request sent (OSC 52) for /srv/repo/spec.md · a file on the writer's machine"
         );
         assert!(link_note("~/notes/a.md").contains("a file on the writer's machine"));
     }
