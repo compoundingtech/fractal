@@ -2,7 +2,7 @@
 //! The dictionary is also the bounded-build lookup index: unlike CREATE INDEX on the
 //! historical candidate table, populating it never requires a history-sized writer loan.
 use super::*;
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 const PAGE: usize = 64;
 const PAGE_TIME: std::time::Duration = std::time::Duration::from_millis(10);
