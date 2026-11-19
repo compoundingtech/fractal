@@ -326,6 +326,62 @@ mod tests {
     }
 
     #[test]
+    fn ownerless_landing_exec_authorizes_the_mission_requester_without_st_agent() {
+        use super::super::tests::{FakeRuntime, apply_source};
+        let source = r#"version 2
+        mission "landing" state="ready" {
+            goal "Verify requester-owned landing."
+            step "land" {
+                agentless
+                lane "landing" host="node" class="landing" coverage="logical" {
+                    capacity cores=1 memory="1G";
+                }
+                exec "land" { command "true"; }
+            }
+        }"#;
+        for (requester, allowed) in [("agent/example/lander", true), ("agent/example/background", false)] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, source, "landing-source");
+            store.start_resource_authority("node", "epoch").unwrap();
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "landing".into(), revision: None, workspace: "/work".into(),
+                requester: Some(requester.into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "landing-run".into(),
+            }).unwrap();
+            let intent = crate::graph::parse_intent(source, "node").unwrap();
+            let spec = &intent.missions["landing"].steps["land"];
+            let declarations = crate::graph::parse_execution_intent(
+                spec.declarations_kdl.as_deref().unwrap(), "node", &run.id).unwrap();
+            let exec = declarations.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
+            assert!(!exec.environment.contains_key("ST_AGENT"));
+            assert!(!exec.environment.contains_key("FRACTAL_AGENT"));
+            let lane = lower_request(spec.resource_lane.as_ref().unwrap(), "landing-exec".into(), Owner {
+                run: run.subject.clone(), step: run.steps[0].subject.clone(),
+                attempt: run.steps[0].attempt, invocation: Some("exec/landing/land".into()),
+            });
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+                .with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                    landing: fractal_runtime::host::LandingPolicy {
+                        allowed_actors: BTreeSet::from(["agent/example/lander".into()]), ..Default::default()
+                    }, ..Default::default()
+                }));
+            let mut fit = reconciler.resource_lane_fit(&lane).unwrap();
+            fit.room = test_fit().room;
+            let admission = store.request_resource_membership(&lane, fit, 1).unwrap();
+            if allowed {
+                assert!(matches!(admission, Admission::Admitted(_)));
+            } else {
+                assert!(matches!(admission, Admission::Refused {
+                    code: crate::store::resource_membership::RefusalCode::UnauthorizedLanding, reason
+                } if reason.contains("allowedActors")));
+            }
+            let record = store.resource_membership_record(&lane.id, &lane.owner).unwrap();
+            assert_eq!(record.request.class, fractal_runtime::RequestClass::Landing);
+            assert_eq!(record.state, if allowed { "admitted" } else { "refused" });
+        }
+    }
+
+    #[test]
     fn disabled_heavy_io_refuses_before_disk_or_memory_observation() {
         use super::super::tests::FakeRuntime;
         let store = Arc::new(Store::open_memory("node").unwrap());
