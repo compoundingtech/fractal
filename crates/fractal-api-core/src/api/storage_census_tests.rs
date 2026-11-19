@@ -4,7 +4,7 @@ fn seed(state: &AppState, from: usize, to: usize) {
     state.store.connection.batched(|transaction| -> anyhow::Result<()> {
         for index in from..to {
             crate::store::append_claim_tx(transaction, &state.node,
-                &format!("custom.census/{index}"), "custom.census.reading", None,
+                "custom/census/reading", "custom.census.reading", None,
                 &json!({"fields": {"reading": index, "note": "é"}}), &[], None)?;
             transaction.execute(
                 "INSERT INTO local_observations(after_store_index, subject, kind, body, observed_at_unix_ms)
@@ -25,7 +25,7 @@ async fn storage_census_route_has_constant_sqlite_cost_as_retained_history_grows
     let state = super::tests::state(root.path());
     state.store.storage_census.checkpoint_enabled.set(false).unwrap();
     async fn measured(state: &AppState) -> (work::SqliteWork, Value) {
-        operations::storage_status(State(state.clone())).await.unwrap();
+        let _ = operations::storage_status(State(state.clone())).await.unwrap();
         let mut best = None;
         for _ in 0..3 {
             let before = work::total();
