@@ -145,6 +145,7 @@ pub mod seat_status;
 pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
+mod card_actual;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -852,7 +853,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5268709f026 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfecc739717ae owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1203,6 +1204,9 @@ WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(body, '$.fields.owner_run'))
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
+WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_person_ask_origin_index
+ON claims(json_extract(body, '$.fields.origin_step'), json_extract(body, '$.fields.origin_attempt'), subject)
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_recipient_index
 ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
@@ -22549,7 +22553,7 @@ pub fn step_execution_timing_at(
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
     Ok(fold_step_timing(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22564,7 +22568,7 @@ pub fn step_execution_clock_at(
     currently_active: bool,
 ) -> rusqlite::Result<StepTiming> {
     Ok(fold_step_clock(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22581,6 +22585,15 @@ pub fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
+    Ok(shared_step_timing_events(connection, subject)?.as_ref().clone())
+}
+
+/// Borrow the immutable history for clock folds without cloning its JSON bodies. Only the
+/// history is reused: attempt, snapshot time, and active state are folded on every read.
+fn shared_step_timing_events(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<Arc<Vec<(String, Value, u128)>>> {
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
     // A committed read of a database file keys the events on the newest index and the count of
@@ -22608,7 +22621,7 @@ pub fn step_timing_events(
             .filter(|(kept, _)| *kept == key)
             .map(|(_, events)| events.clone())
     {
-        return Ok(events.as_ref().clone());
+        return Ok(events);
     }
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha579e98adb61 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
@@ -22627,7 +22640,7 @@ pub fn step_timing_events(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
-    let events = events
+    let events = Arc::new(events
         .into_iter()
         .map(|(kind, body, accepted)| {
             (
@@ -22636,13 +22649,13 @@ pub fn step_timing_events(
                 accepted.parse::<u128>().unwrap_or(0),
             )
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>());
     if let (Some(file), Some(key)) = (file, key) {
         let mut kept = STEP_TIMING_EVENTS.lock().unwrap_or_else(PoisonError::into_inner);
         if kept.len() >= ACTUAL_CACHE_LIMIT && !kept.contains_key(&file) {
             kept.clear();
         }
-        kept.insert(file, (key, Arc::new(events.clone())));
+        kept.insert(file, (key, Arc::clone(&events)));
     }
     Ok(events)
 }
