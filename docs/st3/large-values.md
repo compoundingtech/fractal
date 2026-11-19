@@ -984,9 +984,9 @@ invariants; no growing receipt body is synthesized by this update.
 ### Durable phone service minutes
 
 The `fractal_store::store::observation_minutes` maintainer owns the summary
-report, exact-minute and live-window sinks (`lv-hfcc0104f3a41`,
-`lv-h8d4d7e936cfe`, `lv-h9b74750ad85e`). They read canonical claim bodies through
-source/report, subject and numeric-minute seek indexes, respectively. The phone
+report, exact-minute, once-only cardinality and live-window sinks (`lv-hfcc0104f3a41`,
+`lv-h8d4d7e936cfe`, `lv-h0b3749d94a8e`, `lv-h9b74750ad85e`). They read canonical
+claim bodies through source/report, subject and numeric-minute seek indexes. The phone
 producer limits a report to 32 validated samples and canonical bounded histogram
 bins, but these producer limits do not establish a general physical value-size
 proof. The tracing TODO retains exact source, report and minute identities while

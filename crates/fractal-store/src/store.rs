@@ -9690,6 +9690,9 @@ fn validate_claim_cardinality(
 ) -> Result<(), FractalError> {
     let duplicate = match cardinality {
         fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition => false,
+        fractal_schema::Cardinality::Once if kind == observation_minutes::KIND => {
+            observation_minutes::admitted_minute_exists(transaction, subject)?
+        }
         fractal_schema::Cardinality::Once => transaction
             .query_row(
                 "SELECT 1 FROM claims WHERE subject=?1 AND kind=?2 LIMIT 1",

@@ -94,6 +94,9 @@ Conflicting minute claims admitted concurrently on disconnected members are excl
 native population after replication rather than selecting a winner or counting both.
 Equal concurrent claims collapse to one minute. Admission requires a current grant;
 already accepted evidence remains readable after that grant expires or is revoked.
+Only minutes with valid native phone-admission receipts occupy report replay, minute replay
+or once-only cardinality keys. Merely replicated claims, including signed claims without
+matching phone/person provenance, cannot block authentic admission or enter native evidence.
 
 The graph is the only authority for native objective rows and doctor lines. Native reads seek
 a numeric minute-time index for the last hour; report replay seeks the source/report index

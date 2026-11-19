@@ -78,6 +78,18 @@ fn admitted_minute(connection: &Connection, claim: &ClaimRecord) -> Result<Optio
     }
 }
 
+/// Once-only cardinality, like replay detection, counts only admitted phone evidence.
+pub(super) fn admitted_minute_exists(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d4d7e936cfe owner=fractal_store::store::observation_minutes TODO=trace-statement-and-value-representation */ MINUTE_LOOKUP).map_err(internal)?;
+    let rows = statement.query_map([subject], smallclaims::store::claim_from_row).map_err(internal)?;
+    for row in rows {
+        if admitted_minute(connection, &row.map_err(internal)?)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Store {
     pub fn observation_source(&self, grant: &str, actor: &str) -> Result<String, FractalError> {
         source_for_grant(&self.readers.get(), grant, actor, true)
@@ -110,7 +122,7 @@ impl Store {
             }
             let mut missing = Vec::new();
             for (minute, input) in minutes.iter().zip(&inputs) {
-                let mut existing = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d4d7e936cfe owner=fractal_store::store::observation_minutes TODO=trace-statement-and-value-representation */ MINUTE_LOOKUP).map_err(internal)?;
+                let mut existing = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b3749d94a8e owner=fractal_store::store::observation_minutes TODO=trace-statement-and-value-representation */ MINUTE_LOOKUP).map_err(internal)?;
                 let rows = existing.query_map([&input.subject], smallclaims::store::claim_from_row).map_err(internal)?;
                 let mut found = false;
                 for row in rows {
@@ -267,6 +279,14 @@ mod tests {
             assert_eq!(receiver.observation_minutes(120_000).unwrap(), vec![authentic.clone()], "{spoof}");
             assert!(!receiver.accept_observation_minutes("person/example", std::slice::from_ref(&authentic)).unwrap(), "{spoof}");
             assert_eq!(receiver.index().unwrap(), accepted, "{spoof}: authentic retry must not append");
+            receiver.with_all_runs_fenced(|tx| -> Result<(), FractalError> {
+                let error = super::super::validate_claim_cardinality(
+                    tx, &authentic.subject(), KIND, Some("person/example"), &BTreeMap::new(),
+                    &fractal_schema::Cardinality::Once,
+                ).unwrap_err();
+                assert_eq!(error.code, "claim-cardinality", "{spoof}: admitted evidence still occupies the once-only key");
+                Ok(())
+            }).unwrap();
             let mut conflict = authentic;
             conflict.report_digest = "c".repeat(64);
             assert_eq!(receiver.accept_observation_minutes("person/example", &[conflict]).unwrap_err().code,
