@@ -329,6 +329,9 @@ mod tests {
             }
         }).await.unwrap();
         setup_signer(&store);
+        assert!(store.declared_resource_referrers("resource/fleet/roll-completion").unwrap().iter().any(|binding|
+            binding["owner"] == "agent/example/roll-authority" && binding["name"] == "roll-authority"),
+            "restoring authority must publish a new desired token, not replay the first apply");
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if roll_completion::row(&store, now + 1)["measurement"]["windows"][0]["eligible"] == 1.0 { break; }

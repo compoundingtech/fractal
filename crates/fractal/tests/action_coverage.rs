@@ -39,8 +39,9 @@ async fn cli_native_roll_receipts_and_intent_proof_survive_restart() {
     daemon.store().bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
     daemon.store().pin_fleet_anchor(key.public()).unwrap();
     daemon.store().set_member_key(Some(key.clone())).unwrap();
+    daemon.store().admit_fleet_anchor("7c9e6679-7425-40de-944b-e07fc1f90ae7", key.public(), "listening").unwrap();
     daemon.apply(&format!(r#"version 2
-agent "roll-authority" {{
+agent "example/roll-authority" {{
     command "true"
     host "{NODE}"
     resource "roll-authority" subject="resource/fleet/roll-completion" reason="Declare rolls"
@@ -50,12 +51,12 @@ mission "fleet/roll/cli-proof" state="ready" timeout="20m" {{
     goal "Resolve a signed pinned native rollout intent."
 }}
 "#), "native-roll-cli");
-    daemon.store().ensure_principal_key("agent/roll-authority").unwrap();
+    daemon.store().ensure_principal_key("agent/example/roll-authority").unwrap();
     roll_completion::install(daemon.store(), daemon.root.path()).unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let receipt = Receipt::SourceEnabled {
         version: 1,
-        producer: "agent/roll-authority".into(),
+        producer: "agent/example/roll-authority".into(),
         enabled_at_ms: now.as_millis().try_into().unwrap(),
         mission_prefix: "fleet/roll/".into(),
         resource_input: "main".into(),
@@ -63,9 +64,9 @@ mission "fleet/roll/cli-proof" state="ready" timeout="20m" {{
         roll_id_prefix: "dotfiles/".into(),
     };
     let source = daemon.store().append_claim(&ClaimInput {
-        subject: "resource/fleet/roll-completion/sources/agent/roll-authority/enabled".into(),
+        subject: "resource/fleet/roll-completion/sources/agent/example/roll-authority/enabled".into(),
         kind: "resource.observed".into(),
-        actor: Some("agent/roll-authority".into()),
+        actor: Some("agent/example/roll-authority".into()),
         fields: BTreeMap::from([
             ("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
             ("state".into(), json!("observed")),
@@ -93,7 +94,7 @@ mission "fleet/roll/cli-proof" state="ready" timeout="20m" {{
     let run = daemon.store().create_mission_run(&MissionRunRequest {
         mission: "fleet/roll/cli-proof".into(), revision: None,
         workspace: daemon.root.path().to_string_lossy().into_owned(),
-        requester: Some("agent/roll-authority".into()), mode: Some("run".into()),
+        requester: Some("agent/example/roll-authority".into()), mode: Some("run".into()),
         inputs: BTreeMap::from([("main".into(), format!("{}@{}", resource.subject, resource.id))]),
         idempotency_key: "cli-roll-intent".into(),
     }).unwrap();

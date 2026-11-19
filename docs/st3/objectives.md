@@ -308,6 +308,12 @@ local client cannot impersonate the authority. Signed `resource.observed` claims
 carry `fields.kind = "custom.fractal.fleet-roll-receipt"` using the existing open custom
 resource schema, and the version-1 receipt in `fields.facts`.
 
+Authority receipts also require a currently usable delegated signing chain.
+Historical signature authentication alone does not preserve authority after a key
+in that chain is revoked: admission and replay remove that receipt's trusted
+contribution, rather than retaining cached healthy adoption. Existing source
+enrollment can recover only from a surviving authenticated candidate.
+
 For an enrolled native rollout, resolve the onset and pinned revision with
 `fractal slo roll-intent mission-run/RUN_ID --json`. It returns `roll_id`,
 `declared_at_ms`, `dotfiles_revision` and `resource_claim_id`, authenticated against
@@ -481,6 +487,13 @@ epoch (`ivm_event_state.database_id`, `ivm_source.epoch`), captured in the same
 snapshot as the census. Ordinary reopen preserves this identity. Native
 restore/clone identity rotation starts a new source interval at the new native
 cut, never reuses an old arrival cursor, and cannot inherit prior coverage.
+
+The roll runtime explicitly initializes this existing canonical source lifecycle
+before retaining signed receipt references. Initialization does not attach
+optional materialized views or enable their claim-capture hooks, and preserves an
+existing source epoch, event-retention choice and unavailable state. Missing or
+unavailable lifecycle proof is never replaced with a fabricated identity.
+
 The in-memory reducer keeps only the latest closed frontier per producer/host;
 signed graph and ledger history retain predecessor proof for replay.
 

@@ -373,6 +373,28 @@ fn authenticated_receipt(store: &Store, id: &str) -> Result<(Receipt, String)> {
     let signature = authorization.signature.context("roll receipt signature is missing")?;
     ensure!(signature.on_behalf.is_none() && signature.format.is_none() && signature.signed_fields.is_empty(),
         "roll receipt requires whole-record direct authority");
+    // Historical signature validity does not mean its delegated keys remain
+    // trusted now. Replay must withdraw proof after a later key revocation.
+    for grant_id in &signature.chain {
+        let grant = store.claim_by_id(grant_id)?.context("roll signer delegation is missing")?;
+        let key = grant.body["fields"]["key"].as_str().context("roll signer delegation key is missing")?;
+        let reader = store.readers.get();
+        let mut query = reader.prepare_cached(
+            "SELECT id FROM claims WHERE subject=?1 AND kind='principal.key-revoked'
+             AND json_extract(body,'$.fields.key')=?2")?;
+        for id in query.query_map(params![grant.subject, key], |row| row.get::<_, String>(0))? {
+            let revocation = store.claim_authorization(&id?)?;
+            ensure!(!matches!(revocation.verdict, smallclaims::principal::Verdict::Held(_)),
+                "roll signer current revocation authority is unsettled");
+            if revocation.verdict == smallclaims::principal::Verdict::Verified
+                && let Some(revoker) = revocation.signature
+            {
+                ensure!(revoker.signer != grant.subject
+                    && smallclaims::principal::Family::of(&revoker.signer) != Some(smallclaims::principal::Family::Node),
+                    "roll signer delegation has been revoked");
+            }
+        }
+    }
     let fields = &claim.body["fields"];
     ensure!(fields["kind"] == "custom.fractal.fleet-roll-receipt", "incorrect roll receipt resource kind");
     let receipt: Receipt = serde_json::from_value(fields["facts"].clone())?;
@@ -474,6 +496,7 @@ fn authenticated_receipt(store: &Store, id: &str) -> Result<(Receipt, String)> {
 /// The old unsigned JSON ledger is deliberately not an authority input. It remains on disk
 /// for diagnostics; only graph claims referenced in this signed ledger can be replayed.
 pub fn install(store: &Store, state_dir: &Path) -> Result<()> {
+    store.initialize_native_source_lifecycle()?;
     let source = store.fractal.extensions.get::<Source>();
     let mut writer = source.writer.lock().unwrap_or_else(PoisonError::into_inner);
     ensure!(writer.is_none(), "roll receipt registry already installed");

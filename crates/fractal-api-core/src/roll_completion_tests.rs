@@ -246,6 +246,7 @@ pub(crate) fn setup_signer(store: &Store) {
     store.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
     store.pin_fleet_anchor(KEY.public()).unwrap();
     store.set_member_key(Some(KEY.clone())).unwrap();
+    store.admit_fleet_anchor("7c9e6679-7425-40de-944b-e07fc1f90ae7", KEY.public(), "listening").unwrap();
     // Slash-qualified identity is placement-independent. A simple name becomes
     // agent/{host}.roll-authority and cannot authorize the separately signed principal.
     let source = format!(r#"version 2
@@ -255,9 +256,16 @@ agent "example/roll-authority" {{
   resource "roll-authority" subject="resource/fleet/roll-completion" reason="Declare rolls"
 }}
 "#, store.origin());
-    let intent = crate::graph::parse_intent(&source, store.origin()).unwrap();
-    let preview = store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
-    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    if !store.declared_resource_referrers(RESOURCE).unwrap().iter().any(|binding|
+        binding["owner"] == "agent/example/roll-authority" && binding["name"] == "roll-authority")
+    {
+        let intent = crate::graph::parse_intent(&source, store.origin()).unwrap();
+        let preview = store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
+        // Re-enabling a removed binding is a new publication, not a replay of
+        // the first source-hash idempotency key.
+        let key = format!("roll-authority:{}:{}", intent.source_hash, store.index().unwrap());
+        store.apply(&intent, &preview.subject_tokens, &key).unwrap();
+    }
     store.ensure_principal_key("agent/example/roll-authority").unwrap();
 }
 
@@ -377,13 +385,13 @@ async fn public_claim_api_cannot_mint_host_evidence_or_unbound_declarations() {
         "actor":"agent/example/roll-authority","fields":{"kind":"custom.fractal.fleet-roll-receipt","state":"declared",
         "facts":declaration("poison", &["node"])}});
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/claims")
-        .extension(crate::api::BoundAgent("agent/roll-authority".into()))
+        .extension(crate::api::BoundAgent("agent/example/roll-authority".into()))
         .header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
     assert!(response.status().is_success());
     let claim: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     state.store.seal_local_batches().unwrap();
     state.store.judge_claims(true).unwrap();
-    let signed = SignedReceipt { claim_id: claim["id"].as_str().unwrap().into() };
+    let signed = SignedReceipt { claim_id: claim["value"]["id"].as_str().unwrap().into() };
     assert_eq!(ingest(&state.store, signed, START + 1).unwrap()["changed"], true);
 }
 
@@ -411,14 +419,14 @@ fn resolution_requires_the_original_authority_and_immutable_admitted_declaration
     let root = tempfile::tempdir().unwrap();
     let store = Store::open_memory("host-a").unwrap();
     install(&store, root.path()).unwrap();
-    let declared = publish_fixture(&store, declaration("roll", &["host-a"]), Some("agent/roll-authority"));
+    let declared = publish_fixture(&store, declaration("roll", &["host-a"]), Some("agent/example/roll-authority"));
     ingest(&store, SignedReceipt { claim_id: declared.clone() }, START).unwrap();
     let resolution = Receipt::HostTargetResolved { version: 1, roll_id: "roll".into(), declared_at_ms: START,
         host: "host-a".into(), target: target(), expected_system_path: "/nix/store/example-system".into(),
         expected_home_path: "/nix/store/example-home".into(), declaration_claim_id: declared };
     let forged = publish_fixture(&store, resolution.clone(), Some("agent/other"));
     assert!(ingest(&store, SignedReceipt { claim_id: forged }, START).is_err());
-    let legitimate = publish_fixture(&store, resolution.clone(), Some("agent/roll-authority"));
+    let legitimate = publish_fixture(&store, resolution.clone(), Some("agent/example/roll-authority"));
     ingest(&store, SignedReceipt { claim_id: legitimate.clone() }, START).unwrap();
     assert_eq!(resolved_target(&store, &legitimate).unwrap().host, "host-a");
     assert_eq!(ingest(&store, SignedReceipt { claim_id: legitimate }, START + 1).unwrap()["changed"], false);
@@ -426,7 +434,7 @@ fn resolution_requires_the_original_authority_and_immutable_admitted_declaration
     if let Receipt::HostTargetResolved { expected_home_path, .. } = &mut conflict {
         *expected_home_path = "/nix/store/different-home".into();
     }
-    let conflict = publish_fixture(&store, conflict, Some("agent/roll-authority"));
+    let conflict = publish_fixture(&store, conflict, Some("agent/example/roll-authority"));
     assert!(ingest(&store, SignedReceipt { claim_id: conflict }, START + 1).is_err());
 }
 
@@ -436,13 +444,13 @@ fn signed_host_proof_survives_canonical_graph_replication_without_trusting_origi
     let root = tempfile::tempdir().unwrap();
     let source = Store::open_memory("host-a").unwrap();
     install(&source, root.path()).unwrap();
-    let declared = publish_fixture(&source, declaration("replicated", &["host-a"]), Some("agent/roll-authority"));
+    let declared = publish_fixture(&source, declaration("replicated", &["host-a"]), Some("agent/example/roll-authority"));
     ingest(&source, SignedReceipt { claim_id: declared.clone() }, START).unwrap();
     let resolved = publish_fixture(&source, Receipt::HostTargetResolved {
         version: 1, roll_id: "replicated".into(), declared_at_ms: START, host: "host-a".into(), target: target(),
         expected_system_path: "/nix/store/example-system".into(), expected_home_path: "/nix/store/example-home".into(),
         declaration_claim_id: declared.clone(),
-    }, Some("agent/roll-authority"));
+    }, Some("agent/example/roll-authority"));
     ingest(&source, SignedReceipt { claim_id: resolved.clone() }, START).unwrap();
     let observed = publish_fixture(&source, observation("replicated", "host-a", START + 1, Adoption::Verified), None);
     let anchor = source.claim_authorization(&observed).unwrap().signature.unwrap().key;
@@ -485,9 +493,11 @@ fn revoked_declaration_proof_removes_cached_good_adoption_on_rebuild() {
     ingest_fixture(&store, observation("roll", "host-a", START + 1, Adoption::Verified), START + 1).unwrap();
     assert_eq!(row(&store, START + 1)["measurement"]["windows"][0]["eligible"], 1.0);
     let signature = store.claim_authorization(declared["claim_id"].as_str().unwrap()).unwrap().signature.unwrap();
-    store.revoke_device_key("agent/roll-authority", &signature.key, "example revocation").unwrap();
+    store.revoke_device_key("agent/example/roll-authority", &signature.key, "example revocation").unwrap();
     store.seal_local_batches().unwrap();
     store.judge_claims(true).unwrap();
+    assert_eq!(store.claim_authorization(declared["claim_id"].as_str().unwrap()).unwrap().verdict,
+        smallclaims::principal::Verdict::Verified, "historical authenticity is not current roll authority");
     rebuild(&store).unwrap();
     assert_eq!(row(&store, START + 1)["measurement"]["windows"][0]["eligible"], 0.0);
     assert_eq!(row(&store, START + 1)["status"], "no-data");
@@ -496,7 +506,7 @@ fn revoked_declaration_proof_removes_cached_good_adoption_on_rebuild() {
 // Reducer fixtures represent already admitted native proofs. API/signature tests
 // below exercise the real publication boundary; no production eligibility bypass.
 fn complete_source_fixture(registry: &mut Registry, through: u64) {
-    let producer = "agent/roll-authority".to_owned();
+    let producer = "agent/example/roll-authority".to_owned();
     let host = "host-a".to_owned();
     registry.membership = Membership { producers: BTreeSet::from([producer.clone()]),
         hosts: BTreeMap::from([(host.clone(), "incarnation-a".into())]), since_ms: 0 };
@@ -505,7 +515,7 @@ fn complete_source_fixture(registry: &mut Registry, through: u64) {
         revision_fact: "head".into(), roll_id_prefix: "demo/".into() }, "enable", &producer, 0);
     let hosts = registry.membership.hosts.clone();
     record_source(registry, Receipt::SourceFrontier { version: 1, producer, host,
-        members: vec!["agent/roll-authority".into()], hosts,
+        members: vec!["agent/example/roll-authority".into()], hosts,
         source_claim_id: "enable".into(), covered_from_ms: 0, through_ms: through,
         previous_frontier_claim_id: None, source_index: 1, source_lifetime: "database:1".into(), receipt_claim_ids: vec![] },
         &format!("frontier-{through}"), "host/host-a", through);
@@ -554,8 +564,10 @@ fn stale_or_short_history_retains_diagnostics_without_budget_eligibility() {
     let stale = render(&registry, true, now + FRONTIER_FRESHNESS_MS + 1);
     assert_eq!(stale["status"], "no-data");
     assert_eq!(stale["measurement"]["windows"][0]["bad"], 1.0);
+    assert_eq!(stale["measurement"]["windows"][0]["budget_eligible"], false);
     registry.source_accepted_at.insert("agent/example/roll-authority".into(), now - DAY);
     assert_eq!(render(&registry, true, now)["status"], "no-data");
+    assert_eq!(render(&registry, true, now)["measurement"]["windows"][0]["budget_eligible"], false);
 }
 
 #[test]
@@ -610,7 +622,7 @@ async fn generic_claim_api_never_signs_source_frontiers_even_for_bound_authority
     let claim: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     state.store.seal_local_batches().unwrap();
     state.store.judge_claims(true).unwrap();
-    let id = claim["id"].as_str().unwrap().to_owned();
+    let id = claim["value"]["id"].as_str().unwrap().to_owned();
     let accepted = state.store.claim_by_id(&id).unwrap().unwrap().accepted_at_unix_ms as u64;
     ingest(&state.store, SignedReceipt { claim_id:id }, START).unwrap();
     assert!(source_configs(&state.store).unwrap()[0].enabled_at_ms >= accepted,

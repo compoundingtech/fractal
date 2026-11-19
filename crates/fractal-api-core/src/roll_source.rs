@@ -227,9 +227,10 @@ fn census_pending(store: &Store, config: &SourceConfig, now: u64, pending: Vec<R
     Ok(Some(Census { from: config.enabled_at_ms, through, pending_intents, covered }))
 }
 
-/// Existing native database identity and restore epoch scope every source cursor.
-/// A normal reopen preserves this value; replacement/restore cannot inherit a
-/// previous lifetime's coverage merely by reusing its numerical claim index.
+/// Canonical native lifecycle metadata is initialized explicitly by native source
+/// startup, independently of optional shadow views. Ordinary reopen preserves it;
+/// replacement/restore cannot inherit coverage by reusing a numerical claim index.
+/// Unsupported/unavailable lifecycle state is an error, never a synthesized identity.
 pub fn source_lifetime(store: &Store) -> Result<String> {
     let (database, epoch): (String, String) = store.readers.get().query_row(
         "SELECT e.database_id, CAST(s.epoch AS TEXT)
@@ -384,6 +385,59 @@ mod tests {
         let store = Store::open_memory("host-a").unwrap();
         assert!(intent_context(&store, "missing").is_err());
         assert!(intent_context(&store, "mission-run/missing").is_err());
+    }
+
+    #[test]
+    fn plain_native_store_lifetime_survives_reopen_but_not_replacement_or_unavailability() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.db");
+        let original = {
+            let store = Store::open(&path, "host-a").unwrap();
+            assert!(source_lifetime(&store).is_err(), "a source not initialized by its owner is unknown");
+            store.initialize_native_source_lifecycle().unwrap();
+            assert!(store.ivm_views().is_none(), "native lifetime must not require shadow views");
+            source_lifetime(&store).unwrap()
+        };
+        let store = Store::open(&path, "host-a").unwrap();
+        store.initialize_native_source_lifecycle().unwrap();
+        assert_eq!(source_lifetime(&store).unwrap(), original);
+        let replacement = Store::open(&root.path().join("replacement.db"), "host-a").unwrap();
+        replacement.initialize_native_source_lifecycle().unwrap();
+        assert_ne!(source_lifetime(&replacement).unwrap(), original);
+        store.connection.write().execute(
+            "UPDATE ivm_event_state SET available=0 WHERE singleton=1", [],
+        ).unwrap();
+        assert!(source_lifetime(&store).is_err(), "unavailable native source must remain unknown");
+        drop(store);
+        let store = Store::open(&path, "host-a").unwrap();
+        store.initialize_native_source_lifecycle().unwrap();
+        assert!(source_lifetime(&store).is_err(), "reopen cannot silently repair unavailable authority");
+    }
+
+    #[test]
+    fn native_lifecycle_initialization_preserves_existing_source_and_event_contract() {
+        let store = Store::open_memory("host-a").unwrap();
+        let views = smallclaims::ivm::Views::new(Vec::new()).unwrap();
+        let cut = smallclaims::ivm::SourceCut {
+            epoch: 7, admitted: 0, projected: 0, local_generation: 3,
+        };
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            views.create_schema(&transaction).unwrap();
+            views.initialize_empty(&transaction, cut).unwrap();
+            smallclaims::ivm::events::install(&transaction, 1024).unwrap();
+            transaction.commit().unwrap();
+        }
+        let lifetime = source_lifetime(&store).unwrap();
+        store.initialize_native_source_lifecycle().unwrap();
+        assert_eq!(source_lifetime(&store).unwrap(), lifetime);
+        assert_eq!(smallclaims::ivm::source_cut(&store.readers.get()).unwrap(), Some(cut));
+        // Reinstall through the owning API proves retention was not replaced.
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        smallclaims::ivm::events::install(&transaction, 1024).unwrap();
+        transaction.commit().unwrap();
     }
 
     #[test]
