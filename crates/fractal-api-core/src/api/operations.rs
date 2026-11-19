@@ -27,6 +27,7 @@ pub async fn doctor(
     web: Option<Extension<LocalWebStatus>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
+    let slo_state_dir = state.state_dir.clone();
     let environment = match tokio::time::timeout(
         DOCTOR_STEP,
         crate::api::read_deadline::spawn_blocking(crate::environment::snapshot),
@@ -115,27 +116,8 @@ pub async fn doctor(
         });
     }
     let slo_store = reader_store.clone();
-    let slo_report = blocking_store(move || {
-        let mut report = request_latency_windows();
-        super::client_observations::attach(&slo_store, &mut report, client_now_ms() as u64)?;
-        Ok(report)
-    }).await?;
-    for (name, status, message) in crate::slo::doctor_lines(&slo_report) {
-        report.checks.push(DoctorCheck {
-            name,
-            status: status.into(),
-            message,
-        });
-    }
-    // Only a daemon that runs the divergence check knows the count; the rest show no line.
-    if let Some(open) = reader_store.open_divergences_at_last_check() {
-        let (name, status, message) = crate::slo::divergence_line(open);
-        report.checks.push(DoctorCheck {
-            name,
-            status: status.into(),
-            message,
-        });
-    }
+    let rows = blocking_store(move || current_slo_rows(&slo_store, &slo_state_dir)).await?;
+    report.checks.extend(native_slo_checks(&rows));
     report.checks.extend(github_usage_checks(
         &crate::resource::github_usage_report(),
         client_now_ms(),
@@ -153,6 +135,70 @@ pub async fn doctor(
     ));
     report.status = doctor_status(&report.checks).into();
     Ok(Json(report))
+}
+
+/// Doctor presents the same native evaluations as the SLO list, including declared objectives.
+/// Tone is already evaluated by the daemon; this adapter only translates diagnostic severity.
+fn native_slo_checks(rows: &[Value]) -> impl Iterator<Item = DoctorCheck> + '_ {
+    rows.iter().map(|row| DoctorCheck {
+        name: format!("slo/{}", row["id"].as_str().unwrap_or_default()),
+        status: match row["tone"].as_str() {
+            Some("green") => "pass",
+            Some("red") => "fail",
+            _ => "warn",
+        }.into(),
+        message: format!(
+            "{}; {}; target {}; {}",
+            row["status"].as_str().unwrap_or("no-data"),
+            row["current"].as_str().unwrap_or_default(),
+            row["target"].as_str().unwrap_or_default(),
+            row["window"].as_str().unwrap_or_default(),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod native_slo_doctor_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_preserves_every_native_row_and_its_evaluation() {
+        let rows = [
+            ("agents/mail-delivery", "missed", "red", "fail"),
+            ("build/admission", "met", "green", "pass"),
+            ("cpu/idle", "no-data", "quiet", "warn"),
+            ("example/merge-latency/p50", "at-risk", "yellow", "warn"),
+            ("ios-live-share", "missed", "red", "fail"),
+            ("database-archive", "met", "green", "pass"),
+            ("fleet/roll-completion", "no-data", "quiet", "warn"),
+        ];
+        let native = rows.iter().map(|(id, status, tone, _)| json!({
+            "id": id, "kind": "objective", "status": status, "tone": tone,
+            // Deliberately do not imply the verdict from these display strings.
+            "current": "native reading", "target": "native target", "window": "30d"
+        })).collect::<Vec<_>>();
+        let checks = native_slo_checks(&native).collect::<Vec<_>>();
+        assert_eq!(checks.len(), rows.len());
+        for (check, (id, verdict, _, severity)) in checks.iter().zip(rows) {
+            assert_eq!(check.name, format!("slo/{id}"));
+            assert_eq!(check.status, severity);
+            assert_eq!(check.message, format!("{verdict}; native reading; target native target; 30d"));
+        }
+    }
+
+    #[test]
+    fn doctor_native_inventory_matches_the_slo_endpoint_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let rows = current_slo_rows(&state.store, &state.state_dir).unwrap();
+        assert!(!rows.is_empty());
+        let checks = native_slo_checks(&rows).collect::<Vec<_>>();
+        assert_eq!(checks.len(), rows.len());
+        for (row, check) in rows.iter().zip(checks) {
+            assert_eq!(check.name, format!("slo/{}", row["id"].as_str().unwrap()));
+            assert!(check.message.starts_with(row["status"].as_str().unwrap()));
+        }
+    }
 }
 
 fn descriptor_check() -> DoctorCheck {
