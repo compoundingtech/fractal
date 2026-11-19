@@ -7,6 +7,7 @@
   },
   "schema": {
     "status": "changed",
+    "transitions": [[20, 21]],
     "detail": "Candidates retain their full original signature text and PRIMARY KEY(claim_id, signature). A new claim_signature_originals dictionary stores another exact text copy, candidate provenance and a 32-byte SHA-256 reference, keyed by (claim_id, reference). Sources, the selected-signature facade and judging cursors move to references; the migration checkpoint records staged progress. The dictionary duplicates canonical text and adds key/row overhead: smaller relationship values do not establish total database savings. No measured size or latency result is claimed."
   },
   "rules": {

@@ -2779,7 +2779,7 @@ mission "launch-publication" state="ready" {
     }
 
     #[test]
-    fn signature_storage_19_to_20_upgrade_preserves_runtime_operation_and_format_boundary() {
+    fn signature_storage_19_to_21_upgrade_preserves_runtime_operation_and_format_boundary() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("claims.db");
         let store = Store::open(&path, "node").unwrap();
@@ -2823,6 +2823,8 @@ mission "launch-publication" state="ready" {
         // actual operation, revocation, observation-generation or format-cut state.
         let (before_roots, before_generation, before_cuts) = {
             let connection = store.connection.write();
+            connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+            connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
             connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
                 DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
                 CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
@@ -2843,7 +2845,7 @@ mission "launch-publication" state="ready" {
             reader
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            20
+            21
         );
         assert_eq!(roots(&reader, true), before_roots);
         assert_eq!(generation(&reader), before_generation);
