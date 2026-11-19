@@ -3991,7 +3991,9 @@ finally:
 
     def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
         self.commit('b.txt', 'two')
-        seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'unix:/e', 'FRACTAL_AGENT': 'agent/x', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
+        seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'unix:/e',
+                'FRACTAL_AGENT': GIT_ENV.get('FRACTAL_AGENT', GIT_ENV.get('ST_AGENT', 'agent/x')),
+                'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
                 'ST_AGENT': GIT_ENV.get('ST_AGENT', 'agent/x'), 'ST_AGENT_FOO': 'x',
                 'ST_SKIP_EVIDENCE': '0', 'ST_EVIDENCE_TIME_LIMIT': '9'}
         out = Path(self.tmp.name) / 'seen'

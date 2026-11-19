@@ -15,7 +15,13 @@
 set -euo pipefail
 # A direct invocation owns one native phase; st-test supplies the enclosing root.
 # The profile/receipt flags are provisional until the native profile contract merges.
-if [[ $OSTYPE != darwin* ]] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
+platform=unknown
+if [[ -r /proc/sys/kernel/ostype ]]; then
+  builtin read -r platform < /proc/sys/kernel/ostype
+elif [[ -x /usr/bin/uname ]]; then
+  platform=$(/usr/bin/uname -s)
+fi
+if [[ $platform != Darwin ]] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
   receipt_root=$HOME/.cache/st-test/admission
   mkdir -p "$receipt_root"
   request=$(uuidgen)

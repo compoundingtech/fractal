@@ -2075,7 +2075,8 @@ no longer used by default and can be deleted.
 The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
 missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
 Darwin keeps its direct-execution path through st-test and both ci-local shell entrypoints; none invokes native resources admission.
-The shell entrypoints use Bash's own `OSTYPE`, not a caller-substitutable `uname` on PATH.
+The shell entrypoints read Linux's `/proc/sys/kernel/ostype`, otherwise probe `/usr/bin/uname` (present on Darwin).
+Unknown platforms require native admission; caller PATH, imported `uname` functions and inherited `OSTYPE` cannot select the bypass.
 The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.

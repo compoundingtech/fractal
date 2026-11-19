@@ -36,7 +36,13 @@ done
 # Direct callers enter the same native phase as st-test; an inherited native
 # phase already owns setup and every stage. Profile flags are provisional until
 # the native profile contract merges. No legacy admission fallback is permitted.
-if [[ $OSTYPE != darwin* ]] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
+platform=unknown
+if [[ -r /proc/sys/kernel/ostype ]]; then
+  builtin read -r platform < /proc/sys/kernel/ostype
+elif [[ -x /usr/bin/uname ]]; then
+  platform=$(/usr/bin/uname -s)
+fi
+if [[ $platform != Darwin ]] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
   receipt_root=$real_home/.cache/st-test/admission
   mkdir -p "$receipt_root"
   request=$(uuidgen)
