@@ -239,6 +239,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_counts",
         "claim_signature_writer_counts",
         "claim_signature_migration",
+        "claim_signature_originals",
+        "claim_signature_reference_migration",
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",

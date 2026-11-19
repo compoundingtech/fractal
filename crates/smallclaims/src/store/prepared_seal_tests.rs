@@ -193,16 +193,16 @@ fn sealed_rows(connection: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>>
 /// makes afresh.
 fn signers(connection: &Connection) -> Vec<(String, ClaimSignature)> {
     let mut statement = connection
-        .prepare("SELECT claim_id, signature FROM claim_signatures ORDER BY claim_id")
+        .prepare("SELECT claim_id FROM claim_signatures ORDER BY claim_id")
         .unwrap();
     statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
+        .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .map(|row| {
-            let (claim_id, text) = row.unwrap();
-            let mut signature: ClaimSignature = serde_json::from_str(&text).unwrap();
+            let claim_id = row.unwrap();
+            let mut signature = principals::stored_signature(connection, &claim_id)
+                .unwrap()
+                .unwrap();
             signature.nonce.clear();
             signature.signature.clear();
             (claim_id, signature)
@@ -332,16 +332,11 @@ fn a_claim_signed_while_preparing_is_signed_as_the_old_sealing_signs_it() {
     assert_eq!(signers(&reader), old);
     for (subject, payload) in payloads(&reader) {
         let claim = &payload.batch.claims[0];
-        let stored: String = reader
-            .query_row(
-                "SELECT signature FROM claim_signatures WHERE claim_id=?1",
-                [&claim.id],
-                |row| row.get(0),
-            )
-            .unwrap();
         assert_eq!(
             payload.claim_signatures.get(&claim.id),
-            Some(&serde_json::from_str::<ClaimSignature>(&stored).unwrap()),
+            principals::stored_signature(&reader, &claim.id)
+                .unwrap()
+                .as_ref(),
             "{subject} carries the signature stored for it"
         );
         assert!(
@@ -411,16 +406,9 @@ fn a_claim_signature_stored_after_preparation_is_the_one_sealed() {
         payloads["note/signed-late"].claim_signatures.get(&claim.id),
         Some(&late)
     );
-    let stored: String = reader
-        .query_row(
-            "SELECT signature FROM claim_signatures WHERE claim_id=?1",
-            [&claim.id],
-            |row| row.get(0),
-        )
-        .unwrap();
     assert_eq!(
-        serde_json::from_str::<ClaimSignature>(&stored).unwrap(),
-        late
+        principals::stored_signature(&reader, &claim.id).unwrap(),
+        Some(late)
     );
 }
 
@@ -920,11 +908,7 @@ fn legacy_seed_replica_envelopes_signed_tx(
         collect_referenced_blobs(transaction, &claims, &mut blobs)?;
         let mut claim_signatures = BTreeMap::new();
         for claim in &claims {
-            let existing = transaction
-                .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h021fd4a251f0 owner=smallclaims::store::prepared_seal_tests TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, String>(0))
-                .optional()?
-                .and_then(|text| serde_json::from_str(&text).ok());
+            let existing = principals::stored_signature(transaction, &claim.id)?;
             let signature = match (existing, sign) {
                 (Some(signature), _) => Some(signature),
                 (None, Some(sign)) => sign(&principals::Unsealed {
