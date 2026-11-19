@@ -49,6 +49,13 @@ objective "ops/change-rollout" {
 A missing, unknown, repeated or nonsensical child is refused, never defaulted. An objective is a root
 declaration; it cannot sit inside a mission.
 
+Fault owners can be declared without a harness or command. Their declared `host` selects the
+single member that appends the durable `message.sent`; delivery does not require a running
+agent. Host-block placement, default placement and `host "local"` are resolved when the
+declaration is published. Reapply older no-launch declarations that omitted an explicit host
+to persist that resolved placement. Repeated reconciliation retains one message per episode;
+a recovered objective that burns again opens a new episode and message.
+
 ## Indicators
 
 ### Native telemetry
