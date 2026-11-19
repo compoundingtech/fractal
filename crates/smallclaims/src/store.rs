@@ -876,6 +876,8 @@ pub struct Store {
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
     pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
+    /// Daemon start and last arrival of the worker's existing process-CPU heartbeat, in Unix ms.
+    replication_worker_heartbeat: Mutex<(Option<u128>, Option<u128>)>,
     /// Serializes endpoint refreshes and signed Fabric rekey transitions.
     fleet_endpoints_publication: Mutex<()>,
     /// Whether exchanges compare projections with a peer at all, keeping what a reproduction
@@ -1350,6 +1352,7 @@ impl Store {
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
+            replication_worker_heartbeat: Mutex::new((Some(now_ms()), None)),
             fleet_endpoints_publication: Mutex::new(()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
@@ -1528,6 +1531,8 @@ pub struct ComparedDifference {
 #[derive(Clone, Debug, Default)]
 pub struct PeerSyncProgress {
     pub measured: Option<ReplicationPeerSync>,
+    /// Membership incarnation against which the last measurement was authenticated.
+    pub measured_member_key: Option<String>,
     pub window_started_at_unix_ms: u128,
     pub window_peer_only: u64,
     pub window_received: u64,
@@ -7976,7 +7981,7 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
     ) -> Result<ReplicationReceipt, FractalError> {
-        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())?;
+        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default(), None)?;
         // One exchange is received in one writer hold.
         crate::windows::holds::covered("received envelopes", input.envelopes.len());
         Ok(receipt)
@@ -7989,6 +7994,7 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
         if input.peer != relay {
             return Err(FractalError::new(
@@ -8281,6 +8287,11 @@ impl Store {
             compact: !input.inventory.buckets.is_empty(),
         };
         progress.observe_on(received, difference, basis, now);
+        if difference.is_some() {
+            // This identity was authenticated before receive began. Never relabel an
+            // in-flight exchange with an incarnation admitted while it was running.
+            progress.measured_member_key = authenticated_member_key.map(str::to_owned);
+        }
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
         }
@@ -10201,6 +10212,62 @@ impl Store {
         progress.worker = Some(worker);
     }
 
+    /// The process-CPU report is also the worker's host-local liveness authority.
+    pub fn record_replication_worker_heartbeat(&self) {
+        self.replication_worker_heartbeat
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1 = Some(now_ms());
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replication_worker_observed_for_test(&self, started_ms: Option<u128>, heartbeat_ms: Option<u128>) {
+        *self.replication_worker_heartbeat
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (started_ms, heartbeat_ms);
+    }
+
+    /// Persisted history is not liveness. Only measurements for an admitted current
+    /// incarnation (or the pending first-sync sponsor) establish exchange health.
+    pub fn replication_health(&self, configured: bool) -> Result<crate::replication::ReplicationHealth> {
+        let now = now_ms();
+        let (started, heartbeat) = *self.replication_worker_heartbeat
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let view = self.fleet_view_sealed()?;
+        let first_sync = self.first_sync()?;
+        let bootstrap = first_sync.as_ref().filter(|first| first.state == "syncing")
+            .and_then(|first| first.peer.as_deref())
+            .filter(|peer| view.members.iter().all(|member| member.name != *peer));
+        let is_current = |member: &&crate::fleet::MemberView| {
+            member.name != self.origin && member.state == "current"
+        };
+        let progress = self.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let last_exchange = progress.iter().filter(|(peer, progress)| {
+            view.members.iter().filter(is_current).any(|member| member.name == **peer
+                && progress.measured_member_key.as_deref() == Some(member.member_key.as_str()))
+                || bootstrap == Some(peer.as_str())
+                // Legacy config-peer operation has no membership or join receipt.
+                || (view.anchor.is_none() && first_sync.is_none())
+        }).filter_map(|(_, progress)| progress.measured.as_ref())
+            .map(|measurement| measurement.measured_at_unix_ms).max();
+        let targets = view.members.iter().filter(is_current).count() + usize::from(bootstrap.is_some());
+        // Ended incarnations remain in the view; only current membership defines a sole creator.
+        let sole_creator = targets == 0
+            && view.members.iter().any(|member| member.name == self.origin && member.state == "current")
+            && first_sync.is_none();
+        let age = |at: Option<u128>| at.map(|at| std::time::Duration::from_millis(
+            u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX),
+        ));
+        Ok(crate::replication::ReplicationHealth::observe(
+            configured,
+            age(started).unwrap_or(std::time::Duration::MAX),
+            age(heartbeat),
+            if sole_creator { 0 } else { targets.max(1) },
+            age(last_exchange),
+        ))
+    }
+
     /// The latest sync measurement for each configured peer that has one.
     pub fn replication_peer_sync(
         &self,
@@ -10569,6 +10636,7 @@ impl Store {
         Ok(ReplicationStatus {
             configured,
             fleet_id: fleet_id.map(str::to_owned),
+            health: self.replication_health(configured)?,
             authority_digest: snapshot.authority_digest.clone(),
             graph_digest: snapshot.graph_digest.clone(),
             projection_digests: snapshot.projection_digests.clone(),
