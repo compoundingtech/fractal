@@ -78,4 +78,26 @@ mailbox, internal, and administration routes still require their appropriate loc
 transport. Fabric routing does not bypass client API pairing, bearer credentials,
 or device signing: the remote daemon applies the same client authorization rules.
 
+### Re-key a Fabric member
+
+With Fabric v0.9.4 and the fleet adapters running, execute one command on the
+machine whose identity changes:
+
+```sh
+fractal fleet transports rekey fabric
+```
+
+Fractal prepares a new Fabric NodeID, announces it under the existing signed
+member identity through the old route, and waits for a peer adapter's installed
+policy receipt. It commits the new endpoint and waits for a second receipt before
+activating the new local identity. Both waits share a ten-minute deadline.
+Fabric enforces expiring overlap grants; it never serves two local identities.
+If no peer confirms in time, the command aborts without activating the new key.
+
+Run the same command after a crash to resume its durable journal and guarded
+activation. Do not rotate keys by hand. Offline members may need a reachable
+member to deliver the signed cutover before their Fabric route works again.
+See the [re-key procedure](https://github.com/compoundingtech/fractal/blob/main/docs/fleet-join.md#re-key-an-existing-fabric-member)
+for rollback, static grants, and recovery boundaries.
+
 See [Fleet membership](fleet-join.md) for trust and invitation behavior and [replication](https://github.com/compoundingtech/fractal/blob/main/docs/st3/replication.md) for digests and recovery. Keep raw state and keys when investigating inconsistent history; do not reset a replica merely to make its status look healthy.

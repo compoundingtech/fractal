@@ -62,7 +62,7 @@
       "original": {
         "owner": "compoundingtech",
         "repo": "fabric",
-        "rev": "19e7f8964ce8305aeb8c200fb717967aa03f738f",
+        "ref": "v0.9.4",
         "type": "github"
       }
     },
