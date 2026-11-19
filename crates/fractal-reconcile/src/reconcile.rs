@@ -2721,10 +2721,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .iter()
             .filter(|subject| {
                 subject.kind == "agent"
-                    && subject
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.host == self.host)
+                    && crate::graph::canonical_child_value(&subject.desired, "host")
+                        .and_then(Value::as_str)
+                        .filter(|host| *host != "local")
+                        // Older launch declarations already retained their resolved placement.
+                        .or_else(|| subject.member.as_ref().map(|member| member.host.as_str()))
+                        == Some(self.host.as_str())
             })
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
