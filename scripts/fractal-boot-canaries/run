@@ -728,7 +728,10 @@ def idle_suspend_and_wake(node, seats):
     def suspended():
         agent = node.json("agents", "show", subject)["value"]
         suspension = agent.get("suspension") or {}
-        latest.update({key: agent.get(key) for key in ("state", "residency", "suspension", "delivery", "harness")})
+        latest.update({key: agent.get(key) for key in (
+            "state", "residency", "suspension", "delivery", "_status_source",
+            "incarnation_id", "current_session_id",
+        )})
         if parked(node, subject):
             fail("the idle canary parked instead of suspending")
         if agent.get("state") == "suspended" and suspension.get("phase") == "suspended":
