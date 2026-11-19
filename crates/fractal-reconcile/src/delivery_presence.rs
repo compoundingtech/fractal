@@ -926,7 +926,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         assessment.state = "refused";
         assessment.reason = Some(format!("delivery refused: {}", refusal.code));
     }
-    if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state, assessment.reason.as_deref()) {
+    if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state) {
         assessment.since_unix_ms = Some(since);
         if assessment.state == "stale" && non_ready {
             let reason = assessment.reason.take().unwrap_or_default();
@@ -940,29 +940,15 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
 }
 
 /// When this incarnation's assessments entered `state`, restarting the clock when the state changes.
-fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &'static str, reason: Option<&str>) -> Option<u64> {
+fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &'static str) -> Option<u64> {
     let record = |rows: &mut HashMap<String, IncarnationStateClocks>| {
         if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
         let incarnations = rows.get_mut(recipient).expect("inserted seat");
         if !incarnations.contains_key(incarnation) {
-            tracing::info!(
-                event = "delivery.assessment.transition",
-                agent = recipient, incarnation, previous = "unobserved", current = state,
-                cause = reason.unwrap_or("eligible native delivery report"),
-                "delivery assessment entered state"
-            );
             incarnations.insert(incarnation.into(), (state, unix_ms()));
         }
         let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
-        if row.0 != state {
-            tracing::info!(
-                event = "delivery.assessment.transition",
-                agent = recipient, incarnation, previous = row.0, current = state,
-                cause = reason.unwrap_or("eligible native delivery report"),
-                "delivery assessment changed state"
-            );
-            *row = (state, unix_ms());
-        }
+        if row.0 != state { *row = (state, unix_ms()); }
         row.1
     };
     #[cfg(any(test, feature = "test-support"))]

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Native agent mailboxes preserve canonical send order across graph and message-shard mail and replay pending offers when the same incarnation reconnects.",
-  "replay": { "status": "changed", "detail": "A transport reconnect reoffers pending messages whose staging belongs to this incarnation. A one-time upgrade reader also preserves unproven staging present before the first provenance-capable store open; its checked native re-offer acquires strict incarnation custody. Delivered mail is not replayed." },
-  "schema": { "status": "changed", "detail": "Additive daemon-local native staging provenance for graph claims and marks; shard lifecycle records carry the checked incarnation in local fields. An atomic first-open marker freezes legacy staging identities, not receipt timestamps, so later unproven staging cannot use the upgrade arm. No client-v0 schema, codegen, published schema or contract digest change." },
+  "summary": "Native agent mailboxes merge graph and message-shard mail in canonical send order instead of placing every graph message before shard messages.",
+  "replay": { "status": "none", "detail": "No replay or backfill. Existing pending mail uses canonical send order on its next mailbox update." },
+  "schema": { "status": "none", "detail": "No published schema or contract digest change." },
   "rules": { "status": "none", "detail": "No authority, retention or claim-admission change." },
-  "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use canonical send keys across both stores. Pagination namespaces are not delivery priority. Socket epochs and durable boot floors are logged on open and close; delivery-assessment transitions log their cause." },
+  "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use the same canonical send keys across both stores. Index namespaces remain pagination identities, not delivery priority." },
   "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no data conversion." },
   "manual": { "status": "none", "detail": "No manual action required." },
-  "recovery": { "status": "changed", "detail": "Pending native offers remain owned by their harness incarnation across transport reconnects. Unresolved staged recovery batches are reconstructed before choosing more backlog, preserving the five-outstanding bound. Pre-upgrade staging without custody is reoffered rather than lost and promoted on its fenced staging acknowledgement; already-delivered mail is excluded. Message IDs and existing receipt idempotency preserve deduplication. Polling retains its existing local offer policy." }
+  "recovery": { "status": "none", "detail": "Existing receipt and recovery admission policies are unchanged." }
 }
