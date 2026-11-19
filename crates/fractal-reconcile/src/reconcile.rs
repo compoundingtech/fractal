@@ -3191,19 +3191,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn next_work_wake_deadline(&self) -> Result<Option<u128>> {
         let mut work = self.store.work_for_reconcile_all()?;
-        let local_agents = self
-            .store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|subject| {
-                subject.kind == "agent"
-                    && subject
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.host == self.host)
-            })
-            .map(|subject| subject.subject)
-            .collect::<BTreeSet<_>>();
+        let local_agents = self.store.hosted_agents(&self.host)?.into_iter().collect::<BTreeSet<_>>();
         let run_orders = self.wake_run_orders(&local_agents, &work)?;
         let candidates = local_agents
             .iter()
@@ -3258,21 +3246,10 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn next_provider_capacity_retry_deadline(&self) -> Result<Option<u128>> {
         let mut deadline = None;
-        for subject in self
-            .store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|subject| {
-                subject.kind == "agent"
-                    && subject
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.host == self.host)
-            })
-        {
+        for agent in self.store.hosted_agents(&self.host)? {
             for claim in self
                 .store
-                .harness_diagnostics(&subject.subject)?
+                .harness_diagnostics(&agent)?
                 .iter()
             {
                 let fields = claim.body.get("fields").unwrap_or(&claim.body);
