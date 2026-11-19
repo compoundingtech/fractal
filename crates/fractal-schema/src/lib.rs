@@ -3429,6 +3429,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
         "resource.exec-receipt" => &[
             ("exec_id", required_string()),
+            ("argv", array()),
+            ("argv_sha256", string()),
+            ("launched", boolean()),
+            ("timed_out", boolean()),
+            ("refusal_code", string()),
+            ("request_id", string()),
+            ("profile_key", string()),
+            ("profile_estimate", object()),
+            ("disk_path", string()),
             ("host", required_string()),
             ("class", required_enum(&["landing", "check", "agent"])),
             ("owner", required_object()),
