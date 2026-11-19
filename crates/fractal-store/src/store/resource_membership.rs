@@ -103,6 +103,8 @@ pub enum RefusalCode {
     Retiring,
     Uncertain,
     InvalidState,
+    // Reader arm for newer recovery-class refusal rows; this host does not admit that class.
+    RecoveryNotAllowed,
 }
 
 impl RefusalCode {
@@ -118,6 +120,7 @@ impl RefusalCode {
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+            Self::RecoveryNotAllowed => "recovery-not-allowed",
         }
     }
 }
@@ -270,6 +273,7 @@ fn authorized(member: &Membership, owner: &Owner) -> Result<()> {
 }
 
 fn fenced(connection: &Connection, member: &Membership, grant: &Grant) -> Result<()> {
+    member.request.class.ensure_supported()?;
     anyhow::ensure!(member.grant.as_ref() == Some(grant), "stale resource generation");
     let epoch: String = connection.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&member.request.host], |r| r.get(0))?;
     anyhow::ensure!(epoch == grant.authority_epoch, "stale resource authority");
@@ -482,6 +486,11 @@ impl Store {
         let mut uncertain = 0;
         for mut member in self.resource_memberships_for_host(host)? {
             if !matches!(member.state.as_str(), "admitted" | "launched" | "retiring" | "uncertain") { continue; }
+            if let Err(error) = member.request.class.ensure_supported() {
+                tracing::warn!(membership = %member.request.id, %error, "retaining newer-class resource custody until the execution host is upgraded");
+                uncertain += 1;
+                continue;
+            }
             let Some(mut grant) = member.grant.take() else { anyhow::bail!("active resource custody has no durable grant"); };
             if grant.authority_epoch == epoch { continue; }
             for root in &mut member.roots {
@@ -543,6 +552,7 @@ impl Store {
     }
 
     pub fn request_resource_membership(&self, request: &LaneRequest, fit: Fit, now_ms: u64) -> Result<Admission> {
+        request.class.ensure_supported()?;
         anyhow::ensure!(!request.id.is_empty() && !request.name.is_empty() && !request.host.is_empty(), "empty resource identity");
         anyhow::ensure!(request.host == self.origin, "only the execution host may grant resource membership");
         anyhow::ensure!(request.max_members > 0, "maxMembers must be positive");
@@ -947,6 +957,33 @@ mod tests {
     }
 
     #[test]
+    fn future_resource_classes_cannot_acquire_membership() {
+        let store = fixture();
+        let mut future = request("future");
+        future.class = RequestClass::Unknown("recovery".into());
+        assert!(store.request_resource_membership(&future, test_fit(), 1).unwrap_err()
+            .to_string().contains("unsupported resource class recovery"));
+        assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn future_resource_class_custody_is_retained_during_authority_recovery() {
+        let store = fixture();
+        let request = request("future-custody");
+        let grant = grant(&store, &request, 1);
+        store.update_resource_membership(&grant, |member| {
+            member.request.class = RequestClass::Unknown("recovery".into());
+            Ok(())
+        }).unwrap();
+        let before = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
+        let after = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn disk_reservations_are_mount_local_and_the_floor_applies_to_zero_byte_requests() {
         let store = fixture();
         let mut first = request("mount-one");
@@ -1114,7 +1151,7 @@ mod tests {
             let mut candidate = request(id);
             candidate.name = id.into();
             candidate.class = class;
-            candidate.capacity = Some(Capacity { cores: 1, memory: if class == RequestClass::Landing { 80 } else { 20 } });
+            candidate.capacity = Some(Capacity { cores: 1, memory: if candidate.class == RequestClass::Landing { 80 } else { 20 } });
             candidate
         }).collect();
         let blocked = Fit { room: Some(Capacity { cores: 8, memory: 100 }), outside_bytes: 100, ..test_fit() };

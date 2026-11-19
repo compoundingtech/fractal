@@ -1,6 +1,6 @@
 //! Terminal shell membership observations in the durable claims log.
 use super::*;
-use super::resource_membership::{Coverage, RequestClass};
+use super::resource_membership::Coverage;
 use super::shell_resources::Execution;
 
 pub const KIND: &str = "resource.exec-receipt";
@@ -25,9 +25,7 @@ pub fn argv_sha256(argv: &[String]) -> String {
 pub fn subject(origin: &str, execution: &Execution) -> String {
     let head = execution.result.as_ref().and_then(|result| result.head_start.as_deref())
         .or(execution.head_start.as_deref()).unwrap_or_default();
-    let class = match execution.command.lane.class {
-        RequestClass::Landing => "landing", RequestClass::Check => "check", RequestClass::Agent => "agent",
-    };
+    let class = execution.command.lane.class.as_str();
     format!("{}{}/{}/{}", head_prefix(head), hex::encode(origin), class, hex::encode(&execution.command.id))
 }
 
@@ -91,7 +89,7 @@ pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::resource_membership::{LaneRequest, Owner};
+    use super::super::resource_membership::{LaneRequest, Owner, RequestClass};
     use super::super::shell_resources::{Command, PayloadResult};
 
     fn command(id: &str) -> Command {

@@ -8,6 +8,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if self.store.shell_resources(&self.host, true)?.is_empty() { return Ok(()); }
         self.ensure_resource_authority()?;
         for mut execution in self.store.shell_resources(&self.host, true)? {
+            if let Err(error) = execution.command.lane.class.ensure_supported() {
+                tracing::warn!(execution = %execution.command.id, %error, "retaining newer-class execution until the execution host is upgraded");
+                continue;
+            }
             if let Err(error) = self.drive_shell_resource(&mut execution) {
                 let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
                     .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
@@ -117,6 +121,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let (exited, receiver) = std::sync::mpsc::channel();
         let mut running = Vec::new();
         for mut execution in self.store.shell_resources(&self.host, true)? {
+            if let Err(error) = execution.command.lane.class.ensure_supported() {
+                tracing::warn!(execution = %execution.command.id, %error, "retaining newer-class execution during authority recovery");
+                continue;
+            }
             let Some(root) = members.iter().flat_map(|member| &member.roots)
                 .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()) else { continue; };
             let generation = root.execution.as_ref().context("released shell has no generation")?.generation_id.clone();

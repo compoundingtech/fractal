@@ -23,7 +23,7 @@ fn lower_request(lane: &crate::model::ResourceLaneSpec, id: String, owner: Owner
             crate::model::ResourceLaneCoverage::Enforced => Coverage::Enforced,
         },
         admission_timeout_ms: lane.admission_timeout_ms,
-        class: lane.class, disk: lane.disk.clone(), io: lane.io,
+        class: lane.class.clone(), disk: lane.disk.clone(), io: lane.io,
     }
 }
 
@@ -183,7 +183,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         if self.seat_admission.status.lane_wait_class(&request.id,
-            "finite execution waits for native admission".into(), true, now, request.class)
+            "finite execution waits for native admission".into(), true, now, request.class.clone())
         {
             self.incremental.touch("seat-admission");
             self.signal_changed();
