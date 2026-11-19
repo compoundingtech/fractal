@@ -87,6 +87,9 @@ fn daily_growth_requires_a_covered_same_scope_day_without_unknown_samples() {
     let mut gap = samples();
     gap.drain(10..14);
     assert_eq!(growth(&gap, now, "scope"), None);
+    let mut missed_write = samples();
+    missed_write.remove(12);
+    assert_eq!(growth(&missed_write, now, "scope"), None);
     let mut moved = samples();
     moved[12].scope = "other".into();
     assert_eq!(growth(&moved, now, "scope"), None);
