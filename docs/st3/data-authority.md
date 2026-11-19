@@ -26,6 +26,14 @@ not a replicated projection. Its receipts survive projection reconstruction and
 remain outside shared logical rows and projection digests. Constructors install
 its empty schema before returning the store, without making run admission decisions.
 
+`shell_environment_scrub_v1` is host-local security migration authority. Its single
+completion marker is read by shell-resource schema initialization to skip a completed
+historical environment scrub. It is written only after rewriting the local rows,
+vacuuming and checkpointing their physical storage. Like local cleanup receipts and
+secret registrations, it is neither a shared projection nor reconstructible from
+claims, and remains outside replication and shared projection digests. Importing
+another host's completion marker would not prove erasure of this database.
+
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
 pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
