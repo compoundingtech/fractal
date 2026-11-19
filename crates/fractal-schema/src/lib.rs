@@ -1148,6 +1148,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "gate-admission",
+            "gate-admission/HOST/ID/OUTCOME",
+            "One immutable transitional gate admission lifecycle receipt.",
+            false,
+        ),
+        (
             "fleet-invite",
             "fleet-invite/ID",
             "A single-use fleet join invite.",
@@ -1305,6 +1311,12 @@ fn build_registry() -> Registry {
             "resource/NAME",
             "An observed external or durable fact bag.",
             true,
+        ),
+        (
+            "resource-admission",
+            "resource-admission/HOST or resource-admission/HOST/ID",
+            "A host authority's durable admission source cut or membership lifecycle evidence.",
+            false,
         ),
         (
             "repair",
@@ -1622,6 +1634,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
 
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
+        (
+            "resource.admission.observed",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "resource.admission.coverage",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "gate.admission.observed",
+            &["gate-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
         (
             "resource.exec-receipt",
             &["resource"],
@@ -2513,6 +2552,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         (
             "custom.client.action-result", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
+        ),
+        (
+            "custom.client.observation-minute", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Once, None, false, &[],
         ),
         (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
@@ -3427,6 +3470,40 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.admission.observed" => &[
+            ("id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("epoch", required_string()),
+            ("owner", required_object()),
+            ("queued_at", required_integer()),
+            ("admitted_at", integer()),
+            ("retired_at", integer()),
+            ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
+            ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+            ("finite", required_boolean()),
+            ("admission_timeout_ms", integer()),
+            ("clock_uncertain", required_boolean()),
+        ],
+        "resource.admission.coverage" => &[
+            ("host", required_string()),
+            ("epoch", required_string()),
+            ("complete", required_boolean()),
+        ],
+        "gate.admission.observed" => &[
+            ("schema", required_enum(&["gate-slot.admission/v1"])),
+            ("id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["gate", "heavy", "eval"])),
+            ("at_ms", required_integer()),
+            ("onset_ms", required_integer()),
+            ("epoch", required_string()),
+            ("coverage", required_enum(&["logical"])),
+            ("outcome", required_enum(&["accepted", "granted", "failed", "excluded"])),
+            ("reason", required_string()),
+        ],
         "resource.exec-receipt" => &[
             ("exec_id", required_string()),
             ("host", required_string()),
@@ -4109,6 +4186,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("request_digest", required_string()),
             ("result", FieldSpec { required: true, ..object() }),
         ],
+        "custom.client.observation-minute" => &[
+            ("source", required_string()),
+            ("pairing_grant", required_string()),
+            ("report_id", required_string()),
+            ("report_digest", required_string()),
+            ("target", required_string()),
+            ("carrier", required_enum(&["fabric", "tailscale", "lan"])),
+            ("path", string()),
+            ("start_ms", required_integer()),
+            ("count", required_integer()),
+            ("over", required_integer()),
+            ("max_ms", required_integer()),
+            ("buckets", required_array()),
+        ],
         "agent.helper-launched" => &[
             ("launcher", required_reference_to(&["agent"])),
             ("person", reference_to(&["person"])),
@@ -4319,6 +4410,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "runtime.action.requested" => &[
             ("action", string()),
             ("cause", string()),
+            ("idle_declaration", string()),
+            ("idle_after_ms", integer()),
+            ("idle_enabled_at_unix_ms", integer()),
+            ("idle_eligible_since_unix_ms", integer()),
+            ("idle_frontier", object()),
+            ("suspend_operation_id", string()),
+            ("idle_wake_lineage", string()),
+            ("idle_wake_attempt", integer()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -5476,6 +5575,12 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in ["resource-admission", "gate-admission"] {
+            current.subjects.remove(family).unwrap();
+        }
         for kind in residency::KINDS {
             current.claims.remove(*kind).unwrap();
         }
@@ -5494,6 +5599,7 @@ mod tests {
         current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("custom.client.observation-minute").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
         for kind in attention_controls::KINDS {
@@ -5542,6 +5648,11 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
+            "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
+            "idle_wake_lineage", "idle_wake_attempt"] {
+            current.claims.get_mut("runtime.action.requested").unwrap().fields.remove(field).unwrap();
+        }
         for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
             for field in ["cause", "mode", "request_key", "operation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
@@ -6152,6 +6263,28 @@ mod tests {
     }
 
     #[test]
+    fn phone_minute_summaries_are_durable_once_and_not_publicly_writable() {
+        let kind = "custom.client.observation-minute";
+        let fields = serde_json::from_value(serde_json::json!({
+            "source": "person/avery/device/example",
+            "pairing_grant": "custom/client/pairing-example",
+            "report_id": "11111111-1111-4111-8111-111111111111",
+            "report_digest": "a".repeat(64),
+            "target": "ios-connect", "carrier": "fabric", "path": "direct",
+            "start_ms": 0, "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+        })).unwrap();
+        let subject = "custom/client/observation-minute-example";
+        let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+        assert_eq!(spec.retention, Retention::Durable);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert!(!spec.wakes_reconciler);
+        for actor in [None, Some("person/avery"), Some("agent/example")] {
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, actor)
+                .unwrap_err().code, "claim-write-forbidden");
+        }
+    }
+
+    #[test]
     fn public_claim_admission_uses_the_registry_write_policy() {
         assert!(
             registry()
@@ -6196,5 +6329,37 @@ mod tests {
                 .code,
             "claim-write-forbidden"
         );
+    }
+
+    #[test]
+    fn admission_sources_accept_producer_fields_but_not_public_writes() {
+        let cases = [
+            ("resource-admission/example-host/request", "resource.admission.observed", serde_json::json!({
+                "id": "request", "host": "example-host", "class": "check", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "queued",
+                "refusal": null, "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host", "resource.admission.coverage", serde_json::json!({
+                "host": "example-host", "epoch": "epoch-one", "complete": true
+            })),
+            ("gate-admission/example-host/request/accepted", "gate.admission.observed", serde_json::json!({
+                "schema": "gate-slot.admission/v1", "id": "request", "host": "example-host",
+                "class": "heavy", "at_ms": 200, "onset_ms": 100, "epoch": "epoch-one",
+                "coverage": "logical", "outcome": "accepted", "reason": "test"
+            })),
+        ];
+        for (subject, kind, fields) in cases {
+            let fields: BTreeMap<String, Value> = serde_json::from_value(fields).unwrap();
+            let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+            assert_eq!(spec.retention, Retention::Durable);
+            assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, Some("agent/example/check"))
+                .unwrap_err().code, "claim-write-forbidden");
+            let mut unknown = fields.clone();
+            unknown.insert("grant".into(), serde_json::json!({"generation": "not-evidence"}));
+            assert_eq!(registry().validate_claim(subject, kind, &unknown).unwrap_err().code, "unknown-claim-field");
+            assert_eq!(registry().validate_claim("host/example-host", kind, &fields).unwrap_err().code, "invalid-claim-subject");
+        }
     }
 }

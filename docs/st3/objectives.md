@@ -49,6 +49,26 @@ objective "ops/change-rollout" {
 A missing, unknown, repeated or nonsensical child is refused, never defaulted. An objective is a root
 declaration; it cannot sit inside a mission.
 
+Fault owners can be declared without a harness or command. Their declared `host` selects the
+single member that appends the durable `message.sent`; delivery does not require a running
+agent. Host-block placement, default placement and `host "local"` are resolved when the
+declaration is published. Reapply older no-launch declarations that omitted an explicit host
+to persist that resolved placement. Repeated reconciliation retains one message per episode;
+a recovered objective that burns again opens a new episode and message.
+
+```kdl
+agent "ops/budget-owner" {
+  host "monitor"
+  name "Budget owner"
+  description "Own service budget episodes without starting a runtime"
+}
+```
+
+This inert top-level agent needs no task children. A run-owned agent still needs a launch;
+invalid or conflicting explicitly declared launches are rejected as before.
+Its agent card has no runtime or current session. Changing a previously launched root to an
+inert declaration does not reuse historical runtime or harness observations as current state.
+
 ## Indicators
 
 ### Native telemetry
@@ -78,6 +98,100 @@ Diagnostic aspirations retain their strict meanings: a p99 is missed in a window
 1% of its samples are over, and a max when any one is. An operational budget row's status instead
 uses its slow-event or bad-covered-time allowance, retained coverage and paired burns. A `met`
 operational row does not claim that its diagnostic p99 or max aspiration was met.
+
+#### Organic terminal attachment and sparse reads
+
+`terminal-attach` counts successful server-side first-screen observations, not a terminal
+listing or viewer click-to-paint. Its exact keys are `GET /v1/client/terminals/{id}/screen`
+and **singular** `stream terminal`. The collections socket records the latter only after
+successfully sending a terminal screen. **Plural** `stream terminals` measures the terminal
+list's initial snapshot and must never count as attachment evidence.
+
+The dedicated local and remote terminal screen streams do not currently record that
+first-screen latency. Their successful send boundaries are in `terminal_stream_socket`
+and `remote_terminal_stream_socket` in `crates/fractal-api-client-v0/src/api/client_v0.rs`.
+Consequently, absent attachment samples cannot establish that no viewer attached. Until
+those producers are instrumented, the native objective covers only its instrumented organic
+paths; the existing exact key mapping is not a substitute for a missing producer.
+
+When no organic observations qualify in the last hour, `terminal-attach` and
+`person-read-fresh` explicitly display **No qualifying events**. With no retained qualifying
+events they remain `no-data`, with no remaining-budget verdict, even when observation-time
+coverage is complete. Native operational rows expose `coverage` as the observed fraction
+over their accounting horizon, or `null` when unavailable; their explanation states the
+same coverage explicitly. Coverage of observation time does not prove every viewer or
+attempt was instrumented. Missing coverage is unknown, never an invented zero or success.
+An hour without new events does not erase a verdict supported by retained eligible history.
+After a restart, an empty process-local diagnostic histogram is not evidence of an empty
+hour: retained hourly events remain visible, with the diagnostic p99 explicitly unavailable
+in the new process rather than mislabeled as no qualifying events.
+
+Synthetic probes are not organic attachment or fresh-read traffic. Any future availability
+probe must have its own separately named objective rather than filling these sparse rows.
+
+### CPU populations and commissioning
+
+Production `cpu` remains ≤1 core over **all 60 closed UTC minutes**, including daemon and
+replication-worker process CPU. Unknown minutes never become zero or a shorter denominator.
+The sampler requires the exact expected fresh worker cohort at both boundaries. In production's
+singleton-worker topology, the newest reported process birth supersedes older births; the changed
+minute stays unknown, but the following stable minute recovers without waiting for the old report
+to age out. Equal-birth competing identities remain ambiguous, and a delayed older report cannot
+revive a superseded worker. Multi-worker topologies retain the entire exact cohort check.
+The CPU target in `/v1/client/request-latency` includes at most one hour of `minute_evidence`:
+CPU/wall nanoseconds, expected worker count, idle/seat evidence,
+busy reasons and a bounded `missing_reason` (`worker-missing`, `worker-stale`,
+`worker-cohort-extra`, `worker-topology-changed`, `worker-incarnation-changed`,
+`worker-counter-regressed`, `daemon-counter-regressed`). An omitted minute is an unobserved
+boundary, not a known zero. These are current local diagnostics, not durable historical
+attribution: an older receipt without them cannot prove which condition caused its unknown CPU.
+
+Production `cpu/idle` remains conditional: ≤0.5 core over at least ten confirmed idle minutes
+in a complete hour. `not eligible: busy` means productive seat activity alone rules out ten
+idle minutes; the row stays no-data with no error-budget credit. Missing CPU/seat evidence
+remains distinct and visible, even when reasons overlap. A live session's same-incarnation
+runtime heartbeat is not productive work: matching harness `ready`, `idle`, `blocked` or
+`ended` with no background jobs can prove it quiet only while the source `observed_at_ms`
+is fresh under the existing harness stale/future-skew bounds. Starts, new incarnations,
+work, and missing or expired matching harness observations cannot. Receiving an old report
+again does not refresh its source evidence.
+Freshness is checked before each admitted replacement as well as at minute boundaries;
+a later fresh observation cannot erase an earlier intra-minute gap of expired evidence.
+
+The separately labeled **representative isolated controlled quiet reference** is commissioned
+with the real daemon/worker sampler, never synthetic CPU values and never by pausing live seats.
+Prepare a network/state-isolated member using the same binary and configuration as the reference
+member, with instance-specific isolation supplied as launch overrides. Retain the launch,
+network/state isolation and configuration provenance in an operator receipt. Do not connect its
+worker to production peers. Then run:
+
+```sh
+python3 scripts/commission-cpu-quiet-reference \
+  --socket /isolated/member.sock --reference-socket /reference/member.sock \
+  --config /isolated/config.toml --reference-config /reference/config.toml \
+  --binary /isolated/fractal --reference-binary /reference/fractal \
+  --expected-workers 1 --isolation-evidence '<launch-and-isolation-receipt>'
+```
+
+The command only reads both members; it requires equal nonempty `build.commit` strings in
+both health responses, checks byte-identical
+binary/configuration inputs and reference worker topology, then collects exactly ten **new consecutive**
+closed minutes and waits for seat settlement. The operator's isolation receipt, not the socket
+name, establishes that launch overrides really isolate the member and that these are the files
+actually used. Unknown CPU, missing boundaries, busy/unsettled seats, topology changes or a
+changed build cannot pass. The measured verdict is published only after the final health read
+confirms the same nonempty build commit; a failed final health check leaves the receipt `no-data`.
+Its JSON stdout carries binary/configuration SHA-256, build, worker topology, isolation provenance,
+measured CPU/wall totals and per-minute evidence. Save that stdout as the
+commissioning artifact; a miss/no-data exits nonzero. This is `cpu/quiet-reference`, explicitly
+`production_objective=false`, not a third production objective or evidence of the busy host's
+idle behavior. Production `cpu` and conditional `cpu/idle` are unchanged by commissioning.
+
+Regression commands (not substitutes for a measured commissioning receipt):
+`cargo test -p smallclaims windows::cpu_minutes`,
+`cargo test -p fractal-store runtime_heartbeats_do_not_make_a_quiet_live_session_productive`,
+`cargo test -p fractal-api-core the_cpu_rows_are_met_missed_or_no_data_never_met_without_the_facts`,
+and `python3 scripts/commission-cpu-quiet-reference-test`.
 
 ### Source-backed GitHub measurements
 
@@ -331,6 +445,76 @@ Native episode failures persist the exact declaring objective name. Cleanup read
 from the claims, so changing the bound native family or restarting the member still recovers
 obsolete children without prefix-matching an independent nested declaration. A wholly unavailable
 source keeps its previously open owned rows unknown, including after restart.
+
+### GO-to-merged completion ratios
+
+[`slo/dotfiles-merge-latency.kdl`](../../slo/dotfiles-merge-latency.kdl) declares
+`landing/merge-latency/dotfiles/p50` and `landing/merge-latency/dotfiles/p95` through
+the existing native `ratio` evaluator. These are ratio row IDs, not diagnostic percentile
+estimates: at least 50% of qualifying completions must take at most 600 seconds, and at
+least 95% at most 1800 seconds. Both use the half-open merged-completion cohort
+`[now - 30d, now)`. Admission or GO before that horizon does not exclude a merge inside it.
+Equality at either duration is good; equality at the bad-event allowance satisfies the
+rendered `≤` target with zero remaining budget. Exhaustion requires exceeding that
+allowance. This inclusive boundary applies to the shared native budget classifier;
+unknown evidence and paired-burn decisions are unchanged.
+
+The source is an explicitly published declaration, not an automatically activated observer
+or a second configuration reader. Include it in the owning fleet's governed declaration
+source and publish through that source's existing `fractal apply --set` lane. Preview with
+`fractal apply --as "$FRACTAL_AGENT" --dry-run slo/dotfiles-merge-latency.kdl`.
+This file neither starts acquisition nor changes the merge queue. It declares no breach
+owner; fleet policy may author `on-breach` through its normal ownership lane.
+
+The queue-derived producer ingests existing custom claims through `fractal claim` /
+`POST /v1/claims`, not a new API or schema kind:
+
+- Kind: `custom.landing.dotfiles-merged`.
+- Subject: `custom/landing/dotfiles/merged/DIGEST`, where `DIGEST` is SHA-256 of the
+  UTF-8 compact JSON array `[repo,pr,head,admission,merge]`. Preserve producer-normalized
+  tuple values on retries; do not derive identity from ingestion time.
+- Fields: `schema: "fractal.merge-latency/v1"`, `repo`, `pr`, `head`, `admission`,
+  `merge`, `admittedAt`, `mergedAt`, `goAt`, `goSource`, `goEvidence`, `durationSeconds`.
+  `head` is the admitted full head; `merge` is the completed merge commit. Times are
+  RFC 3339 or Unix milliseconds. `durationSeconds = (mergedAt - goAt) / 1000`
+  must be finite and nonnegative, without rounding at the threshold.
+- `goSource: "route-a-exact-head"` requires an unedited exact-full-head
+  `q19-go v1 head=<40hex> verdict=GO` comment with one valid v3 footer identifying
+  a reviewer different from the PR body's owner; `goEvidence` is its durable URL.
+  These are self-asserted footer semantics, not independent authentication.
+  Preparation/candidate timestamps and free-form review prose are not promoted to GO.
+  Without qualifying evidence, `goSource: "admission-proxy"` uses admission time and
+  `goEvidence` holds the admission ID; both objectives explicitly exclude it.
+- Pass each field as `--field KEY=JSON`, plus `--actor "$FRACTAL_AGENT"` and a stable
+  `--idempotency-key`. The command parses JSON before its raw-string fallback, so encode
+  strings as JSON too. Retry the identical accepted fact, including its original
+  completion time and provenance, rather than inventing a new event timestamp.
+
+The producer owns validating durable completed admission/merge pairs and GO evidence;
+custom fields are not a new registered claim schema. The native reader incrementally
+reconstructs rows from replicated claims after restart or declaration revision and
+deduplicates repeated claims by subject and event timestamp. A missing or malformed
+duration is unknown, never good. Producer output/journal remains the replay source.
+No new schema registry, generated schema, projection, reconstruction kind, route,
+or acquisition cost probe is introduced.
+The integration tests compile this exact KDL source rather than duplicating its policy.
+It is therefore an explicit `fractal-api-core` extra in `.st/rust-test-inputs.json`
+and an input to both `linux-clippy` and `linux-fleet-compat` in the evidence policy
+and lane manifest, alongside the other compile-time SLO sources.
+The included KDL is also registered as source site `lv-ha5695af111aa` in the existing
+SQLite source inventory, with its adjacent owner/action marker. This accounts for
+test-source provenance only; it does not assert a SQLite value-size proof or add a
+runtime database path.
+
+Only exact-GO completions form the denominator. A proxy-only cohort reads
+`no-qualifying-events`, not met; unobserved or proxy merges cannot prove fleet-wide
+compliance. One qualifying completion makes the 30d budget eligible, but recent paired
+burn windows retain their independent evidence gates: an eligible historical cohort
+without recent evidence can read `not-eligible`, not an invented healthy burn verdict.
+Inspect `fractal slo explain landing/merge-latency/dotfiles/p50` (and `/p95`) for
+qualifying/excluded/unknown counts and remaining budget; use
+`fractal claims ls --kind custom.landing.dotfiles-merged` for provenance and producer
+coverage. These native ratios do not assert that the producer has observed every merge.
 
 ### Interval over claims
 
@@ -586,3 +770,137 @@ index. `fractal claims ls --kind KIND --subject-prefix PREFIX` prints them. Both
 claims' kind and subject indexes. The interval and count indicators read their claims the same way,
 keeping each objective's samples or events in memory and reading only claims newer than the last it
 saw.
+
+## Build admission lifecycle
+
+`build/admission/HOST/CLASS` measures accepted eligible finite requests granted capacity
+within two hours: 90% good over 30 days, with paired burns of 14.4× over 1h and 5m,
+or 6× over 6h and 30m. The capacity grant is the stop, not payload launch or completion.
+The denominator is resolved requests plus overdue open requests, not queue polls.
+An open request fails once in its original deadline bucket; a later grant cannot move
+that failure. Early refusal and withdrawal are failed admissions, not successful stops.
+The native withdrawal interface has no typed intentional-supersession proof and therefore
+does not silently exclude cancellation. Requests without a finite profile are separately
+excluded. Impossible finite profiles are failures.
+
+The host authority commits `resource.admission.observed` claims atomically with membership
+changes, carrying accepted onset, grant timestamp, retirement/refusal facts, attempt owner,
+original authority epoch and logical/enforced coverage mode. Replayable grants and runtime
+custody are never copied into this stream. Authority acquisition replays existing membership
+records once before committing its source cut. SLO reads incrementally consume only the
+durable claim stream; they neither inspect the membership table nor create observations.
+Child and inherited contexts do not create another membership sample. Repeated requests
+retain their original identity and onset.
+The native registry admits these system-only claims on `resource-admission/HOST/ID`;
+`resource.admission.coverage` uses `resource-admission/HOST` for each acquired source cut.
+Both kinds remain durable replicated evidence, not launch capabilities. Ordinary public
+claim writers cannot publish either kind.
+The daemon subscribes to claim-change notifications and arms one timer for the nearest
+open deadline or 5m/30m/1h/6h/30d accounting boundary. The wake autonomously evaluates
+the full native objective set and existing owner bindings even without an SLO reader.
+Timers do not sample membership or manufacture lifecycle facts; an empty source has no
+timer. There is no periodic admission-source poll.
+
+Local native coverage is admitted only after this process acquires the host authority and
+completes replay. A persisted marker cannot certify an absent producer after restart.
+Remote evidence remains unknown: replication alone does not certify a remote complete cut.
+Unreadable or uncertain clocks also leave the source unknown, never green. Coverage modes
+remain visible in `coverage_modes`; a logical grant does not claim physical enforcement.
+
+### Transitional gate producer
+
+Gate admission receipts use immutable `gate-slot.admission/v1` accepted, granted, failed
+and typed superseded edges, not payload completion receipts. Configure the gate producer's
+`GATE_SLOT_ADMISSION_SPOOL` and the daemon's `FRACTAL_GATE_ADMISSION_SPOOL` to the same directory.
+The producer defaults to `$XDG_STATE_HOME/gate-slot/admission` (or the standard user state
+directory); the daemon requires an explicit source directory. `GATE_SLOT_ADMISSION_HOST`
+must agree with the daemon's host identity when the machine's short hostname does not.
+The reactive importer retains source files, replays idempotently on restart and publishes
+`gate.admission.observed`; no periodic directory sampler or parallel SLO policy is involved.
+The system-only `gate.admission.observed` kind uses `gate-admission/HOST/ID/OUTCOME`.
+Each outcome receipt is immutable and retained durably; its schema admits the producer's
+logical coverage only, without granting native execution custody.
+Supersession before the deadline is visibly excluded; after the deadline it remains bad.
+Unconfirmed wrapper death leaves an open sample, not an invented successful grant.
+
+Gate evidence deliberately remains unknown until the deployment owner proves prospective
+complete adoption: every authorized gate writer uses the instrumented revision, the complete
+host/gate-root population is known, and pre-existing uninstrumented waiters have drained or
+been reconciled. A receipt directory, one successful completion or a snapshot cannot prove
+that older writers cannot introduce new unobserved requests. No historical coverage is
+invented. Remove this transitional producer/importer when callers migrate to native resource
+membership; do not remove admission safety as part of measurement.
+
+## Agent mail delivery lifecycle
+
+`agents/mail-delivery/<host>` measures durable agent messages accepted by a native harness
+within **15 minutes**, with **95% good over 30 days**. A miss is counted once in its original
+deadline bucket even while the message remains open, or after late acceptance. A terminal
+close or expiry without input acceptance is bad, not successful delivery. The shared native
+budget evaluator uses paired **14.4x (1h + 5m)** and **6x (6h + 30m)** burns, with one sample
+as the minimum; sample counts remain visible. The 24h p95 and oldest open age are diagnostics,
+not substitutes for the failed-message budget.
+
+The producer joins graph sends, messages-shard sends and local lifecycle marks through
+transaction-fed retained metadata. Shard lifecycle timestamps come from the source shard,
+not from the mirror's later wall time; its dedicated replay cursor catches up existing
+history. Retry and alias spellings collapse to one `(message, canonical agent recipient)`
+sample. Current declared host ownership determines the host row. People are outside this
+family; missing agent ownership is unknown, never a successful delivery.
+
+`POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
+`input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider
+authority, recipient and current mailbox incarnation/epoch must all match. Acceptance
+commits under the same transactional fence and preserves its first source timestamp.
+It does **not** advance generic delivered/read state. Ordinary `message.delivered` or
+`message.read` assertions cannot certify input acceptance. Historical settled mail without
+a native acceptance certificate remains unknown rather than being manufactured as success.
+Acceptance committed in a valid recipient incarnation remains historical evidence after
+a later restart; a replacement cannot submit an earlier incarnation's unbound receipt.
+
+Explicit silent/next-turn mail is shown in held diagnostics until its first durable staged
+eligibility edge. It is never called delivered while held. Once eligible, its latency still
+starts at the **original durable send**; hold time is visible but is not subtracted or reset.
+Terminal undelivered held mail remains bad. Busy delivery-capable seats are not excluded.
+An eligible open message remains visible after its failure bucket leaves the budget horizon.
+
+`POST /v1/mailbox/acceptance-frontier` accepts a flat current mailbox fence and
+`observed_through_unix_ms`. A native producer first seals/drains its source and durably posts
+every acceptance through that cut. An unresolved handoff bounds the frontier before that
+attempt; missing original handoff clocks cannot certify a frontier. This is not a daemon
+heartbeat or receipt-pump wall-time assertion. The source joins each current recipient
+incarnation to its frontier and evaluates budgets at the **minimum proven accounting cut**.
+A source clock behind a message onset does not manufacture a deadline failure; that message
+remains unjudged until the source cut reaches it. Frontier freshness is 120s.
+
+Ledger attempt generations survive pruning, binding changes and reopen. A rejected RPC
+resolves only its own generation; abandoned earlier attempts, including unknown source
+clocks, continue to bound coverage until authoritative native absence resolves them.
+Claude retains native acceptance timestamps independently of optional TODO journaling.
+Frontier publication failures retain those bounds and produce the protocol-visible
+`claude-acceptance-frontier-unsettled` waiting diagnostic, including after daemon recovery
+acknowledges a previously unavailable publication; they do not write into the seat terminal.
+
+The daemon starts one reactive source publication beside its roster producer. Source events
+invalidate the previous cut immediately; capture failure, startup, missing shard mirror
+coverage, missing ownership, missing/stale driver frontiers and malformed original clocks
+produce unknown/no-data and cannot recover an owner episode. An idle source subscription
+can renew its own capture heartbeat without querying mail, but cannot advance a native
+producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluation; no source
+polling or request-time sampling is used. Native ownership/response declarations bind this
+host row through the existing native indicator mechanism, without a separate alert evaluator.
+
+The local acceptance and lifecycle ledgers retain metadata across restarts and source-mark
+retention. They contain recipient identity, source timestamps, sender/tags and lifecycle
+provenance, not message content or model output. They currently retain this audit metadata
+without automatic deletion; 30d applies to budget evaluation, not a destructive ledger TTL.
+
+Capture does not aggregate these indefinitely retained ledgers on each event. Producer
+transactions maintain a rebuildable pending-message key projection (unresolved or invalid
+original send clocks), and an indexed send-time range supplies the current window. Capture
+unions those populations, then reads lifecycle and certificate primary-key ranges only for
+relevant messages assigned to this host. Completed history outside the window therefore
+causes no historical lifecycle/certificate reads on unrelated daemon events. Startup replay
+rebuilds this projection from durable metadata; no timer refresh or cached-success fallback
+substitutes for producer facts.
+
