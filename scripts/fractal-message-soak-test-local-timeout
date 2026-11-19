@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-: "${FRACTAL_SOAK_TEST_REAL_ST3_BIN-${ST3_SOAK_TEST_REAL_ST3_BIN:?set the real installed st3 executable for this test}}"
+: "${FRACTAL_SOAK_TEST_REAL_ST3_BIN-${ST3_SOAK_TEST_REAL_ST3_BIN:?set the real installed Fractal executable for this test}}"
 if [[ ${1:-} == conversations && ${2:-} == send ]]; then
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   "${FRACTAL_SOAK_TEST_REAL_ST3_BIN-${ST3_SOAK_TEST_REAL_ST3_BIN-}}" "$@" >/dev/null

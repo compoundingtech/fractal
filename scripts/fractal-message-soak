@@ -16,12 +16,12 @@ set -Eeuo pipefail
 umask 077
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-: "${FRACTAL_BIN-${ST3_BIN:?set ST3_BIN to the installed st3 executable}}"
+: "${FRACTAL_BIN-${ST3_BIN:?set FRACTAL_BIN to the installed Fractal executable}}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-: "${FRACTAL_AGENT-${ST_AGENT:?set ST_AGENT to the authorized st3 operator identity}}"
+: "${FRACTAL_AGENT-${ST_AGENT:?set FRACTAL_AGENT to the authorized Fractal operator identity}}"
 : "${FABRIC_BIN:?set FABRIC_BIN to the installed Fabric executable}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-: "${FRACTAL_SOAK_EXAMPLE_MAC_BIN-${ST3_SOAK_EXAMPLE_MAC_BIN:?set ST3_SOAK_EXAMPLE_MAC_BIN to the installed st3 executable on ExampleMac}}"
+: "${FRACTAL_SOAK_EXAMPLE_MAC_BIN-${ST3_SOAK_EXAMPLE_MAC_BIN:?set FRACTAL_SOAK_EXAMPLE_MAC_BIN to the installed Fractal executable on ExampleMac}}"
 
 MONITOR=agent/example/st3/delivery-soak-20260924/monitor
 # ST_AGENT authorizes operator attention actions below. The probe sender has
@@ -29,7 +29,7 @@ MONITOR=agent/example/st3/delivery-soak-20260924/monitor
 EXAMPLE_MAC_RECIPIENT=agent/example/st3/delivery-soak-20260924/recipient
 EXAMPLE_LINUX_RECIPIENT=agent/example/st3/delivery-soak-20260924/example-linux-recipient
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-EXAMPLE_MAC_ST3=${FRACTAL_SOAK_EXAMPLE_MAC_BIN-${ST3_SOAK_EXAMPLE_MAC_BIN-}}
+EXAMPLE_MAC_FRACTAL=${FRACTAL_SOAK_EXAMPLE_MAC_BIN-${ST3_SOAK_EXAMPLE_MAC_BIN-}}
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 DEADLINE_SECONDS=${FRACTAL_SOAK_DEADLINE_SECONDS-${ST3_SOAK_DEADLINE_SECONDS:-180}}
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -43,7 +43,7 @@ log() {
     | /usr/bin/tee -a "$STATE_DIR/events.log"
 }
 
-# Fabric exec can time out after the remote st3 command has committed. Recover
+# Fabric exec can time out after the remote Fractal command has committed. Recover
 # only the exact durable request, never infer success from a timed-out client.
 recover_sent_subject() {
   local recipient=$1 token=$2 deadline=${3:-} mailbox subjects count
@@ -108,7 +108,7 @@ probe() {
     fi
   elif [[ $direction == example-mac-to-example-linux ]]; then
     recipient=$EXAMPLE_LINUX_RECIPIENT
-    if ! response=$(/usr/bin/timeout 30s "$FABRIC_BIN" exec example-mac -- "$EXAMPLE_MAC_ST3" conversations send "$recipient" \
+    if ! response=$(/usr/bin/timeout 30s "$FABRIC_BIN" exec example-mac -- "$EXAMPLE_MAC_FRACTAL" conversations send "$recipient" \
       --from "$MONITOR" --subject 'soak request' \
       --body "Reply once with exact receipt token $token." --json); then
       if subject=$(recover_sent_subject "$recipient" "$token" "$((started + DEADLINE_SECONDS))"); then
@@ -228,7 +228,7 @@ record_result() {
   fi
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   if response=$(/usr/bin/timeout 20s "${FRACTAL_BIN-${ST3_BIN-}}" attention request --as "${FRACTAL_AGENT-${ST_AGENT-}}" --for person/alex \
-    --title "st3 cross-host delivery failing: $direction" \
+    --title "Fractal cross-host delivery failing: $direction" \
     --reason "Three consecutive exact-receipt probes failed in $direction; latest message $pending, token ${LAST_TOKEN:-unknown}. Inspect the st3-message-soak service journal and both recipient agents." \
     "${target_args[@]}" --severity error \
     --idempotency-key "st3-message-soak:$direction:$episode" --json); then

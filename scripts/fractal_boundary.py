@@ -11,7 +11,7 @@ LEGACY = re.compile("st2", re.IGNORECASE)
 # in temporary ancestors such as nix-shell.Cst2Ln.
 LEGACY_COMPONENT = re.compile(r"(?:.*[._-])?st2(?:[._-].*)?", re.IGNORECASE)
 # A stored value names st2 as its own token: a label, schema, path or program. Keys, signatures,
-# nonces and other base64 that st stores hold the letters st2 inside longer runs by chance.
+# nonces and other base64 that Fractal stores hold the letters st2 inside longer runs by chance.
 TOKEN = re.compile(r"(?<![a-z0-9])st2(?![a-z0-9])", re.IGNORECASE)
 
 

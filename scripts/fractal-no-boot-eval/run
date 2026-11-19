@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-# Prove that st starts a seat idle. One fresh isolated daemon starts a seat for every named
+# Prove that Fractal starts a seat idle. One fresh isolated daemon starts a seat for every named
 # harness in a Git workspace that still holds what older releases rendered: a `.st3/boot.md` and
 # a `.st3/` line in the Git exclude file. For each seat the eval requires that:
 #
 #   1. the started seat takes no turn and writes no transcript entry while nothing is posted;
-#   2. st removed the legacy `.st3` directory and exclude line, and installed the st skill;
+#   2. Fractal removed the legacy `.st3` directory and exclude line, and installed the Fractal skill;
 #   3. once a step is assigned and a message is posted, the seat claims and completes the step
 #      and replies to the message;
-#   4. after its provider is killed and st restarts it, the seat takes no turn again.
+#   4. after its provider is killed and Fractal restarts it, the seat takes no turn again.
 #
-# Usage: run ST3_BIN OUT HARNESS...
+# Usage: run FRACTAL_BIN OUT HARNESS...
 #   HARNESS is claude, codex, omp, pi, or opencode.
 #
 # NB_MODEL_<HARNESS> overrides a seat's model. NB_QUIET_SECONDS (default 30) is how long each
 # idle window is watched. NB_WORK_SECONDS (default 600) bounds the step and the reply.
 # NB_EXTRA_PATH is prepended to the daemon's PATH, for a harness installed outside the login PATH.
 #
-# Run it outside any st seat: the isolated daemon binds a caller to the nearest ST_AGENT among
-# its ancestors, and this eval acts as a person. Each driver installs the st skill in this user's
+# Run it outside any Fractal seat: the isolated daemon binds a caller to the nearest ST_AGENT among
+# its ancestors, and this eval acts as a person. Each driver installs the Fractal skill in this user's
 # home, as it does on a real host.
 #
 # OUT/result.json holds the verdict and one record per seat. OUT/evidence/ keeps the agent cards,
@@ -63,7 +63,7 @@ harness_block() {
 root="$(mktemp -d /tmp/nbe.XXXXXX)"
 socket="$root/st3.sock"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st3() { FRACTAL_ENDPOINT="$socket" ST3_ENDPOINT="$socket" FRACTAL_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" ST3_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" "$root/bin/st3" "$@"; }
+fractal() { FRACTAL_ENDPOINT="$socket" ST3_ENDPOINT="$socket" FRACTAL_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" ST3_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" "$root/bin/st3" "$@"; }
 
 # transcripts HARNESS: every native transcript file the seat has written, one per line. A restart
 # can resume the same file or start another, so the checks count across all of them.
@@ -102,14 +102,14 @@ turn_entries() {
   echo "$total"
 }
 
-# working_since HARNESS MS: how many times st observed the seat working at or after MS.
+# working_since HARNESS MS: how many times Fractal observed the seat working at or after MS.
 working_since() {
-  st3 subject history "agent/nb.$1" --json --limit 100 2>/dev/null \
+  fractal subject history "agent/nb.$1" --json --limit 100 2>/dev/null \
     | jq -s --argjson since "$2" \
       'map(select(.kind == "harness.observed" and .body.fields.state == "working" and .accepted_at_unix_ms >= $since)) | length'
 }
 
-agent_json() { st3 agents show "agent/nb.$1" --json 2>/dev/null || echo '{}'; }
+agent_json() { fractal agents show "agent/nb.$1" --json 2>/dev/null || echo '{}'; }
 
 now_ms() {
   local micros=${EPOCHREALTIME/./}
@@ -145,7 +145,7 @@ cleanup() {
       n=$((n + 1))
       cp "$file" "$out/evidence/$harness-transcript-$n.jsonl"
     done < <(transcripts "$harness")
-    st3 subject history "agent/nb.$harness" --json --limit 100 >"$out/evidence/$harness-history.jsonl" 2>/dev/null || true
+    fractal subject history "agent/nb.$harness" --json --limit 100 >"$out/evidence/$harness-history.jsonl" 2>/dev/null || true
   done
   cp "$root/daemon.log" "$out/evidence/" 2>/dev/null || true
   cp "$root/xdg-state/st3/driver-api-warnings.log" "$out/evidence/driver.log" 2>/dev/null || true
@@ -174,7 +174,7 @@ env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL="$SHELL" LANG="${LANG:-C.
 echo $! >"$root/daemon.pid"
 for _ in $(seq 1 300); do
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  FRACTAL_DAEMON_WAIT=0 ST3_DAEMON_WAIT=0 st3 conversations ls person/eval --json >/dev/null 2>&1 && break
+  FRACTAL_DAEMON_WAIT=0 ST3_DAEMON_WAIT=0 fractal conversations ls person/eval --json >/dev/null 2>&1 && break
   sleep 0.2
 done
 
@@ -195,7 +195,7 @@ done
 } >"$root/seats.kdl"
 cp "$root/seats.kdl" "$out/evidence/seats.kdl"
 started_at=$(now_ms)
-st3 apply "$root/seats.kdl" --no-gate-check --as person/eval >"$out/evidence/apply.txt"
+fractal apply "$root/seats.kdl" --no-gate-check --as person/eval >"$out/evidence/apply.txt"
 
 declare -A idle_ok start_turns start_working st3_left exclude_left skill_ok
 for harness in "${harnesses[@]}"; do
@@ -214,7 +214,7 @@ for harness in "${harnesses[@]}"; do
     claude) skill="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/st/SKILL.md" ;;
     *) skill="$HOME/.agents/skills/st/SKILL.md" ;;
   esac
-  cmp -s "$skill" <(st3 skill) && skill_ok[$harness]=1 || skill_ok[$harness]=0
+  cmp -s "$skill" <(fractal skill) && skill_ok[$harness]=1 || skill_ok[$harness]=0
 done
 
 # The work: one step per seat, assigned the way a mission assigns a standing seat, and one message.
@@ -231,11 +231,11 @@ done
   echo '}'
 } >"$root/mission.kdl"
 cp "$root/mission.kdl" "$out/evidence/mission.kdl"
-st3 apply "$root/mission.kdl" --as person/eval >"$out/evidence/publish.txt"
-st3 --json missions start eval/no-boot --id nb --workspace "$root/ws" --as person/eval >"$out/evidence/start.json"
+fractal apply "$root/mission.kdl" --as person/eval >"$out/evidence/publish.txt"
+fractal --json missions start eval/no-boot --id nb --workspace "$root/ws" --as person/eval >"$out/evidence/start.json"
 declare -A message
 for harness in "${harnesses[@]}"; do
-  message[$harness]="$(st3 conversations send "agent/nb.$harness" --from person/eval \
+  message[$harness]="$(fractal conversations send "agent/nb.$harness" --from person/eval \
     --subject "No-boot check" \
     --body "Reply to this message with the single word PONG." --json | jq -er .subject)"
 done
@@ -244,8 +244,8 @@ declare -A step_state replied
 deadline=$((SECONDS + work_seconds))
 while ((SECONDS < deadline)); do
   pending=0
-  st3 missions show mission-run/eval/no-boot/nb --json >"$root/run.json" 2>/dev/null || true
-  st3 conversations ls person/eval --json >"$root/inbox.json" 2>/dev/null || echo '[]' >"$root/inbox.json"
+  fractal missions show mission-run/eval/no-boot/nb --json >"$root/run.json" 2>/dev/null || true
+  fractal conversations ls person/eval --json >"$root/inbox.json" 2>/dev/null || echo '[]' >"$root/inbox.json"
   for harness in "${harnesses[@]}"; do
     step_state[$harness]="$(jq -r --arg step "$harness" \
       '[.steps[]? | select(.step == $step) | .status] | first // "unknown"' \
@@ -260,7 +260,7 @@ done
 cp "$root/run.json" "$out/evidence/run.json" 2>/dev/null || true
 cp "$root/inbox.json" "$out/evidence/inbox.json" 2>/dev/null || true
 
-# The restart: kill each provider; st restarts the seat, which must again take no turn.
+# The restart: kill each provider; Fractal restarts the seat, which must again take no turn.
 declare -A before_restart restart_ok restart_turns restart_working restarted_at
 for harness in "${harnesses[@]}"; do
   old="$(agent_json "$harness" | jq -r '.value.incarnation_id // empty')"
@@ -327,7 +327,7 @@ for harness in "${harnesses[@]}"; do
     | .failures = ([
         (if .started_idle then empty else "the started seat did not become idle" end),
         (if .transcript_entries_before_message == 0 then empty else "the started seat wrote \(.transcript_entries_before_message) transcript entries before a message" end),
-        (if .working_observations_before_message == 0 then empty else "st saw the started seat working before a message" end),
+        (if .working_observations_before_message == 0 then empty else "Fractal saw the started seat working before a message" end),
         (if .legacy_st3_left then "the legacy .st3 directory is still there" else empty end),
         (if .legacy_exclude_left then "the legacy .st3/ exclude line is still there" else empty end),
         (if .skill_installed then empty else "the st skill is not installed" end),
@@ -336,7 +336,7 @@ for harness in "${harnesses[@]}"; do
         (if .replies > 0 then empty else "the seat did not reply to the message" end),
         (if .restarted_idle then empty else "the restarted seat did not become idle" end),
         (if .transcript_entries_after_restart == 0 then empty else "the restarted seat wrote \(.transcript_entries_after_restart) transcript entries" end),
-        (if .working_observations_after_restart == 0 then empty else "st saw the restarted seat working" end)
+        (if .working_observations_after_restart == 0 then empty else "Fractal saw the restarted seat working" end)
       ])
     | .verdict = (if (.failures | length) == 0 then "pass" else "fail" end)')"
   records+=("$record")

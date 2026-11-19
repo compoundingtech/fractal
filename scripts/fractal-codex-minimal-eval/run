@@ -6,7 +6,7 @@
 #
 # Usage: run BIN_DIR OUT [MODEL]
 #
-# BIN_DIR holds the st3 binary under test. OUT receives start.json, status.json, history.jsonl,
+# BIN_DIR holds the Fractal binary under test. OUT receives start.json, status.json, history.jsonl,
 # the seat's transcript, its provider argv (codex-argv.txt) and verdict.txt.
 set -Eeuo pipefail
 
