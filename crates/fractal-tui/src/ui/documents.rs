@@ -6,7 +6,7 @@
 use super::doc::{Doc, DocExt, Hit, Target};
 use super::{text, theme};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use fractal_client::{ClientError, DocumentContent, DocumentReferences, DocumentsPage};
 use fractal_ui_model::documents::{DocumentList, DocumentTrail, DocumentView, Unavailable, parse_reference};
 use std::cell::RefCell;

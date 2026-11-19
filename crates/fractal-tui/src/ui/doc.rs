@@ -7,7 +7,7 @@
 use super::text::{self, run};
 use super::theme;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 /// What a button on an alert does.
 #[derive(Clone, Debug, PartialEq, Eq)]

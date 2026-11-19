@@ -42,7 +42,16 @@ assert_eq!(selection.text(&["▎ ```sh", "▎   cargo test"]), "cargo test");
 
 Terminal consumers opt into `features = ["ratatui"]`. This adds `Cache`, `Theme`, and the
 `conversation`, `doc`, `text`, `ansi`, and `theme` modules, plus the `SelectionLine`
-implementation for ratatui's `Line`. the Fractal terminal UI and the Fractal CLI enable this feature explicitly.
+implementation for the owned semantic `text::Line`. The Fractal terminal UI and CLI enable this feature explicitly.
+
+`text::{Line, Span}` retain style, display width and continuation alignment through composition.
+`Span::link` and `Run::link` carry an optional shared URL/reference target independently of the
+label. `text::link(label, target, style)` creates a labeled run; raw HTTP(S) URLs and document
+references are recognized before wrapping, including in ask prose, so every wrapped segment
+keeps the full target without changing its visible text. Prefixes, tables and document appends
+preserve this metadata. Convert with `Line::to_ratatui()` only at the drawing boundary; native
+Ratatui lines can enter via `Line::from`. `Line::drawn_links()` and the markdown link-range APIs
+derive display-column ranges directly from span metadata, without global state or style encoding.
 
 Verify the two builds independently, since a workspace build unifies the terminal consumers'
 features:

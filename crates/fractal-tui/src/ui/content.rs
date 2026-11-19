@@ -11,8 +11,8 @@ use base64::Engine as _;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    text::{Line, Span},
 };
+use fractal_conversation_ui::text::{Line, Span};
 use serde_json::Value;
 use fractal_client::{Client, ConversationContentRef, TimelineBody};
 use std::{
