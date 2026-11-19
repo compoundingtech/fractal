@@ -188,7 +188,7 @@ pub fn claude_settings_registration() -> serde_json::Value {
             "UserPromptSubmit": observe("UserPromptSubmit"),
             "Stop": observe("Stop"),
             // The permission hook waits while a person may answer from a client (see
-            // `driver_hook::answer_permission_from_st`), past Claude's default hook timeout.
+            // `driver_hook::answer_permission_from_fractal`), past Claude's default hook timeout.
             "PermissionRequest": [{ "hooks": [{
                 "type": "command",
                 "command": "\"$ST_HOOKS/claude-observe.sh\" PermissionRequest",

@@ -5748,7 +5748,7 @@ fn a_persons_answer_takes_each_approval_methods_own_decision_words() {
 }
 
 #[test]
-fn an_approval_answered_in_fractal_is_sent_once_and_only_for_this_thread() {
+fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     use crate::session_control::PromptAnswer;
     let root = tempfile::tempdir().unwrap();
     let mut writer =

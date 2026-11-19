@@ -144,7 +144,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(FractalError::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `fractal agents resume`. If resume refuses an authored session selection, use `fractal agents stop` then `fractal agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
