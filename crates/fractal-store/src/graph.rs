@@ -2228,14 +2228,14 @@ fn driver_member(
     let extra = child_strings(children, "args")?.unwrap_or_default();
     let mut provider = vec![child_string(children, "executable")?.unwrap_or_else(|| name.clone())];
     if name == "claude" {
-        // A typed Claude harness is always the real interactive TUI and always carries st3's
+        // A typed Claude harness is always the real interactive TUI and always carries Fractal's
         // native channel. `dev-channels #true` is retained only so declarations written before
         // the channel became intrinsic continue to parse; opting out would create an agent that
         // cannot receive graph messages, so false is rejected below.
         provider.extend(["--channels".into(), fractal_drivers::claude_channel::FRACTAL_CHANNEL.into()]);
         // The channel wakes the real TUI, while Claude's own lifecycle hooks externalize the
         // resulting turn. Supplying the canonical registration as an additional native settings
-        // source keeps arbitrary user workspaces untouched and gives every typed st seat the
+        // source keeps arbitrary user workspaces untouched and gives every typed Fractal seat the
         // same UserPromptSubmit/Stop state edges.
         provider.extend([
             "--settings".into(),

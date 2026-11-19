@@ -388,7 +388,7 @@ fn without_the_seat_binary_the_script_drains_stdin_and_renders_the_fault() {
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "st: hooks cannot run: this seat's st3 binary is missing (ST3_BIN={})\n",
+                "fractal: hooks cannot run: this seat's Fractal binary is missing (FRACTAL_BIN={})\n",
                 binary.unwrap_or("unset")
             )
         );

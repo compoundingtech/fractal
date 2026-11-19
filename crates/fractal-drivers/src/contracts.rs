@@ -60,7 +60,7 @@ fn env_with_warning(
     if old.as_ref().is_some_and(|old| old != &new) {
         let identity = identity_env(name);
         warn(format!(
-            "st: conflicting environment variables {new_name} and {name}; {}",
+            "fractal: conflicting environment variables {new_name} and {name}; {}",
             if identity { "ignoring both identity values" } else { "using the Fractal value" }
         ));
         if identity {

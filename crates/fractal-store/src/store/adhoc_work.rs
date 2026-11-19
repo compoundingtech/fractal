@@ -100,7 +100,7 @@ pub fn enrich_handoff(
     if let Some(handoff) = handoff.filter(|h| h.accepted_at_unix_ms <= at) {
         let fields = &handoff.body["fields"];
         let ack = acknowledged(connection, &handoff, at)?;
-        view.constraints.push(format!("Handoff from {} to {} ({}): {}\nNote: {}\nAcknowledge: st work acknowledge {} --message {} --as {}",
+        view.constraints.push(format!("Handoff from {} to {} ({}): {}\nNote: {}\nAcknowledge: fractal work acknowledge {} --message {} --as {}",
             handoff.actor.as_deref().unwrap_or_default(), fields["handoff_to"].as_str().unwrap_or_default(), if ack { "acknowledged" } else { "awaiting acknowledgment" },
             fields["handoff_message"].as_str().unwrap_or_default(), fields["summary"].as_str().unwrap_or_default(), view.subject,
             fields["handoff_message"].as_str().unwrap_or_default(), fields["handoff_to"].as_str().unwrap_or_default()));
