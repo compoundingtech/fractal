@@ -41,6 +41,9 @@ pub mod observer_refresh;
 pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
+pub mod model_fallback;
+pub use model_fallback::{ModelFallbackCause, ModelFallbackObservation};
+pub mod model_return;
 mod notice_authority;
 pub mod ask_digest;
 pub mod auto_resolved;
@@ -879,6 +882,10 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+-- Bridge requests carry the durable admitted count; roster reads seek one current-incarnation row.
+CREATE INDEX IF NOT EXISTS claims_model_return_attempt_index
+ON claims(subject, json_extract(body,'$.fields.incarnation_id'), json_extract(body,'$.fields.model_return_attempt') DESC)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.operation')='model-return-v1';
 CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
 ON claims(subject, json_extract(body, '$.fields.request_key'))
 WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
@@ -6863,12 +6870,12 @@ impl Store {
     /// replicated readings newest-first through `claims_subject_kind_accepted_index`. Never a
     /// usage fold or a scan of the seat's usage history: a new incarnation that has not
     /// reported yet reads `None` after one bounded window, however long the seat's history.
-    pub fn latest_usage_model(&self, subject: &str, incarnation: &str) -> Result<Option<String>> {
+    pub fn latest_usage_model_observation(&self, subject: &str, incarnation: &str) -> Result<Option<model_drift::ModelObservation>> {
         /// Response rollups interleave with session readings, and a replaced incarnation's
         /// last readings can land after the new one's first, so the newest session reading
         /// of a live incarnation sits well inside this.
         const LATEST_USAGE_MODEL_WINDOW: i64 = 64;
-        fn model_of(body: &Value, incarnation: &str) -> Option<String> {
+        fn model_of(body: &Value, incarnation: &str) -> Option<model_drift::ModelObservation> {
             let fields = body.get("fields")?;
             if fields.get("incarnation_id").and_then(Value::as_str) != Some(incarnation)
                 || !matches!(
@@ -6878,7 +6885,10 @@ impl Store {
             {
                 return None;
             }
-            fields.get("model").and_then(Value::as_str).map(str::to_owned)
+            Some(model_drift::ModelObservation {
+                model: fields.get("model").and_then(Value::as_str)?.to_owned(),
+                observed_at_ms: fields.get("observed_at_unix_ms").and_then(Value::as_u64).map(u128::from),
+            })
         }
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
