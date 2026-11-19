@@ -10,7 +10,7 @@ fn enables_asm(dependency: &toml::Value) -> bool {
 #[test]
 fn sha2_asm_is_declared_only_for_aarch64() {
     // This guards the manifest policy, not Cargo's resolved feature graph.
-    let manifest: toml::Value = include_str!("../Cargo.toml").parse().unwrap();
+    let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
     assert!(!enables_asm(&manifest["dependencies"]["sha2"]));
     let targets = manifest["target"].as_table().unwrap();
     let aarch64 = "cfg(target_arch = \"aarch64\")";
@@ -24,7 +24,7 @@ fn sha2_asm_is_declared_only_for_aarch64() {
             assert!(!enables_asm(dependency), "unexpected asm feature for {target}");
         }
     }
-    let workspace: toml::Value = include_str!("../../../Cargo.toml").parse().unwrap();
+    let workspace: toml::Value = toml::from_str(include_str!("../../../Cargo.toml")).unwrap();
     assert_eq!(workspace["workspace"]["resolver"].as_str(), Some("3"));
 }
 
