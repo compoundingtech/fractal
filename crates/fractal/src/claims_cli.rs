@@ -83,6 +83,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn phase_trace_distinguishes_occurrence_from_acceptance_time() {
+        for phase in [
+            "dispatched", "received", "admitted", "exec-started", "exec-exited",
+            "result-replicated", "dispatch-stalled",
+        ] {
+            for wrapped in [false, true] {
+                let fields = json!({
+                    "attempt": 2, "phase": phase, "exec": "exec/test",
+                    "at_unix_ms": 1000, "host": "host/test",
+                });
+                let claim: ClaimRecord = serde_json::from_value(json!({
+                    "id": "claim-phase", "store_index": 9, "batch_id": "batch-phase",
+                    "subject": "step-run/test/work", "kind": "step.execution-phase",
+                    "origin": "test", "actor": null,
+                    "body": if wrapped { json!({"fields": fields}) } else { fields },
+                    "predecessors": [], "accepted_at_unix_ms": 2000,
+                })).unwrap();
+                let mut output = Vec::new();
+                write_trace_claim(&mut output, &claim).unwrap();
+                assert_eq!(String::from_utf8(output).unwrap(), format!(
+                    "9\t1970-01-01T00:00:02.000Z\tstep.execution-phase\tstep-run/test/work\tattempt=2 · phase={phase} · exec=exec/test · at_unix_ms=1970-01-01T00:00:01.000Z · host=host/test\n"
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn a_claims_page_prints_trace_lines_and_the_next_page_flag() {
         let claim: ClaimRecord = serde_json::from_value(json!({
             "id": "claim-1", "store_index": 7, "batch_id": "batch-1",
