@@ -274,7 +274,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let newly_started = !record.roots.iter().any(|root| root.runtime_id == execution.command.id);
         if newly_started {
             execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(execution, now);
-            let mut environment = execution.command.environment.clone();
+            let mut environment = self.store.take_shell_environment(&execution.command.id)
+                .context("environment-unavailable: shell launch environment lost; resubmit the command")?;
             environment.insert(PARENT_ENV.into(), serde_json::to_string(&crate::store::shell_resources::ParentContext { grant: grant.clone(), request: request.clone() })?);
             // Nested CLIs must reconnect to the exact authority which owns the inherited grant.
             environment.insert("ST3_ENDPOINT".into(), self.endpoint.clone());
@@ -292,7 +293,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 driver: None, terminal_size: None, capacity: None, declared_priority: None, declared_lane: None, declared_budgets: None,
             };
             resource_lanes::set_request(&mut member, &request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
                 anyhow::ensure!(!self.store.shell_resource(&execution.command.id)?.cancel, "shell request cancelled before payload release");
                 self.store.shell_resource_owner_live(&request.owner)?;
                 Ok(())
