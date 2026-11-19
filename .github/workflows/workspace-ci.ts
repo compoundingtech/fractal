@@ -130,6 +130,9 @@ const pickedOr = (namespaceLabels: string, output = 'ci1', mergeLabels = mergeCi
 // Deployment and merge progress take precedence during saturation. Required PR
 // checks precede optional/manual work; local reservations remain unchanged.
 const workspaceJobPriority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
+export const requiredLinuxRunner = [
+  `${linuxRunnerProfile.replace(linuxJobPriority, `\${{ ${workspaceJobPriority} }}`)};github.run-id=\${{ github.run_id }}`,
+] as const
 // CI_MERGE_NAMESPACE_PROFILE remains the independent merge overflow profile.
 // CI_PR_NAMESPACE_PROFILE is selected by the hosted step only after a successful
 // exact-head, not-queued lookup. Keep it unset until the PR profile is provisioned.
