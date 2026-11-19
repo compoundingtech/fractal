@@ -944,7 +944,7 @@ mod tests {
             });
         }
         assert!(ui.context.is_none());
-        assert!(ui.flash.as_ref().unwrap().0.starts_with("Copied"));
+        assert!(ui.flash.as_ref().unwrap().0.starts_with("Clipboard request sent (OSC 52)"));
         peer.set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
         loop {

@@ -502,24 +502,54 @@ fn pane_intents_keep_other_sessions_drafts_and_expansion_independent() {
 
 #[test]
 fn selection_joins_wrapped_lines_from_another_renderer() {
-    struct Line<'a>(&'a str, Option<&'a str>);
+    enum Fragment<'a> {
+        Content(&'a str),
+        Decoration(&'a str),
+    }
+    impl Fragment<'_> {
+        fn text(&self) -> &str {
+            match self { Self::Content(text) | Self::Decoration(text) => text }
+        }
+    }
+    struct Line<'a>(&'a [Fragment<'a>], Option<&'a str>);
     impl SelectionLine for Line<'_> {
         fn plain_text(&self) -> std::borrow::Cow<'_, str> {
-            std::borrow::Cow::Borrowed(self.0)
+            std::borrow::Cow::Owned(self.0.iter().map(Fragment::text).collect())
         }
 
         fn continuation(&self) -> Option<&str> {
             self.1
         }
+
+        fn copy_fragments(&self, from: usize, to: usize) -> Vec<pane::CopyFragment> {
+            let mut column = 0;
+            self.0.iter().filter_map(|fragment| {
+                let start = column;
+                column += unicode_width::UnicodeWidthStr::width(fragment.text());
+                match fragment {
+                    Fragment::Content(text) if column > from && start < to => Some(pane::CopyFragment {
+                        text: pane::columns(text, from.saturating_sub(start), to.saturating_sub(start)),
+                        link: None,
+                        column: None,
+                    }),
+                    _ => None,
+                }
+            }).collect()
+        }
+
+        fn decoration_only(&self) -> bool {
+            self.0.iter().all(|fragment| matches!(fragment, Fragment::Decoration(_)))
+        }
     }
+    use Fragment::{Content, Decoration};
     let lines = [
-        Line("▎ a long", None),
-        Line("▎ paragraph", Some(" ")),
-        Line("▎ https://example.com/", None),
-        Line("▎ path", Some("")),
-        Line("▎ ```sh", None),
-        Line("▎   echo hello", None),
-        Line("▎ ```", None),
+        Line(&[Decoration("▎ "), Content("a long")], None),
+        Line(&[Decoration("▎ "), Content("paragraph")], Some(" ")),
+        Line(&[Decoration("▎ "), Content("https://example.com/")], None),
+        Line(&[Decoration("▎ "), Content("path")], Some("")),
+        Line(&[Decoration("▎ ```sh")], None),
+        Line(&[Decoration("▎ "), Content("  echo hello")], None),
+        Line(&[Decoration("▎ ```")], None),
     ];
     let mut selection = Selection {
         pane: "session/a".into(),

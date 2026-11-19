@@ -32,6 +32,9 @@ marks entire chrome rows to skip, while a real empty line remains a paragraph bo
 `Selection::text` copies selected content; `text_with_link_targets` additionally includes full
 targets once per link occurrence. Tables retain source row/cell identity through grid wrapping
 and stacked-record layout, so copied rows are TSV rather than interleaved visual fragments.
+Custom renderers supply `copy_fragments` that omit decoration and mark chrome-only rows with
+`decoration_only`. All styled and wrapped fragments of one link share one target `Arc`;
+separate source link occurrences use separate allocations even when their URL text matches.
 
 ```rust
 use fractal_conversation_ui::Selection;
