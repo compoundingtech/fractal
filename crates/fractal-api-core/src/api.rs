@@ -11766,8 +11766,10 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
     let now = client_now_ms() as u64;
+    let mut report = request_latency_target_windows();
+    client_observations::attach(store, &mut report, now)?;
     let mut rows = crate::objectives::rows(
-        &request_latency_target_windows(),
+        &report,
         &limits,
         now,
         fresh_ms,
