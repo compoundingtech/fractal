@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Ship integer verdict-dependency readers before a writer cutover; default stores remain version 20 with text dependency links",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay, history rewrite or dependency backfill is required. Existing dependency links stay in place. Both representations are local derived judgment state, not replicated authority."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Add claim_verdict_dependency_keys(id INTEGER PRIMARY KEY, link TEXT NOT NULL UNIQUE), claim_verdict_dependency_edges(dependency_id INTEGER NOT NULL REFERENCES claim_verdict_dependency_keys(id) DEFERRABLE INITIALLY DEFERRED, claim_id TEXT NOT NULL, PRIMARY KEY(dependency_id,claim_id)) WITHOUT ROWID, and reverse index claim_verdict_dependency_edges_claim(claim_id,dependency_id). Read-only view claim_verdict_dependency_links exposes (link,claim_id) as UNION ALL of claim_verdict_links and dictionary-joined integer edges. The local storage digest changes; no subject, claim kind, claim field, wire format, claim-registry digest or convergence corpus changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Signature verification, candidate selection, nonce evidence and authorization rules are unchanged. Dependency readers conservatively include both representations; paged invalidation deduplicates claim IDs before canonical claim-ID ordering and the 1024-row limit."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Reader maximum advances to 22; default writer version stays 20. Opening a version-21 or version-22 database preserves its marker. Newly recorded dependencies still go to claim_verdict_links even in version-22 stores. Version-21 signature-reference behavior is untouched. This release does not activate default production integer writes or qualify a later writer cutover."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "Ordinary process replacement installs empty additive tables, their index and the union view. There is no history scan, existing-link conversion or history-sized index build; startup installation time has not been independently measured."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual SQL or activation is required. Do not change user_version or move production dependency rows to activate integer writes. A later separately qualified writer release is required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Default version-20 stores retain text dependencies and previous-release reopen/write compatibility. Do not relabel a version-22 database for an older reader: it may contain integer-only dependencies whose omission would miss invalidation. Preserve both representations on recovery and use a reader supporting the stored version. Local dependency state remains rebuildable by the explicit verdict recheck; installation does not discard or rebuild it."
+  }
+}
