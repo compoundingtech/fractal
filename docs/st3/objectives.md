@@ -496,6 +496,11 @@ unavailable lifecycle proof is never replaced with a fabricated identity.
 
 The in-memory reducer keeps only the latest closed frontier per producer/host;
 signed graph and ledger history retain predecessor proof for replay.
+Authenticated retries of the retained frontier are idempotent even after its
+predecessor leaves the hot reducer. Older native writer positions are terminal,
+not missing dependencies; the commit watcher drops them instead of retaining
+one pending candidate per heartbeat. A new frontier still waits for an
+unadmitted predecessor and every receipt in its delta.
 
 Evaluation intersects all configured producers × all current host incarnations
 and evaluates ratios and paired burn windows at that common proven cut, not

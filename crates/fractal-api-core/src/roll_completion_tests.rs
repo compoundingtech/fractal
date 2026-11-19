@@ -629,7 +629,7 @@ async fn generic_claim_api_never_signs_source_frontiers_even_for_bound_authority
         "a backdated caller journal cannot manufacture historical native coverage");
 }
 
-fn native_source_fixture(store: &Store) -> SourceConfig {
+pub(crate) fn native_source_fixture(store: &Store) -> SourceConfig {
     setup_signer(store);
     let claim = store.append_claim(&crate::model::ClaimInput {
         subject: "resource/demo/anchor".into(), kind: "resource.observed".into(), actor: None,
@@ -825,6 +825,37 @@ fn three_signed_frontier_versions_wait_for_reversed_predecessor_admission() {
     for id in &ids { ingest(&store, SignedReceipt { claim_id: id.clone() }, now).unwrap(); }
     let source = store.fractal.extensions.get::<Source>();
     assert_eq!(source_cut(&source.registry.read().unwrap(), now).unwrap().through_ms, through + 2);
+}
+
+#[test]
+fn current_frontier_retry_preserves_cut_and_superseded_predecessor_is_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("host-a").unwrap();
+    install(&store, root.path()).unwrap();
+    let config = native_source_fixture(&store);
+    let now = config.enabled_at_ms + 10_000;
+    store.set_write_clock_at(u128::from(now)).unwrap();
+    let lifetime = crate::roll_source::source_lifetime(&store).unwrap();
+    let first = publish_frontier(&store, &config, config.enabled_at_ms, now - 2,
+        store.index().unwrap(), &lifetime, now).unwrap()["claim_id"].as_str().unwrap().to_owned();
+    let second = publish_frontier(&store, &config, config.enabled_at_ms, now - 1,
+        store.index().unwrap(), &lifetime, now).unwrap()["claim_id"].as_str().unwrap().to_owned();
+    let source = store.fractal.extensions.get::<Source>();
+    let before = {
+        let registry = source.registry.read().unwrap();
+        assert!(!registry.frontier_ids.contains_key(&first));
+        let proof = registry.frontiers.values().flat_map(BTreeMap::values).next().unwrap();
+        let cut = source_cut(&registry, now).unwrap();
+        (cut.covered_from_ms, cut.through_ms, proof.source_index)
+    };
+    assert_eq!(ingest(&store, SignedReceipt { claim_id: second.clone() }, now).unwrap()["changed"], false);
+    assert!(ingest(&store, SignedReceipt { claim_id: first.clone() }, now).is_err());
+    assert!(!dependencies_pending(&store, &first).unwrap());
+    let registry = source.registry.read().unwrap();
+    let proof = registry.frontiers.values().flat_map(BTreeMap::values).next().unwrap();
+    let cut = source_cut(&registry, now).unwrap();
+    assert_eq!((cut.covered_from_ms, cut.through_ms, proof.source_index), before);
+    assert_eq!(proof.claim_id, second);
 }
 
 #[test]

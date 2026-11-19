@@ -578,6 +578,10 @@ fn validate_source(registry: &Registry, receipt: &Receipt, now: u64) -> Result<b
     }
     if let Receipt::SourceFrontier { producer, host, source_claim_id, covered_from_ms, through_ms,
         previous_frontier_claim_id, source_index, source_lifetime, receipt_claim_ids, .. } = receipt {
+        // The retained proof already validated this immutable delta and its
+        // predecessor. Advancing the hot frontier deliberately prunes that
+        // predecessor, so an authenticated exact retry must not need it again.
+        if !registry.validate(receipt, now)? { return Ok(false); }
         ensure!(registry.enabled_sources.get(producer).is_some_and(|source| source.source_claim_id == *source_claim_id),
             "frontier must reference its admitted source enable proof");
         ensure!(receipt_claim_ids.iter().all(|id| registry.admitted_ids.contains(id)),
@@ -591,6 +595,7 @@ fn validate_source(registry: &Registry, receipt: &Receipt, now: u64) -> Result<b
                 && proof.source_lifetime == *source_lifetime
                 && *covered_from_ms >= proof.covered_from_ms, "source frontier chain does not extend its own admitted stream");
         }
+        return Ok(true);
     }
     registry.validate(receipt, now)
 }
@@ -819,6 +824,10 @@ pub fn dependencies_pending(store: &Store, claim_id: &str) -> Result<bool> {
     };
     let source = store.fractal.extensions.get::<Source>();
     let registry = source.registry.read().unwrap_or_else(PoisonError::into_inner);
+    if matches!(&receipt, Receipt::SourceFrontier { .. })
+        && frontier_is_obsolete(store, &registry, &receipt, claim_id)? {
+        return Ok(false);
+    }
     Ok(match receipt {
         Receipt::RollDeclared { .. } => {
             let signer = auth.signature.map(|signature| signature.signer);
@@ -994,10 +1003,16 @@ pub(crate) fn authority_cut(store: &Store) -> Result<Vec<String>> {
 /// A restored old source can never overwrite a later lifetime merely by arriving
 /// late or carrying a smaller local arrival cursor.
 fn validate_frontier_position(store: &Store, registry: &Registry, receipt: &Receipt, claim_id: &str) -> Result<()> {
-    let Receipt::SourceFrontier { producer, host, .. } = receipt else { return Ok(()); };
-    let Some(proofs) = registry.frontiers.get(&(producer.clone(), host.clone())) else { return Ok(()); };
-    let Some(previous) = proofs.values().next() else { return Ok(()); };
-    if previous.claim_id == claim_id { return Ok(()); }
+    ensure!(!frontier_is_obsolete(store, registry, receipt, claim_id)?,
+        "obsolete source frontier native writer position cannot replace the current source lifetime");
+    Ok(())
+}
+
+fn frontier_is_obsolete(store: &Store, registry: &Registry, receipt: &Receipt, claim_id: &str) -> Result<bool> {
+    let Receipt::SourceFrontier { producer, host, .. } = receipt else { return Ok(false); };
+    let Some(proofs) = registry.frontiers.get(&(producer.clone(), host.clone())) else { return Ok(false); };
+    let Some(previous) = proofs.values().next() else { return Ok(false); };
+    if previous.claim_id == claim_id { return Ok(false); }
     let sequence = |id: &str| -> Result<u64> {
         store.readers.get().query_row(
             "SELECT MAX(r.sequence) FROM replica_records r
@@ -1006,9 +1021,7 @@ fn validate_frontier_position(store: &Store, registry: &Registry, receipt: &Rece
                  AND e.receipt_state='validated'",
             rusqlite::params![id, host], |row| row.get(0)).map_err(Into::into)
     };
-    ensure!(sequence(claim_id)? > sequence(&previous.claim_id)?,
-        "obsolete source frontier native writer position cannot replace the current source lifetime");
-    Ok(())
+    Ok(sequence(claim_id)? <= sequence(&previous.claim_id)?)
 }
 
 pub fn intent_is_admitted(store: &Store, intent_claim_id: &str, declaration_claim_id: &str) -> bool {

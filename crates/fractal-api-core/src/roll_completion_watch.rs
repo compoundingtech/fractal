@@ -194,6 +194,33 @@ mod tests {
     }
 
     #[test]
+    fn locally_published_heartbeat_chain_never_accumulates_pending_frontiers() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("host-a").unwrap();
+        roll_completion::install(&store, root.path()).unwrap();
+        roll_completion::tests::native_source_fixture(&store);
+        let mut frontier = Frontier::default();
+        let mut previous: Option<String> = None;
+        for _ in 0..4 {
+            // A fresh scheduler makes the heartbeat immediately due without
+            // sleeping or changing the native envelope clock.
+            let before = store.index().unwrap();
+            crate::roll_source::Heartbeat::default().refresh(&store).unwrap();
+            let candidates = scan(&store.readers.get(), before, store.index().unwrap()).unwrap();
+            let published = candidates.iter().find(|candidate| candidate.rank == 3)
+                .expect("quiet enrolled source must publish a native frontier");
+            if let Some(previous) = previous {
+                assert!(!roll_completion::dependencies_pending(&store, &previous).unwrap());
+            }
+            previous = Some(published.id.clone());
+            frontier.refresh(&store).unwrap();
+            assert!(frontier.pending.is_empty(), "local publication retries and superseded frontiers are terminal");
+            frontier.refresh(&store).unwrap();
+            assert!(frontier.pending.is_empty());
+        }
+    }
+
+    #[test]
     fn initial_cut_is_topological_and_incremental_cut_excludes_old_and_unrelated_claims() {
         let connection = database();
         insert(&connection, 1, &format!("{PREFIX}roll/host/1"), "resource.observed", "host-observed");
