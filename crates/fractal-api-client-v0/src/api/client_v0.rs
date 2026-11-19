@@ -10827,6 +10827,7 @@ mod tests {
         drop(app);
         drop(state);
         let reopened = test_state(root.path());
+        reopened.store.set_member_key(Some(key.clone())).unwrap();
         let app = super::super::router(reopened.clone());
         assert_eq!(send(app.clone(), "replacement-token").await.unwrap().status(), StatusCode::OK);
         assert_eq!(reopened.store.index().unwrap(), accepted);
