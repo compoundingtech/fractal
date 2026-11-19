@@ -493,6 +493,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
         left: Default::default(),
         machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
         verification_attempt: None,
+        worker: None,
     };
     let output = render_checkpoint_status(&status);
     assert!(output.contains("last daemon start (advertised build)"));
@@ -506,6 +507,17 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     })).unwrap());
     assert!(status.pending.as_ref().unwrap().terms.is_none());
     assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
+    let output = render_checkpoint_status(&status);
+    assert!(output.contains("alder phase=seal (no seal)"));
+    assert!(output.contains("birch phase=seal (no seal)"));
+    status.pending = None;
+    status.worker = Some(serde_json::from_value(serde_json::json!({
+        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
+    })).unwrap());
+    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
 }
 
 #[test]

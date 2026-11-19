@@ -14,6 +14,8 @@
 //! - `concurrent`: five seats launch at once.
 //! - `suspend`: a quiet seat suspends and resumes its own native session, and a resume whose
 //!   transcript is gone fails with a typed reason while the seat stays suspended.
+//! - `idle-suspend`: a signed fleet member automatically stops a quiet seat, then wake-class mail
+//!   resumes the same native session through a ready channel and reaches its first native turn.
 //!
 //! The stand-ins answer instantly where the real providers take seconds. That is the point: a race
 //! between a provider and the daemon that a slow provider hides, a fast one hits every time.
@@ -184,7 +186,7 @@ fn canary(harness: &str, scenario: &str) {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
         .is_some_and(|result| result["verdict"] == "pass")
         && output.status.success();
-    if matches!(scenario, "when-idle" | "idle-hold") {
+    if matches!(scenario, "when-idle" | "idle-hold" | "idle-suspend") {
         eprintln!(
             "{}",
             result.as_ref().map(String::as_str).unwrap_or_default()
@@ -352,6 +354,14 @@ fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
         return;
     }
     canary("codex", "import");
+}
+
+#[test]
+fn omp_idle_suspension_wakes_the_same_native_session_and_takes_a_first_turn() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    canary("omp", "idle-suspend");
 }
 
 #[test]

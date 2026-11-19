@@ -474,6 +474,86 @@ pub struct CheckpointStatusView {
     /// Latest local verification attempt, including phases completed before a failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
+    /// Process-local worker evidence, never part of checkpoint agreement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<CheckpointWorker>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointPhase {
+    Disabled,
+    Activation,
+    ScratchCleanup,
+    Sweep,
+    Rebuild,
+    CatchingUp,
+    LocalTrim,
+    ApplyStable,
+    Manifest,
+    Halted,
+    Idle,
+    Left,
+    HeldEnvelopes,
+    Capture,
+    Seal,
+    AwaitSeals,
+    Verify,
+    ProofFailed,
+    AwaitVerifications,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointWorker {
+    pub phase: CheckpointPhase,
+    pub updated_at_unix_ms: u128,
+    /// Failure stays attached to the phase that failed until the next attempt starts.
+    pub error: Option<String>,
+}
+
+impl CheckpointStatusView {
+    /// Bounded diagnostic using only status metadata; never computes an envelope digest.
+    pub fn blocking_summary(&self) -> Option<String> {
+        if self.pending.is_none() && !self.halted
+            && !self.worker.as_ref().is_some_and(|worker|
+                worker.error.is_some() || worker.phase == CheckpointPhase::Disabled)
+        {
+            return None;
+        }
+        let mut details = Vec::new();
+        if let Some(worker) = &self.worker {
+            if worker.phase == CheckpointPhase::Disabled {
+                details.push("disabled by config on 1 node (local); peer config unknown".into());
+            }
+            details.push(format!("{} phase={:?}{}", self.node, worker.phase,
+                worker.error.as_ref().map(|error| format!(" failed: {error}")).unwrap_or_default()));
+        } else {
+            details.push(format!("{} phase=unknown (worker evidence unavailable)", self.node));
+        }
+        if self.halted {
+            details.push(format!("{} phase=trim (halted: graph would change)", self.node));
+        }
+        if let Some(pending) = &self.pending {
+            for participant in &pending.unsealed {
+                details.push(format!("{participant} phase=seal (no seal)"));
+            }
+            for (participant, difference) in &pending.disagreeing {
+                details.push(format!("{participant} phase=seal (different {difference})"));
+            }
+            if pending.unsealed.is_empty() && pending.disagreeing.is_empty() {
+                for participant in self.participants.difference(&pending.verified) {
+                    details.push(format!("{participant} phase=verify (no verification)"));
+                }
+            }
+            for (participant, difference) in &pending.verifications_differ {
+                details.push(format!("{participant} phase=verify (different {difference})"));
+            }
+        }
+        Some(format!("{}; newest stable {}: {}",
+            self.pending.as_ref().map(|pending| pending.checkpoint.as_str()).unwrap_or("no checkpoint pending"),
+            self.newest_stable.as_ref().map(|stable| stable.checkpoint.as_str()).unwrap_or("none"),
+            details.join("; ")))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,6 +640,8 @@ pub fn verification_difference(ours: &VerifiedTerms, theirs: &VerifiedTerms) -> 
 struct FailedProofInputs {
     inputs: BTreeSet<String>,
     last_failed_at_unix_ms: u128,
+    #[serde(default)]
+    last_mismatches: Vec<String>,
 }
 
 impl FailedProofInputs {
@@ -567,6 +649,16 @@ impl FailedProofInputs {
         !self.inputs.is_empty()
             && now_unix_ms < self.last_failed_at_unix_ms.saturating_add(CHECKPOINT_PROOF_BACKOFF_MS)
     }
+}
+
+#[test]
+fn legacy_proof_failure_metadata_keeps_retry_refusal_without_mismatch_detail() {
+    let failures: FailedProofInputs = serde_json::from_value(json!({
+        "inputs": ["failed-input"], "last_failed_at_unix_ms": 100
+    })).unwrap();
+    assert!(failures.last_mismatches.is_empty());
+    assert!(failures.in_backoff(101));
+    assert!(failures.inputs.contains("failed-input"));
 }
 
 /// Release labels can be just the package version. Hash the actual running code once, rather
@@ -880,6 +972,7 @@ impl Store {
         plan: &StagedPlan,
         input_digest: String,
         failed_at_unix_ms: u128,
+        mismatches: &[String],
     ) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
@@ -893,6 +986,7 @@ impl Store {
             .map(serde_json::from_value).transpose()?.unwrap_or_default();
         failures.inputs.insert(input_digest);
         failures.last_failed_at_unix_ms = failures.last_failed_at_unix_ms.max(failed_at_unix_ms);
+        failures.last_mismatches = mismatches.to_vec();
         detail.as_object_mut().ok_or_else(|| anyhow::anyhow!("checkpoint detail is not an object"))?
             .insert("proof_failures".into(), serde_json::to_value(failures)?);
         transaction.execute(
@@ -920,6 +1014,28 @@ impl Store {
     /// what it holds before the cut is still changing. Call it after exchanges and every few
     /// minutes. The proof copies the store and replays it, so run it off the request path.
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
+        self.checkpoint_worker_phase(CheckpointPhase::Sweep);
+        let result = self.checkpoint_step_inner(context);
+        if let Err(error) = &result {
+            self.checkpoint_worker_error(format!("{error:#}"));
+        }
+        result
+    }
+
+    pub fn checkpoint_worker_phase(&self, phase: CheckpointPhase) {
+        *self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner) = Some(CheckpointWorker {
+            phase, updated_at_unix_ms: now_ms(), error: None,
+        });
+    }
+
+    pub fn checkpoint_worker_error(&self, error: String) {
+        if let Some(worker) = self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+            worker.error = Some(error);
+            worker.updated_at_unix_ms = now_ms();
+        }
+    }
+
+    fn checkpoint_step_inner(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
         self.runtime.checkpoint_preflight()?;
         let mut actions = Vec::new();
         // Local rows outside every digest, so this does not wait for a peer.
@@ -928,13 +1044,16 @@ impl Store {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
         // What a trim deferred and a crash left before its rebuild.
+        self.checkpoint_worker_phase(CheckpointPhase::Rebuild);
         self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
+            self.checkpoint_worker_phase(CheckpointPhase::CatchingUp);
             return Ok(actions);
         }
         // A member that trims locally takes no part in checkpoints: it finishes a trim it had
         // already committed, then trims its own due cut.
         if self.trims_locally() {
+            self.checkpoint_worker_phase(CheckpointPhase::LocalTrim);
             self.trim_day.store(
                 u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
                 std::sync::atomic::Ordering::Relaxed,
@@ -946,7 +1065,9 @@ impl Store {
         let claims = self.checkpoint_claims()?;
         // Every node trims the same checkpoints in the same order, so the newest stable one is
         // applied here before this node seals or verifies a newer one.
+        self.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
         if let Some(need) = self.apply_stable_checkpoints(&claims, &context.scratch, &mut actions)? {
+            self.checkpoint_worker_phase(CheckpointPhase::Manifest);
             actions.push(CheckpointAction::ManifestNeeded {
                 checkpoint: need.checkpoint,
                 cut_unix_ms: need.cut_unix_ms,
@@ -954,12 +1075,14 @@ impl Store {
             return Ok(actions);
         }
         if self.checkpoint_halted()? {
+            self.checkpoint_worker_phase(CheckpointPhase::Halted);
             return Ok(actions);
         }
         let stable = stable_checkpoints(&claims);
         let newest_stable = stable.keys().next_back().copied();
         let cut = newest_due_cut(context.now_unix_ms);
         if cut == 0 || newest_stable.is_some_and(|stable| stable >= cut) {
+            self.checkpoint_worker_phase(CheckpointPhase::Idle);
             // Nothing is left to capture, so no staged set is either.
             self.remove_checkpoint_staging(&context.scratch)?;
             return Ok(actions);
@@ -968,6 +1091,7 @@ impl Store {
         let (participants, left) =
             self.checkpoint_participants(&claims, &context.configured_peers)?;
         if left.contains(&self.origin) {
+            self.checkpoint_worker_phase(CheckpointPhase::Left);
             return Ok(actions);
         }
         // Sealing ends this node's own excusal, so it counts itself.
@@ -981,6 +1105,7 @@ impl Store {
         if !verified.contains_key(&self.origin)
             && let Some(held) = self.unvalidated_envelopes_before(cut)?
         {
+            self.checkpoint_worker_phase(CheckpointPhase::HeldEnvelopes);
             actions.push(CheckpointAction::HeldBack {
                 checkpoint,
                 pending: held.pending,
@@ -989,6 +1114,7 @@ impl Store {
             });
             return Ok(actions);
         }
+        self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
         if !verified.contains_key(&self.origin) {
             // Our first seal lets peers advance, but refreshing it cannot enable verification
             // while a participant has no seal. Defer the identity walk even if history changed:
@@ -996,11 +1122,13 @@ impl Store {
             if seals.contains_key(&self.origin)
                 && participants.iter().any(|writer| !seals.contains_key(writer))
             {
+                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
                 return Ok(actions);
             }
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
             // until that history changes. It writes only when a bound grows.
+            self.checkpoint_worker_phase(CheckpointPhase::Capture);
             self.register_checkpoint_capture(cut, None)?;
             let sealed = self.checkpoint_sealed_identities(cut, None)?;
             let terms = SealTerms {
@@ -1021,17 +1149,20 @@ impl Store {
                     })
                     .next_back()
                     .map(|claim| claim.id.as_str());
+                self.checkpoint_worker_phase(CheckpointPhase::Seal);
                 self.publish_seal(&checkpoint, &terms, &sealed, replaces)?;
                 actions.push(CheckpointAction::Sealed {
                     checkpoint: checkpoint.clone(),
                     sealed_digest: terms.sealed_digest.clone(),
                     participants: terms.participants.clone(),
                 });
+                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
             } else if terms
                 .participants
                 .iter()
                 .all(|writer| seals.get(writer) == Some(&terms))
             {
+                self.checkpoint_worker_phase(CheckpointPhase::Verify);
                 self.verify_checkpoint(
                     &checkpoint,
                     &terms,
@@ -1039,6 +1170,8 @@ impl Store {
                     context,
                     &mut actions,
                 )?;
+            } else {
+                self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
             }
         }
         Ok(actions)
@@ -1080,13 +1213,18 @@ impl Store {
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
         self.runtime.checkpoint_preflight()?;
+        self.checkpoint_worker_phase(CheckpointPhase::Verify);
         if terms.rules_digest != self.runtime.checkpoint_rules_digest() {
             // Verification is for these seal terms, never a different build's drop rules.
             // The normal step publishes replacement terms before attempting proof again.
+            self.checkpoint_worker_error("verification rules differ from the running build".into());
             return Ok(());
         }
         let failures = self.checkpoint_failed_proof_inputs(checkpoint)?;
         if failures.in_backoff(context.now_unix_ms) {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof retry backoff; last recorded mismatches: {}",
+                failures.last_mismatches.join("; ")));
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
@@ -1095,6 +1233,7 @@ impl Store {
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
             // Something before the cut arrived since the seal; the next pass seals again.
+            self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
             return Ok(());
         }
         // A checkpoint with no failures needs no failure identity unless its proof fails.
@@ -1104,11 +1243,16 @@ impl Store {
             Some(proof_input_digest(&staged, &plan)?)
         };
         if input_digest.as_ref().is_some_and(|input| failures.inputs.contains(input)) {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof input previously failed; last recorded mismatches: {}",
+                failures.last_mismatches.join("; ")));
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
         let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof mismatches: {}", proof.mismatches.join("; ")));
             let input_digest = match input_digest {
                 Some(input) => input,
                 None => proof_input_digest(&staged, &plan)?,
@@ -1138,7 +1282,7 @@ impl Store {
             })
             .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
             self.record_failed_checkpoint_proof(
-                checkpoint, &staged, &plan, input_digest, context.now_unix_ms,
+                checkpoint, &staged, &plan, input_digest, context.now_unix_ms, &proof.mismatches,
             )?;
             actions.push(CheckpointAction::ProofFailed {
                 checkpoint: checkpoint.to_owned(),
@@ -1163,6 +1307,7 @@ impl Store {
             drop_digest: plan.drop_digest.clone(),
             dropped_claims: plan.dropped_claims,
         });
+        self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
         Ok(())
     }
 
@@ -1347,6 +1492,7 @@ impl Store {
             left,
             machine_version: BTreeMap::new(),
             verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
+            worker: self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         })
     }
 
