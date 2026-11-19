@@ -219,8 +219,15 @@ A failed-jobs-only rerun can inherit the earlier successful producer output; its
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
 target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
 and dependency boundary, and builds the gateway binary with its standalone production features.
-Its Cargo JSON and binary hash are retained alongside the archive; the VM does not substitute
-the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
+Its Cargo JSON and compressed binary hash are retained alongside the archive; the VM does not substitute
+the workspace-unified test binary. Manifest version 3 carries the gateway as `sekrets-st3.gz`;
+consumers verify its compressed bytes before decompressing outside the upload directory.
+Nextest uses Zstandard level 10 and its native 128 MiB long-distance window to share
+repeated code and symbol names across archived content. All executable symbols are
+retained for panic backtraces; local compiler profiles are unchanged. The outer artifact
+ZIP uses storage-only mode because both large payloads are already compressed.
+No build caches, incremental directories or raw gateway copy belong in this transfer.
+A failed producer explicitly fails consumer checks and the gate.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
 Manifest/fixture paths
