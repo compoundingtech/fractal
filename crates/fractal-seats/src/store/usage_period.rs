@@ -12,10 +12,18 @@ pub fn boundary_rows(
     let series = series_sql();
     let observed = observed_sql();
     let boundaries = boundaries.iter().map(|boundary| format!("{boundary:>20}")).collect::<Vec<_>>();
-    // A loose index scan: one successor seek per series, regardless of its history length.
-    let mut next = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9c902113b98b owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
-        "SELECT {series} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}>?1 ORDER BY {series} LIMIT 1"
+    // Only series with a reading inside a reporting window can contribute a delta.
+    // Seek that window first, so retired executions do not cost work on every report.
+    let mut active = connection.prepare_cached(&format!(
+        "SELECT DISTINCT {series} FROM claims INDEXED BY {} WHERE {PREDICATE} AND {observed}>?1 AND {observed}<=?2",
+        fractal_store::store::usage_period::WINDOW_INDEX,
     ))?;
+    let keys = if let (Some(since), Some(until)) = (boundaries.first(), boundaries.last()) {
+        active.query_map(params![since, until], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     let mut timestamp = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h301f0cf2b659 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ &format!(
         "SELECT {observed} FROM claims INDEXED BY {INDEX} WHERE {PREDICATE} AND {series}=?1 AND {observed}<=?2 ORDER BY {observed} DESC LIMIT 1"
     ))?;
@@ -31,8 +39,7 @@ pub fn boundary_rows(
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     };
     let mut result = BTreeMap::new();
-    let mut previous = String::new();
-    while let Some(key) = next.query_row(/* sqlite-large-value: allow-for-now lv-h569a833c55b3 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional()? {
+    for key in keys {
         let mut previous_at = None;
         for boundary in &boundaries {
             let Some(at) = timestamp.query_row(/* sqlite-large-value: allow-for-now lv-hee0474334795 owner=fractal_seats::store::usage_period TODO=trace-statement-and-value-representation */ params![key, boundary], |row| row.get::<_, String>(0)).optional()? else {
@@ -54,7 +61,6 @@ pub fn boundary_rows(
             result.insert(id, (subject, index, body));
             previous_at = Some(at);
         }
-        previous = key;
     }
     let mut rows = result.into_values().collect::<Vec<_>>();
     // Rollups replicate hourly; the seat's host also has the readings since, so each boundary
