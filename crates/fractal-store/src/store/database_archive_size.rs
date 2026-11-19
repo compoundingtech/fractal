@@ -107,7 +107,8 @@ fn growth(samples: &[Sample], now: u128, scope: &str) -> Option<(i64, u128, u128
         .min_by_key(|(_, sample)| (sample.at.abs_diff(day_ago), sample.at))?;
     let covered = &samples[index..];
     if covered.iter().any(|sample| sample.scope != scope || sample.bytes.is_none())
-        || covered.windows(2).any(|pair| pair[1].at <= pair[0].at || pair[1].at - pair[0].at > 2 * HOUR) { return None; }
+        // A lost hourly write must break coverage even when its unknown sample could not persist.
+        || covered.windows(2).any(|pair| pair[1].at <= pair[0].at || pair[1].at - pair[0].at > 90 * 60 * 1000) { return None; }
     let current = covered.last()?;
     if current.at != now { return None; }
     let span = now.checked_sub(baseline.at)?;
