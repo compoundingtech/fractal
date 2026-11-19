@@ -248,8 +248,8 @@ pub enum AgentResourcesChange {
 }
 
 /// The exact cache-hit contract shared by the building path and the read-only warm pin: one
-/// graph cut, one roster-relevant local frontier, one history mode, a queue lease window that
-/// has not ended, and coverage of every requested subject.
+/// graph cut, one roster-relevant local frontier, one history mode, the effective local policy,
+/// a queue lease window that has not ended, and coverage of every requested subject.
 fn agent_resources_entry_hits(
     entry: &runtime::AgentResourcesEntry,
     now: u128,
@@ -261,6 +261,7 @@ fn agent_resources_entry_hits(
     entry.index == index
         && entry.local == local
         && entry.history == history
+        && entry.idle_residency == crate::config::idle_residency_policy()
         && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         && match selected {
             None => entry.covered.is_none(),

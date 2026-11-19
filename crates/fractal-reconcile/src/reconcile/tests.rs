@@ -5124,6 +5124,188 @@ mission "legacy-child" state="ready" {
     }
 
     #[test]
+    fn restart_active_publication_only_retargets_head_following_runs() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |goal: &str| format!(r#"version 2
+mission "revision-intent" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  concurrent-runs
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &source("Use the first revision."), "intent-first");
+        let first = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        let start = |revision: Option<String>, key: &str| {
+            store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "revision-intent".into(),
+                revision,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: key.into(),
+            }).unwrap()
+        };
+        let pinned = start(Some(first.revision.clone()), "intent-pin");
+        let head = start(None, "intent-head");
+        apply_source(&store, &source("Use the second revision."), "intent-second");
+        let second = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&pinned.id).unwrap().unwrap().superseded_by.is_none());
+        let replacement = store.mission_run(&head.id).unwrap().unwrap().superseded_by.unwrap();
+        assert_eq!(store.mission_run(&replacement).unwrap().unwrap().revision, second.revision);
+        store.set_mission_run_state(&pinned.id, "failed", "terminal", None).unwrap();
+        let retry = store.retry_mission_run(&pinned.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "intent-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision);
+        apply_source(&store, &source("Use the third revision."), "intent-third");
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+        assert!(store.mission_run(&replacement).unwrap().unwrap().superseded_by.is_some(),
+            "a head-following successor must still follow later heads");
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(false);
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_legacy_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(true);
+    }
+
+    fn assert_restart_active_preserves_exact_revision_child(legacy: bool) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let child_source = |goal: &str| format!(r#"version 2
+mission "pinned-work" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &child_source("Review the first change."), "pin-first");
+        let first = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        apply_source(&store, &format!(r#"version 2
+mission "pin-parent" state="ready" {{
+  goal "Run the exact child."
+  step "execute" {{ agentless; uses-mission "pinned-work@{}"; }}
+}}"#, first.revision), "pin-parent");
+        let parent = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pin-parent".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: "pin-parent-run".into(),
+        }).unwrap();
+        if legacy {
+            // Author a pre-metadata creation receipt, rather than modifying signed history.
+            store.append_claim(&crate::model::ClaimInput {
+                subject: "mission-run/legacy-pin-child".into(),
+                kind: "mission-run.created".into(),
+                actor: Some("person/test".into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "mission": first.subject,
+                    "revision": first.revision,
+                    "initial_revision": first.revision,
+                    "current_generation": "run-generation/legacy-pin-generation",
+                    "root_revision": parent.revision,
+                    "root_mission_run": parent.subject,
+                    "parent_step_run": parent.steps[0].subject,
+                    "workspace": "/tmp",
+                    "requester": "person/test",
+                    "inputs": {},
+                    "mode": "run",
+                    "status": "running",
+                    "phase": "normal",
+                    "admission_publication": null,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("legacy-child-creation".into()),
+            }).unwrap();
+            store.replay_replication_graph().unwrap();
+            assert_eq!(store.mission_run("legacy-pin-child").unwrap().unwrap()
+                .parent_step_run.as_deref(), Some(parent.steps[0].subject.as_str()));
+        }
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let child = store.mission_run_for_parent_step(&parent.steps[0].subject)
+            .unwrap().expect("the exact-revision child is live");
+        assert_eq!(child.revision, first.revision);
+        assert!(child.superseded_by.is_none());
+        let creation = store.latest_claim(&child.subject, Some("mission-run.created"))
+            .unwrap().unwrap();
+        assert_eq!(creation.body.get("revision_pinned"),
+            if legacy { None } else { Some(&Value::Bool(true)) });
+        // The registry is unchanged from before pin metadata existed.
+        assert!(matches!(
+            crate::store::classify_replicated_claim_with_registry(
+                &creation, fractal_schema::registry(),
+            ).unwrap(),
+            smallclaims::store::ReplicatedClaimAdmission::Valid,
+        ));
+        assert!(smallclaims::hash::claim_id_is_content_hash(&creation).unwrap());
+        let signed_digest = smallclaims::principal::content_digest(
+            &creation.subject, &creation.kind, creation.actor.as_deref(), &creation.body,
+        );
+        let mut stripped = creation.clone();
+        if legacy {
+            stripped.body["revision_pinned"] = Value::Bool(true);
+        } else {
+            stripped.body.as_object_mut().unwrap().remove("revision_pinned");
+        }
+        assert!(!smallclaims::hash::claim_id_is_content_hash(&stripped).unwrap());
+        assert_ne!(signed_digest, smallclaims::principal::content_digest(
+            &stripped.subject, &stripped.kind, stripped.actor.as_deref(), &stripped.body,
+        ));
+        // Rebuilding projections must not turn either creation format into head intent.
+        store.replay_replication_graph().unwrap();
+        apply_source(&store, &child_source("Review a different change."), "pin-second");
+        let second = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        assert_ne!(first.revision, second.revision);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let retained = store.mission_run(&child.id).unwrap().unwrap();
+        assert!(retained.superseded_by.is_none(), "a head publication must not supersede an exact-revision child");
+        assert_eq!(retained.status, child.status);
+        assert_eq!(retained.revision, first.revision);
+        assert_eq!(retained.generation, child.generation);
+        let replica = Arc::new(Store::open_memory("node").unwrap());
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        replica.replay_replication_graph().unwrap();
+        let restarted = Reconciler::new(
+            replica.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&child.id).unwrap().unwrap().superseded_by.is_none());
+        replica.set_mission_run_state(&child.id, "failed", "terminal", None).unwrap();
+        let retry = replica.retry_mission_run(&child.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "pin-child-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision, "even a default retry retains a pin");
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
         exact_produced_mission_revision(false);
     }

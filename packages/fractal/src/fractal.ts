@@ -64,3 +64,4 @@ export {
 } from './mod.ts'
 export { childMission, doc, input, pr, product, runId, t } from './run-values.ts'
 export { Launch, Review, Timing } from './values.ts'
+export { lower, GraphCompileRefusal, GraphGateFailed, type LowerOptions, type WorkerBinding } from './lower.ts'

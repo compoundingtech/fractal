@@ -24,6 +24,21 @@ The source's status, generation, and execution history are immutable. Append-onl
 
 For a mission without a revision policy, publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
 
+An explicit CLI `missions start --revision REVISION`, API request `revision`, or declarative
+`mission "mission/ID@REVISION"` pins the run against automatic supersession. A CLI start
+without `--revision` still resolves an exact revision for admission, but emits
+`follow-head "true"` in its mission-run declaration so that this internal resolution does
+not become a user pin. Declarative callers can use the same flag when their selected
+revision is intended to follow later publications. Same-revision retries preserve the pin.
+
+The daemon advertises `capabilities.mission_run_follow_head = 1` in `/v1/health`.
+The CLI emits `follow-head` only when that capability is at least 1. Against an older
+daemon (capability absent or 0), it sends the legacy exact-revision declaration so starts
+continue to work during rolling upgrades; those admissions may be recorded as pinned.
+Authored declarations using `follow-head` require an upgraded publishing daemon. This
+authored flag keeps the exact admission binding (including validated readiness and
+workspace) while explicitly opting into later automatic head supersession.
+
 Native `work revise` and targeted launch revision proposals publish their candidate with the explicit run-revision operation atomically. Automatic publication supersession therefore cannot cancel the source between publication and its authorized explicit revision or proposal. Direct and proposal responses retain their durable idempotency correlation.
 
 The pinned source's revision policy and authentic evidence take precedence. Mission- or step-level `revisions="human-only"`, completed work, or person responses prevent automatic supersession; publication cannot strip that protection. The existing proposal, exact preview, reviewer authorization, and all-reviewer approval path remains. Approved cutover admits a new linked run at the exact approved revision, using the same admission-first and cleanup barriers below.
