@@ -13497,3 +13497,52 @@ fn an_older_member_sees_control_diagnostics_as_before_and_still_sends_every_code
     sync(&older, &current);
     assert_eq!(current.claim_by_id(&sent.id).unwrap().unwrap().body, sent.body);
 }
+
+#[test]
+fn shared_step_timing_history_reuses_revision_but_refolds_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("timing.db"), "fixture").unwrap();
+    let subject = "step-run/timing/step";
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_claim(&serde_json::from_value(json!({
+            "subject": subject, "kind": kind, "actor": "daemon/runtime",
+            "fields": fields, "evidence": [],
+            "expected_subject": null, "idempotency_key": null
+        })).unwrap()).unwrap()
+    };
+    let claim = append(subject, "work.claimed", json!({"attempt": 1}));
+    let connection = store.readers.get();
+    let first = shared_step_timing_events(&connection, subject).unwrap();
+    let second = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    let at = claim.accepted_at_unix_ms;
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 10, true).unwrap().elapsed,
+        10,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, true).unwrap().elapsed,
+        20,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 2, at + 20, true).unwrap().elapsed,
+        0,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, false).unwrap().started,
+        None,
+    );
+    append("step-run/timing/other", "work.progress", json!({"attempt": 1}));
+    assert!(Arc::ptr_eq(
+        &first, &shared_step_timing_events(&connection, subject).unwrap(),
+    ));
+    append(subject, "work.progress", json!({"attempt": 1}));
+    let changed = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(!Arc::ptr_eq(&first, &changed));
+    assert_eq!(changed.len(), first.len() + 1);
+    assert_eq!(step_timing_events(&connection, subject).unwrap(), *changed);
+    let transaction = connection.unchecked_transaction().unwrap();
+    let transactional = shared_step_timing_events(&transaction, subject).unwrap();
+    assert!(!Arc::ptr_eq(&changed, &transactional));
+    assert_eq!(*changed, *transactional);
+}

@@ -22,8 +22,8 @@ pub struct CardReads {
 /// A subject's folded actual state and its selected actual-state claim: the claim, its origin
 /// and the rival observations it must descend from to hold alone.
 pub struct ActualState {
-    latest: Option<Value>,
-    source: Option<(String, String, Vec<String>)>,
+    pub(super) latest: Option<Value>,
+    pub(super) source: Option<(String, String, Vec<String>)>,
 }
 
 /// An actual-state claim as the chunked read returns it: id, kind, origin, body, and whether
@@ -184,127 +184,77 @@ impl CardReads {
         Ok(())
     }
 
-    /// Read the actual states of `subjects` not read yet, one statement per chunk. A subject's
-    /// source selection uses its declared host, so declarations are read first.
-    fn load_actual(&mut self, connection: &Connection, subjects: &[String]) -> Result<()> {
-        let missing = subjects
-            .iter()
-            .filter(|subject| !self.actual.contains_key(*subject))
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        // The same claims `latest_actual_at` folds and `selected_actual_source_at` selects from:
-        // the actual-state claims, the fold leaving out `harness.` in any case. The cross join
-        // reads them one subject at a time, and each subject's rows are put in canonical order
-        // here (`canonical_order`) instead of by a sorter that would copy every body.
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h707310c0157a owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT claims.subject, claims.id, claims.kind, claims.origin, claims.body,
+    /// Resume each subject's canonical reduction from its indexed arrival suffix. A
+    /// late canonical predecessor or a mutation of the prefix restarts only that subject.
+    pub(super) fn load_actual(&mut self, store: &Store, connection: &Connection, subjects: &[String]) -> Result<()> {
+        // A writer transaction may roll back and reuse its arrival indexes. Only
+        // committed/autocommit reads and physically read-only snapshots may share state.
+        let share = connection.is_autocommit() || connection.is_readonly(rusqlite::DatabaseName::Main)?;
+        let missing = subjects.iter().filter(|subject| !self.actual.contains_key(*subject))
+            .collect::<BTreeSet<_>>();
+        let mut revision = connection.prepare_cached(
+            "SELECT COALESCE((SELECT revision FROM card_actual_revisions WHERE subject=?1),0)"
+        )?;
+        let query = format!(
+            "SELECT claims.id, claims.kind, claims.origin, claims.body,
                     claims.kind NOT LIKE 'harness.%',
                     claims.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
                     claims.batch_id
-             FROM json_each(?1) subjects
-             CROSS JOIN claims INDEXED BY claims_subject_kind_index
-               ON claims.subject=subjects.value
+             FROM claims INDEXED BY claims_subject_index
              JOIN batches ON batches.id=claims.batch_id
-             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
-               AND {UNREPAIRED_CLAIM}"
-        ))?;
-        // Each subject is folded as soon as its rows end, so a chunk holds one subject's
-        // history at a time, as a one-subject read does.
-        let mut chunks = missing.chunks(CHUNK).map(<[String]>::to_vec).collect::<VecDeque<_>>();
-        while let Some(chunk) = chunks.pop_front() {
-            let mut rows = statement.query(params![json_list(&chunk)?, self.index])?;
-            let mut current: Option<(String, Vec<(ActualRow, BatchKey)>)> = None;
-            let mut folded = HashSet::new();
-            let mut again = BTreeSet::new();
-            while let Some(row) = rows.next()? {
-                let kind: String = row.get(2)?;
-                if self.hide_reserved && fractal_schema::notice::is_reserved_kind(&kind) {
+             WHERE claims.subject=?1 AND claims.store_index>?2 AND claims.store_index<=?3
+               AND {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM}"
+        );
+        let mut suffix = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7b1fbb1528fe owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &query)?;
+        let mut full = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2228f34d3717 owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &query.replace("INDEXED BY claims_subject_index", "INDEXED BY claims_subject_kind_index"))?;
+        for subject in missing {
+            let key = (subject.clone(), self.hide_reserved);
+            let revision: u64 = revision.query_row(/* sqlite-large-value: allow-for-now lv-hc5a5be63ac9d owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
+            let kept = if share {
+                store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner)
+                    .get(&key).filter(|entry| entry.through <= self.index && entry.revision == revision).cloned()
+            } else { None };
+            let mut after = kept.as_ref().map_or(0, |entry| entry.through);
+            let reduction = loop {
+                let statement = if after == 0 { &mut full } else { &mut suffix };
+                let rows = statement.query_map(params![subject, after, self.index], |row| {
+                    Ok(((row.get(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
+                        (row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)))
+                })?.filter_map(|row: rusqlite::Result<(ActualRow, BatchKey)>| {
+                    if self.hide_reserved && row.as_ref().is_ok_and(|(item, _)|
+                        fractal_schema::notice::is_reserved_kind(&item.1)) { None } else { Some(row) }
+                }).collect::<rusqlite::Result<Vec<_>>>()?;
+                let rows = canonical_order(connection, rows)?;
+                if after > 0
+                    && let (Some(first), Some(last)) = (rows.first(), kept.as_ref().and_then(|entry| entry.last.as_ref()))
+                    && card_actual::key(connection, &first.0)? <= *last
+                {
+                    // Replication can deliver an older canonical claim after the cached cut.
+                    after = 0;
                     continue;
                 }
-                let subject = row.get::<_, String>(0)?;
-                let item = (
-                    (row.get(1)?, kind, row.get(3)?, row.get(4)?, row.get(5)?),
-                    (row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?),
-                );
-                match current.as_mut() {
-                    Some((held, items)) if *held == subject => items.push(item),
-                    _ => {
-                        // A subject whose rows did not arrive together is read again alone.
-                        if !folded.insert(subject.clone()) {
-                            again.insert(subject.clone());
-                        }
-                        if let Some((held, items)) = current.replace((subject, vec![item])) {
-                            let items = canonical_order(connection, items)?;
-                            self.fold_actual(held, items)?;
-                        }
-                    }
+                let mut next = if after > 0 {
+                    kept.as_deref().expect("resumed prefix").clone()
+                } else { card_actual::Reduction::default() };
+                if let Some(last) = rows.last() {
+                    next.last = Some(card_actual::key(connection, &last.0)?);
                 }
-            }
-            if let Some((held, items)) = current {
-                let items = canonical_order(connection, items)?;
-                self.fold_actual(held, items)?;
-            }
-            drop(rows);
-            for subject in &chunk {
-                if !self.actual.contains_key(subject) {
-                    self.fold_actual(subject.clone(), Vec::new())?;
-                }
-            }
-            for subject in again {
-                self.actual.remove(&subject);
-                chunks.push_back(vec![subject]);
-            }
-        }
-        Ok(())
-    }
-
-    /// Fold one subject's actual-state rows, as `latest_actual_at` and
-    /// `selected_actual_source_at` do.
-    fn fold_actual(&mut self, subject: String, rows: Vec<ActualRow>) -> Result<()> {
-        // Each body is parsed once, for the fold and for source selection both.
-        let mut parsed = Vec::with_capacity(rows.len());
-        for (id, kind, origin, body, folded) in rows {
-            #[cfg(any(test, feature = "test-support"))]
-            if folded || kind == "runtime.observed" {
-                ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
-            }
-            let value = if folded {
-                serde_json::from_str::<Value>(&body)?
-            } else if kind == "runtime.observed" {
-                serde_json::from_str::<Value>(&body).unwrap_or(Value::Null)
-            } else {
-                Value::Null
+                next.apply(rows)?;
+                next.through = self.index;
+                next.revision = revision;
+                break next;
             };
-            parsed.push((id, kind, origin, value, folded));
+            let host = self.desired.get(subject).and_then(Option::as_ref)
+                .and_then(|row| row.member.as_deref())
+                .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok())
+                .map(|member| member.host);
+            self.actual.insert(subject.clone(), reduction.state(host.as_deref()));
+            if share {
+                let mut cache = store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner);
+                if cache.len() >= ACTUAL_CACHE_LIMIT && !cache.contains_key(&key) { cache.clear(); }
+                cache.insert(key, Arc::new(reduction));
+            }
         }
-        let host = self
-            .desired
-            .get(&subject)
-            .and_then(Option::as_ref)
-            .and_then(|row| row.member.as_deref())
-            .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok())
-            .map(|member| member.host);
-        // Source selection reads the runtime bodies in place; then the fold takes them.
-        let source = {
-            let null = Value::Null;
-            let rows = parsed
-                .iter()
-                .map(|(id, kind, origin, value, _)| {
-                    let body = if kind == "runtime.observed" { value } else { &null };
-                    (id.as_str(), kind.as_str(), origin.as_str(), body)
-                })
-                .collect::<Vec<_>>();
-            select_actual_source(&rows, host.as_deref())
-        };
-        let latest = fold_latest_values(
-            parsed
-                .into_iter()
-                .filter(|(.., folded)| *folded)
-                .map(|(_, kind, _, value, _)| (kind, value)),
-        )?;
-        self.actual.insert(subject, ActualState { latest, source });
         Ok(())
     }
 
@@ -486,7 +436,7 @@ impl Store {
             reads.load_desired(connection, &chunk)?;
             let mut actual = chunk.clone();
             actual.extend(reads.owners(&chunk));
-            reads.load_actual(connection, &actual)?;
+            reads.load_actual(self, connection, &actual)?;
             let list = json_list(&chunk)?;
             let mut conflict = HashMap::new();
             for row in conflicts.query_map(params![list, store_index], |row| {
@@ -908,3 +858,7 @@ impl Store {
         Ok(reads)
     }
 }
+
+#[cfg(test)]
+#[path = "card_actual_regression_tests.rs"]
+mod actual_regression_tests;
