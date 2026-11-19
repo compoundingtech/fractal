@@ -8,7 +8,7 @@ Retries for peers and networks are valid because those connections can be unreac
 
 Build reactive behavior instead of polling. Use incremental view maintenance when necessary to keep updates and reads efficient.
 
-Nathan approved this policy on 2026-10-06. See issue #1566 and st document doc/fleet/smalltalk/no-workarounds/hunt-2026-10-06 for examples.
+Nathan approved this policy on 2026-10-06. See issue #1566 and Fractal document doc/fleet/smalltalk/no-workarounds/hunt-2026-10-06 for examples.
 
 ## Public history: every introduced commit must be clean
 

@@ -104,7 +104,7 @@ Domain handling for host cutover and staging is being revised; until supported
 handling is available, the limitation above applies. Fresh installs and the app
 installer remain GUI-domain-only and are outside that cutover/staging work.
 
-For the default-host Fractal cutover, `st service install --stage-fractal` installs
+For the default-host Fractal cutover, `fractal service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages
 `fractal.service` and `fractal-replication.service` disabled. Existing legacy service
