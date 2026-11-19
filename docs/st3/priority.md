@@ -68,7 +68,7 @@ IO level 7 acts only under the `bfq` and `mq-deadline` disk schedulers. On an NV
 ## Declared admission
 
 **Declared admission — declared, not enforced.**
-st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.
+Fractal stores and returns these values. They do not change scheduling, admission, process priority or resource limits.
 
 Agent and mission declarations accept optional, declaration-local metadata.
 This mission example includes CPU, token and per-person attention budgets:
