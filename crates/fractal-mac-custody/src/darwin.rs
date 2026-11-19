@@ -1,6 +1,6 @@
 //! The unsafe boundary is libproc, kqueue and descriptor ownership only. All
 //! returned process data is size-checked; PIDs are revalidated before signals.
-use crate::{Invocation, Plan, Receipt, Status, USER};
+use crate::{Invocation, Plan, Receipt, Slot, Status};
 use serde::{Deserialize, Serialize};
 use std::{collections::{BTreeMap, BTreeSet}, fs::{File, OpenOptions}, io::{self, Write}, mem::{self, MaybeUninit}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt}}, path::Path, process::Command, time::{SystemTime, UNIX_EPOCH}};
 
@@ -66,15 +66,15 @@ fn members(uid: u32) -> io::Result<BTreeMap<i32, (u64, u64)>> {
 /// metadata is an error, never permission to omit a possible live slot member.
 pub fn live_members(uid: u32) -> io::Result<Vec<i32>> { Ok(members(uid)?.into_keys().collect()) }
 
-fn slot_uid() -> io::Result<u32> {
-    let name = std::ffi::CString::new(USER).expect("constant has no NUL");
+fn slot_uid(slot: &Slot) -> io::Result<u32> {
+    let name = std::ffi::CString::new(slot.user).expect("constant has no NUL");
     // SAFETY: name is NUL terminated; helper is single-threaded and copies pw_uid
     // before any subsequent passwd database call could invalidate this pointer.
     let entry = unsafe { libc::getpwnam(name.as_ptr()) };
-    if entry.is_null() { return Err(io::Error::other("slot user _fractal-heavy1 not found")); }
+    if entry.is_null() { return Err(io::Error::other(format!("slot user {} not found", slot.user))); }
     // SAFETY: successful getpwnam returned a valid passwd record.
     let uid = unsafe { (*entry).pw_uid };
-    if uid < 400 || uid == 501 { return Err(io::Error::other("unsafe slot UID (must be >=400 and not 501)")); }
+    if uid != slot.uid { return Err(io::Error::other(format!("slot user {} must have UID {}", slot.user, slot.uid))); }
     Ok(uid)
 }
 
@@ -90,7 +90,7 @@ fn protected_file(path: &Path, mode: u32, append: bool) -> io::Result<File> {
     Ok(file)
 }
 
-fn lock_slot() -> io::Result<File> {
+fn lock_slot(slot: &Slot) -> io::Result<File> {
     let path = Path::new(STATE_DIR);
     match std::fs::create_dir(path) {
         Ok(()) => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?,
@@ -99,7 +99,7 @@ fn lock_slot() -> io::Result<File> {
     }
     let meta = path.symlink_metadata()?;
     if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o077 != 0 { return Err(io::Error::other("custody state directory must be root-owned mode 0700")); }
-    acquire_lock(protected_file(&path.join("heavy1.lock"), 0o600, false)?)
+    acquire_lock(protected_file(&state_path(slot, "lock"), 0o600, false)?)
 }
 
 fn acquire_lock(file: File) -> io::Result<File> {
@@ -108,12 +108,16 @@ fn acquire_lock(file: File) -> io::Result<File> {
     Ok(file)
 }
 
+fn state_path(slot: &Slot, extension: &str) -> std::path::PathBuf {
+    Path::new(STATE_DIR).join(format!("{}.{extension}", slot.name))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Binding { job_id: String, bound_at: u64 }
 
-fn read_binding() -> io::Result<Option<Binding>> {
-    let path = Path::new(STATE_DIR).join("heavy1.json");
+fn read_binding(slot: &Slot) -> io::Result<Option<Binding>> {
+    let path = state_path(slot, "json");
     let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -128,16 +132,16 @@ fn read_binding() -> io::Result<Option<Binding>> {
     Ok(Some(binding))
 }
 
-fn write_binding(job_id: &str) -> io::Result<()> {
+fn write_binding(slot: &Slot, job_id: &str) -> io::Result<()> {
     let directory = Path::new(STATE_DIR);
-    let pending = directory.join("heavy1.pending");
+    let pending = state_path(slot, "pending");
     let mut file = protected_file(&pending, 0o600, false)?;
     file.set_len(0)?;
     let binding = Binding { job_id: job_id.into(), bound_at: SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs() };
     serde_json::to_writer(&mut file, &binding)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
-    std::fs::rename(pending, directory.join("heavy1.json"))?;
+    std::fs::rename(pending, state_path(slot, "json"))?;
     File::open(directory)?.sync_all()
 }
 
@@ -221,13 +225,13 @@ fn sweep(uid: u32) -> io::Result<(u64, u64)> {
     }
 }
 
-fn cancel(uid: u32, job_id: &str) -> io::Result<Status> {
-    let binding = read_binding()?;
+fn cancel(slot: &Slot, uid: u32, job_id: &str) -> io::Result<Status> {
+    let binding = read_binding(slot)?;
     if let Some(stale) = stale_status(binding.as_ref(), job_id) { return Ok(stale); }
     let result: io::Result<(u64, u64)> = (|| {
         bootout(&format!("user/{uid}"))?;
         let proof = sweep(uid)?;
-        std::fs::remove_file(Path::new(STATE_DIR).join("heavy1.json"))?;
+        std::fs::remove_file(state_path(slot, "json"))?;
         Ok(proof)
     })();
     Ok(match result {
@@ -286,8 +290,8 @@ fn audit(file: &mut File, inv: &Invocation, status: &Status, job_id: Option<&str
     Ok(())
 }
 
-fn drop_identity(uid: u32, gid: u32) -> io::Result<()> {
-    let name = std::ffi::CString::new(USER).expect("constant has no NUL");
+fn drop_identity(slot: &Slot, uid: u32, gid: u32) -> io::Result<()> {
+    let name = std::ffi::CString::new(slot.user).expect("constant has no NUL");
     // SAFETY: helper is single-threaded and still root. initgroups replaces
     // supplementary groups. Darwin's privileged setgid/setuid set all real,
     // effective and saved IDs, unlike setegid/seteuid. No payload runs on error.
@@ -304,7 +308,7 @@ fn drop_identity(uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn run(inv: &Invocation, plan: &Plan, uid: u32, audit_file: &mut File, caller: &Caller) -> io::Result<Status> {
+fn run(inv: &Invocation, slot: &Slot, plan: &Plan, uid: u32, audit_file: &mut File, caller: &Caller) -> io::Result<Status> {
     if plan.env.get("FRACTAL_MAC_CUSTODY_STDIO").is_some_and(|value| value == "pipe") {
         // SAFETY: isatty only inspects the inherited standard descriptors.
         if (0..=2).any(|fd| unsafe { libc::isatty(fd) } == 1) {
@@ -323,9 +327,9 @@ fn run(inv: &Invocation, plan: &Plan, uid: u32, audit_file: &mut File, caller: &
     // SAFETY: getpid is an argument-free query; audit describes the exec attempt,
     // not a fabricated successful launch receipt.
     audit(audit_file, inv, &Status::Executing { pid: unsafe { libc::getpid() } }, Some(&plan.job_id), caller)?;
-    write_binding(&plan.job_id)?;
+    write_binding(slot, &plan.job_id)?;
     std::env::set_current_dir(&plan.cwd)?;
-    drop_identity(uid, gid)?;
+    drop_identity(slot, uid, gid)?;
     // exec preserves stdin/stdout/stderr and PID. The CLOEXEC slot lock stays
     // held through the identity transition and closes atomically with exec.
     // A failed exec returns here; the pre-opened root audit descriptor remains
@@ -343,16 +347,16 @@ pub fn execute(inv: &Invocation) -> Receipt {
     };
     let mut job_id = inv.job_id.clone();
     let result = (|| {
-        if inv.slot != crate::SLOT { return Err(io::Error::other("only heavy1 is compiled into this helper")); }
+        let slot = crate::slot(&inv.slot).ok_or_else(|| io::Error::other("unknown compiled slot"))?;
         if (inv.verb == "run") != inv.plan_file.is_some() { return Err(io::Error::other("only run requires a plan file")); }
         if (inv.verb == "cancel") != inv.job_id.is_some() { return Err(io::Error::other("only cancel requires a jobId fence")); }
         if let Some(id) = inv.job_id.as_deref() { crate::validate_job_id(id).map_err(io::Error::other)?; }
-        let _lock = lock_slot()?;
-        let uid = slot_uid()?;
+        let _lock = lock_slot(slot)?;
+        let uid = slot_uid(slot)?;
         match inv.verb.as_str() {
             "run" => {
                 let path = inv.plan_file.as_ref().ok_or_else(|| io::Error::other("run requires a plan file"))?;
-                let plan = match crate::read_plan_under(path, Path::new(crate::SLOT_ROOT)) {
+                let plan = match crate::read_plan_under(path, Path::new(slot.root)) {
                     Ok(plan) => plan,
                     Err(reason) => return Ok(Status::PlanRejected { reason }),
                 };
@@ -362,14 +366,14 @@ pub fn execute(inv: &Invocation) -> Receipt {
                     Err(reason) => return Ok(Status::PlanRejected { reason }),
                 };
                 let members = live_members(uid)?;
-                let bound_job_id = read_binding()?.map(|binding| binding.job_id);
+                let bound_job_id = read_binding(slot)?.map(|binding| binding.job_id);
                 if let Some(busy) = run_busy_status(members, bound_job_id) { return Ok(busy); }
-                run(inv, &validated.plan, uid, &mut audit_file, &caller)
+                run(inv, slot, &validated.plan, uid, &mut audit_file, &caller)
             },
-            "cancel" => cancel(uid, inv.job_id.as_deref().ok_or_else(|| io::Error::other("cancel requires jobId"))?),
+            "cancel" => cancel(slot, uid, inv.job_id.as_deref().ok_or_else(|| io::Error::other("cancel requires jobId"))?),
             "leftovers" => {
                 let pids = live_members(uid)?;
-                let bound_job_id = read_binding()?.map(|binding| binding.job_id);
+                let bound_job_id = read_binding(slot)?.map(|binding| binding.job_id);
                 Ok(leftovers_status(pids, bound_job_id))
             },
             "sample" => sample(uid),
@@ -394,6 +398,18 @@ pub fn rejected_invocation(args: &[std::ffi::OsString], reason: String) -> Recei
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_state_paths_are_disjoint() {
+        let mut paths = BTreeSet::new();
+        for slot in crate::SLOTS {
+            for extension in ["lock", "json", "pending"] {
+                let path = state_path(slot, extension);
+                assert_eq!(path, Path::new(STATE_DIR).join(format!("{}.{extension}", slot.name)));
+                assert!(paths.insert(path));
+            }
+        }
+    }
 
     #[test]
     fn binding_fences_and_empty_membership() {
