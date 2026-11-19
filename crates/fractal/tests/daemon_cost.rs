@@ -68,6 +68,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
 use fractal_daemon::HarnessQuestionsStore;
+use fractal_daemon::DeliveryStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -232,7 +233,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/fleet/admission-residue",
         "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
-    ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/observations", "requires a current paired session; validates at most 32 minute samples and atomically appends durable source-bound summaries plus operation receipts; paired transport, exact retry/reopen, replication and native-row producer proof in api/client_observations.rs; ingestion cost is not measured by this unpaired route probe"),
     ("POST /v1/client/pairings/renewals/stage", "explicit operator replacement staging; bounded source lookup and one append, no history-growing scan; covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/pending", "explicit key-bound pending lookup; capped current-stage scan and bounded challenge append, covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/complete", "explicit one-use replacement completion; transactionally rechecks source, stage and consumption before one grant, covered by device renewal route tests"),
@@ -1497,6 +1498,29 @@ const PROBES: &[Probe] = &[
             })
         },
     ),
+    // Native physical authority is absent from generated stores. Exercise the real fenced
+    // persistence path, including a fresh incarnation and non-replayed frontier each time.
+    direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
+        let agent = &fixture.subjects.seats[0];
+        let incarnation = format!("cost-mail-frontier-{attempt}");
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: agent.clone(), kind: kind.into(), actor: Some(agent.clone()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).map_err(|error| error.message)?;
+        }
+        let fence = store.bind_mailbox(&fractal_daemon::client::Fence::new(agent, &incarnation, "delivery"))
+            .map_err(|error| error.message)?;
+        let through = u64::try_from(smallclaims::store::now_ms()).unwrap();
+        let (record, written) = store.record_mail_acceptance_frontier(&fence, through)
+            .map_err(|error| error.message)?;
+        assert!(written, "measure an advancing source frontier, not a replay");
+        Ok(serde_json::to_value(record).unwrap())
+    }),
     // The route binds its caller to a live seat process, which a test has none of.
     direct("POST /v1/harness-events", |store, fixture, attempt| {
         let seat = &fixture.subjects.seats[0];

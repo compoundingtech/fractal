@@ -42,6 +42,23 @@ or losing this local table loses registrations; recovery requires the phone to r
 again with a valid locally issued pairing, not a graph replay. Full local database backups
 contain these secrets and must remain private; a graph-only backup cannot recover them.
 
+Phone service minutes are durable `custom.client.observation-minute` claims, not
+member-local observations or diagnostic JSONL. The phone persists an exact report
+before upload; paired ingestion atomically records its minute summaries and
+trusted operation receipts. The logical source binds the authenticated person
+and device, independently of the receiving member or a replacement pairing grant.
+Exact retries collapse by source/target/carrier/path/minute. Conflicting replicated
+content for the same minute supplies unknown evidence, not a chosen winner or a
+second population. Native iOS objectives fold these claims fleet-wide; absent
+minutes and absent foreground time are never inferred to be zero or healthy.
+The held client request-latency diagnostic retains its existing local admission,
+JSONL and in-memory phone windows until its separately authorized cutover.
+Those local windows are diagnostic-only and never supply native objective rows
+or doctor verdicts. A replacement pairing on the same process can still meet the
+legacy diagnostic report-scope conflict after the durable graph deduplicates it;
+activation must resolve that boundary rather than interpreting the refusal as
+missing fleet evidence.
+
 ## Large inline values
 
 New storage work must avoid unbounded large inline SQLite objects, including variable

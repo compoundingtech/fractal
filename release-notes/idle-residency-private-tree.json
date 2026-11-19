@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Measure idle-stop private reclamation across a birth-fenced Linux seat process tree",
+  "replay": {"status": "none", "detail": "Measurements remain ephemeral; completed action receipts still own suspension outcomes."},
+  "schema": {"status": "none", "detail": "No claim or database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Linux measurements sum smaps_rollup Private_Clean and Private_Dirty for the runtime-authorized root and descendants discovered through every thread. Birth, ancestry, topology, malformed data or coverage changes make private memory unknown. RSS and Private_Hugetlb are not included. Other platforms remain absent."},
+  "downtime": {"status": "none", "detail": "Sampling occurs at the existing reversible idle-stop boundary; no polling or fleet changes."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "A completed whole-seat stop accounts for known pre-stop private bytes without treating a missing procfs sensor as zero. Missing pre-stop evidence remains unknown, including after daemon restart."}
+}

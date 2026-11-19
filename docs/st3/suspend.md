@@ -28,13 +28,13 @@ idempotent even after the seat resumes: replay returns the conversion receipt, n
 suspend. A manual hold must not be automatically woken. This is a reader-first prerequisite
 for [idle residency](https://github.com/compoundingtech/fractal/pull/6720), not its activation.
 
-## Idle residency diagnostics
+## Idle residency
 
 `agents show` includes a residency block with the effective policy, the beginning of
 continuous eligibility, its exact due time, or the current refusal reason. The member policy
-is `[reconcile] idle_suspend_after = "off"` by default; a duration enables **diagnostics and
-deadlines only**, not automatic suspension. `idle_resume_concurrency` defaults to `2` and must
-be positive. Both settings reload with the other daemon policies.
+is `[reconcile] idle_suspend_after = "off"` by default; a duration enables automatic
+suspension after the signed fleet reader barrier is satisfied. `idle_resume_concurrency`
+defaults to `2` and must be positive. Both settings reload with the other daemon policies.
 
 An agent may declare `idle-suspend "never"` to opt out or `idle-suspend "member"` to inherit
 the member policy. Editing this metadata does not restart a running seat. Only OMP supports
@@ -261,9 +261,10 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
-- Mail does not wake a suspended seat. Only `fractal agents resume` does.
-  [Idle residency](idle-residency.md) specifies daemon-owned idle suspension that wake-class mail
-  resumes; it is not implemented yet.
+- Mail never wakes a manual suspension. Only `fractal agents resume` does.
+  [Idle residency](idle-residency.md) uses cause `idle` and wakes through bounded
+  owner admission, strict same-session resume and an incarnation-bound channel-ready
+  barrier. Policy off stops new automatic suspends without disabling these wakes.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 

@@ -30,7 +30,9 @@ impl Reduction {
     pub fn apply(&mut self, rows: Vec<(String, String, String, String, bool)>) -> Result<()> {
         for (id, kind, origin, body, folded) in rows {
             #[cfg(any(test, feature = "test-support"))]
-            ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
+            if folded || kind == "runtime.observed" {
+                ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
+            }
             let value = if folded { serde_json::from_str::<Value>(&body)? }
                 else if kind == "runtime.observed" { serde_json::from_str(&body).unwrap_or(Value::Null) }
                 else { Value::Null };
@@ -156,7 +158,7 @@ mod tests {
         let connection = store.readers.get();
         let mut reads = card_fold::CardReads::new(index);
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
-        store.runtime_view_entries(&connection, &["agent/example".into()], index, false, &mut reads).unwrap();
+        reads.load_actual(store, &connection, &["agent/example".into()]).unwrap();
         let decoded = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
         let cached = store.fractal.card_actuals.lock().unwrap().get(&("agent/example".into(), false)).unwrap().clone();
         assert_eq!(cached.state(None).latest, latest_actual_at(&connection, "agent/example", Some(index)).unwrap());

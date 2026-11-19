@@ -186,7 +186,7 @@ impl CardReads {
 
     /// Resume each subject's canonical reduction from its indexed arrival suffix. A
     /// late canonical predecessor or a mutation of the prefix restarts only that subject.
-    fn load_actual(&mut self, store: &Store, connection: &Connection, subjects: &[String]) -> Result<()> {
+    pub(super) fn load_actual(&mut self, store: &Store, connection: &Connection, subjects: &[String]) -> Result<()> {
         // A writer transaction may roll back and reuse its arrival indexes. Only
         // committed/autocommit reads and physically read-only snapshots may share state.
         let share = connection.is_autocommit() || connection.is_readonly(rusqlite::DatabaseName::Main)?;
@@ -272,6 +272,21 @@ impl CardReads {
         }
     }
 
+    /// Membership needs status, not the full actual state or source selection.
+    /// Match the single-subject view reader and stop once its fields are resolved.
+    fn view_actual(&self, connection: &Connection, subject: &str) -> Result<Option<Value>> {
+        match self.actual.get(subject) {
+            Some(actual) => Ok(actual.latest.clone()),
+            None => latest_actual_fields_filtered_at(
+                connection,
+                subject,
+                Some(self.index),
+                if subject.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+                self.hide_reserved,
+            ),
+        }
+    }
+
     /// The owning runs and generations of the declarations read for `subjects`.
     fn owners(&self, subjects: &[String]) -> Vec<String> {
         subjects
@@ -353,13 +368,6 @@ impl Store {
                 .collect::<Vec<_>>();
             reads.load_desired(connection, &candidates)?;
             let owner_subjects = if owners { reads.owners(&candidates) } else { Vec::new() };
-            // Owners are runs and generations. Their actual states are read before any
-            // declaration of theirs, so their selected source ignores a declared host; that holds
-            // only because no owner is itself a runtime this fold shows.
-            debug_assert!(owner_subjects.iter().all(|owner| !runtime_subject(owner)));
-            let mut actual = candidates.clone();
-            actual.extend(owner_subjects.iter().cloned());
-            reads.load_actual(self, connection, &actual)?;
             let owner_heads = heads(connection, &owner_subjects, store_index)?;
             for (subject, head, candidate) in read {
                 let reads = &*reads;
@@ -371,7 +379,7 @@ impl Store {
                     head,
                     candidate,
                     &mut || reads.desired(connection, &subject),
-                    &mut |of| reads.latest(connection, of),
+                    &mut |of| reads.view_actual(connection, of),
                     &mut |owner| match owner_heads.get(owner) {
                         Some(head) => Ok(*head),
                         None => subject_head_at(connection, owner, store_index),

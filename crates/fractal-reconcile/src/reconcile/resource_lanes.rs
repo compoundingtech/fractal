@@ -344,6 +344,49 @@ mod tests {
         assert!(matches!(store.request_resource_membership(&candidate, fit, 2).unwrap(), Admission::Admitted(_)));
     }
 
+    #[test]
+    fn replication_health_alert_raises_without_a_worker_and_recovers_with_live_evidence() {
+        use super::super::tests::FakeRuntime;
+        use smallclaims::replication::ReplicationHealth;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.bind_fleet("fleet/silent").unwrap();
+        let now = smallclaims::store::now_ms();
+        store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), None);
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_replication_health().unwrap();
+        let title = "Replication is not healthy on node";
+        let raised = store
+            .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+            .unwrap();
+        assert!(
+            raised.iter().any(|request| request.title == title),
+            "{raised:?}"
+        );
+
+        store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+        store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .entry("sponsor".into())
+            .or_default()
+            .observe(0, Some((0, 0)), now);
+        reconciler.reconcile_replication_health().unwrap();
+        assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+        let recovered = store
+            .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+            .unwrap();
+        assert!(
+            recovered.iter().all(|request| request.title != title),
+            "{recovered:?}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_logical_requests_use_native_custody_without_linux_lane_observation() {

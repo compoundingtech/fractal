@@ -108,14 +108,14 @@ final class SignalBoardTests: XCTestCase {
     let daemonIDs = [
       "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
       "terminal-attach", "sql-statement", "transaction/read", "transaction/write",
-      "transaction/writer_hold", "writer-hold", "cpu", "cpu/idle", "database",
+      "transaction/writer_hold", "writer-hold", "cpu", "cpu/idle", "database", "database-archive",
     ]
     let rows = daemonIDs.map { row($0, status: "missed") } + [
       row("ios-connect", status: "missed"), row("fractal/flakes", status: "missed"),
     ]
     let aggregated = signal("fractal", in: SignalBoard(rows: rows))
     XCTAssertEqual(aggregated.members.map(\.id), daemonIDs)
-    XCTAssertEqual(aggregated.value, "14/14")
+    XCTAssertEqual(aggregated.value, "15/15")
     let overridden = signal("fractal", in: SignalBoard(rows: rows + [row("fractal", current: "99.9%")]))
     XCTAssertEqual(overridden.members.map(\.id), ["fractal"])
     XCTAssertEqual(overridden.value, "99.9%")
