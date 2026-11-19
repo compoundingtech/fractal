@@ -767,7 +767,17 @@ fn native_pr_registration_retains_the_standing_observer_without_a_seat_subscript
     assert!(crate::graph::observer_spec(&observer.desired).unwrap().stopped);
 }
 
-fn observe_program_pr(engine: &ProgramEngine, pulls: Value) {
+fn observe_program_pr(engine: &ProgramEngine, mut pulls: Value) {
+    use crate::watches::ProgramPrWatchesStore as _;
+    let targets = await_pr::targets(engine.store.program_pr_watches().unwrap(), "acme/garden").unwrap();
+    for pull in pulls.as_array_mut().unwrap() {
+        if let Some(target) = targets.iter().find(|target| pull["number"].as_u64() == Some(target.pr)) {
+            pull["await_pr_observation"] = json!({
+                "registrations":target.registrations,"head":pull["head_sha"],
+                "merged":pull["merged"],"merge_commit_sha":pull["merge_commit_sha"],
+            });
+        }
+    }
     observe_program_pr_facts(engine, &json!({"repository_id":7,"pull_requests":pulls,"await_prs_not_found":[]}));
 }
 
@@ -781,6 +791,21 @@ fn observe_program_pr_facts(engine: &ProgramEngine, facts: &Value) {
         facts,
         smallclaims::store::now_ms() + 60_000, &[], None,
     ).unwrap();
+}
+
+fn record_program_repo_missing(engine: &ProgramEngine, evidence: Vec<String>) {
+    use crate::watches::WatchesStore as _;
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    engine.store.ensure_watch_observer(&thread).unwrap();
+    engine.store.append_claim(&ClaimInput {
+        subject: thread.observer(), kind: "observer.state".into(), actor: None,
+        fields: BTreeMap::from([
+            ("state".into(), json!("unreachable")),
+            ("error_code".into(), json!("github-repository-not-found")),
+            ("reason".into(), json!("GitHub repository returned HTTP 404")),
+        ]),
+        evidence, expected_subject: None, idempotency_key: None,
+    }).unwrap();
 }
 
 #[test]
@@ -814,7 +839,7 @@ fn native_await_pr_resolves_observed_merge_and_journals_the_caller_key() {
 
 #[test]
 fn native_await_pr_returns_typed_unknown_repository_and_pull_request_errors() {
-    use crate::watches::WatchesStore as _;
+    use crate::watches::ProgramPrWatchesStore as _;
     for known_repo in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path());
@@ -824,29 +849,26 @@ fn native_await_pr_returns_typed_unknown_repository_and_pull_request_errors() {
             observe_program_pr(&engine, json!([]));
         }
         if !known_repo {
-            let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
-            engine.store.ensure_watch_observer(&thread).unwrap();
-            engine.store.append_claim(&ClaimInput {
-                subject: thread.observer(), kind: "observer.state".into(), actor: None,
-                fields: BTreeMap::from([
-                    ("state".into(), json!("unreachable")),
-                    ("error_code".into(), json!("github-repository-not-found")),
-                    ("reason".into(), json!("GitHub repository returned HTTP 404")),
-                ]),
-                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-            }).unwrap();
+            record_program_repo_missing(&engine, Vec::new());
         }
         engine.handle(&json!({
             "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
             "repo":"acme/garden","pr":12,"head":"head",
         }), 7).unwrap();
         let request = engine.requests(&run.subject).pop().unwrap();
+        let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
+        assert!(!pending.unwrap(), "pre-registration failures and incremental absence cannot settle a new wait");
+        assert!(reads.contains("resource/github/acme/garden"));
+        assert!(reads.contains("observer/github/acme/garden"));
+        let registrations = engine.store.program_pr_watches().unwrap();
+        let token = registrations[0]["registration"].as_str().unwrap();
         if known_repo {
-            let (pending, reads) = smallclaims::touched::record(|| await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head"));
-            assert!(!pending.unwrap(), "an incremental listing is not a definitive PR absence");
-            assert!(reads.contains("resource/github/acme/garden"));
-            assert!(reads.contains("observer/github/acme/garden"));
-            observe_program_pr_facts(&engine, &json!({"repository_id":7,"pull_requests":[],"await_prs_not_found":[12]}));
+            observe_program_pr_facts(&engine, &json!({
+                "repository_id":7,"pull_requests":[],
+                "await_prs_not_found":[{"pr":12,"registrations":[token]}],
+            }));
+        } else {
+            record_program_repo_missing(&engine, vec![token.to_owned()]);
         }
         assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "head").unwrap());
         let journal = engine.journal(&request.step, 1).unwrap();
@@ -898,4 +920,39 @@ fn native_await_pr_resolves_only_observed_queue_exit_or_changed_head() {
             "outcome":"dequeued","reason":if moved { "head-changed" } else { "merge-queue-exit" },
         }));
     }
+}
+
+#[test]
+fn a_new_wait_does_not_treat_an_older_observed_head_as_head_movement() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "await-pr-stale-head");
+    running_attempt(&engine, &run, 1, 7);
+    observe_program_pr_facts(&engine, &json!({
+        "repository_id":7,"await_prs_not_found":[],"pull_requests":[{
+            "number":12,"state":"open","head_sha":"old","head":"old","merged":false,
+            "await_pr_observation":{
+                "registrations":["another-registration"],"head":"old","merged":false,"merge_commit_sha":null,
+            },
+        }],
+    }));
+    engine.handle(&json!({
+        "t":"await-pr","step":run.steps[0].subject,"attempt":1,"seq":1,"key":"await-outcome",
+        "repo":"acme/garden","pr":12,"head":"requested",
+    }), 7).unwrap();
+    let request = engine.requests(&run.subject).pop().unwrap();
+    assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap(),
+        "the standing observer's pre-registration head is not movement");
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"open","head_sha":"requested","head":"requested","merged":false,
+    }]));
+    assert!(!await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap(),
+        "a fresh acquisition of the requested head keeps waiting");
+    assert!(engine.journal(&request.step, 1).unwrap().is_empty());
+    observe_program_pr(&engine, json!([{
+        "number":12,"state":"open","head_sha":"later","head":"later","merged":false,
+    }]));
+    assert!(await_pr::settle(&engine.store, &engine, &request, "acme/garden", 12, "requested").unwrap());
+    assert_eq!(engine.journal(&request.step, 1).unwrap()[0]["value"],
+        json!({"outcome":"dequeued","reason":"head-changed"}));
 }

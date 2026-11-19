@@ -143,7 +143,7 @@ impl ProgramPrWatchesStore for Store {
         let candidates = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(
-                "SELECT DISTINCT json_extract(body,'$.fields.value') FROM claims registration
+                "SELECT DISTINCT json_set(json_extract(body,'$.fields.value'), '$.registration', id) FROM claims registration
                  WHERE kind='program.step' AND json_extract(body,'$.fields.status')='started'
                  AND json_extract(body,'$.fields.value.type')='await-pr'
                  AND json_extract(body,'$.fields.child') LIKE 'program-await-pr/%'

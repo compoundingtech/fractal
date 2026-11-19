@@ -1572,7 +1572,7 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
     /// Fields and native PR targets captured by each observer/revision's latest arm. New
     /// interest observes immediately rather than keeping a deadline for an older input set.
-    observer_fields: Arc<Mutex<HashMap<String, (Vec<String>, Vec<u64>)>>>,
+    observer_fields: Arc<Mutex<HashMap<String, (Vec<String>, Vec<crate::resource::AwaitPrTarget>)>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// By observer: held from a look reading its cursor until the look publishes the cursor it
     /// kept, so an arm that retired another waits for that look rather than polling from the
@@ -18838,15 +18838,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         spec.fields.dedup();
         let await_prs = if spec.provider == "github.repository" {
             use crate::watches::ProgramPrWatchesStore as _;
-            let targets = self.store.program_pr_watches()?.into_iter().filter(|registration| {
-                registration["repo"].as_str().is_some_and(|repo| repo.eq_ignore_ascii_case(&spec.locator))
-            }).filter_map(|registration| registration["pr"].as_u64()).collect::<BTreeSet<_>>();
+            let targets = program::await_pr::targets(self.store.program_pr_watches()?, &spec.locator)?;
             if !targets.is_empty() {
                 spec.fields.extend(crate::github_watch::WATCH_FIELDS.into_iter().map(str::to_owned));
                 spec.fields.sort();
                 spec.fields.dedup();
             }
-            targets.into_iter().collect::<Vec<_>>()
+            targets
         } else { Vec::new() };
         // A live subscription is a watch of this ref. Keep explicit faster intervals,
         // and use conditional reads every thirty seconds while anyone watches it.
@@ -18904,7 +18902,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .insert(deadline_key.clone(), (spec.fields.clone(), await_prs.clone()));
         if previous_fields.as_ref().is_some_and(|(fields, targets)| {
             spec.fields.iter().any(|field| !fields.contains(field))
-                || await_prs.iter().any(|target| !targets.contains(target))
+                || await_prs.iter().any(|target| targets.iter().find(|previous| previous.pr == target.pr)
+                    .is_none_or(|previous| target.registrations.iter().any(|token| !previous.registrations.contains(token))))
         }) || previous_fields.is_none() && !await_prs.is_empty() {
             next_check = next_check.min(now_ms());
         }
@@ -19404,6 +19403,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                         } else {
                             "unreachable"
                         };
+                        let failure_evidence = if condition.code() == "github-repository-not-found" {
+                            await_prs.iter().flat_map(|target| target.registrations.iter().cloned())
+                                .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+                        } else { Vec::new() };
+                        let evidence_recorded = failure_evidence.is_empty()
+                            || store.latest_observation(&observer_subject, "observer.state").ok().flatten()
+                                .is_some_and(|claim| claim.body["evidence"].as_array().is_some_and(|evidence| {
+                                    failure_evidence.iter().all(|token| evidence.iter().any(|value| value.as_str() == Some(token.as_str())))
+                                }));
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
                             actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
@@ -19411,7 +19419,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 && (refusal_deadline.is_none()
                                     || actual.get("next_check_unix_ms").and_then(Value::as_str)
                                         .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
-                        });
+                        }) && evidence_recorded;
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
@@ -19443,7 +19451,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 kind: "observer.state".into(),
                                 actor: None,
                                 fields,
-                                evidence: Vec::new(),
+                                evidence: failure_evidence,
                                 expected_subject: None,
                                 idempotency_key: Some(format!(
                                     "observer-failure:{}",

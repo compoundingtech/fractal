@@ -508,6 +508,8 @@ fn resolved_item(
     let closed = state == "closed" || state == "merged";
     let event = node.pointer("/timelineItems/nodes/0");
     if identity.pull {
+        insert(&mut facts, "head", node.get("headRefOid"));
+        insert(&mut facts, "head_sha", node.get("headRefOid"));
         let merged = node.get("merged").and_then(Value::as_bool) == Some(true);
         facts.insert("merged".into(), json!(merged));
         facts.insert(
@@ -761,7 +763,7 @@ const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
     ... on PullRequest {
-      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      number url state updatedAt headRefOid merged mergedAt mergedBy { login } mergeCommit { oid url }
       timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
         createdAt closer {
           ... on PullRequest { url }
@@ -788,7 +790,7 @@ const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
       } } }
     }
     ... on PullRequest {
-      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      number url state updatedAt headRefOid merged mergedAt mergedBy { login } mergeCommit { oid url }
       timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
         createdAt closer {
           ... on PullRequest { url }
@@ -1647,37 +1649,6 @@ async fn observe_poll(
         }
     }
 
-    // A newly registered exact-head wait may name a closed PR that never appeared in the
-    // open listing. Bootstrap its identity through the existing observer's authenticated
-    // acquisition path; subsequent observations use the normal tracked-node detail reads.
-    for &number in &request.await_prs {
-        if cursor.identities.values().any(|identity| identity.pull && identity.number == number) {
-            continue;
-        }
-        let pull = match github_json(&client, format!("{base}/pulls/{number}"), token, cache_for).await {
-            Ok(pull) => pull.value,
-            Err(error) if http_not_found(&error) => {
-                await_prs_not_found.push(number);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let id = pull.get("node_id").and_then(Value::as_str)
-            .context("the GitHub pull request response has no node ID")?;
-        anyhow::ensure!(pull.get("number").and_then(Value::as_u64) == Some(number),
-            "the GitHub pull request response names another PR");
-        cursor.identities.insert(id.to_owned(), ItemIdentity { number, pull: true });
-        let mut facts = serde_json::Map::new();
-        for (name, pointer) in [
-            ("number", "/number"), ("node_id", "/node_id"), ("state", "/state"),
-            ("head_sha", "/head/sha"), ("merged", "/merged"),
-            ("merge_commit_sha", "/merge_commit_sha"), ("merged_at", "/merged_at"),
-            ("merged_by", "/merged_by/login"), ("url", "/html_url"), ("title", "/title"),
-        ] {
-            insert(&mut facts, name, pull.pointer(pointer));
-        }
-        merge(&mut items, Item { pull: true, listed: false, facts });
-    }
 
     if fields.contains("pull_requests")
         || (fields.contains("issues") && !cursor.identities.is_empty())
@@ -1805,6 +1776,46 @@ async fn observe_poll(
                 );
             }
         }
+    }
+
+    // Active exact-head waits revalidate their targets within this observer's normal cadence.
+    // Conditional REST reads acquire head and merged together, after normal detail merging,
+    // so an older cached GraphQL answer cannot overwrite a fresh target head.
+    for target in &request.await_prs {
+        let number = target.pr;
+        let pull = match github_json(&client, format!("{base}/pulls/{number}"), token, Duration::ZERO).await {
+            Ok(pull) => pull.value,
+            Err(error) if http_not_found(&error) => {
+                await_prs_not_found.push(json!({"pr": number, "registrations": target.registrations}));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let id = pull.get("node_id").and_then(Value::as_str)
+            .context("the GitHub pull request response has no node ID")?;
+        anyhow::ensure!(pull.get("number").and_then(Value::as_u64) == Some(number),
+            "the GitHub pull request response names another PR");
+        let head = pull.pointer("/head/sha").and_then(Value::as_str)
+            .context("the GitHub pull request response has no head SHA")?;
+        let merged = pull.get("merged").and_then(Value::as_bool)
+            .context("the GitHub pull request response has no merged flag")?;
+        cursor.identities.insert(id.to_owned(), ItemIdentity { number, pull: true });
+        let mut facts = serde_json::Map::new();
+        for (name, pointer) in [
+            ("number", "/number"), ("node_id", "/node_id"), ("state", "/state"),
+            ("merged", "/merged"), ("merge_commit_sha", "/merge_commit_sha"),
+            ("merged_at", "/merged_at"), ("merged_by", "/merged_by/login"),
+            ("url", "/html_url"), ("title", "/title"),
+        ] {
+            insert(&mut facts, name, pull.pointer(pointer));
+        }
+        facts.insert("head".into(), json!(head));
+        facts.insert("head_sha".into(), json!(head));
+        facts.insert("await_pr_observation".into(), json!({
+            "registrations": target.registrations, "head": head, "merged": merged,
+            "merge_commit_sha": pull.get("merge_commit_sha").unwrap_or(&Value::Null),
+        }));
+        merge(&mut items, Item { pull: true, listed: false, facts });
     }
 
     let mut facts =
@@ -2312,12 +2323,18 @@ mod tests {
             "number": 42, "node_id": "PR_42", "state": "closed", "head": {"sha": "head"},
             "merged": true, "merge_commit_sha": "merge", "merged_at": "2026-11-19T09:00:00Z"}));
         let mut input = request(&[], None, None);
-        input.await_prs = vec![42];
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
         let observed = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
         let pull = item(&observed.facts, "pull_requests", 42);
         assert_eq!(pull["head_sha"], "head");
         assert_eq!(pull["merged"], true);
         assert_eq!(pull["merge_commit_sha"], "merge");
+        assert_eq!(pull["await_pr_observation"], json!({
+            "registrations": ["registration-42"], "head": "head",
+            "merged": true, "merge_commit_sha": "merge",
+        }));
         assert_eq!(observed.facts["await_prs_not_found"], json!([]));
     }
 
@@ -2326,9 +2343,12 @@ mod tests {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
         let mut input = request(&[], None, None);
-        input.await_prs = vec![42];
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
         let missing = observe_at(input.clone(), &base, Some(&GithubAuth::test("test"))).await.unwrap();
-        assert_eq!(missing.facts["await_prs_not_found"], json!([42]));
+        assert_eq!(missing.facts["await_prs_not_found"],
+            json!([{"pr": 42, "registrations": ["registration-42"]}]));
         github.route("/repos/acme/garden/pulls/42", json!({
             "number": 42, "node_id": "PR_42", "state": "open", "head": {"sha": "head"},
             "merged": false}));
@@ -2336,6 +2356,44 @@ mod tests {
         let found = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
         assert_eq!(found.facts["await_prs_not_found"], json!([]));
         assert_eq!(item(&found.facts, "pull_requests", 42)["head_sha"], "head");
+    }
+
+    #[test]
+    fn tracked_merged_details_bind_the_final_head_and_merge_commit_together() {
+        assert!(RESOLVED_PULLS.contains("headRefOid"));
+        assert!(RESOLVED_ITEMS.contains("headRefOid"));
+        let facts = resolved_item(&json!({
+            "id": "PR_42", "number": 42, "state": "MERGED", "headRefOid": "new-head",
+            "merged": true, "mergeCommit": {"oid": "final-merge"},
+        }), &ItemIdentity { number: 42, pull: true }, "acme/garden");
+        assert_eq!(facts["head_sha"], "new-head");
+        assert_eq!(facts["merge_commit_sha"], "final-merge");
+    }
+
+    #[tokio::test]
+    async fn active_target_revalidates_cached_heads_and_pairs_a_later_merge_with_its_new_head() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "open", "head": {"sha": "old-head"},
+            "merged": false}));
+        let mut input = request(&[], None, None);
+        input.every_ms = Some(300_000);
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
+        let first = observe_at(input.clone(), &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&first.facts, "pull_requests", 42)["await_pr_observation"]["head"], "old-head");
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "closed", "head": {"sha": "new-head"},
+            "merged": true, "merge_commit_sha": "new-merge"}));
+        input.cursor = first.cursor;
+        input.previous_facts = Some(first.facts);
+        let second = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&second.facts, "pull_requests", 42)["await_pr_observation"], json!({
+            "registrations": ["registration-42"], "head": "new-head",
+            "merged": true, "merge_commit_sha": "new-merge",
+        }), "no intermediate open-head observation or new registration is needed");
     }
 
     #[tokio::test]
