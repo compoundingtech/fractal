@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add explicitly requested Darwin finite-execution slot custody",
+  "replay": {"status": "none", "detail": "No claim replay or projection changes."},
+  "schema": {"status": "changed", "detail": "Darwin executions persist their operation-bound slot identity in the existing scope record. Retirement proofs gain an optional Darwin receipt; existing systemd proofs remain readable. The new root helper owns separate slot binding and audit files."},
+  "rules": {"status": "changed", "detail": "Only explicitly authorized finite launches request a Darwin slot. Ordinary execution and PTY seats remain detached; admission policy is unchanged. Retirement requires matching job identity and an empty effective-or-real UID union, never only supervisor exit."},
+  "compatibility": {"status": "changed", "detail": "Adds the fractal-mac-custody package and run/cancel/leftovers/sample protocol. A requested slot fails with helperUnavailable without the pinned authorized helper. Older runtimes cannot own the new Darwin retirement contract; retire active slot jobs before rolling back."},
+  "downtime": {"status": "none", "detail": "No automatic service restart or slot activation."},
+  "manual": {"status": "changed", "detail": "Operators must separately provision the login-less slot identity, shared workspace and narrowly pinned sudo rules, with use_pty and log_output disabled. Root acceptance and explicit admission integration are required before enabling slot execution."},
+  "recovery": {"status": "changed", "detail": "RetirementUnknown retains the root binding and prevents reuse. Use matching-job cancellation and operator inspection; do not delete a binding or infer retirement from a vanished supervisor."}
+}
