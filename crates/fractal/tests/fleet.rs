@@ -6562,6 +6562,133 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
+/// Signature verdicts through the settled-judging prune: a previous-release member and a new
+/// one replicate signed claims both ways; the previous release upgraded in place drops the
+/// judging rows it kept without changing a verdict or the replicated set; rolled back, it reads
+/// and writes verdicts as before, and upgraded again it prunes what it wrote meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "5c1e9a3d-7b2f-4d8e-a6c0-3f9e8d7c6b5a";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([9_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n = Node::new(root.path(), "n");
+    o.legacy_config(fleet_id, &secret, &[("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    o.start().await;
+    n.start().await;
+    let rows = |node: &Node, sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+    };
+    let unverified = |node: &Node| {
+        rows(node, "SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE v.verdict IS NOT 'verified'")
+    };
+    // Node-signed notes: no actor, so they need no verified caller ancestry on any host.
+    let note = |node: &Node, text: &str| {
+        let client = node.client();
+        let text = text.to_owned();
+        async move {
+            let _: Value = client
+                .post("/v1/claims", &ClaimInput {
+                    subject: format!("custom/fleet-test/{text}"),
+                    kind: NOTE.into(),
+                    actor: None,
+                    fields: [("text".to_owned(), Value::String(text))].into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+    };
+    let mut expected = BTreeSet::new();
+    for text in ["o-0", "o-1", "o-2"] {
+        note(&o, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for text in ["n-0", "n-1"] {
+        note(&n, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+    }
+    // The new member keeps no row for a settled verdict; the previous release keeps one each.
+    assert_eq!(rows(&n, "SELECT COUNT(*) FROM claim_signature_judging"), 0);
+    assert!(rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") > 0);
+
+    // Upgrade in place: the prune drops the release's rows, verdicts and the set stay.
+    let before: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    o.wait_listening().await;
+    wait_until("the upgraded member prunes settled judging rows", 120, || async {
+        rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") == 0
+    })
+    .await;
+    assert_eq!(unverified(&o), 0);
+    let after: BTreeSet<String> =
+        o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    assert!(before.is_subset(&after), "upgrade lost history");
+    for (node, text) in [(&o, "o-upgraded"), (&n, "n-after-upgrade")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // Roll back: the release reads every verdict, signs and replicates as before.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    o.wait_listening().await;
+    assert_eq!(unverified(&o), 0);
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+    }
+
+    // Upgrade again: what the release kept meanwhile is pruned too.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    o.wait_listening().await;
+    wait_until("the re-upgraded member prunes again", 120, || async {
+        rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") == 0
+    })
+    .await;
+    assert_eq!(unverified(&o), 0);
+}
+
 /// A page cursor into the messages stream names its position in `stream_after` and leaves out
 /// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
 /// over rather than reading a stream position as a graph index. A subject the graph holds lists
