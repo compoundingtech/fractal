@@ -433,7 +433,6 @@ pub fn install() {
     });
 }
 
-
 /// One measurement of the store.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DatabaseSize {
@@ -705,7 +704,6 @@ fn process_threads() -> Value {
     json!({"total": total, "by_name": by_name})
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,7 +744,6 @@ mod tests {
         assert!(row["size"]["growth_bytes_per_day"].is_null());
         assert!(row["budget"].is_null());
     }
-
 
     #[test]
     fn database_unknown_growth_cannot_prove_health_or_hide_live_breach() {
@@ -844,7 +841,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn the_request_latency_report_carries_the_writer_hold_objective() {
         install();
@@ -912,6 +908,5 @@ mod tests {
         );
         assert!(error(&interval).contains("is a fleet declaration"), "{}", error(&interval));
     }
-
 
 }
