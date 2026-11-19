@@ -205,11 +205,11 @@ impl CardReads {
              WHERE claims.subject=?1 AND claims.store_index>?2 AND claims.store_index<=?3
                AND {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM}"
         );
-        let mut suffix = connection.prepare_cached(&query)?;
-        let mut full = connection.prepare_cached(&query.replace("INDEXED BY claims_subject_index", "INDEXED BY claims_subject_kind_index"))?;
+        let mut suffix = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7b1fbb1528fe owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &query)?;
+        let mut full = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2228f34d3717 owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &query.replace("INDEXED BY claims_subject_index", "INDEXED BY claims_subject_kind_index"))?;
         for subject in missing {
             let key = (subject.clone(), self.hide_reserved);
-            let revision: u64 = revision.query_row([subject], |row| row.get(0))?;
+            let revision: u64 = revision.query_row(/* sqlite-large-value: allow-for-now lv-hc5a5be63ac9d owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
             let kept = if share {
                 store.fractal.card_actuals.lock().unwrap_or_else(PoisonError::into_inner)
                     .get(&key).filter(|entry| entry.through <= self.index && entry.revision == revision).cloned()

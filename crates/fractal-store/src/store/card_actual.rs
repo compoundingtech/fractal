@@ -6,12 +6,12 @@ type SourceRow = (String, String, String, Value);
 pub(super) type Key = (usize, String, String, Option<i64>, String, i64, String);
 
 pub(super) fn key(connection: &Connection, id: &str) -> Result<Key> {
-    Ok(connection.prepare_cached(&format!(
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9f9764d46e29 owner=fractal_store::store::card_actual TODO=trace-statement-and-value-representation */ &format!(
         "SELECT length(claims.accepted_at_unix_ms), claims.accepted_at_unix_ms,
          batches.origin, batches.replica_sequence, claims.batch_id, {}, claims.id
          FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1",
         canonical::position_sql("claims")
-    ))?.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h41ad0419d8c7 owner=fractal_store::store::card_actual TODO=trace-statement-and-value-representation */ [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,
         row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))?)
 }
 
@@ -65,10 +65,10 @@ impl Reduction {
 /// appends use the indexed arrival suffix; repairs, trims and ordering changes restart it.
 /// These are disposable derived fences; claims remain the only reduction authority.
 pub(super) fn install(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS card_actual_revisions (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd43112908de0 owner=fractal_store::store::card_actual TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS card_actual_revisions (
         subject TEXT PRIMARY KEY, revision INTEGER NOT NULL
     );")?;
-    let bump = |subject: &str| format!("INSERT INTO card_actual_revisions(subject,revision)
+    let bump = |subject: &str| format!(/* sqlite-large-value: allow-for-now lv-h5b8679124200 owner=fractal_store::store::card_actual TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO card_actual_revisions(subject,revision)
         SELECT {subject},1 WHERE {subject} IS NOT NULL
         ON CONFLICT(subject) DO UPDATE SET revision=revision+1;");
     for (name, event, subject) in [
@@ -84,12 +84,12 @@ pub(super) fn install(connection: &Connection) -> Result<()> {
         ("position_update_new", "AFTER UPDATE OF claim_id ON claim_positions WHEN OLD.claim_id IS NOT NEW.claim_id", "(SELECT subject FROM claims WHERE id=NEW.claim_id)"),
         ("position_delete", "AFTER DELETE ON claim_positions", "(SELECT subject FROM claims WHERE id=OLD.claim_id)"),
     ] {
-        connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS card_actual_{name} {event}
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h2d32e6b8e798 owner=fractal_store::store::card_actual TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS card_actual_{name} {event}
             BEGIN {} END;", bump(subject)))?;
     }
     // Position admission can lower an existing claim's canonical position without
     // inserting another replica row. Observe the authoritative position table itself.
-    connection.execute_batch("DROP TRIGGER IF EXISTS card_actual_record_insert;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha2d22ff13e93 owner=fractal_store::store::card_actual TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS card_actual_record_insert;
         DROP TRIGGER IF EXISTS card_actual_record_update;
         DROP TRIGGER IF EXISTS card_actual_record_update_new;
         DROP TRIGGER IF EXISTS card_actual_record_delete;

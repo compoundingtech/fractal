@@ -795,7 +795,7 @@ fn enrich_responses_with_sql(
     view: &mut StepRunView,
     sql: &str,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(sql))?;
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c2bec39d0b7 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(sql))?;
     let responses = query
         .query_map(params![view.subject, view.attempt], |row| {
             Ok((

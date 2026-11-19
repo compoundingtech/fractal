@@ -71,12 +71,12 @@ fn duplicate_envelope_position_join_invalidates_the_canonical_prefix() {
         let tx = writer.transaction().unwrap();
         let first = append(&tx, "running", None);
         let second = append(&tx, "stopped", Some(&first.batch_id));
-        tx.execute("UPDATE claims SET accepted_at_unix_ms='100' WHERE id IN (?1,?2)",
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4aeb57f40a61 owner=fractal_store::store::card_actual_regression_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='100' WHERE id IN (?1,?2)",
             params![first.id, second.id]).unwrap();
         // Local admission already assigned 0 and 1. Seed the pre-duplicate wire
         // positions directly: the production MIN join cannot raise those values.
-        tx.execute("UPDATE claim_positions SET position=10 WHERE claim_id=?1", [&first.id]).unwrap();
-        tx.execute("UPDATE claim_positions SET position=20 WHERE claim_id=?1", [&second.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hf09583e4d191 owner=fractal_store::store::card_actual_regression_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_positions SET position=10 WHERE claim_id=?1", [&first.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h5cdac82c1d39 owner=fractal_store::store::card_actual_regression_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_positions SET position=20 WHERE claim_id=?1", [&second.id]).unwrap();
         tx.commit().unwrap();
         (first, second)
     };
