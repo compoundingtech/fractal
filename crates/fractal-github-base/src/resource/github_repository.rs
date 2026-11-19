@@ -3196,7 +3196,9 @@ mod tests {
         assert!(!cursor.identities.contains_key("I_gone"));
         assert!(cursor.identities.contains_key("I_live"));
         github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
-        github.resolved_nodes(json!([{"id": "I_live", "state": "OPEN", "number": 2}]));
+        *github.graphql.lock() = json!({"data": {"nodes": [
+            {"id": "I_live", "state": "OPEN", "number": 2}
+        ]}}).to_string();
         github.graphql_requests.lock().clear();
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
         observe_at(request(&["issues"], first.cursor.as_deref(), None), &base, Some(&GithubAuth::test("test")))
