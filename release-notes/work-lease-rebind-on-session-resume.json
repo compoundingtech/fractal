@@ -3,7 +3,7 @@
   "summary": "A seat that restarts without a fresh session keeps its held work leases under the new incarnation",
   "replay": {
     "status": "none",
-    "detail": "No forced replay. The new work.rebound fact projects both incrementally and in a full replay when it is present, and its guards make the projection idempotent."
+    "detail": "No forced replay. work.rebound transfers only an exact held lease and replays idempotently. Orphaned or released leases are never resurrected. A possibly resumable session retains its existing lease until a binding or fresh intent resolves continuity, or ordinary lease expiry releases it."
   },
   "schema": {
     "status": "changed",
@@ -11,22 +11,22 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."
+    "detail": "No checkpoint rules or rules-digest changes. A fleet capability barrier gates the new ownership protocol."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Older members retain replicated work.rebound facts as unknown vocabulary pending upgrade, as designed for new claim kinds. Until a member is upgraded, a seat resuming its native session there keeps the previous behavior: its old-incarnation lease is refused and reclaimed. The work action incarnation fence is unchanged; a stale incarnation stays refused."
+    "detail": "Emission of work.rebound and resumable-session orphan deferral require every current fleet member to advertise work_rebind_v1>=1. Ambiguous membership, missing support or unfenced outside writers close the barrier. While closed, ownership keeps the prior orphan/reclaim behavior. Older members retain unknown facts; no new transfers are emitted during a mixed-version roll."
   },
   "downtime": {
     "status": "none",
-    "detail": "Normal binary restart; the rebind runs once per native session report with no additional startup work."
+    "detail": "Normal rolling binary restarts. Session transfers activate only after the fleet capability barrier opens."
   },
   "manual": {
     "status": "none",
-    "detail": "No operator action; existing leases, sessions and identities are preserved."
+    "detail": "No operator cutover. Capability advertisements automatically open or close the writer barrier; native-session publication, proof and transfer commit atomically."
   },
   "recovery": {
-    "status": "none",
-    "detail": "Rolling back keeps the durable work.rebound facts as unprojected events; leases replay to the incarnation they recorded before the rebind, which is the previous behavior, with no data loss."
+    "status": "changed",
+    "detail": "A rollback stops advertising work_rebind_v1 and closes the barrier, so no further transfers are emitted. Already retained work.rebound facts remain authoritative on supporting readers; older readers retain but do not apply them."
   }
 }

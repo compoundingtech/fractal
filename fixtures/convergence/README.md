@@ -532,3 +532,15 @@ seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
 The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
 The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
 the three-seed cap and majority trim coverage remain enforced.
+
+`claims-v39.json` adds the durable `work.rebound` evidence kind from the complete native
+registry. Versions 1 through 38 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v39.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v39.
+Rebound inputs identify an agent claimant, a positive attempt, distinct old and new harness
+incarnations, and the native session resumed by the new incarnation. The focused
+`the_corpus_generates_valid_work_rebound_inputs` regression checks the specification against
+the live registry, validates and admits the generated input, and replicates it to the oracle.
+Adding this kind changes the shared seeded schedule; v38 characterization remains historical.
+Exact per-seed trim equality, old-build-excusal continuation, the three-seed cap and majority
+trim coverage remain enforced; any changed expectations require measured v39 outcomes.

@@ -20093,7 +20093,7 @@ pub fn project_mission_run_update(
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h15544bf28230 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_incarnation=?2, updated_at_unix_ms=?3
                  WHERE subject=?1 AND attempt=?4 AND lease_owner=?5 AND lease_incarnation=?6
-                   AND status NOT IN ('completed','failed','cancelled')",
+                   AND status IN ('claimed','working','verifying','blocked','waiting-person')",
                 params![
                     claim.subject,
                     to,

@@ -5566,6 +5566,7 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.remove("work.rebound").unwrap();
         for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
             current.claims.remove(kind).unwrap();
         }

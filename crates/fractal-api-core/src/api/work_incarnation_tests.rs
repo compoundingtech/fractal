@@ -163,20 +163,40 @@ mission "catalog" state="ready" {
             .unwrap();
     }
 
-    /// An operator's request that the next launch start a new native session.
-    fn fresh_session_requested(&self) {
+    async fn fresh_session_restart(&self, now: bool) {
+        // A self-restart defers only while fresh driver evidence says a turn is in flight.
         self.state
             .store
             .append_claim(&ClaimInput {
                 subject: SEAT.into(),
-                kind: "runtime.action.requested".into(),
-                actor: Some("person/ada".into()),
-                fields: BTreeMap::from([("action".into(), json!("fresh-session"))]),
+                kind: "harness.observed".into(),
+                actor: Some(SEAT.into()),
+                fields: BTreeMap::from([
+                    ("state".into(), json!("working")),
+                    ("driver".into(), json!("claude")),
+                    ("incarnation_id".into(), json!("chooser:one")),
+                    ("observed_at_ms".into(), json!(smallclaims::store::now_ms())),
+                ]),
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: None,
             })
             .unwrap();
+        let (status, claim) = super::tests::json_request(
+            router(self.state.clone()),
+            "/v1/agents/restart",
+            json!({
+                "subject": SEAT, "actor": SEAT, "fresh_session": true,
+                "now": now, "idempotency_key": "fresh-restart",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_eq!(claim["body"]["fields"]["fresh_session"], true);
+        assert_eq!(
+            claim["body"]["fields"]["action"],
+            if now { "restart" } else { "restart-when-idle" }
+        );
     }
 
     async fn report_native_session(&self, incarnation: &str, session: &str) {
@@ -781,29 +801,31 @@ async fn a_seat_that_resumes_its_native_session_keeps_its_claim() {
 
 #[tokio::test]
 async fn a_fresh_session_restart_still_orphans_the_held_lease() {
-    let fixture = Fixture::new(false).await;
-    fixture.binding("chooser:one", "native-one");
-    fixture.fresh_session_requested();
-    fixture.runtime("chooser:two");
-    // Even a report naming the old session id cannot rebind across a fresh-session request.
-    fixture.report_native_session("chooser:two", "native-one").await;
+    for now in [true, false] {
+        let fixture = Fixture::new(false).await;
+        fixture.binding("chooser:one", "native-one");
+        fixture.fresh_session_restart(now).await;
+        fixture.runtime("chooser:two");
+        // Even a report naming the old session id cannot rebind across a fresh-session request.
+        fixture.report_native_session("chooser:two", "native-one").await;
 
-    let step = fixture
-        .state
-        .store
-        .step_run(&fixture.step)
-        .unwrap()
-        .unwrap();
-    assert_eq!(step.claim_incarnation.as_deref(), Some("chooser:one"));
-    assert!(fixture.state.store.work_claim_is_orphaned(&step).unwrap());
-    assert!(
-        fixture
+        let step = fixture
             .state
             .store
-            .latest_claim(&fixture.step, Some("work.rebound"))
+            .step_run(&fixture.step)
             .unwrap()
-            .is_none()
-    );
+            .unwrap();
+        assert_eq!(step.claim_incarnation.as_deref(), Some("chooser:one"));
+        assert!(fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+        assert!(
+            fixture
+                .state
+                .store
+                .latest_claim(&fixture.step, Some("work.rebound"))
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[tokio::test]
@@ -850,4 +872,242 @@ async fn a_restart_on_a_new_native_session_orphans_the_held_lease() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn delayed_native_session_reports_cannot_strand_a_claim_on_a_stale_incarnation() {
+    let fixture = Fixture::new(false).await;
+    fixture.report_native_session("chooser:one", "native-one").await;
+    fixture.runtime("chooser:two");
+    fixture.runtime("chooser:three");
+
+    // B's delayed report is invalid both before and after C publishes its binding.
+    for c_bound in [false, true] {
+        if c_bound {
+            fixture.report_native_session("chooser:three", "native-one").await;
+        }
+        let (status, error) = super::tests::json_request(
+            router(fixture.state.clone()),
+            "/v1/agents/native-session",
+            json!({
+                "subject": SEAT, "actor": SEAT, "incarnation_id": "chooser:two",
+                "harness": "claude", "session_id": "native-one",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(error["code"], "stale-session-incarnation", "{error}");
+        let binding = fixture.state.store.latest_claim(SEAT, Some("harness.session-file"))
+            .unwrap().unwrap();
+        assert_eq!(
+            binding.body["fields"]["incarnation_id"],
+            if c_bound { "chooser:three" } else { "chooser:one" }
+        );
+        let step = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+        assert_eq!(
+            step.claim_incarnation.as_deref(),
+            Some(if c_bound { "chooser:three" } else { "chooser:one" })
+        );
+        assert_eq!(step.status, "claimed");
+        assert!(!fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+    }
+
+    let fact = fixture.state.store.latest_claim(&fixture.step, Some("work.rebound"))
+        .unwrap().unwrap();
+    assert_eq!(fact.body["fields"]["from_incarnation"], "chooser:one");
+    assert_eq!(fact.body["fields"]["to_incarnation"], "chooser:three");
+    fixture.state.store.replay_replication_graph().unwrap();
+    let replayed = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert_eq!(replayed.claimant.as_deref(), Some(SEAT));
+    assert_eq!(replayed.claim_incarnation.as_deref(), Some("chooser:three"));
+    assert_eq!(replayed.status, "claimed");
+    assert!(!fixture.state.store.work_claim_is_orphaned(&replayed).unwrap());
+}
+
+#[tokio::test]
+async fn sequential_native_session_transfers_follow_each_live_incarnation_and_replay() {
+    let fixture = Fixture::new(false).await;
+    fixture.report_native_session("chooser:one", "native-one").await;
+    for (from, to) in [
+        ("chooser:one", "chooser:two"),
+        ("chooser:two", "chooser:three"),
+    ] {
+        fixture.runtime(to);
+        fixture.report_native_session(to, "native-one").await;
+        let step = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+        assert_eq!(step.claimant.as_deref(), Some(SEAT));
+        assert_eq!(step.claim_incarnation.as_deref(), Some(to));
+        assert_eq!(step.status, "claimed");
+        assert!(!fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+        let fact = fixture.state.store.latest_claim(&fixture.step, Some("work.rebound"))
+            .unwrap().unwrap();
+        assert_eq!(fact.body["fields"]["from_incarnation"], from);
+        assert_eq!(fact.body["fields"]["to_incarnation"], to);
+        assert_eq!(fact.body["fields"]["session_id"], "native-one");
+    }
+    fixture.state.store.replay_replication_graph().unwrap();
+    let replayed = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert_eq!(replayed.claimant.as_deref(), Some(SEAT));
+    assert_eq!(replayed.claim_incarnation.as_deref(), Some("chooser:three"));
+    assert_eq!(replayed.status, "claimed");
+    assert!(!fixture.state.store.work_claim_is_orphaned(&replayed).unwrap());
+}
+
+#[tokio::test]
+async fn sweeps_before_and_after_a_resume_cannot_release_the_continuing_session_lease() {
+    let fixture = Fixture::new(false).await;
+    fixture.report_native_session("chooser:one", "native-one").await;
+    for (kind, fields) in [
+        ("runtime.observed", BTreeMap::from([
+            ("status".into(), json!("exited")),
+            ("incarnation_id".into(), json!("chooser:one")),
+        ])),
+        ("harness.observed", BTreeMap::from([
+            ("state".into(), json!("ended")),
+            ("driver".into(), json!("claude")),
+            ("incarnation_id".into(), json!("chooser:one")),
+        ])),
+    ] {
+        fixture.state.store.append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: kind.into(),
+            actor: Some(SEAT.into()),
+            fields,
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    fixture.runtime("chooser:two");
+    let before = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert!(!fixture.state.store.work_claim_is_orphaned(&before).unwrap());
+    assert!(!fixture.state.store.set_step_state(
+        &fixture.step, "orphaned", Some("the exact worker incarnation ended"),
+    ).unwrap());
+    let retained = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert_eq!(retained.status, "claimed");
+    assert_eq!(retained.claimant.as_deref(), Some(SEAT));
+    assert_eq!(retained.claim_incarnation.as_deref(), Some("chooser:one"));
+
+    fixture.report_native_session("chooser:two", "native-one").await;
+    // A sweep decision made against the old incarnation must be rechecked at publication.
+    assert!(!fixture.state.store.set_step_state(
+        &fixture.step, "orphaned", Some("the exact worker incarnation ended"),
+    ).unwrap());
+    let swept = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    // Match the second sweep's orphaned -> ready guard; never release a live claim unconditionally.
+    if swept.status == "orphaned" {
+        fixture.state.store.set_step_state(
+            &fixture.step, "ready", Some("the prior worker incarnation ended"),
+        ).unwrap();
+    }
+    assert_eq!(swept.status, "claimed");
+    assert_eq!(swept.claim_incarnation.as_deref(), Some("chooser:two"));
+    assert!(!fixture.state.store.work_claim_is_orphaned(&swept).unwrap());
+    fixture.state.store.replay_replication_graph().unwrap();
+    let replayed = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert_eq!(replayed.status, "claimed");
+    assert_eq!(replayed.claimant.as_deref(), Some(SEAT));
+    assert_eq!(replayed.claim_incarnation.as_deref(), Some("chooser:two"));
+    assert!(!fixture.state.store.work_claim_is_orphaned(&replayed).unwrap());
+}
+
+#[tokio::test]
+async fn native_session_continuity_requires_every_fleet_member_to_advertise_work_rebind() {
+    const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+    fn sync(from: &crate::store::Store, to: &crate::store::Store) {
+        let exchange = from.export_replication_exchange_answering(
+            FLEET,
+            &to.replication_inventory().unwrap(),
+            &to.replication_signature_requests().unwrap(),
+        ).unwrap();
+        to.receive_replication_exchange(&from.origin, FLEET, &exchange).unwrap();
+        to.validate_replication_backlog().unwrap();
+        to.apply_replication_repairs().unwrap();
+        assert!(to.project_replication_backlog().unwrap());
+    }
+
+    // Evaluate closed and upgraded barriers against independent lease and binding histories.
+    for supported in [false, true] {
+        let fixture = Fixture::new(false).await;
+        let store = &fixture.state.store;
+        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        store.bind_fleet(FLEET).unwrap();
+        store.pin_fleet_anchor(anchor.public()).unwrap();
+        store.set_member_key(Some(anchor.clone())).unwrap();
+        store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+
+        let peer_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        store.append_claim(&ClaimInput {
+            subject: "host/birch".into(),
+            kind: "fleet.member-admitted".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("fleet_id".into(), json!(FLEET)),
+                ("member_key".into(), json!(peer_key.public())),
+                ("via".into(), json!("invite")),
+                ("sponsor".into(), json!(format!("host/{}", store.origin))),
+                ("mode".into(), json!("listening")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        store.replication_snapshot().unwrap();
+        let peer = crate::store::Store::open_memory("birch").unwrap();
+        peer.bind_fleet(FLEET).unwrap();
+        peer.pin_fleet_anchor(anchor.public()).unwrap();
+        peer.set_member_key(Some(peer_key)).unwrap();
+        sync(store, &peer);
+        peer.append_claim(&ClaimInput {
+            subject: "daemon/birch".into(),
+            kind: "daemon.started".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("features".into(), json!({})),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        sync(&peer, store);
+        if supported {
+            peer.append_claim(&ClaimInput {
+                subject: "daemon/birch".into(),
+                kind: "daemon.started".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("features".into(), json!({"work_rebind_v1": 1})),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            sync(&peer, store);
+        }
+
+        fixture.report_native_session("chooser:one", "native-one").await;
+        fixture.runtime("chooser:two");
+        let before = store.step_run(&fixture.step).unwrap().unwrap();
+        assert_eq!(store.work_claim_is_orphaned(&before).unwrap(), !supported);
+        fixture.report_native_session("chooser:two", "native-one").await;
+        let resumed = store.step_run(&fixture.step).unwrap().unwrap();
+        assert_eq!(
+            resumed.claim_incarnation.as_deref(),
+            Some(if supported { "chooser:two" } else { "chooser:one" })
+        );
+        assert_eq!(store.work_claim_is_orphaned(&resumed).unwrap(), !supported);
+        assert_eq!(
+            store.latest_claim(&fixture.step, Some("work.rebound")).unwrap().is_some(),
+            supported
+        );
+        store.replay_replication_graph().unwrap();
+        let replayed = store.step_run(&fixture.step).unwrap().unwrap();
+        assert_eq!(replayed.claim_incarnation, resumed.claim_incarnation);
+        assert_eq!(replayed.status, "claimed");
+        assert_eq!(store.work_claim_is_orphaned(&replayed).unwrap(), !supported);
+    }
 }

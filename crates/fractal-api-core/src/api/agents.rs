@@ -578,15 +578,15 @@ pub async fn report_native_session(
         )));
     }
     let mut fields = BTreeMap::from([
-        ("harness".into(), Value::String(request.harness.clone())),
+        ("harness".into(), Value::String(request.harness)),
         (
             "session_id".into(),
-            Value::String(request.session_id.clone()),
+            Value::String(request.session_id),
         ),
         ("agent".into(), Value::String(subject.clone())),
         (
             "incarnation_id".into(),
-            Value::String(request.incarnation_id.clone()),
+            Value::String(request.incarnation_id),
         ),
         ("status".into(), Value::String("active".into())),
     ]);
@@ -601,7 +601,7 @@ pub async fn report_native_session(
     }
     let claim = state
         .store
-        .append_claim(&ClaimInput {
+        .bind_native_session(&ClaimInput {
             subject: subject.clone(),
             kind: "harness.session-file".into(),
             actor: Some(subject.clone()),
@@ -612,18 +612,6 @@ pub async fn report_native_session(
             // deduplicates only an unchanged current binding, not every prior use of its ID.
             idempotency_key: None,
         })
-        .map_err(ApiError::bad)?;
-    // This report is the authoritative proof that the incarnation resumed a native session: it
-    // is the one place the runtime binds incarnation to session, so the work leases that
-    // session's previous incarnation held rebind here, once, or never.
-    state
-        .store
-        .rebind_work_leases_to_resumed_session(
-            &subject,
-            &request.harness,
-            &request.session_id,
-            &request.incarnation_id,
-        )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(claim))
