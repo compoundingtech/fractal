@@ -297,6 +297,7 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 mod run_fence;
+pub mod observation_minutes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rebuild_observer;
 pub mod revision_seats;
@@ -851,7 +852,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0f0625bb0cf6 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5268709f026 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -861,6 +862,13 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Phone admission seeks one stable source/report; evaluation seeks only the retained hour.
+CREATE INDEX IF NOT EXISTS claims_observation_report_index
+ON claims(json_extract(body,'$.fields.source'), json_extract(body,'$.fields.report_id'))
+WHERE kind='custom.client.observation-minute';
+CREATE INDEX IF NOT EXISTS claims_observation_minute_time_index
+ON claims(CAST(json_extract(body,'$.fields.start_ms') AS INTEGER), subject)
+WHERE kind='custom.client.observation-minute';
 -- Shared action-key admission must seek one actor/key, never scan retained resolutions.
 CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
 ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
@@ -9739,6 +9747,9 @@ fn validate_claim_cardinality(
 ) -> Result<(), FractalError> {
     let duplicate = match cardinality {
         fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition => false,
+        fractal_schema::Cardinality::Once if kind == observation_minutes::KIND => {
+            observation_minutes::admitted_minute_exists(transaction, subject)?
+        }
         fractal_schema::Cardinality::Once => transaction
             .query_row(
                 "SELECT 1 FROM claims WHERE subject=?1 AND kind=?2 LIMIT 1",
@@ -24745,6 +24756,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if input.kind == observation_minutes::KIND {
+            return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
+        }
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
