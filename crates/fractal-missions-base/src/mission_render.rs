@@ -512,8 +512,11 @@ mod tests {
         assert!(lane.capacity.is_none());
         assert!(lane.disk.is_none());
         let rendered = render_mission_kdl(&mission).unwrap();
-        assert!(rendered.text.contains("profile=\"check.unit\""));
-        assert!(rendered.text.contains("disk-path=\"/workspace\""));
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let rendered_lane = document.get("mission").unwrap().children().unwrap()
+            .get("step").unwrap().children().unwrap().get("lane").unwrap();
+        assert_eq!(rendered_lane["profile"].as_string(), Some("check.unit"));
+        assert_eq!(rendered_lane["disk-path"].as_string(), Some("/workspace"));
         let stored = serde_json::to_value(lane).unwrap();
         assert!(stored.get("profile_estimate").is_none());
         assert_eq!(serde_json::from_value::<crate::model::ResourceLaneSpec>(stored).unwrap(), *lane);
