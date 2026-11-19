@@ -2,6 +2,78 @@ use super::*;
 use super::desired_batch::DesiredBatchRequest;
 
 #[test]
+fn named_desired_reads_keep_constant_scan_work_and_freshness_parity() {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"freshness/local\" { host \"node\"; command \"true\"; }\n\
+         agent \"freshness/remote\" { host \"other\"; command \"true\"; }\n\
+         agent \"freshness/stopped\" { command \"true\"; }\n",
+        "node",
+    ).unwrap();
+    crate::store::publication_tests_shared::publish(&store, &intent, "freshness-fixture");
+    let stop = crate::graph::parse_intent(
+        "version 2\nstop \"agent/freshness/stopped\"\n", "node",
+    ).unwrap();
+    crate::store::publication_tests_shared::publish(&store, &stop, "freshness-stop");
+    let anchor = store.latest_claim("agent/freshness/local", Some("intent.desired")).unwrap().unwrap();
+    let names = ["agent/freshness/local", "agent/freshness/remote", "agent/freshness/stopped",
+        "agent/freshness/missing", "agent/freshness/local"];
+    let mut costs = Vec::new();
+    for unrelated in [0, 4096] {
+        if unrelated > 0 {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for index in 0..unrelated {
+                transaction.execute(
+                    "INSERT INTO desired(subject,kind,revision,claim_id,body)
+                     VALUES (?1,'resource','fixture',?2,'{}')",
+                    params![format!("resource/unrelated-{index}"), anchor.id],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        store.read_snapshot(|_| {
+            let connection = store.readers.get();
+            let steps = Arc::new(AtomicU64::new(0));
+            let counter = steps.clone();
+            connection.progress_handler(1, Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }));
+            let selected = store.desired_subjects_named(&names);
+            connection.progress_handler(0, None::<fn() -> bool>);
+            let selected = selected?;
+            let bounded_steps = steps.swap(0, Ordering::Relaxed);
+            let counter = steps.clone();
+            connection.progress_handler(1, Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }));
+            let all = store.desired_subjects();
+            connection.progress_handler(0, None::<fn() -> bool>);
+            let all = all?;
+            let legacy_steps = steps.load(Ordering::Relaxed);
+            let reference = all.into_iter().filter(|row| names.contains(&row.subject.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(selected, reference);
+            for host in ["node", "other", "absent"] {
+                let hosted = |rows: &[DesiredSubject]| rows.iter()
+                    .filter(|row| row.member.as_ref().is_some_and(|member| member.host == host))
+                    .map(|row| row.subject.clone()).collect::<BTreeSet<_>>();
+                assert_eq!(hosted(&selected), hosted(&reference));
+            }
+            assert!(store.desired_subjects_named(&[])?.is_empty());
+            eprintln!("freshness desired unrelated={unrelated} selected={} bounded_vm_steps={bounded_steps} legacy_vm_steps={legacy_steps}", selected.len());
+            costs.push((bounded_steps, legacy_steps));
+            Ok(())
+        }).unwrap();
+    }
+    assert_eq!(costs[0].0, costs[1].0, "unrelated inventory must add no scan work");
+    assert!(costs[1].1 > costs[1].0 * 100, "old scan must exceed bounded work by 100x");
+}
+
+#[test]
 fn kind_filtered_desired_pages_seek_the_kind_subject_index() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.connection.write();

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Authenticate incoming seat freshness against only the pushed seats instead of decoding the entire desired inventory",
+  "replay": { "status": "none", "detail": "Claim replay and projection writes are unchanged." },
+  "schema": { "status": "none", "detail": "Uses the existing desired subject primary key; no new tables or indexes." },
+  "rules": { "status": "none", "detail": "The same decoded member-host check authenticates each pushed seat. Missing, stopped and unreadable members remain unrecorded." },
+  "compatibility": { "status": "none", "detail": "No wire or response changes. Only incoming freshness candidate discovery changes; other desired inventory consumers are unchanged." },
+  "downtime": { "status": "none", "detail": "Normal daemon update; no migration or downtime required." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Revert the read-path change; no stored state changes." }
+}

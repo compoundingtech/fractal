@@ -34,8 +34,11 @@ pub async fn seat_freshness(
         .map_err(|error| validation(format!("{error:#}")))?;
     let store = state.store.clone();
     blocking_store(move || {
+        // The push already bounds the candidate seats. Seek only those declarations,
+        // rather than decode the whole inventory just to authenticate this small batch.
+        let subjects = received.seats.iter().map(|seat| seat.agent.as_str()).collect::<Vec<_>>();
         let hosted = store
-            .desired_subjects()?
+            .desired_subjects_named(&subjects)?
             .into_iter()
             .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == received.from))
             .map(|desired| desired.subject)

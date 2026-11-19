@@ -6461,6 +6461,22 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Current desired rows for only these exact subject names. Empty input selects nothing.
+    /// Like `desired_subjects`, this reads the projection without resolving aliases or folding cards.
+    pub fn desired_subjects_named(&self, subjects: &[&str]) -> Result<Vec<DesiredSubject>> {
+        if subjects.is_empty() {
+            return Ok(Vec::new());
+        }
+        smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+             FROM desired WHERE subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], desired_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
