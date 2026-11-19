@@ -499,6 +499,7 @@ pub enum CheckpointPhase {
     Seal,
     AwaitSeals,
     Verify,
+    ProofFailed,
     AwaitVerifications,
 }
 
@@ -513,7 +514,12 @@ pub struct CheckpointWorker {
 impl CheckpointStatusView {
     /// Bounded diagnostic using only status metadata; never computes an envelope digest.
     pub fn blocking_summary(&self) -> Option<String> {
-        let pending = self.pending.as_ref()?;
+        if self.pending.is_none() && !self.halted
+            && !self.worker.as_ref().is_some_and(|worker|
+                worker.error.is_some() || worker.phase == CheckpointPhase::Disabled)
+        {
+            return None;
+        }
         let mut details = Vec::new();
         if let Some(worker) = &self.worker {
             if worker.phase == CheckpointPhase::Disabled {
@@ -524,18 +530,27 @@ impl CheckpointStatusView {
         } else {
             details.push(format!("{} phase=unknown (worker evidence unavailable)", self.node));
         }
-        for participant in &pending.unsealed {
-            details.push(format!("{participant} phase=seal (no seal)"));
+        if self.halted {
+            details.push(format!("{} phase=trim (halted: graph would change)", self.node));
         }
-        for (participant, difference) in &pending.disagreeing {
-            details.push(format!("{participant} phase=seal (different {difference})"));
-        }
-        if pending.unsealed.is_empty() && pending.disagreeing.is_empty() {
-            for participant in self.participants.difference(&pending.verified) {
-                details.push(format!("{participant} phase=verify (no verification)"));
+        if let Some(pending) = &self.pending {
+            for participant in &pending.unsealed {
+                details.push(format!("{participant} phase=seal (no seal)"));
+            }
+            for (participant, difference) in &pending.disagreeing {
+                details.push(format!("{participant} phase=seal (different {difference})"));
+            }
+            if pending.unsealed.is_empty() && pending.disagreeing.is_empty() {
+                for participant in self.participants.difference(&pending.verified) {
+                    details.push(format!("{participant} phase=verify (no verification)"));
+                }
+            }
+            for (participant, difference) in &pending.verifications_differ {
+                details.push(format!("{participant} phase=verify (different {difference})"));
             }
         }
-        Some(format!("{}; newest stable {}: {}", pending.checkpoint,
+        Some(format!("{}; newest stable {}: {}",
+            self.pending.as_ref().map(|pending| pending.checkpoint.as_str()).unwrap_or("no checkpoint pending"),
             self.newest_stable.as_ref().map(|stable| stable.checkpoint.as_str()).unwrap_or("none"),
             details.join("; ")))
     }
@@ -625,6 +640,8 @@ pub fn verification_difference(ours: &VerifiedTerms, theirs: &VerifiedTerms) -> 
 struct FailedProofInputs {
     inputs: BTreeSet<String>,
     last_failed_at_unix_ms: u128,
+    #[serde(default)]
+    last_mismatches: Vec<String>,
 }
 
 impl FailedProofInputs {
@@ -632,6 +649,16 @@ impl FailedProofInputs {
         !self.inputs.is_empty()
             && now_unix_ms < self.last_failed_at_unix_ms.saturating_add(CHECKPOINT_PROOF_BACKOFF_MS)
     }
+}
+
+#[test]
+fn legacy_proof_failure_metadata_keeps_retry_refusal_without_mismatch_detail() {
+    let failures: FailedProofInputs = serde_json::from_value(json!({
+        "inputs": ["failed-input"], "last_failed_at_unix_ms": 100
+    })).unwrap();
+    assert!(failures.last_mismatches.is_empty());
+    assert!(failures.in_backoff(101));
+    assert!(failures.inputs.contains("failed-input"));
 }
 
 /// Release labels can be just the package version. Hash the actual running code once, rather
@@ -945,6 +972,7 @@ impl Store {
         plan: &StagedPlan,
         input_digest: String,
         failed_at_unix_ms: u128,
+        mismatches: &[String],
     ) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
@@ -958,6 +986,7 @@ impl Store {
             .map(serde_json::from_value).transpose()?.unwrap_or_default();
         failures.inputs.insert(input_digest);
         failures.last_failed_at_unix_ms = failures.last_failed_at_unix_ms.max(failed_at_unix_ms);
+        failures.last_mismatches = mismatches.to_vec();
         detail.as_object_mut().ok_or_else(|| anyhow::anyhow!("checkpoint detail is not an object"))?
             .insert("proof_failures".into(), serde_json::to_value(failures)?);
         transaction.execute(
@@ -1141,7 +1170,6 @@ impl Store {
                     context,
                     &mut actions,
                 )?;
-                self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
             } else {
                 self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
             }
@@ -1185,13 +1213,18 @@ impl Store {
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
         self.runtime.checkpoint_preflight()?;
+        self.checkpoint_worker_phase(CheckpointPhase::Verify);
         if terms.rules_digest != self.runtime.checkpoint_rules_digest() {
             // Verification is for these seal terms, never a different build's drop rules.
             // The normal step publishes replacement terms before attempting proof again.
+            self.checkpoint_worker_error("verification rules differ from the running build".into());
             return Ok(());
         }
         let failures = self.checkpoint_failed_proof_inputs(checkpoint)?;
         if failures.in_backoff(context.now_unix_ms) {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof retry backoff; last recorded mismatches: {}",
+                failures.last_mismatches.join("; ")));
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
@@ -1200,6 +1233,7 @@ impl Store {
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
             // Something before the cut arrived since the seal; the next pass seals again.
+            self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
             return Ok(());
         }
         // A checkpoint with no failures needs no failure identity unless its proof fails.
@@ -1209,11 +1243,16 @@ impl Store {
             Some(proof_input_digest(&staged, &plan)?)
         };
         if input_digest.as_ref().is_some_and(|input| failures.inputs.contains(input)) {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof input previously failed; last recorded mismatches: {}",
+                failures.last_mismatches.join("; ")));
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
         let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
+            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
+            self.checkpoint_worker_error(format!("proof mismatches: {}", proof.mismatches.join("; ")));
             let input_digest = match input_digest {
                 Some(input) => input,
                 None => proof_input_digest(&staged, &plan)?,
@@ -1243,7 +1282,7 @@ impl Store {
             })
             .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
             self.record_failed_checkpoint_proof(
-                checkpoint, &staged, &plan, input_digest, context.now_unix_ms,
+                checkpoint, &staged, &plan, input_digest, context.now_unix_ms, &proof.mismatches,
             )?;
             actions.push(CheckpointAction::ProofFailed {
                 checkpoint: checkpoint.to_owned(),
@@ -1268,6 +1307,7 @@ impl Store {
             drop_digest: plan.drop_digest.clone(),
             dropped_claims: plan.dropped_claims,
         });
+        self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
         Ok(())
     }
 

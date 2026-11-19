@@ -510,6 +510,14 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     let output = render_checkpoint_status(&status);
     assert!(output.contains("alder phase=seal (no seal)"));
     assert!(output.contains("birch phase=seal (no seal)"));
+    status.pending = None;
+    status.worker = Some(serde_json::from_value(serde_json::json!({
+        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
+    })).unwrap());
+    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
 }
 
 #[test]

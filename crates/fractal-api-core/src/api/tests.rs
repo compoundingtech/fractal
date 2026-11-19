@@ -6845,6 +6845,27 @@ fn doctor_distinguishes_disabled_checkpoint_worker_from_missing_participant_seal
 }
 
 #[test]
+fn checkpoint_doctor_warns_on_worker_failure_or_halt_without_pending_work() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    state.store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = state.store.checkpoint_status(client_now_ms(), &[]).unwrap();
+    status.pending = None;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=trim (halted"));
+    status.halted = false;
+    assert_eq!(checkpoint_doctor_check(&status).status, "pass");
+}
+
+#[test]
 fn doctor_lists_attention_items_open_for_more_than_a_day() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

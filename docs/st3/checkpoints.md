@@ -15,9 +15,14 @@ Status also reports process-local `worker` evidence: the last entered phase, its
 and any failure retained at that phase until the next attempt. This distinguishes disabled
 checkpointing, activation, scratch cleanup, catch-up, capture, seal, proof and trim work.
 `blocking` in text status and the `checkpoint` doctor check name each participant still missing
-a seal or verification and distinguish differing seals. A missing worker field means the daemon
-has no worker evidence, not that it is enabled or healthy. These diagnostics read cached worker
-metadata and existing agreement claims; they do not start a capture, proof copy or envelope walk.
+a seal or verification and distinguish differing seals and verifications. Worker failures and halted
+trims remain visible even when the newest due checkpoint is already stable and none is pending.
+Failed proofs retain their mismatch reason in local checkpoint detail; backoff and same-input
+refusals report the recorded failure rather than waiting for peer verifications. Older failure
+records without mismatch detail still refuse the proof, but cannot recover the missing reason.
+A missing worker field means the daemon has no worker evidence, not that it is enabled or healthy.
+These diagnostics read cached worker metadata and existing agreement claims; they do not start
+a capture, proof copy or envelope walk.
 They are not agreement inputs, do not excuse removed members, and do not enable checkpoints.
 
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it

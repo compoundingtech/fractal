@@ -13926,9 +13926,9 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
                  checkpoint tries again\n",
             );
         }
-        if let Some(blocking) = status.blocking_summary() {
-            output.push_str(&format!("  blocking    {blocking}\n"));
-        }
+    }
+    if let Some(blocking) = status.blocking_summary() {
+        output.push_str(&format!("  blocking    {blocking}\n"));
     }
     output
 }

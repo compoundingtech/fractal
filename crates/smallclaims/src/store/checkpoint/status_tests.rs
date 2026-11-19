@@ -117,3 +117,32 @@ fn blockers_distinguish_seals_from_verifications_and_accept_older_status() {
     let old: crate::store::CheckpointStatusView = serde_json::from_value(json).unwrap();
     assert!(old.worker.is_none());
 }
+
+#[test]
+fn worker_failures_and_halted_trims_remain_visible_without_pending_work() {
+    use crate::store::checkpoint_agreement::CheckpointPhase;
+    let store = store();
+    store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = store.checkpoint_status(NOW, &[]).unwrap();
+    status.pending = None;
+    assert!(status.blocking_summary().unwrap().contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker.as_mut().unwrap().error = None;
+    status.halted = true;
+    assert!(status.blocking_summary().unwrap().contains("phase=trim (halted"));
+    status.halted = false;
+    assert!(status.blocking_summary().is_none());
+}
+
+#[test]
+fn verification_disagreements_name_participants_and_reasons() {
+    let store = store();
+    let mut status = store.checkpoint_status(NOW, &[]).unwrap();
+    let pending = status.pending.as_mut().unwrap();
+    pending.unsealed.clear();
+    pending.verified.insert("status-node".into());
+    pending.verifications_agree = false;
+    pending.verifications_differ.insert("status-node".into(), "readers, retained claims".into());
+    assert!(status.blocking_summary().unwrap().contains(
+        "status-node phase=verify (different readers, retained claims)"));
+}
