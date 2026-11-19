@@ -4319,6 +4319,8 @@ mod mission_golden {
                     let doc =
                         mission_detail(&world, Some(&mission.id), width, "⠋", None, &expanded);
                     // The digest also locks styles, exact span boundaries and click targets.
+                    // Semantic Line/Span Debug includes link metadata (even link: None), so
+                    // migrating from ratatui text changes digests without changing visible text.
                     let digest = Sha256::digest(format!("{doc:#?}").as_bytes());
                     actual.push_str(&format!(
                         "{} width={width} open={open} sha256={digest:x}\n",

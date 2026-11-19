@@ -180,10 +180,8 @@ enum Item {
 enum Phase {
     Editing,
     Running,
-    /// Setup ran; the rows show their results. `failed` is an error from st itself.
-    Done {
-        failed: Option<String>,
-    },
+    /// Setup ran; the rows show their results. Setup-wide errors return to Editing.
+    Done,
 }
 
 /// The first and last line an item covers, and the columns when two share a line.
@@ -239,7 +237,7 @@ impl Screen {
     fn items(&self) -> Vec<Item> {
         match &self.phase {
             Phase::Running => Vec::new(),
-            Phase::Done { .. } => {
+            Phase::Done => {
                 let mut items = Vec::new();
                 if self.retryable().next().is_some() {
                     items.push(Item::Retry);
@@ -364,7 +362,7 @@ impl Screen {
             if self.phase == Phase::Running {
                 return Reaction::None;
             }
-            self.cancelled = !matches!(self.phase, Phase::Done { .. });
+            self.cancelled = !matches!(self.phase, Phase::Done);
             return Reaction::Leave;
         }
         if self.phase == Phase::Running {
@@ -379,7 +377,7 @@ impl Screen {
                 return Reaction::Leave;
             }
             KeyCode::Char('r') | KeyCode::Char('R')
-                if !ctrl && self.field().is_none() && matches!(self.phase, Phase::Done { .. }) =>
+                if !ctrl && self.field().is_none() && matches!(self.phase, Phase::Done) =>
             {
                 if self.retryable().next().is_some() {
                     return self.press(Item::Retry, check);
@@ -478,7 +476,7 @@ impl Screen {
                 match result {
                     Ok(()) => {
                         let clean = self.retryable().next().is_none();
-                        self.phase = Phase::Done { failed: None };
+                        self.phase = Phase::Done;
                         self.focus = if self.retryable().next().is_some() {
                             Item::Retry
                         } else {
@@ -563,7 +561,7 @@ impl Screen {
                 ),
                 theme::fg(theme::WORKING),
             ),
-            Phase::Done { .. } => (
+            Phase::Done => (
                 "Enter presses   r retries the rows that did not finish   Esc continues".into(),
                 theme::dim(),
             ),
@@ -732,7 +730,7 @@ impl Screen {
             Phase::Running => {
                 lines.extend(wrap("Setting up. Results appear beside each agent as they finish.", 0, theme::soft()));
             }
-            Phase::Done { .. } => {
+            Phase::Done => {
                 let ready = self.form.rows.iter().filter(|row| row.selected && row.outcome.as_ref().is_some_and(Outcome::ready)).count();
                 let pending = self.retryable().count();
                 if pending == 0 {
@@ -896,7 +894,7 @@ where
                     screen.event(event);
                 }
             }
-            if screen.leave && matches!(screen.phase, Phase::Done { .. }) {
+            if screen.leave && matches!(screen.phase, Phase::Done) {
                 // A clean finish stays up long enough to read.
                 let since = *left_at.get_or_insert_with(Instant::now);
                 if since.elapsed() >= Duration::from_millis(1500) {
@@ -906,7 +904,7 @@ where
                 break;
             }
             if stopping.load(std::sync::atomic::Ordering::Relaxed) || crate::stdin_hung_up() {
-                screen.cancelled = !matches!(screen.phase, Phase::Done { .. });
+                screen.cancelled = !matches!(screen.phase, Phase::Done);
                 break;
             }
             if crossterm::event::poll(Duration::from_millis(60))? {
@@ -1162,7 +1160,7 @@ mod tests {
         let long = "claude plugin install failed: ".to_owned() + &"the marketplace could not be reached; ".repeat(6) + "THE END";
         screen.event(Event_::Row("codex".into(), Outcome::Failed(long)));
         screen.event(Event_::Done(Ok(())));
-        assert!(matches!(screen.phase, Phase::Done { .. }));
+        assert!(matches!(screen.phase, Phase::Done));
         assert!(!screen.leave, "a failure keeps the screen up for the person");
         let shown = frame(&mut screen, 110, 70);
         assert!(shown.contains("✓ Ready. The Fractal channel is installed."), "{shown}");
@@ -1293,20 +1291,29 @@ mod tests {
     #[test]
     fn wrapped_setup_links_keep_the_full_target_on_every_row() {
         let url = "https://example.com/setup/a/very/long/instruction";
-        let mut screen = Screen::new(form());
-        screen.phase = Phase::Done { failed: Some(format!("Read {url}")) };
-        screen.focus = Item::Continue;
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 80));
-        screen.draw(buffer.area, &mut buffer);
-        let segments: Vec<_> = screen.links.iter().filter(|(_, target)| target == url).collect();
-        assert!(segments.len() > 1);
-        let mut visible = String::new();
-        for (rect, _) in segments {
-            for x in rect.x..rect.right() {
-                visible.push_str(buffer[(x, rect.y)].symbol());
+        for row_failure in [false, true] {
+            let mut screen = Screen::new(form());
+            screen.phase = Phase::Running;
+            if row_failure {
+                screen.event(Event_::Row("claude".into(), Outcome::Failed(format!("Read {url}"))));
+                screen.event(Event_::Done(Ok(())));
+                assert_eq!(screen.phase, Phase::Done);
+            } else {
+                screen.event(Event_::Done(Err(format!("Read {url}"))));
+                assert_eq!(screen.phase, Phase::Editing);
             }
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 80));
+            screen.draw(buffer.area, &mut buffer);
+            let segments: Vec<_> = screen.links.iter().filter(|(_, target)| target == url).collect();
+            assert!(segments.len() > 1, "row failure: {row_failure}");
+            let mut visible = String::new();
+            for (rect, _) in segments {
+                for x in rect.x..rect.right() {
+                    visible.push_str(buffer[(x, rect.y)].symbol());
+                }
+            }
+            assert_eq!(visible, url);
+            assert!(buffer.content.iter().all(|cell| !cell.symbol().contains('\x1b')));
         }
-        assert_eq!(visible, url);
-        assert!(buffer.content.iter().all(|cell| !cell.symbol().contains('\x1b')));
     }
 }
