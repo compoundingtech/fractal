@@ -42,13 +42,12 @@ pub trait MailboxChangesStore {
             previous: &MailboxWatermark,
             messages: &[MessageView],
         ) -> Result<MailboxChanges>;
-    /// Canonical send order across graph and message-shard mail, reading missing keys in one
-    /// statement per store. A key is the subject's first send or declaration, so it changes only
-    /// with a claim on that subject: callers remove each changed subject before ordering.
-    /// Keeps only the current mailbox's keys.
-    fn order_mailbox_messages(
+    /// Cache missing canonical send keys in place, with one query per owning store.
+    /// Callers invalidate changed subjects and remove departed subjects themselves;
+    /// unrelated entries and their allocations are never rebuilt.
+    fn cache_mailbox_order_keys(
             &self,
-            messages: &mut [MessageView],
+            messages: &[MessageView],
             keys: &mut MailboxOrder,
         ) -> Result<()>;
 }
@@ -155,21 +154,20 @@ impl MailboxChangesStore for Store {
         })
     }
 
-    fn order_mailbox_messages(
+    fn cache_mailbox_order_keys(
             &self,
-            messages: &mut [MessageView],
+            messages: &[MessageView],
             keys: &mut MailboxOrder,
         ) -> Result<()> {
-        let mut current = MailboxOrder::new();
         let mut missing_graph = Vec::new();
         let mut missing_stream = Vec::new();
         for message in messages.iter() {
-            match keys.remove(&message.subject) {
-                Some(key) => {
-                    current.insert(message.subject.clone(), key);
+            if !keys.contains_key(&message.subject) {
+                if mailbox_reads::is_stream_item(message) {
+                    missing_stream.push(&message.subject);
+                } else {
+                    missing_graph.push(&message.subject);
                 }
-                None if mailbox_reads::is_stream_item(message) => missing_stream.push(&message.subject),
-                None => missing_graph.push(&message.subject),
             }
         }
         let shard = fractal_store::store::messages_shard::shard(self);
@@ -197,19 +195,19 @@ impl MailboxChangesStore for Store {
                 let subject: String = row.get(0)?;
                 let time: String = row.get(1)?;
                 let key = (time.parse()?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?);
-                let entry = current.entry(subject).or_insert_with(|| key.clone());
-                if key < *entry {
-                    *entry = key;
+                match keys.entry(subject) {
+                    std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(key); },
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if key < *entry.get() { entry.insert(key); }
+                    },
                 }
             }
         }
         if let Some(message) = messages.iter().find(|message| {
-            !current.contains_key(&message.subject)
+            !keys.contains_key(&message.subject)
         }) {
             anyhow::bail!("mailbox message {} has no send or declaration claim", message.subject);
         }
-        messages.sort_by(|left, right| current[&left.subject].cmp(&current[&right.subject]));
-        *keys = current;
         Ok(())
     }
 }
