@@ -692,6 +692,11 @@ mod tests {
             }).unwrap();
         }
         let index = store.index().unwrap();
+        assert_eq!(index - first.cut, 10_001, "exercise the raw-span guard boundary");
+        assert!(
+            store.attention_future_since(first.cut, index, 0).unwrap().is_some(),
+            "the future helper must count post-filter claims, not the 10001-index span",
+        );
         assert_eq!(
             store.attention_list_delta(&first, index, client_now_ms()).unwrap(),
             AttentionDelta::Unchanged(None),
