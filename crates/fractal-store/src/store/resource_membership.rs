@@ -42,6 +42,37 @@ pub struct LaneRequest {
     pub disk: Option<DiskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io: Option<IoClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_estimate: Option<fractal_runtime::ResourceProfileEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+}
+
+/// Historical tuple policies remain authoritative. Keyed policy identity deliberately excludes
+/// the immutable estimate carried by each membership.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(untagged)]
+enum InstalledPolicy {
+    Keyed {
+        version: u32,
+        #[serde(rename = "maxMembers")]
+        max_members: u32,
+        profile: String,
+        coverage: Coverage,
+    },
+    Declared((u32, Option<Capacity>, Coverage)),
+}
+
+impl InstalledPolicy {
+    fn for_request(request: &LaneRequest) -> Self {
+        match &request.profile {
+            Some(profile) => Self::Keyed { version: 1, max_members: request.max_members,
+                profile: profile.clone(), coverage: request.coverage },
+            None => Self::Declared((request.max_members, request.capacity, request.coverage)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -72,6 +103,8 @@ pub enum RefusalCode {
     Retiring,
     Uncertain,
     InvalidState,
+    // Reader arm for newer recovery-class refusal rows; this host does not admit that class.
+    RecoveryNotAllowed,
 }
 
 impl RefusalCode {
@@ -87,6 +120,7 @@ impl RefusalCode {
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+            Self::RecoveryNotAllowed => "recovery-not-allowed",
         }
     }
 }
@@ -240,6 +274,7 @@ fn authorized(member: &Membership, owner: &Owner) -> Result<()> {
 }
 
 fn fenced(connection: &Connection, member: &Membership, grant: &Grant) -> Result<()> {
+    member.request.class.ensure_supported()?;
     anyhow::ensure!(member.grant.as_ref() == Some(grant), "stale resource generation");
     let epoch: String = connection.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&member.request.host], |r| r.get(0))?;
     anyhow::ensure!(epoch == grant.authority_epoch, "stale resource authority");
@@ -345,6 +380,32 @@ impl Store {
         smallclaims::touched::note_read(|| dependency(&member.request.host, &member.request.name));
         Ok(member)
     }
+    /// Reconciliation reuses the host's first durable estimate, including while queued.
+    pub fn resource_profile_request(&self, id: &str) -> Result<Option<LaneRequest>> {
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT body FROM resource_memberships_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+        body.map(|body| serde_json::from_str::<Membership>(&body).map(|member| member.request))
+            .transpose().map_err(Into::into)
+    }
+
+    /// The parent containment covers every live frozen member, not latest-estimate × slots.
+    pub fn resource_lane_aggregate(&self, host: &str, lane: &str) -> Result<Option<Capacity>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
+            WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
+        let rows = statement.query_map(rusqlite::params![host, lane], |row| row.get::<_, String>(0))?;
+        let mut aggregate: Option<Capacity> = None;
+        for row in rows {
+            let member: Membership = serde_json::from_str(&row?)?;
+            if let Some(capacity) = member.request.capacity {
+                let current = aggregate.get_or_insert(Capacity { cores: 0, memory: 0 });
+                current.cores = current.cores.checked_add(capacity.cores).context("aggregate lane cores overflow")?;
+                current.memory = current.memory.checked_add(capacity.memory).context("aggregate lane memory overflow")?;
+            }
+        }
+        Ok(aggregate)
+    }
+
 
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
@@ -431,6 +492,11 @@ impl Store {
         let mut uncertain = 0;
         for mut member in self.resource_memberships_for_host(host)? {
             if !matches!(member.state.as_str(), "admitted" | "launched" | "retiring" | "uncertain") { continue; }
+            if let Err(error) = member.request.class.ensure_supported() {
+                tracing::warn!(membership = %member.request.id, %error, "retaining newer-class resource custody until the execution host is upgraded");
+                uncertain += 1;
+                continue;
+            }
             let Some(mut grant) = member.grant.take() else { anyhow::bail!("active resource custody has no durable grant"); };
             if grant.authority_epoch == epoch { continue; }
             for root in &mut member.roots {
@@ -492,6 +558,7 @@ impl Store {
     }
 
     pub fn request_resource_membership(&self, request: &LaneRequest, fit: Fit, now_ms: u64) -> Result<Admission> {
+        request.class.ensure_supported()?;
         anyhow::ensure!(!request.id.is_empty() && !request.name.is_empty() && !request.host.is_empty(), "empty resource identity");
         anyhow::ensure!(request.host == self.origin, "only the execution host may grant resource membership");
         anyhow::ensure!(request.max_members > 0, "maxMembers must be positive");
@@ -500,17 +567,19 @@ impl Store {
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
-            let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
+            let expected = InstalledPolicy::for_request(request);
+            let policy = serde_json::to_string(&expected)?;
             let installed: Option<String> = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                 rusqlite::params![request.host,request.name], |row| row.get(0)).optional()?;
-            if let Some(installed) = installed.filter(|installed| *installed != policy) {
-                let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
-                anyhow::ensure!(previous == (request.max_members, None, request.coverage),
-                    "resource lane policy differs from host-installed policy");
-                // Earlier writers installed profile-less policies. Define the missing profile
-                // without changing their custody; resource_blocking drains those holders first.
+            if let Some(installed) = installed {
+                let previous: InstalledPolicy = serde_json::from_str(&installed)?;
+                if previous != expected {
+                    anyhow::ensure!(previous == InstalledPolicy::Declared((request.max_members, None, request.coverage)),
+                        "resource lane policy differs from host-installed policy");
+                    // Only the historical profile-less policy may acquire its first footprint.
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                     rusqlite::params![request.host,request.name])?;
+                }
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
                 rusqlite::params![request.host,request.name,policy])?;
@@ -626,6 +695,7 @@ impl Store {
     pub fn withdraw_resource_membership(&self, id: &str, owner: &Owner, now_ms: u64) -> Result<()> {
         let mut connection = self.connection.write(); let tx = connection.transaction()?;
         let mut member = read(&tx, id)?; authorized(&member, owner)?;
+        member.request.class.ensure_supported()?;
         let previous = member.state.clone();
         if member.state == "queued" {
             member.state = "retired".into(); member.reason = "cancelled before admission".into(); member.retired_at = Some(now_ms);
@@ -871,6 +941,7 @@ mod tests {
         LaneRequest { id: id.into(), name: "executor/activation".into(), host: "host-a".into(),
             max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: RequestClass::Agent, disk: None, io: None,
+            profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: format!("mission-run/{id}"), step: format!("step-run/{id}"),
                 attempt: 1, invocation: Some(format!("invocation/{id}")) } }
     }
@@ -890,6 +961,33 @@ mod tests {
     }
     fn runtime(root: &Path) -> ExecRuntime {
         ExecRuntime::new(root.join("runtime"), root.join("logs"))
+    }
+
+    #[test]
+    fn future_resource_classes_cannot_acquire_membership() {
+        let store = fixture();
+        let mut future = request("future");
+        future.class = RequestClass::Unknown("recovery".into());
+        assert!(store.request_resource_membership(&future, test_fit(), 1).unwrap_err()
+            .to_string().contains("unsupported resource class recovery"));
+        assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn future_resource_class_custody_is_retained_during_authority_recovery() {
+        let store = fixture();
+        let request = request("future-custody");
+        let grant = grant(&store, &request, 1);
+        store.update_resource_membership(&grant, |member| {
+            member.request.class = RequestClass::Unknown("recovery".into());
+            Ok(())
+        }).unwrap();
+        let before = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
+        let after = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
@@ -1060,7 +1158,7 @@ mod tests {
             let mut candidate = request(id);
             candidate.name = id.into();
             candidate.class = class;
-            candidate.capacity = Some(Capacity { cores: 1, memory: if class == RequestClass::Landing { 80 } else { 20 } });
+            candidate.capacity = Some(Capacity { cores: 1, memory: if candidate.class == RequestClass::Landing { 80 } else { 20 } });
             candidate
         }).collect();
         let blocked = Fit { room: Some(Capacity { cores: 8, memory: 100 }), outside_bytes: 100, ..test_fit() };
@@ -1483,7 +1581,8 @@ mod tests {
         let mut holder = request("native-holder");
         holder.name = format!("resource-test-{}", uuid::Uuid::new_v4().simple());
         let current = grant(&store, &holder, wall());
-        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity, require_enforced: false };
+        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity,
+            member_capacity: holder.capacity, memory_high_bytes: None, require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: current.membership_id.clone(), generation: current.generation.clone(),
