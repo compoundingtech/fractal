@@ -1,4 +1,5 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
+import { readyPRJobs } from './ready-pr.ts'
 import { cachixPushStep, defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
@@ -72,11 +73,12 @@ export default githubWorkflow(scopeLinuxNixSandbox({
         }
       ]
     },
+    ...readyPRJobs({ jobs: {
     "nix-release-x86_64-linux": {
       // Nathan/CoS 2026-10-15: optional Nix must not occupy merge-serving workers.
       // Persistent-store verification cannot be relabelled to an ephemeral image.
       // Restore only with a reviewed, qualified dedicated persistent-store pool.
-      "if": "false",
+      "if": false,
       "runs-on": "ci1",
       "timeout-minutes": 180,
       "steps": [
@@ -108,5 +110,6 @@ export default githubWorkflow(scopeLinuxNixSandbox({
         }
       ]
     }
+    } }).jobs,
   }
 }))
