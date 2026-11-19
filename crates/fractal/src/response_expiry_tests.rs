@@ -245,7 +245,17 @@ async fn response_expiry_yields_between_sixty_four_row_commits() {
         .unwrap()
         .unwrap();
     count_becomes(&store, changes, 0).await;
-    assert_eq!(*counts.lock().unwrap(), [130, 66, 2, 0]);
+    let counts = counts.lock().unwrap();
+    assert_eq!(counts.first(), Some(&130));
+    assert_eq!(counts.last(), Some(&0), "all committed prefixes drain the backlog");
+    let deleted = counts.windows(2).map(|pair| {
+        let deleted = pair[0].checked_sub(pair[1]).expect("cleanup cannot add receipts");
+        assert!(deleted <= smallclaims::store::idempotency::CLEANUP_CHUNK as u64);
+        deleted
+    }).collect::<Vec<_>>();
+    assert_eq!(deleted.iter().sum::<u64>(), 130);
+    assert!(deleted.iter().filter(|count| **count != 0).count() >= 3,
+        "the daemon releases the writer between bounded committed prefixes");
     task.abort();
 }
 

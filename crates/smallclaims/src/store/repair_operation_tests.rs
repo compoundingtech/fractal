@@ -307,7 +307,7 @@ fn repaired(store: &Store) -> BTreeMap<String, String> {
         .unwrap()
 }
 
-/// A repair backlog takes one writer hold per page of `REPAIR_CHUNK_CLAIMS`, in repair id order.
+/// A repair backlog yields by row count and elapsed work, preserving repair id order.
 /// A call stopped between pages keeps the pages it committed, and after a restart the next call
 /// applies the rest, leaving what one call would have.
 #[test]
@@ -328,18 +328,21 @@ fn a_repair_backlog_holds_the_writer_one_page_at_a_time_and_resumes_after_a_stop
     repairs.sort();
     let total = repairs.len();
     STOP_BETWEEN_REPAIR_PAGES.with(|stop| stop.set(true));
+    EXPIRE_REPAIR_PAGE_BUDGET.with(|expire| expire.set(true));
     let (stopped, holds) = holds_during(|| store.apply_replication_repairs());
     assert!(stopped.is_err());
-    assert_eq!(holds.pages_of("applied repairs"), [REPAIR_CHUNK_CLAIMS]);
-    let first_page = repairs[..REPAIR_CHUNK_CLAIMS].iter().map(|(_, applied)| applied.clone());
+    assert_eq!(holds.pages_of("applied repairs"), [1], "elapsed work limits the first page");
+    let first_page = repairs[..1].iter().map(|(_, applied)| applied.clone());
     assert_eq!(repaired(&store), first_page.collect(), "the first page by repair id, and no more");
     assert_canonical(&store);
 
     drop(store);
     let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
     let (changed, holds) = holds_during(|| store.apply_replication_repairs().unwrap());
-    assert_eq!(changed, total - REPAIR_CHUNK_CLAIMS, "a committed page changes nothing again");
-    assert_eq!(holds.pages_of("applied repairs"), [REPAIR_CHUNK_CLAIMS, REPAIR_CHUNK_CLAIMS, 7]);
+    assert_eq!(changed, total - 1, "a committed page changes nothing again");
+    let pages = holds.pages_of("applied repairs");
+    assert_eq!(pages.iter().sum::<usize>(), total, "no candidate skipped between short pages");
+    assert!(pages.iter().all(|count| *count > 0 && *count <= REPAIR_CHUNK_CLAIMS));
     assert_eq!(repaired(&store), repairs.into_iter().map(|(_, applied)| applied).collect());
     assert_canonical(&store);
     assert_eq!(store.apply_replication_repairs().unwrap(), 0);

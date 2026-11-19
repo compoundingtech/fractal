@@ -118,6 +118,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_ask_digest_deferred",
         "local_ask_digest_retry",
         "local_idle_messages",
+        // Disposable wake metadata and pending folds; graph/shard mail remains authoritative.
+        "local_wake_demand_v1",
+        "local_wake_demand_pending_v1",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
         "local_message_staged",
@@ -240,6 +243,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_counts",
         "claim_signature_writer_counts",
         "claim_signature_migration",
+        "claim_signature_originals",
+        "claim_signature_reference_migration",
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",

@@ -8075,6 +8075,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    reconciler.set_idle_residency(config.reconcile.idle_residency()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
@@ -8938,6 +8939,7 @@ async fn start_mission_run(
         &run_id,
         mission_id,
         &mission.revision,
+        mission_start_follows_head(args.revision.as_deref(), &health),
         &workspace,
         &requester,
         &inputs,
@@ -8990,6 +8992,15 @@ async fn start_mission_run(
         print!("{}", cli_help::mission_next_steps(&started));
     }
     follow_mission_run(client, started, response.store_index, json_output, 50).await
+}
+
+fn mission_start_follows_head(revision: Option<&str>, health: &Value) -> bool {
+    // Older daemons reject the authored follow-head child. Preserve their exact-revision
+    // declaration during rolling upgrades, even though they will record it as pinned.
+    revision.is_none()
+        && health["capabilities"]["mission_run_follow_head"]
+            .as_u64()
+            .is_some_and(|version| version >= 1)
 }
 
 fn mission_start_run_id(mission_id: &str, requested: Option<&str>) -> String {
@@ -9260,6 +9271,7 @@ fn mission_run_intent(
     run_id: &str,
     mission_id: &str,
     revision: &str,
+    follow_head: bool,
     workspace: &Path,
     requester: &str,
     inputs: &BTreeMap<String, String>,
@@ -9274,6 +9286,9 @@ fn mission_run_intent(
     let exact_mission = format!("mission/{mission_id}@{revision}");
     body.nodes_mut()
         .push(kdl_node("mission", [exact_mission.as_str()]));
+    if follow_head {
+        body.nodes_mut().push(kdl_node("follow-head", ["true"]));
+    }
     body.nodes_mut().push(kdl_node(
         "workspace",
         [workspace.to_string_lossy().as_ref()],
@@ -15485,6 +15500,18 @@ fn render_client_agent(
             let _ = writeln!(output, "SOURCE OFFLINE {} · override recorded", handoff.overridden_sources.join(", "));
         }
     }
+    if let Some(residency) = &agent.residency {
+        let _ = writeln!(output, "RESIDENCY    {}", residency.policy);
+        if let Some(since) = &residency.eligible_since {
+            let _ = writeln!(output, "  ELIGIBLE   {since}");
+        }
+        if let Some(due) = &residency.due_at {
+            let _ = writeln!(output, "  DUE        {due}");
+        }
+        if let Some(reason) = &residency.refusal_reason {
+            let _ = writeln!(output, "  REFUSAL    {reason}");
+        }
+    }
     if let Some(suspension) = &agent.suspension {
         let session = match (&suspension.harness, &suspension.native_session_id) {
             (Some(harness), Some(session)) => format!(" · {harness} session {session}"),
@@ -15498,8 +15525,10 @@ fn render_client_agent(
         };
         let _ = writeln!(
             output,
-            "SUSPENSION   {} {}{session}{failure}",
-            suspension.action, suspension.phase
+            "SUSPENSION   {} {} · {} · {}{session}{failure}",
+            suspension.action, suspension.phase,
+            suspension.cause.as_deref().unwrap_or("manual"),
+            suspension.mode.as_deref().unwrap_or("git"),
         );
     }
     if let Some(rollout) = &agent.rollout {
@@ -18127,6 +18156,11 @@ impl ObservationClient<'_> {
         let mut claim = claim.clone();
         bind_observation_account(&mut claim, account.as_deref());
         if let Some((runtime, sequence, dir, _)) = self.event {
+            // Diagnostics are retained graph facts, not local observation slots. Preserve
+            // their episode key; /harness-events replaces keys with its observation slot.
+            if claim.kind == "harness.diagnostic" {
+                return self.client.post(path, &claim).await;
+            }
             let slot = format!(
                 "{}:{}",
                 claim.kind,
@@ -18142,11 +18176,6 @@ impl ObservationClient<'_> {
                 &slot,
                 &serde_json::to_value(&claim)?,
             )?)?;
-            // Diagnostics are retained graph facts, not local observation slots. Preserve
-            // their episode key; /harness-events replaces keys with its observation slot.
-            if claim.kind == "harness.diagnostic" {
-                return self.client.post(path, &claim).await;
-            }
             self.client
                 .post(
                     "/v1/harness-events",
@@ -18290,6 +18319,33 @@ async fn publish_harness_activity(
         observed.since_ms,
         &fields,
     ))?));
+    let channel_ready = observed.channel_ready.or_else(|| matches!(
+        observed.state,
+        fractal_drivers::harness_state::Activity::Unknown | fractal_drivers::harness_state::Activity::Ended,
+    ).then_some(false));
+    if driver == "omp"
+        && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
+    {
+        // Extensible diagnostics are reader-first: older readers retain these facts without
+        // rejecting the native activity claim. No suspension action consumes this proof yet.
+        let episode = match client.event {
+            Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
+            None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
+                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+        };
+        let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
+            subject: subject.into(), kind: "harness.diagnostic".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
+                ("driver".into(), Value::from("omp")),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")),
+        }).await?;
+    }
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
     }
@@ -21432,6 +21488,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                reconciler.set_idle_residency(reconcile.idle_residency().expect("validated idle residency"));
                 reconciler.set_default_stall_reports(reconcile.default_stall_reports);
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
@@ -21962,8 +22019,8 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if state()?.done() {
-                    let complete = state()?;
+                let complete = state()?;
+                if complete.done() && !complete.references_pending {
                     if !initial.done() { stderr_message("fractal", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();
