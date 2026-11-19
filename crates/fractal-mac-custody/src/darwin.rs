@@ -291,7 +291,9 @@ fn drop_identity(uid: u32, gid: u32) -> io::Result<()> {
     // SAFETY: helper is single-threaded and still root. initgroups replaces
     // supplementary groups. Darwin's privileged setgid/setuid set all real,
     // effective and saved IDs, unlike setegid/seteuid. No payload runs on error.
-    if unsafe { libc::initgroups(name.as_ptr(), gid) } != 0 { return Err(io::Error::last_os_error()); }
+    // Darwin declares initgroups' basegroup as signed int, while gid_t is u32;
+    // preserve the bit pattern (the nobody group is commonly represented as -2).
+    if unsafe { libc::initgroups(name.as_ptr(), gid as libc::c_int) } != 0 { return Err(io::Error::last_os_error()); }
     // SAFETY: gid was resolved from the system nobody group, not the plan.
     if unsafe { libc::setgid(gid) } != 0 { return Err(io::Error::last_os_error()); }
     // SAFETY: uid was resolved and validated from the compile-time slot account.
@@ -306,7 +308,7 @@ fn run(inv: &Invocation, plan: &Plan, uid: u32, audit_file: &mut File, caller: &
     if plan.env.get("FRACTAL_MAC_CUSTODY_STDIO").is_some_and(|value| value == "pipe") {
         // SAFETY: isatty only inspects the inherited standard descriptors.
         if (0..=2).any(|fd| unsafe { libc::isatty(fd) } == 1) {
-            return Ok(Status::PlanRejected { reason: "controllingPty: pipe stdio requested but a standard descriptor is a terminal".into() });
+            return Ok(Status::PlanRejected { reason: "controllingPty".into() });
         }
     }
     let group = std::ffi::CString::new("nobody").expect("constant has no NUL");
