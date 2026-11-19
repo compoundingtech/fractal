@@ -54,7 +54,8 @@ enum RunCreationSource<'a> {
 
 /// The first canonical creation receipt is immutable authority; requester is attribution only.
 fn initiating_principal_tx(connection: &Connection, subject: &str) -> Result<Option<String>, FractalError> {
-    connection.query_row(&canonical_sql(
+    // Canonical ancestry remains inline; trace its principal value and claim ordering before changing representation.
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-h1945b7eb9ba4 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_extract(body,'$.fields.initiating_principal') FROM claims
          WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
         [subject], |row| row.get(0)).optional().map(Option::flatten).map_err(internal)

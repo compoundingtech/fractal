@@ -980,3 +980,14 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+### Authenticated Landing ancestry (#6834)
+
+The `fractal_store::store::missions` maintainer owns `lv-h1945b7eb9ba4`,
+the canonical creation-receipt lookup for an initiating principal. It binds the
+mission-run subject TEXT key and reads the original principal from claim JSON,
+ordered by canonical claim identity. These values remain inline to preserve the
+immutable ancestry authority used by Landing admission; one selected row is not
+a bound on encoded bytes or query cost. The
+`trace-statement-and-value-representation` task is to trace the canonical SQL
+expansion, subject key and extracted principal through a bounded/reference
+representation without substituting requester attribution for creation authority.
