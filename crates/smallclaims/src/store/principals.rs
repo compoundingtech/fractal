@@ -1723,6 +1723,18 @@ impl Store {
         max_loans: Option<usize>,
         fresh_only: bool,
     ) -> Result<usize> {
+        self.judge_claims_with_loan_budget(
+            check_roots, max_loans, fresh_only, std::time::Duration::from_millis(10),
+        )
+    }
+
+    fn judge_claims_with_loan_budget(
+        &self,
+        check_roots: bool,
+        max_loans: Option<usize>,
+        fresh_only: bool,
+        loan_budget: std::time::Duration,
+    ) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
             return Ok(0);
@@ -1747,6 +1759,7 @@ impl Store {
         loop {
             loans += 1;
             let mut connection = self.connection.write_background();
+            let loan_started = std::time::Instant::now();
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let roots = self.trust_roots(&transaction, &self.origin)?;
@@ -1811,8 +1824,14 @@ impl Store {
             };
             let memo = RefCell::new(BTreeMap::new());
             let mut candidates_judged = 0;
-            for claim_id in &queued {
-                if candidates_judged >= CANDIDATE_PAGE {
+            for (position, claim_id) in queued.iter().enumerate() {
+                // Row counts alone do not bound writer occupancy: signature verification,
+                // dependency reads and page faults can make a small page expensive.
+                // Always advance one claim, then commit before starting another once due.
+                // This is cooperative: one claim, requeue page and COMMIT are not preempted.
+                if candidates_judged >= CANDIDATE_PAGE
+                    || (position != 0 && loan_started.elapsed() >= loan_budget)
+                {
                     break;
                 }
                 transaction
@@ -2442,6 +2461,28 @@ mod paced_verdict_tests {
             fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
             Some(expected),
         );
+    }
+
+    #[test]
+    fn an_expired_verdict_loan_commits_progress_and_leaves_the_tail_queued() {
+        let store = root_linked(3);
+        // An already-expired budget deterministically models one expensive claim, without
+        // sleeps or machine-speed assumptions. Missing claims must also make progress.
+        store.judge_claims_with_loan_budget(
+            true, Some(1), false, std::time::Duration::ZERO,
+        ).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 2);
+        assert!(store.verdicts_pending().unwrap());
+        // Another foreground loan can run between pages; no guard survives the return.
+        store.connection.write().execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('verdict-loan-test','interleaved')",
+            [],
+        ).unwrap();
+        store.judge_claims_with_loan_budget(
+            false, None, false, std::time::Duration::ZERO,
+        ).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+        assert!(!store.verdicts_pending().unwrap());
     }
 
     #[test]

@@ -6622,6 +6622,16 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
     let mut state = state(root.path());
     state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
     state.configured_peers = vec!["cobalt".into()];
+    // A pass needs a live worker and a fresh exchange, beside the refusal under test.
+    state.store.record_replication_worker_heartbeat();
+    state
+        .store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("cobalt".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now_ms());
     let app = router(state.clone());
     let (status, recorded) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
         "peer": "cobalt", "status": "refused", "error": "refused by that member's Fabric grants (service st3-peer-v1); replication can continue through other members"
@@ -6651,6 +6661,47 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
             .as_str()
             .unwrap()
             .contains("cobalt: refused by that member's Fabric grants")
+    );
+}
+
+/// The silent dial-out incident shape: redeemed membership, stored envelopes, no worker
+/// process. Doctor must fail loudly instead of passing on persisted history.
+#[tokio::test]
+async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.store.bind_fleet("94cd11ba-c582-4558-9c84-c3bda922eb6d").unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
+    state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
+    let app = router(state);
+    let (status, doctor) = get_request(app, "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "replication")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no replication worker heartbeat"),
+        "{check}"
     );
 }
 
@@ -6770,6 +6821,8 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
         .store
         .receive_replication_exchange("alder", "fleet/waiting", &exchange)
         .unwrap();
+    // A pass needs the live-worker evidence beside the waiting claim.
+    state.store.record_replication_worker_heartbeat();
     let report = doctor_report(&state).unwrap().0;
     let check = report
         .checks
@@ -6825,6 +6878,44 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
             .iter()
             .any(|check| check.name == "shared-projections")
     );
+}
+
+#[test]
+fn doctor_distinguishes_disabled_checkpoint_worker_from_missing_participant_seals() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet/checkpoint-diagnostics".into());
+    state.configured_peers.push("absent-writer".into());
+    state.store.checkpoint_worker_phase(CheckpointPhase::Disabled);
+    let report = doctor_report(&state).unwrap().0;
+    let check = report.checks.iter().find(|check| check.name == "checkpoint").unwrap();
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=Disabled"));
+    assert!(check.message.contains("disabled by config on 1 node"));
+    assert!(check.message.contains("newest stable none"));
+    assert!(check.message.contains("absent-writer phase=seal (no seal)"));
+}
+
+#[test]
+fn checkpoint_doctor_warns_on_worker_failure_or_halt_without_pending_work() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    state.store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = state.store.checkpoint_status(client_now_ms(), &[]).unwrap();
+    status.pending = None;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=trim (halted"));
+    status.halted = false;
+    assert_eq!(checkpoint_doctor_check(&status).status, "pass");
 }
 
 #[test]

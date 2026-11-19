@@ -132,6 +132,7 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
                 &exchange,
                 true,
                 ReplicationCarrier::Loopback,
+                None,
             )
             .unwrap();
         let status = store
@@ -176,6 +177,7 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
                 &exchange,
                 true,
                 ReplicationCarrier::Fabric,
+                None,
             )
             .unwrap();
         let outbound = store.replication_peer_transport("birch").0.unwrap();
@@ -343,7 +345,7 @@ fn a_refused_dial_does_not_flap_a_peer_that_keeps_exchanging() {
     for _ in 0..10 {
         // What a receive does: the exchange, then this member's up observation of the peer.
         store
-            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback)
+            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback, None)
             .unwrap();
         store.record_transport_observation("birch", "up", None, None).unwrap();
         // What a failed outbound dial does: the failure, then an observation only when stale.
@@ -355,4 +357,45 @@ fn a_refused_dial_does_not_flap_a_peer_that_keeps_exchanging() {
         }
     }
     assert_eq!(observations(), 1, "one up observation, not one per refusal and exchange");
+}
+
+/// Redeemed membership with stored envelopes and an old peer row still fails health when no
+/// live worker heartbeat or fresh exchange exists: persisted history is not liveness.
+#[test]
+fn replication_health_ignores_stored_envelopes_and_requires_a_live_worker() {
+    use smallclaims::replication::ReplicationHealth;
+    let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    let now = now_ms();
+    let past = |seconds: u128| now.saturating_sub(seconds * 1_000);
+    store.replication_worker_observed_for_test(Some(past(120)), None);
+    store
+        .connection
+        .write()
+        .execute(
+            "INSERT INTO replication_peers(peer,status,last_success_at_unix_ms,updated_at_unix_ms)
+         VALUES('birch','up',?1,?1)",
+            [past(3_600).to_string()],
+        )
+        .unwrap();
+    store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("birch".into())
+        .or_default()
+        .observe(0, Some((0, 0)), past(3_600));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::WorkerMissing);
+
+    store.replication_worker_observed_for_test(Some(past(120)), Some(past(5)));
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::ExchangeStale);
+
+    store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("birch".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now);
+    assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+    assert_eq!(store.replication_health(false).unwrap(), ReplicationHealth::Disabled);
 }
