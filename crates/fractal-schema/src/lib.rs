@@ -2231,6 +2231,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.rebound",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("step-runs"),
+            true,
+            &[],
+        ),
+        (
             "work.nudged",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -3978,6 +3987,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.rebound" => &[
+            ("attempt", integer()),
+            ("claimant", reference()),
+            ("from_incarnation", string()),
+            ("to_incarnation", string()),
+            ("session_id", string()),
+            ("harness", string()),
         ],
         "work.nudged" => &[
             ("attempt", integer()),
