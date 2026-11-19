@@ -82,14 +82,18 @@ impl EventObserver {
     }
     /// Restore an authenticated native ID; durable confirmation alone consumes the cold fence.
     pub fn with_native_session(mut self, native_session: Option<String>) -> Result<Self> {
-        if self.driver == "omp" && native_session.is_some()
-            && harness_state::with_current_ownership(&self.agent_dir, &self.owner, self.ownership_seq, || {
-                crate::omp_session::has_confirmed_channel_binding(
-                    &self.session_dir, &self.identity, &self.runtime, &self.owner)
-            })?
-        {
-            self.resume_generation = None;
-            self.expected_native_session = None;
+        if self.driver == "omp" && native_session.is_some() {
+            self.channel_ready = harness_state::with_current_ownership(
+                &self.agent_dir, &self.owner, self.ownership_seq, || {
+                    Ok(crate::omp_session::bound_native_session(
+                        &self.session_dir, &self.identity, &self.runtime, &self.owner,
+                    )?.as_deref() == native_session.as_deref())
+                },
+            )?;
+            if self.channel_ready {
+                self.resume_generation = None;
+                self.expected_native_session = None;
+            }
         }
         self.native_session = native_session;
         Ok(self)
@@ -485,6 +489,42 @@ mod tests {
         let ledger = crate::subagents::read(root.path());
         assert!(ledger.running.is_empty());
         assert_eq!(ledger.ended[0].outcome, "completed");
+    }
+
+    #[test]
+    fn omp_reexec_restores_readiness_only_for_the_confirmed_native_session() {
+        let root = tempfile::tempdir().unwrap();
+        let sessions = root.path().join("sessions");
+        crate::harness_events::enable(root.path(), "runtime-a").unwrap();
+        let seq = harness_state::claim(root.path(), "agent/example", "omp", "provider-a").unwrap();
+        let observer = || EventObserver::new(
+            root.path(), &sessions, "agent/example", "omp", "provider-a", seq, "runtime-a",
+        ).unwrap();
+        let idle = serde_json::json!({"type":"state","state":"idle","backgroundJobs":0});
+        let state_path = harness_state::harness_state_path(root.path());
+        let mut original = observer();
+        original.observe(&serde_json::json!({"type":"session","sessionId":"native-a"})).unwrap();
+        original.observe(&serde_json::json!({"type":"ready","sessionId":"native-a"})).unwrap();
+        drop(original);
+
+        // Binary replacement restores the authenticated native ID without another hello/ready.
+        let mut restored = observer().with_native_session(Some("native-a".into())).unwrap();
+        restored.observe(&idle).unwrap();
+        assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(true));
+        drop(restored);
+
+        let mut mismatched = observer().with_native_session(Some("native-other".into())).unwrap();
+        mismatched.observe(&idle).unwrap();
+        assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(false));
+        drop(mismatched);
+
+        // A pending handshake must not acquire readiness from the old durable binding.
+        let mut pending = observer();
+        pending.observe(&serde_json::json!({"type":"session","sessionId":"native-b"})).unwrap();
+        drop(pending);
+        let mut pending = observer().with_native_session(Some("native-b".into())).unwrap();
+        pending.observe(&idle).unwrap();
+        assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(false));
     }
 
     #[test]
