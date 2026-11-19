@@ -2214,8 +2214,12 @@ The execution timeout starts at the executor's physical exec-registry creation,
 reported by `exec-started`, not at the coordinator's claim or dispatch. Only a live
 executor observation past that budget (`execution-timeout`), or a known exit
 duration past it, proves an execution timeout. A missing remote exit does not.
-The payload wrapper timestamps its exit before retrying delivery to the daemon;
-result delivery does not lengthen a completed execution interval.
+The payload wrapper persists its running/completed state in an operation-fenced
+local receipt, independent of the daemon, and fsyncs completion before retrying
+its exit claim. Reconciliation checks that receipt before attesting an overrun;
+a wrapper waiting to deliver a completed result is not a running payload.
+A missing legacy receipt or exit timestamp remains unknown, never observation time.
+Result delivery does not lengthen a completed execution interval.
 
 Native declared execs have a dispatch/replication/admission budget equal to the
 step's declared timeout and a separate result-replication budget of the same size.
@@ -2225,6 +2229,16 @@ or result delivery. Without a declared execution timeout, dispatch and result
 delivery each default to one hour and the overall guard to 24 hours; these fail
 as `dispatch-stalled`, not as execution timeouts. Resource-lane payloads retain
 their separate admission/release budgets.
+These delivery guards close permanently once the exited actual state is
+replicated; later review/product waits are not delivery stalls. Known execution
+overruns remain independently enforceable. Terminal step transitions close any
+still-open display interval, preserving elapsed execution after failure/cancel.
+
+Only newly materialized native attempts (and retries of already tracked attempts)
+are enrolled. Existing declarations without dispatch evidence are grandfathered:
+upgrading a daemon does not retroactively introduce execution timeouts or delivery
+stalls for in-flight steps. Unknown legacy timing is not reconstructed from recovery
+time. New native attempts use the new policy.
 
 Expiry records `dispatch-stalled` with the exec and the waiting subphase, raises
 an operational fault, and fails the step with that reason, never with an execution

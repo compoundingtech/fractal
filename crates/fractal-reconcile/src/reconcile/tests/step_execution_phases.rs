@@ -24,6 +24,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_legacy_state(None)
+    }
+
+    fn with_legacy_state(legacy_state: Option<&str>) -> Self {
         smallclaims::store::set_thread_clock(Some(START));
         let clock = Clock;
         let store = Arc::new(Store::open_memory("coordinator").unwrap());
@@ -46,11 +50,49 @@ mission "execution-phases" state="ready" {
             store.clone(), Arc::new(FakeRuntime::default()), "coordinator".into(),
             Arc::new(Notify::new()),
         );
-        // Mission evaluation materializes real run-owned desired execs without delivering
-        // them to the worker or depending on process scheduling.
-        for _ in 0..3 {
-            let current = store.mission_run(&run.id).unwrap().unwrap();
-            reconciler.evaluate_mission_run(&current, &mission).unwrap();
+        if let Some(status) = legacy_state {
+            // Publish exactly the old run-owned declaration shape, without calling the
+            // phase-aware materializer. Upgrade must not enroll this in-flight attempt.
+            let steps = flatten_mission_steps(&mission);
+            let step = steps.iter().find(|step| step.spec.path == "work").unwrap();
+            let view = store.step_run(&run.steps[0].subject).unwrap().unwrap();
+            let variables = run_variables(&run, step, &view);
+            let source = crate::mission::interpolate_kdl(
+                step.spec.declarations_kdl.as_deref().unwrap(),
+                &variables,
+            ).unwrap();
+            let source = crate::mission::with_mission_capacity(&source, step.mission_capacity).unwrap();
+            let mut intent = crate::graph::parse_execution_intent(&source, "coordinator", &run.id).unwrap();
+            for desired in intent.subjects.values_mut() {
+                desired.owner_run = Some(run.subject.clone());
+                desired.owner_generation = Some(run.generation.clone());
+                desired.owner_step = Some(view.subject.clone());
+                if let Some(member) = desired.member.as_mut() {
+                    reconciler.bind_resource_lane(&run, step, &view, member, &desired.subject).unwrap();
+                    let workspace = PathBuf::from(&member.workspace);
+                    if workspace.is_relative() {
+                        member.workspace = Path::new(&run.workspace).join(&workspace)
+                            .to_string_lossy().into_owned();
+                    }
+                    let cwd = PathBuf::from(&member.cwd);
+                    if cwd.is_relative() {
+                        member.cwd = Path::new(&run.workspace).join(&cwd)
+                            .to_string_lossy().into_owned();
+                    }
+                    member.environment.extend(variables.clone());
+                    member.environment.insert("ST3_RUN_DIR".into(), run.workspace.clone());
+                    member.environment.insert("ST3_ENDPOINT".into(), reconciler.endpoint.clone());
+                }
+            }
+            store.apply_internal(&intent, &format!("materialize:{}:{}", view.subject, view.attempt)).unwrap();
+            store.set_step_state(&view.subject, status, None).unwrap();
+        } else {
+            // Mission evaluation materializes real run-owned desired execs without
+            // delivering them to the worker or depending on process scheduling.
+            for _ in 0..3 {
+                let current = store.mission_run(&run.id).unwrap().unwrap();
+                reconciler.evaluate_mission_run(&current, &mission).unwrap();
+            }
         }
         let exec = store.desired_subjects_for_owner_step(&run.steps[0].subject).unwrap()
             .into_iter().find(|desired| desired.kind == "exec")
@@ -243,6 +285,10 @@ fn replicated_result_records_completion_subphase_without_restarting_execution_cl
     fixture.at(START + 5_000);
     assert_eq!(fixture.reconciler.native_step_timed_out(&fixture.view(), TIMEOUT).unwrap(), Some(false));
     assert!(!fixture.timed_out());
+    assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap(),
+        "a replicated result must close delivery's deadline, including the overall guard");
+    assert!(!fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
+        .iter().any(|claim| claim.body["fields"]["phase"] == "dispatch-stalled"));
 }
 
 #[test]
@@ -269,6 +315,10 @@ fn executor(fixture: &Fixture, started: u128) -> (Reconciler<FakeRuntime>, Desir
     let member = desired.member.as_ref().unwrap();
     let runtime = Arc::new(FakeRuntime::default());
     runtime.exec_started.lock().unwrap().insert((member.runtime_id.clone(), "physical-exec".into()), started);
+    runtime.exec_payloads.lock().unwrap().insert(
+        (member.runtime_id.clone(), "physical-exec".into()),
+        fractal_runtime::payload_receipt::PayloadState::Running,
+    );
     let observation = RuntimeObservation { runtime_id: member.runtime_id.clone(), terminal: false,
         status: "running".into(), exit_code: None, incarnation_id: Some("physical-exec".into()) };
     let reconciler = Reconciler::new(fixture.store.clone(), runtime, "worker".into(), Arc::new(Notify::new()));
@@ -314,4 +364,154 @@ fn only_executor_live_registry_can_attest_a_running_execution_timeout() {
     assert_eq!(fixture.view().status, "failed");
     assert!(fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
         .iter().any(|claim| claim.body["fields"]["phase"] == "execution-timeout"));
+}
+
+#[test]
+fn completed_delivery_does_not_expire_during_review_or_product_wait() {
+    for status in ["verifying", "blocked"] {
+        let fixture = Fixture::new();
+        let attempt = fixture.view().attempt;
+        fixture.phase(attempt, "exec-started", START);
+        fixture.at(START + 100);
+        fixture.phase(attempt, "exec-exited", START + 100);
+        fixture.store.append_claim(&ClaimInput {
+            subject: fixture.exec.clone(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("exited")), ("exit_code".into(), json!(0)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
+        fixture.store.set_step_state(&fixture.view().subject, status, None).unwrap();
+        fixture.at(START + 10_000);
+        assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap(),
+            "{status} is not pending native delivery");
+        assert!(!fixture.timed_out());
+        assert_eq!(fixture.view().status, status);
+        assert!(!fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
+            .iter().any(|claim| claim.body["fields"]["phase"] == "dispatch-stalled"));
+    }
+}
+
+#[test]
+fn completed_delivery_does_not_hide_overbudget_execution_during_review() {
+    let fixture = Fixture::new();
+    let attempt = fixture.view().attempt;
+    fixture.phase(attempt, "exec-started", START);
+    fixture.at(START + 1_001);
+    fixture.phase(attempt, "exec-exited", START + 1_001);
+    fixture.store.append_claim(&ClaimInput {
+        subject: fixture.exec.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("exited")), ("exit_code".into(), json!(0)),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
+    fixture.store.set_step_state(&fixture.view().subject, "verifying", None).unwrap();
+    fixture.at(START + 10_000);
+    assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
+    assert!(fixture.timed_out(), "delivery completion cannot forgive physical execution overrun");
+    assert!(!fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
+        .iter().any(|claim| claim.body["fields"]["phase"] == "dispatch-stalled"));
+}
+
+#[test]
+fn upgrade_does_not_enroll_existing_native_execs_or_attest_new_timeouts() {
+    for status in ["ready", "working", "claimed", "blocked"] {
+        for wrapper_status in ["running", "exited"] {
+            let fixture = Fixture::with_legacy_state(Some(status));
+            assert!(fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap().is_empty());
+            let (executor, desired, mut observation) = executor(&fixture, START);
+            observation.status = wrapper_status.into();
+            observation.exit_code = (wrapper_status == "exited").then_some(0);
+            fixture.store.append_claim(&ClaimInput {
+                subject: fixture.exec.clone(), kind: "runtime.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!(wrapper_status)),
+                    ("exit_code".into(), json!(observation.exit_code)),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            fixture.at(START + 10_000);
+            executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+            assert!(!fixture.timed_out(), "{status}/{wrapper_status} must retain its pre-upgrade timeout semantics");
+            assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
+
+            // Explicitly exercise rematerialization: it must not retroactively dispatch
+            // an attempt whose declarations were already present before the upgrade.
+            let steps = flatten_mission_steps(&fixture.mission);
+            let step = steps.iter().find(|step| step.spec.path == "work").unwrap();
+            fixture.reconciler.materialize_step_declarations(
+                &fixture.run, &fixture.mission, step, &fixture.view(), false,
+            ).unwrap();
+            executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+            fixture.at(START + 20_000);
+            assert!(!fixture.timed_out());
+            assert!(!fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
+            assert!(fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap().is_empty(),
+                "{status}/{wrapper_status}: upgrade must not invent enrollment, execution, or stall phases");
+            assert_eq!(fixture.view().status, status);
+        }
+    }
+}
+
+#[test]
+fn unknown_legacy_exit_timestamp_is_not_replaced_by_observation_time() {
+    let fixture = Fixture::new();
+    let (executor, desired, mut observation) = executor(&fixture, START);
+    observation.status = "exited".into();
+    observation.exit_code = Some(0);
+    executor.runtime.exec_payloads.lock().unwrap().remove(&(
+        desired.member.as_ref().unwrap().runtime_id.clone(), "physical-exec".into(),
+    ));
+    fixture.store.append_claim(&ClaimInput {
+        subject: fixture.exec.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("exited")), ("exit_code".into(), json!(0)),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    fixture.at(START + 10_000);
+    executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+    assert!(!fixture.timed_out(), "observing an old exited wrapper cannot prove an execution overrun");
+    assert!(!fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
+        .iter().any(|claim| matches!(claim.body["fields"]["phase"].as_str(),
+            Some("exec-exited" | "execution-timeout"))),
+        "an unknown physical exit timestamp must stay unknown");
+}
+
+#[test]
+fn persisted_payload_exit_survives_outage_with_stale_running_observation() {
+    let fixture = Fixture::new();
+    let (executor, desired, observation) = executor(&fixture, START);
+    executor.runtime.exec_payloads.lock().unwrap().insert(
+        (desired.member.as_ref().unwrap().runtime_id.clone(), "physical-exec".into()),
+        fractal_runtime::payload_receipt::PayloadState::Exited {
+            at_unix_ms: (START + 100) as u64,
+        },
+    );
+    fixture.at(START + 5_000);
+    executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+    assert!(!fixture.timed_out(), "daemon outage must not count as payload execution");
+    let claims = fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap();
+    let exited = claims.iter().find(|claim| claim.body["fields"]["phase"] == "exec-exited")
+        .expect("the persisted payload receipt must close execution");
+    assert_eq!(exited.body["fields"]["at_unix_ms"], json!(START + 100));
+    assert!(!claims.iter().any(|claim| claim.body["fields"]["phase"] == "execution-timeout"));
+}
+
+#[test]
+fn legacy_running_wrapper_without_payload_receipt_cannot_attest_execution_timeout() {
+    let fixture = Fixture::new();
+    let (executor, desired, observation) = executor(&fixture, START);
+    executor.runtime.exec_payloads.lock().unwrap().remove(&(
+        desired.member.as_ref().unwrap().runtime_id.clone(), "physical-exec".into(),
+    ));
+    fixture.at(START + 5_000);
+    executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+    assert!(!fixture.timed_out(), "wrapper liveness alone cannot attest payload liveness");
+    assert!(!fixture.store.claims_for(&fixture.view().subject, Some(PHASE_KIND)).unwrap()
+        .iter().any(|claim| matches!(claim.body["fields"]["phase"].as_str(),
+            Some("exec-exited" | "execution-timeout"))));
 }

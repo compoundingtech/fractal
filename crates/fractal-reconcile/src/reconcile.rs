@@ -566,6 +566,9 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn exec_started_at(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<u128>> {
         Ok(None)
     }
+    fn exec_payload_state(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        Ok(None)
+    }
     /// Retained, redacted terminal evidence for exactly this runtime incarnation.
     fn exit_evidence(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
         Ok(None)
@@ -914,6 +917,10 @@ impl RuntimeControl for NativeRuntime {
                 if generation.generation_id == incarnation => Some(generation.created_at_unix_ms),
             _ => None,
         })
+    }
+
+    fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        self.exec.payload_state(runtime_id, incarnation)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -8413,6 +8420,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
             self.driver_state_dir.to_string_lossy().into_owned());
         crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
+        if subject.kind == "exec" && subject.owner_step.is_some() && !member.terminal {
+            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
+        }
         if subject.kind == "agent" {
             crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
             crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
@@ -15897,14 +15907,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                 declared_agents.insert(agent.to_owned());
             }
         }
+        // Enroll only newly materialized work (or retries of an already enrolled attempt).
+        // Existing declarations without phase evidence belong to an in-flight legacy attempt:
+        // adopting a new daemon must not retroactively arm new timeout/stall policies for it.
+        let existing = self.native_step_execs(view)?;
+        let phases = self.store.claims_for(&view.subject, Some("step.execution-phase"))?;
+        let tracked_retry = phases.iter().any(|claim|
+            claim.body["fields"]["phase"] == "dispatched"
+                && claim.body["fields"]["attempt"].as_u64().is_some_and(|attempt| attempt < u64::from(view.attempt)));
+        if existing.is_empty() || tracked_retry {
+            for desired in intent.subjects.values().filter(|desired| desired.kind == "exec") {
+                self.record_step_exec_phase(view, desired, "dispatched", now_ms(), None, None)?;
+            }
+        }
         let response = self.store.apply_internal_with_declared_agents(
             &intent,
             &format!("materialize:{}:{}", view.subject, view.attempt),
             &declared_agents,
         )?;
-        for desired in intent.subjects.values().filter(|desired| desired.kind == "exec") {
-            self.record_step_exec_phase(view, desired, "dispatched", now_ms(), None, None)?;
-        }
+        // The dispatch phase precedes desired-state publication, so an executor cannot admit
+        // a new tracked payload before its attempt's enrollment evidence is replicated.
         // A newly declared exec starts when this run's evaluation ends, not in a later pass.
         self.declared_execs
             .lock()

@@ -61,6 +61,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if desired.kind != "exec" { return Ok(()); }
         let Some(owner) = desired.owner_step.as_deref() else { return Ok(()); };
         let Some(view) = self.store.step_run(owner)? else { return Ok(()); };
+        let claims = self.store.claims_for(&view.subject, Some(KIND))?;
+        if phase_at(&claims, view.attempt, &desired.subject, "dispatched").is_none() {
+            return Ok(());
+        }
         self.record_step_exec_phase(&view, desired, phase, at, incarnation, None)
     }
 
@@ -69,17 +73,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         if desired.kind != "exec" || member.terminal || member.host != self.host {
             return Ok(());
         }
+        let Some(owner) = desired.owner_step.as_deref() else { return Ok(()); };
+        let Some(view) = self.store.step_run(owner)? else { return Ok(()); };
+        let claims = self.store.claims_for(owner, Some(KIND))?;
+        if phase_at(&claims, view.attempt, &desired.subject, "dispatched").is_none() {
+            return Ok(());
+        }
         let Some(incarnation) = observation.incarnation_id.as_deref() else { return Ok(()); };
         if let Some(started) = self.runtime.exec_started_at(&member.runtime_id, incarnation)? {
             self.record_native_exec_phase(desired, "exec-started", started, Some(incarnation))?;
-            let exited = self.native_exec_payload_exit(&desired.subject, started)?;
+            let payload = self.runtime.exec_payload_state(&member.runtime_id, incarnation)?;
+            let exited = match payload {
+                Some(fractal_runtime::payload_receipt::PayloadState::Exited { at_unix_ms }) => Some(u128::from(at_unix_ms)),
+                _ => self.native_exec_payload_exit(&desired.subject, started)?,
+            };
             if let Some(exited) = exited {
                 self.record_native_exec_phase(desired, "exec-exited", exited, Some(incarnation))?;
-            } else if observation.status == "exited" {
-                self.record_native_exec_phase(desired, "exec-exited", now_ms(), Some(incarnation))?;
             } else if observation.status == "running"
-                && let Some(owner) = desired.owner_step.as_deref()
-                && let Some(view) = self.store.step_run(owner)?
+                && payload == Some(fractal_runtime::payload_receipt::PayloadState::Running)
                 && let Some(timeout) = view.timeout_ms
             {
                 let deadline = started.saturating_add(u128::from(timeout.saturating_add(view.timeout_extension_ms)));
@@ -116,6 +127,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if execs.is_empty() { return Ok(None); }
         let claims = self.store.claims_for(&view.subject, Some(KIND))?;
         for desired in &execs {
+            if phase_at(&claims, view.attempt, &desired.subject, "dispatched").is_none() {
+                continue;
+            }
             if timeout_observed(&claims, view, &desired.subject) {
                 return Ok(Some(true));
             }
@@ -147,8 +161,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let result = self.store.latest_actual_value(&desired.subject)?;
             let result_present = result.as_ref().is_some_and(|actual|
                 actual_field(actual, "status").and_then(Value::as_str) == Some("exited"));
-            if exited.is_some() && result_present {
+            if result_present || phase_at(&claims, view.attempt, &desired.subject, "result-replicated").is_some() {
                 self.record_step_exec_phase(view, desired, "result-replicated", now, None, None)?;
+                // Delivery is finished. Review/product gates own any subsequent waiting.
+                // Execution-overrun evaluation remains independent of this closed guard.
+                continue;
             }
             let overall_budget = view.timeout_ms.map_or(DEFAULT_OVERALL_BUDGET_MS, |_| timeout.saturating_mul(3))
                 .saturating_add(view.timeout_extension_ms);

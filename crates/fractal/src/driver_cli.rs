@@ -323,9 +323,14 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         }
         return run_st2_native_driver(client, subject, &args.driver, argv, paths).await;
     }
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Running)?;
+    }
     let (program, arguments) = args.argv.split_first().context("driver argv is empty")?;
     let mut child = tokio::process::Command::new(program)
         .args(arguments)
+        .env_remove(fractal_runtime::payload_receipt::PATH_ENV)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -334,6 +339,10 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
     let status = child.wait().await?;
     // Capture the payload edge before retrying delivery to a restarting daemon.
     let exec_exited_at_unix_ms = now_ms() as u64;
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Exited { at_unix_ms: exec_exited_at_unix_ms })?;
+    }
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt as _;

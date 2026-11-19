@@ -1081,6 +1081,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         exec_started: Mutex<HashMap<(String, String), u128>>,
+        exec_payloads: Mutex<HashMap<(String, String), fractal_runtime::payload_receipt::PayloadState>>,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
@@ -1806,6 +1807,9 @@ mission "shell-owner" state="ready" {{
         }
         fn exec_started_at(&self, runtime_id: &str, incarnation: &str) -> Result<Option<u128>> {
             Ok(self.exec_started.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
+        }
+        fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+            Ok(self.exec_payloads.lock().unwrap().get(&(runtime_id.into(), incarnation.into())).copied())
         }
         fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
             if let Some(before) = self.before_observe_exec.lock().unwrap().take() {
