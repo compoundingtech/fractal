@@ -2811,6 +2811,26 @@ fn a_delivery_report_names_the_process_and_its_channel() {
 }
 
 #[test]
+fn agent_model_observation_survives_the_client_extension_map() {
+    let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+        "kind":"agent", "id":"agent/worker", "revision":"one",
+        "updated_at":"2026-10-03T09:00:00Z", "name":"Worker",
+        "state":"running", "reachability":"local", "runtime_ids":[],
+        "declared_model":"anthropic/claude-opus-5-5", "live_model":"gpt-6.1-sol",
+        "model_drift": {
+            "state":"drifted", "drift_since":"2026-10-03T08:00:00Z",
+            "fallback_reason":"transient", "return_attempts":2
+        }
+    })).unwrap();
+    let line = agent_model_line(&agent);
+    assert!(line.contains("declared anthropic/claude-opus-5-5 · live gpt-6.1-sol · drifted"));
+    assert!(line.contains("since 2026-10-03T08:00:00Z · fallback transient · returns 2"));
+    assert!(render_client_agent(&agent, &[], 0).contains(&line));
+    agent.extra.remove("model_drift");
+    assert!(agent_model_line(&agent).ends_with("unknown · fallback unknown · returns unknown"));
+}
+
+#[test]
 fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated_stale() {
     let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind":"agent", "id":"agent/worker", "revision":"one",
@@ -2989,8 +3009,10 @@ fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
         render_client_agents(&page, false, false, "st agents ls"),
         "AGENTS  2\n\
          agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
          \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
          agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
          \x20 stopped, with no recorded reason\n"
     );
     // A running agent prints no stop line, even with an end reason from an earlier incarnation.

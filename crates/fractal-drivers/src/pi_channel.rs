@@ -126,6 +126,28 @@ impl EventObserver {
             }
             self.native_session = native.map(str::to_owned);
         }
+        if frame["type"] == "model_fallback" {
+            if self.driver != "omp" || !self.channel_ready {
+                return Ok(());
+            }
+            let Some(body) = model_fallback_observation(frame, self.native_session.as_deref()) else {
+                return Ok(());
+            };
+            return harness_state::with_current_ownership(
+                &self.agent_dir, &self.owner, self.ownership_seq, || {
+                    anyhow::ensure!(crate::omp_session::bound_native_session(
+                        &self.session_dir, &self.identity, &self.runtime, &self.owner,
+                    )?.as_deref() == self.native_session.as_deref(),
+                        "model fallback observation has no confirmed native session");
+                    self.timeline.append(
+                        format!("model-fallback:{}:{}:{}", body["native_session"].as_str().unwrap(),
+                            body["source_event"].as_str().unwrap(), body["observation"].as_str().unwrap()),
+                        crate::harness_timeline::Role::System,
+                        crate::harness_timeline::EntryType::Status, body, true,
+                    )
+                },
+            );
+        }
         if matches!(frame["type"].as_str(), Some("question.open" | "question.closed")) {
             if self.driver != "omp" || !crate::omp_questions::enabled() {
                 return Ok(());
@@ -194,6 +216,132 @@ impl EventObserver {
         }
         Ok(())
     }
+}
+
+/// Only bounded model metadata and a closed cause vocabulary enter the outbox.
+/// The channel supplies no incarnation or agent authority.
+pub fn model_fallback_observation(frame: &Value, native_session: Option<&str>) -> Option<Value> {
+    use sha2::{Digest as _, Sha256};
+    fn token(value: &Value) -> Option<&str> {
+        value.as_str().filter(|text| !text.is_empty() && text.len() <= 256
+            && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_./:@+".contains(&byte)))
+    }
+    let native = native_session?;
+    if frame["type"] != "model_fallback" || frame["session"].as_str() != Some(native) {
+        return None;
+    }
+    let source = token(&frame["sourceEvent"])?;
+    let episode_source = match frame.get("episodeEvent") {
+        Some(value) => token(value)?,
+        None => source,
+    };
+    let to = token(&frame["to"])?;
+    let observation = frame["observation"].as_str()?;
+    if !matches!(observation, "applied" | "selected") { return None; }
+    let mut digest = Sha256::new();
+    digest.update(native.as_bytes());
+    digest.update([0]);
+    digest.update(episode_source.as_bytes());
+    let episode = format!("{:x}", digest.finalize());
+    let mut body = serde_json::json!({
+        "status": "waiting", "code": "model-fallback",
+        "observation": observation, "native_session": native,
+        "source_event": source, "episode_id": episode, "to": to,
+    });
+    if observation == "applied" {
+        body["from"] = token(&frame["from"])?.into();
+        body["cause"] = classify_model_fallback_facts(&frame["errorFacts"]).as_str().into();
+    }
+    Some(body)
+}
+
+/// Ranking is also the chain merge rule: unknown evidence cannot be improved by a later
+/// transient hop, and quota/auth always defeat transport-looking text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FallbackCause { Transient, Unknown, Auth, Quota }
+
+impl FallbackCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient", Self::Unknown => "unknown",
+            Self::Auth => "auth", Self::Quota => "quota",
+        }
+    }
+}
+
+fn classify_model_fallback_facts(value: &Value) -> FallbackCause {
+    fn contains(text: &str, needle: &str) -> bool {
+        text.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    }
+    fn classify(facts: &Value) -> FallbackCause {
+        let Some(object) = facts.as_object().filter(|object| object.len() <= 16) else {
+            return FallbackCause::Unknown;
+        };
+        let mut quota = false;
+        let mut auth = false;
+        let mut transient = false;
+        let mut status_quota = false;
+        let mut status_auth = false;
+        let mut status_transient = false;
+        let mut incomplete = facts["truncated"] == true || facts["redacted"] == true;
+        let mut terminal = false;
+        let mut status = |status: u64| {
+            status_quota |= status == 429;
+            status_auth |= matches!(status, 401 | 403);
+            status_transient |= (500..=599).contains(&status);
+            terminal |= (400..=499).contains(&status) && !matches!(status, 401 | 403 | 429);
+        };
+        for key in ["status", "statusCode", "errorStatus"] {
+            if let Some(code) = facts[key].as_u64().filter(|code| (100..=599).contains(code)) {
+                status(code);
+            }
+        }
+        // Only actual failure text is evidence. A proactive "skipped because..." reason is
+        // a routing decision, not proof that this primary encountered a transient failure.
+        for key in ["reason", "errorMessage", "errorCode", "code", "errorName", "name", "classification", "failureKind"] {
+            let Some(text) = object.get(key).and_then(Value::as_str) else { continue };
+            if text.len() > 200 { incomplete = true; continue; }
+            let text = if key == "reason" {
+                let Some(text) = text.strip_prefix("Request failed: ") else { continue };
+                text
+            } else { text };
+            for (index, window) in text.as_bytes().windows(3).enumerate() {
+                if !window.iter().all(u8::is_ascii_digit) { continue; }
+                let before = index.checked_sub(1).map(|index| text.as_bytes()[index]);
+                let after = text.as_bytes().get(index + 3).copied();
+                if before.is_none_or(|byte| byte.is_ascii_whitespace() || b":([".contains(&byte))
+                    && after.is_none_or(|byte| byte.is_ascii_whitespace() || b":]),".contains(&byte))
+                {
+                    status(u64::from(window[0] - b'0') * 100
+                        + u64::from(window[1] - b'0') * 10 + u64::from(window[2] - b'0'));
+                }
+            }
+            quota |= ["quota", "rate_limit", "rate-limit", "rate limit", "ratelimit",
+                "too many requests", "usage_limit", "usage limit", "billing", "credit balance"]
+                .iter().any(|needle| contains(text, needle));
+            auth |= ["unauthorized", "forbidden", "authentication", "invalid_api_key",
+                "invalid api key", "auth_failed", "oauth", "invalid token"]
+                .iter().any(|needle| contains(text, needle));
+            transient |= ["socket hang up", "socket closed", "socket close", "socket-close",
+                "socket_close", "socketclosed", "other side closed", "connection reset",
+                "econnreset", "econnrefused", "etimedout", "timeout", "timed out"]
+                .iter().any(|needle| contains(text, needle));
+            if matches!(key, "classification" | "failureKind") {
+                quota |= text.eq_ignore_ascii_case("quota");
+                auth |= text.eq_ignore_ascii_case("auth");
+                transient |= text.eq_ignore_ascii_case("transient");
+                incomplete |= text.eq_ignore_ascii_case("unknown");
+            }
+        }
+        if quota || status_quota { FallbackCause::Quota }
+        else if auth || status_auth { FallbackCause::Auth }
+        else if incomplete || terminal || !(transient || status_transient) { FallbackCause::Unknown }
+        else { FallbackCause::Transient }
+    }
+    let Some(facts) = value.as_array().filter(|facts| !facts.is_empty() && facts.len() <= 16) else {
+        return FallbackCause::Unknown;
+    };
+    facts.iter().map(classify).max().unwrap_or(FallbackCause::Unknown)
 }
 
 /// Normalize only structured snapshots from the currently bound native session. Transport
@@ -388,6 +536,123 @@ fn parse_ask(word: &str) -> harness_state::Ask {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn model_fallback_rust_classification_is_conservative_and_table_driven() {
+        for (facts, expected) in [
+            (json!([{}]), FallbackCause::Unknown),
+            (json!([{"reason":"Request failed: provider returned an error without details"}]), FallbackCause::Unknown),
+            (json!([{"reason":"Skipped because provider returned 503"}]), FallbackCause::Unknown),
+            (json!([{"reason":"Request failed: 503 service unavailable"}]), FallbackCause::Transient),
+            (json!([{"status":500}]), FallbackCause::Transient),
+            (json!([{"statusCode":599}]), FallbackCause::Transient),
+            (json!([{"errorMessage":"socket closed by peer"}]), FallbackCause::Transient),
+            (json!([{"errorName":"TimeoutError"}]), FallbackCause::Transient),
+            (json!([{"errorCode":"ECONNRESET"}]), FallbackCause::Transient),
+            (json!([{"status":429}]), FallbackCause::Quota),
+            (json!([{"errorMessage":"rate limit exceeded; socket closed"}]), FallbackCause::Quota),
+            (json!([{"reason":"Request failed: quota exceeded; 503 service unavailable"}]), FallbackCause::Quota),
+            (json!([{"status":401}]), FallbackCause::Auth),
+            (json!([{"errorStatus":403,"errorMessage":"timeout"}]), FallbackCause::Auth),
+            (json!([{"errorMessage":"authentication failed; timeout"}]), FallbackCause::Auth),
+            (json!([{"status":400,"errorMessage":"timeout"}]), FallbackCause::Unknown),
+            (json!([{"classification":"unknown","status":503}]), FallbackCause::Unknown),
+            (json!([{"classification":"transient"}]), FallbackCause::Transient),
+            (json!([{"status":503,"truncated":true}]), FallbackCause::Unknown),
+            (json!([{"errorMessage":"503 service unavailable","truncated":true}]), FallbackCause::Unknown),
+            (json!([{"reason":format!("Request failed: 503 {} quota exceeded", "x".repeat(300))}]), FallbackCause::Unknown),
+            (json!([{"status":503,"redacted":true}]), FallbackCause::Unknown),
+            (json!([{"status":429,"truncated":true}]), FallbackCause::Quota),
+            (json!([{"status":503},{"status":429}]), FallbackCause::Quota),
+            (json!([{"status":401},{"status":503}]), FallbackCause::Auth),
+            (json!([{},{"status":503}]), FallbackCause::Unknown),
+            (json!([{"status":401},{"status":429},{"status":503}]), FallbackCause::Quota),
+        ] {
+            assert_eq!(classify_model_fallback_facts(&facts), expected, "{facts}");
+        }
+        let mut forged = fallback_frame();
+        forged["cause"] = json!("transient");
+        forged["errorFacts"] = json!([{}]);
+        assert_eq!(model_fallback_observation(&forged, Some("native-a")).unwrap()["cause"], "unknown");
+    }
+
+    fn fallback_frame() -> Value {
+        json!({"type":"model_fallback", "session":"native-a", "sourceEvent":"change-a",
+            "observation":"applied", "from":"provider/model-a", "to":"provider/model-b",
+            "errorFacts":[{"reason":"Request failed: 503 service unavailable", "provider":"example"}],
+            "reason":"SECRET provider diagnostic", "cause":"transient"})
+    }
+
+    #[test]
+    fn model_fallback_normalizer_fences_session_and_sanitizes_causes() {
+        let mut frame = fallback_frame();
+        assert!(model_fallback_observation(&frame, None).is_none());
+        assert!(model_fallback_observation(&frame, Some("native-b")).is_none());
+        for (facts, cause) in [
+            (json!([{}]), "unknown"),
+            (json!([{"status":429}]), "quota"),
+            (json!([{"status":401}]), "auth"),
+            (json!([{"status":503}]), "transient"),
+        ] {
+            frame["errorFacts"] = facts;
+            let body = model_fallback_observation(&frame, Some("native-a")).unwrap();
+            assert_eq!(body["cause"], cause);
+            assert!(!body.to_string().contains("SECRET"));
+            assert!(body.get("reason").is_none());
+        }
+        frame["to"] = json!("model\nSECRET");
+        assert!(model_fallback_observation(&frame, Some("native-a")).is_none());
+    }
+
+    #[test]
+    fn model_fallback_episode_survives_a_chain_but_not_a_new_native_session() {
+        let mut first = fallback_frame();
+        first["episodeEvent"] = json!("change-a");
+        let initial = model_fallback_observation(&first, Some("native-a")).unwrap();
+        first["sourceEvent"] = json!("change-b");
+        let next = model_fallback_observation(&first, Some("native-a")).unwrap();
+        assert_eq!(initial["episode_id"], next["episode_id"]);
+        assert_ne!(initial["source_event"], next["source_event"]);
+        first["session"] = json!("native-b");
+        let switched = model_fallback_observation(&first, Some("native-b")).unwrap();
+        assert_ne!(next["episode_id"], switched["episode_id"]);
+    }
+
+    #[test]
+    fn model_fallback_recording_is_durable_idempotent_and_owner_fenced() {
+        let root = tempfile::tempdir().unwrap();
+        crate::harness_events::enable(root.path(), "runtime-a").unwrap();
+        let seq = harness_state::claim(root.path(), "agent/example", "omp", "provider-a").unwrap();
+        let make_observer = || EventObserver::new(root.path(), &root.path().join("sessions"),
+            "agent/example", "omp", "provider-a", seq, "runtime-a").unwrap();
+        let mut observer = make_observer();
+        observer.resume_generation = Some(crate::residency::Generation(2));
+        observer.expected_native_session = Some("native-a".into());
+        observer.observe(&fallback_frame()).unwrap(); // Not ready: no evidence.
+        observer.observe(&json!({"type":"session", "sessionId":"native-a"})).unwrap();
+        observer.observe(&json!({"type":"ready", "sessionId":"native-a"})).unwrap();
+        observer.observe(&fallback_frame()).unwrap();
+        let events = crate::harness_events::pending(root.path(), 100).unwrap();
+        let fallback = events.iter().find(|event| event.payload["body"]["code"] == "model-fallback").unwrap();
+        assert_eq!(fallback.runtime_incarnation, "runtime-a");
+        assert_eq!(fallback.payload["incarnationId"], "provider-a");
+        let episode = fallback.payload["body"]["episode_id"].clone();
+        assert!(!fallback.payload.to_string().contains("SECRET"));
+        let count = events.len();
+        let mut reconnected = make_observer().with_native_session(Some("native-a".into())).unwrap();
+        reconnected.observe(&fallback_frame()).unwrap();
+        let replay = crate::harness_events::pending(root.path(), 100).unwrap();
+        assert_eq!(replay.len(), count);
+        assert_eq!(replay.iter().find(|event| event.payload["body"]["code"] == "model-fallback").unwrap()
+            .payload["body"]["episode_id"], episode);
+        let mut foreign = fallback_frame();
+        foreign["session"] = json!("native-b");
+        reconnected.observe(&foreign).unwrap();
+        assert_eq!(crate::harness_events::pending(root.path(), 100).unwrap().len(), count);
+        crate::harness_events::enable(root.path(), "runtime-b").unwrap();
+        harness_state::claim(root.path(), "agent/example", "omp", "provider-b").unwrap();
+        assert!(reconnected.observe(&fallback_frame()).is_err());
+    }
 
     fn todo_frame() -> Value {
         serde_json::json!({

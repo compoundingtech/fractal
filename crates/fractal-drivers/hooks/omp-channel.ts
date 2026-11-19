@@ -20,6 +20,33 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 const PROTOCOL = 1;
+type FallbackErrorFacts = { [key: string]: string | number | boolean | undefined };
+/** Only public event facts cross the local channel. Rust owns classification and persistence. */
+const fallbackErrorFacts = (event: Record<string, unknown>): FallbackErrorFacts => {
+  const facts: FallbackErrorFacts = {};
+  const redact = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const bounded = value.slice(0, 16_384);
+    const clean = bounded
+      .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+      .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+      .replace(/((?:api[_ -]?key|token|secret|password|authorization)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1[redacted]")
+      .replace(/https?:\/\/[^\s]+/gi, "[url]")
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]");
+    if (value.length > 200) facts.truncated = true;
+    if (clean !== bounded) facts.redacted = true;
+    return clean.slice(0, 200);
+  };
+  for (const key of ["reason", "classification", "failureKind", "errorMessage", "errorCode", "code", "errorName", "name", "provider"]) {
+    const value = redact(event[key]);
+    if (value !== undefined) facts[key] = value;
+  }
+  for (const key of ["status", "statusCode", "errorStatus"]) {
+    const value = event[key];
+    if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) facts[key] = value;
+  }
+  return facts;
+};
 
 // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 // Kept inline in both channel assets: each is embedded and published as a standalone file.
@@ -106,6 +133,8 @@ type Stash = {
   identity?: string;
   runtimeId?: string;
   session?: string;
+  /** One sanitized native episode retained until the channel can replay it. */
+  modelFallback?: { session: string; sourceEvent: string; episodeEvent: string; from: string; to: string; errorFacts: FallbackErrorFacts[] };
   seq?: string;
   expectedNativeSession?: string;
   resumeGeneration?: string;
@@ -444,6 +473,7 @@ export default function (pi: ExtensionAPI) {
           }
           state.reconnectAttempt = 0;
           send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
+          observeModelSelection(ctx, undefined, true);
           // Every fresh channel needs the provider's idle proof, including reconnects
           // during an idle session where no further turn boundary will arrive.
           watchSettle(ctx);
@@ -841,8 +871,61 @@ export default function (pi: ExtensionAPI) {
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
   ) =>
-    widenedOn(event, (payload, ctx) =>
-      isSubagentSession(ctx) ? undefined : handler(payload, ctx));
+    widenedOn(event, (payload, ctx) => {
+      if (isSubagentSession(ctx)) return;
+      if (event !== "retry_fallback_applied") observeModelSelection(ctx);
+      return handler(payload, ctx);
+    });
+
+  // Native model_change IDs fence manual switches and deduplicate reconnect/redelivery.
+  let modelSelectionChild: childProcess.ChildProcess | undefined;
+  let modelSelectionKey: string | undefined;
+  function observeModelSelection(ctx: ExtensionContext, fallback?: unknown, force = false) {
+    try {
+      const session = ctx.sessionManager.getSessionId();
+      const branch = ctx.sessionManager.getBranch();
+      const change = branch.findLast((entry) => entry.type === "model_change") as
+        { id?: unknown; model?: unknown; resolvedModelIsFallback?: unknown } | undefined;
+      const source = typeof change?.id === "string" ? change.id : `unobserved-${ctx.sessionManager.getLeafId() ?? "root"}`;
+      const model = typeof change?.model === "string" ? change.model : ctx.model?.id;
+      const previous = state.modelFallback;
+      const previousIndex = previous ? branch.findIndex((entry) => entry.id === previous.sourceEvent) : -1;
+      if (previous && (previous.session !== session || previousIndex < 0 ||
+        branch.some((entry, index) => index > previousIndex && entry.type === "model_change" &&
+          (!("resolvedModelIsFallback" in entry) || entry.resolvedModelIsFallback !== true) &&
+          !(fallback && entry.id === source)))) {
+        state.modelFallback = undefined;
+      }
+      if (!session || typeof model !== "string") return;
+      const event = fallback && typeof fallback === "object" ? fallback as Record<string, unknown> : undefined;
+      const applied = typeof change?.id === "string" &&
+        typeof event?.to === "string" && typeof event.from === "string";
+      if (applied) {
+        const prior = state.modelFallback;
+        const facts = prior?.errorFacts ?? [];
+        if (prior?.sourceEvent !== source) {
+          if (facts.length < 16) facts.push(fallbackErrorFacts(event));
+          else facts[15] = { truncated: true };
+        }
+        state.modelFallback = { session, sourceEvent: source,
+          episodeEvent: prior?.episodeEvent ?? source,
+          from: prior?.from ?? event.from as string, to: model, errorFacts: facts };
+      }
+      const key = JSON.stringify([session, source]);
+      const changed = force || modelSelectionChild !== state.child || modelSelectionKey !== key;
+      if (changed) {
+        sendFrame({ type: "model_fallback", session, sourceEvent: source, observation: "selected", to: model });
+        if (state.child && !state.child.stdin?.destroyed) {
+          modelSelectionChild = state.child;
+          modelSelectionKey = key;
+        }
+      }
+      if (state.modelFallback?.sourceEvent === source && (applied || changed)) {
+        sendFrame({ type: "model_fallback", observation: "applied", ...state.modelFallback });
+      }
+    } catch { /* A disappearing native session withholds evidence, never stops a turn. */ }
+  }
+  on("retry_fallback_applied", (event, ctx) => observeModelSelection(ctx, event));
 
   on("message_start", async (event) => {
     if (!event || typeof event !== "object" || !("message" in event)) return;

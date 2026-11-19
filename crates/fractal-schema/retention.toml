@@ -125,6 +125,8 @@
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
 # fleet views run anywhere. Nothing reads a heartbeat, so only changes replicate.
 "harness.observed" = { class = "current", log = "on-change" }
+# Native fallback/selection IDs are replay fences and reasoned return-policy evidence.
+"harness.model-fallback.observed" = { class = "durable" }
 "harness.session-file" = { class = "durable" }
 # The owner reads a transcript from the harness's own session file, or from the local log when
 # there is none. Other nodes relay timeline reads to the owner.
