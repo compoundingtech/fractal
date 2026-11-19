@@ -731,8 +731,8 @@ mod tests {
                     std::thread::spawn(move || {
                         let input = ClaimInput {
                             subject: "message/unrelated".into(), kind: "message.sent".into(),
-                            actor: Some("person/avery".into()),
-                            fields: serde_json::from_value(json!({"from":"person/avery","to":"person/avery",
+                            actor: Some("agent/birch".into()),
+                            fields: serde_json::from_value(json!({"from":"agent/birch","to":"person/avery",
                                 "content":"Unrelated frontier write.","status":"sent","tags":[]})).unwrap(),
                             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                         };
