@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Runner unit tests; add --real to exercise the pinned Linux sandbox too."""
+import ast
+import contextlib
+import io
 import errno
 import os
 from pathlib import Path
@@ -29,6 +32,12 @@ class RunnerTest(unittest.TestCase):
         self.state.mkdir()
         self.store = self.root / 'pnpm'
         self.store.mkdir()
+        environment = patch.dict(os.environ, {
+            'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+            'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+            'FRACTAL_INTEGRATOR_PNPM_STORE': str(self.store)})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.binaries = {name: '/nix/store/test-tools/bin/' + name for name in ('bash', 'bwrap', 'env', 'git')}
         self.tools = patch.object(sandbox, 'tools', return_value=(self.binaries, self.state, self.store))
         self.tools.start()
@@ -103,6 +112,120 @@ class RunnerTest(unittest.TestCase):
             sandbox.prepare_removal(snapshot, root)
         with self.assertRaisesRegex(RuntimeError, 'direct revision/PID child'):
             sandbox.prepare_removal(self.worktree, root)
+
+    def test_bootstrap_cache_survives_isolated_homes(self):
+        cache = self.state / 'nix-bootstrap-cache'
+        with patch.dict(os.environ, {'XDG_CACHE_HOME': '/agent-cache', 'GH_TOKEN': 'secret'}):
+            for prefix in ('bootstrap-', 'package-'):
+                with tempfile.TemporaryDirectory(prefix=prefix, dir=self.state) as home:
+                    environment = sandbox.bootstrap_env(home, self.state)
+                    self.assertEqual(environment['HOME'], home)
+                    self.assertEqual(environment['XDG_CACHE_HOME'], str(cache))
+                    self.assertNotIn('GH_TOKEN', environment)
+                    self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+                    marker = cache / 'fetcher-metadata'
+                    if prefix == 'bootstrap-':
+                        marker.write_text('persistent')
+                    else:
+                        self.assertEqual(marker.read_text(), 'persistent')
+                self.assertFalse(Path(home).exists())
+        self.assertNotIn('XDG_CACHE_HOME', sandbox.bootstrap_env('/nonexistent'))
+
+    def test_tools_build_uses_persistent_cache(self):
+        self.tools.stop()
+        with patch.dict(os.environ, {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(self.store)}), \
+                patch.object(sandbox.shutil, 'which', return_value='/nix/store/test-nix/bin/nix'), \
+                patch.object(Path, 'is_file', return_value=True), \
+                patch.object(sandbox.subprocess, 'run',
+                             return_value=subprocess.CompletedProcess([], 0, '/nix/store/test-tools\n')) as execute:
+            sandbox.tools.__wrapped__()
+        environment = execute.call_args.kwargs['env']
+        self.assertEqual(environment['XDG_CACHE_HOME'], str(self.state / 'nix-bootstrap-cache'))
+        self.assertEqual(Path(environment['HOME']).parent, self.state)
+        self.assertFalse(Path(environment['HOME']).exists())
+
+    def test_tools_refuses_bootstrap_cache_overlapping_pnpm_store(self):
+        self.tools.stop()
+        cache = self.state / 'nix-bootstrap-cache'
+        alias = self.root / 'store-alias'
+        alias.symlink_to(cache, target_is_directory=True)
+        for store in (self.state, cache, cache / 'pnpm', alias):
+            with self.subTest(store=store), patch.dict(os.environ, {
+                    'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(store)}), \
+                    patch.object(sandbox.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the pnpm store'):
+                    sandbox.tools.__wrapped__()
+                execute.assert_not_called()
+
+    def test_tools_refuses_bootstrap_cache_symlink_into_pnpm_store(self):
+        self.tools.stop()
+        (self.state / 'nix-bootstrap-cache').symlink_to(self.store, target_is_directory=True)
+        with patch.dict(os.environ, {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(self.store)}), \
+                patch.object(sandbox.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the pnpm store'):
+                sandbox.tools.__wrapped__()
+            execute.assert_not_called()
+
+    def test_dispatch_refuses_bootstrap_cache_overlapping_candidate_before_bootstrap(self):
+        self.tools.stop()
+        sandbox.tools.cache_clear()
+        self.addCleanup(sandbox.tools.cache_clear)
+        cache = self.state / 'nix-bootstrap-cache'
+        cache.mkdir()
+        nested = cache / 'candidate'
+        nested.mkdir()
+        alias = self.root / 'candidate-alias'
+        alias.symlink_to(cache, target_is_directory=True)
+        for runner, args in ((sandbox.run, (['true'],)),
+                             (sandbox.run_package, ('mr', ['--help']))):
+            for worktree in (self.state, cache, nested, alias):
+                with self.subTest(runner=runner.__name__, worktree=worktree), \
+                        patch.object(sandbox.shutil, 'which', return_value='/nix/store/test-nix/bin/nix'), \
+                        patch.object(sandbox.subprocess, 'run') as execute:
+                    with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the candidate worktree'):
+                        runner(*args, worktree=worktree)
+                    execute.assert_not_called()
+
+    def test_dispatch_refuses_bootstrap_cache_symlink_into_candidate_before_bootstrap(self):
+        self.tools.stop()
+        sandbox.tools.cache_clear()
+        self.addCleanup(sandbox.tools.cache_clear)
+        target = self.worktree / 'cache'
+        target.mkdir()
+        (self.state / 'nix-bootstrap-cache').symlink_to(target, target_is_directory=True)
+        for runner, args in ((sandbox.run, (['true'],)),
+                             (sandbox.run_package, ('mr', ['--help']))):
+            with self.subTest(runner=runner.__name__), \
+                    patch.object(sandbox.shutil, 'which', return_value='/nix/store/test-nix/bin/nix'), \
+                    patch.object(sandbox.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the candidate worktree'):
+                    runner(*args, worktree=self.worktree)
+                execute.assert_not_called()
+
+    def test_bootstrap_cache_is_not_exposed_by_candidate_mounts(self):
+        cache = Path(sandbox.bootstrap_env('/isolated-home', self.state)['XDG_CACHE_HOME'])
+        (self.worktree / '.git').mkdir()
+        with patch.object(sandbox.subprocess, 'run', side_effect=[
+                subprocess.CompletedProcess([], 0, ''),
+                subprocess.CompletedProcess([], 1)]) as execute:
+            sandbox.run(['true'], worktree=self.worktree, shell='web',
+                        output=self.root / 'builds/revision', readonly_dependencies=True)
+        argv = execute.call_args.args[0]
+        self.assertNotIn('XDG_CACHE_HOME', argv)
+        self.assertNotIn(str(cache), argv)
+        for index, argument in enumerate(argv):
+            if argument in ('--bind', '--ro-bind'):
+                source = Path(argv[index + 1]).resolve()
+                self.assertFalse(cache.is_relative_to(source),
+                                 f'bootstrap cache exposed through mount {source}')
 
     def test_default_networkless_and_environment_allowlist(self):
         with patch.dict(os.environ, {'GH_CONFIG_DIR': '/secret', 'ST_SECRET': 'bad', 'SCG_SECRET': 'bad'}), \
@@ -188,6 +311,10 @@ class RunnerTest(unittest.TestCase):
         pin = sandbox.json.loads((sandbox.TRUSTED_CHECKOUT / 'flake.lock').read_text())['nodes']['effect-utils']['locked']
         self.assertEqual(execute.call_args.args[0][-1],
                          f"github:overengineeringstudio/effect-utils/{pin['rev']}#megarepo")
+        environment = execute.call_args.kwargs['env']
+        self.assertEqual(environment['XDG_CACHE_HOME'], str(self.state / 'nix-bootstrap-cache'))
+        self.assertEqual(Path(environment['HOME']).parent, self.state)
+        self.assertFalse(Path(environment['HOME']).exists())
 
     def test_output_is_promoted_only_after_success(self):
         output = self.root / 'production/builds/revision'
@@ -283,6 +410,61 @@ class RunnerTest(unittest.TestCase):
 
 
 class ConfigurationTest(unittest.TestCase):
+    def test_candidate_entrypoints_reject_overlap_before_cold_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / 'state'
+            state.mkdir()
+            cache = state / 'nix-bootstrap-cache'
+            outside = root / 'outside'
+            outside.mkdir()
+            # Exercise the actual integrator validation expression, retaining its
+            # configured clone argument without invoking tick's logging/recovery.
+            tree = ast.parse(Path(sandbox.__file__).with_name('integrator.py').read_text())
+            call, = [node for node in ast.walk(tree)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'candidate_sandbox'
+                     and node.func.attr == 'validate_configuration']
+            integrator_validation = compile(ast.Expression(call), 'integrator.py', 'eval')
+            environment = {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(root / 'pnpm')}
+            for layout in ('contains-cache', 'equal-cache', 'inside-cache', 'symlink'):
+                if layout == 'symlink':
+                    cache.symlink_to(outside, target_is_directory=True)
+                    candidate = outside
+                else:
+                    candidate = {'contains-cache': state, 'equal-cache': cache,
+                                 'inside-cache': cache / 'not-created-clone'}[layout]
+                for entry in ('configuration', 'integrator', 'cli', 'check-config'):
+                    sandbox.tools.cache_clear()
+                    with self.subTest(layout=layout, entry=entry), \
+                            patch.dict(os.environ, environment), \
+                            patch.object(sandbox.shutil, 'which', return_value='/trusted/nix'), \
+                            patch.object(sandbox.subprocess, 'run') as execute:
+                        if entry == 'configuration':
+                            with self.assertRaisesRegex(RuntimeError, 'disjoint from the candidate worktree'):
+                                sandbox.validate_configuration(outside, candidate)
+                        elif entry == 'integrator':
+                            with self.assertRaisesRegex(RuntimeError, 'disjoint from the candidate worktree'):
+                                eval(integrator_validation, {'candidate_sandbox': sandbox, 'C': candidate})
+                        else:
+                            arguments = ['candidate_sandbox.py', '--worktree', str(candidate)]
+                            arguments += ['--check-config'] if entry == 'check-config' else ['--', 'true']
+                            stderr = io.StringIO()
+                            with patch.object(sys, 'argv', arguments), \
+                                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                                sandbox.main()
+                            self.assertEqual(error.exception.code, 1)
+                            self.assertIn('disjoint from the candidate worktree', stderr.getvalue())
+                        execute.assert_not_called()
+                        self.assertEqual(sandbox.tools.cache_info().misses, 0)
+                if cache.is_symlink():
+                    cache.unlink()
+            sandbox.tools.cache_clear()
+
     def test_policy_cli_needs_no_configuration_or_nix(self):
         result = subprocess.run([sys.executable, str(Path(sandbox.__file__).resolve()), '--print-policy'],
                                 env={'PATH': ''}, capture_output=True, text=True)
