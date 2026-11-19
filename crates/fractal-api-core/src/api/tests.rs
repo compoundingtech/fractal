@@ -14170,6 +14170,100 @@ async fn writer_binding_message_guard_matches_only_the_path_segment() {
     }
 }
 
+fn writer_binding_cleanup_mail(state: &AppState) {
+    let now = client_now_ms();
+    state.store.set_write_clock_at(now - 2 * mail_backlog::THRESHOLD_MS as u128).unwrap();
+    for recipient in ["own", "other"] {
+        state.store.append_claim(&ClaimInput {
+            subject: format!("message/cleanup-{recipient}"),
+            kind: "message.sent".into(),
+            actor: Some("person/example".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/example")),
+                ("to".into(), json!(format!("agent/{recipient}"))),
+                ("content".into(), json!("old message")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state.store.set_write_clock_at(now).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_message_cleanup_limits_authenticated_mailboxes() {
+    for caller in ["bound", "paired", "native"] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        writer_binding_cleanup_mail(&state);
+        let credential = "cleanup-pairing";
+        writer_binding_pairing(&state, credential, &["read.projections", "control.messages"]);
+        let app = router(state.clone())
+            .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+        let app = if caller == "native" {
+            app.layer(Extension(NativeDeliveryPeer {
+                agent: "agent/own".into(), transport: "omp-channel", pid: 37, archives_inbox: false,
+            }))
+        } else { app };
+        let bound = (caller == "bound").then_some("agent/own");
+        let bearer = (caller == "paired").then_some(credential);
+        let before = state.store.index().unwrap();
+        for dry_run in [false, true] {
+            for (to, all) in [(Some("agent/other"), false), (None, true)] {
+                let (status, refusal) = writer_binding_request(
+                    app.clone(), "/v1/messages/cleanup", bound, bearer,
+                    json!({"to":to, "all":all, "older_than_ms":mail_backlog::THRESHOLD_MS,
+                        "dry_run":dry_run}),
+                ).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{caller}/{to:?}/{dry_run}: {refusal}");
+                assert_eq!(refusal["code"], "foreign-agent-actor");
+                assert_eq!(state.store.index().unwrap(), before);
+                for recipient in ["own", "other"] {
+                    assert_eq!(state.store.message(&format!("message/cleanup-{recipient}"))
+                        .unwrap().unwrap().status, "sent", "{caller}/{recipient}");
+                }
+            }
+        }
+        let own = if caller == "paired" { "person/example" } else { "own" };
+        let (status, cleaned) = writer_binding_request(
+            app, "/v1/messages/cleanup", bound, bearer,
+            json!({"to":own, "older_than_ms":mail_backlog::THRESHOLD_MS}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{caller}: {cleaned}");
+        assert_eq!(cleaned["count"], if caller == "paired" { 0 } else { 1 });
+        assert_eq!(state.store.message("message/cleanup-other").unwrap().unwrap().status, "sent");
+        assert_eq!(state.store.message("message/cleanup-own").unwrap().unwrap().status,
+            if caller == "paired" { "sent" } else { "closed" });
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_cleanup_retains_operator_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    writer_binding_cleanup_mail(&state);
+    let app = router(state.clone()).layer(Extension(HarnessAncestry::Person));
+    for (to, all, dry_run, count) in [
+        (None, true, true, 2),
+        (Some("agent/other"), false, false, 1),
+        (None, true, false, 1),
+    ] {
+        let (status, cleaned) = writer_binding_request(
+            app.clone(), "/v1/messages/cleanup", None, None,
+            json!({"to":to, "all":all, "dry_run":dry_run,
+                "older_than_ms":mail_backlog::THRESHOLD_MS}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{to:?}/{dry_run}: {cleaned}");
+        assert_eq!(cleaned["count"], count);
+    }
+    for recipient in ["own", "other"] {
+        assert_eq!(state.store.message(&format!("message/cleanup-{recipient}"))
+            .unwrap().unwrap().status, "closed");
+    }
+}
+
 #[tokio::test]
 async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
     let root = tempfile::tempdir().unwrap();
