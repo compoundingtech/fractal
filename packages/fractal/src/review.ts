@@ -2,17 +2,17 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { Schema } from 'effect'
 
-const matches = (pattern: RegExp, message: string) =>
-  Schema.refine((value: unknown): value is string => typeof value === 'string' && pattern.test(value), { message })
-const Head = Schema.String.pipe(matches(/^[0-9a-f]{40}$/, 'Expected an exact commit SHA'))
-const Digest = Schema.String.pipe(matches(/^sha256:[0-9a-f]{64}$/, 'Expected a SHA-256 digest'))
-const Seat = Schema.String.pipe(matches(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Expected a local reviewer seat ID'))
+const matchingString = (pattern: RegExp, message: string): Schema.Codec<string, string> =>
+  Schema.String.pipe(Schema.refine((value): value is string => pattern.test(value), { message }))
+const Head = matchingString(/^[0-9a-f]{40}$/, 'Expected an exact commit SHA')
+const Digest = matchingString(/^sha256:[0-9a-f]{64}$/, 'Expected a SHA-256 digest')
+const Seat = matchingString(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Expected a local reviewer seat ID')
 
 /** Immutable material to assess, not the material attached to a person ask by Review.subject. */
 export const ReviewSubject = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal('pullRequest'),
-    repo: Schema.String.pipe(matches(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'Expected owner/repository')),
+    repo: matchingString(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'Expected owner/repository'),
     number: Schema.Number.pipe(Schema.refine((value): value is number => Number.isSafeInteger(value) && value > 0)),
     head: Head,
     format: Schema.Literals(['q19', 'fractal']),
