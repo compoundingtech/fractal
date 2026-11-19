@@ -881,7 +881,6 @@
         ".st",
         ".fractal",
         "apps/fractal-web/.gitignore",
-        "apps/fractal-web/scripts/devnet",
         "apps/fractal-web/src/changelog/seen.ts",
         "apps/ios/modules/fractal-fabric/build.sh",
         "apps/ios/scripts/release_delivery.py",

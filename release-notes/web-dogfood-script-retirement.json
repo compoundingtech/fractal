@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Remove retired dogfood deployment scripts and their dedicated CI coverage; preserve the upstream web publisher.",
+  "replay": { "status": "none", "detail": "No application-data replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "changed", "detail": "The retired deployment helpers are no longer available. The upstream publisher and its dependencies are unchanged." },
+  "downtime": { "status": "none", "detail": "Source deletion does not restart or change a running service." },
+  "manual": { "status": "changed", "detail": "Retire existing services that consume these helpers before merging this deletion." },
+  "recovery": { "status": "none", "detail": "No application recovery change." }
+}
