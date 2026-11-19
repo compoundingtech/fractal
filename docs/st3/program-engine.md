@@ -491,8 +491,9 @@ and an iterative program that needs more than a few thousand steps runs rounds a
 
 ### 6. Linked child runs, worker turns and asks
 
-A program waits on two kinds of things the daemon owns: a linked child run (`run`, from
-`Fractal.run` and worker turns) and a native person ask (`ask`, from `Fractal.ask`). The engine
+A program can start and wait for a linked child (`Fractal.run` and worker turns), publish a linked
+child without waiting (`Fractal.start`), observe its terminal result (`Fractal.await`), or wait for
+a native person ask (`Fractal.ask`). For the existing `run` and `ask` requests, the engine
 journals a `started` entry for the key when the request arrives, and the program's run evaluation
 does the rest: it starts or adopts what the key waits on, journals a second `started` entry whose
 `child` names it, and, once it ends, journals the result under the key (with `child` set) and sends
@@ -516,6 +517,55 @@ again and the start is retried then. When the child ends, the program receives:
 |---|---|
 | `completed` | Success `{ run, status: 'completed', products? }`; `products` holds the value of each product the child's steps declare, by full subject (`resource/mission-run/CHILD/…`) |
 | `failed` / `cancelled` | Failure `{ _tag: 'ChildFailed', run, status, reason }`; `reason` is the run's end reason, else its failed step's |
+
+**Publish a child, then await it.**
+
+```ts
+const child = yield* Fractal.start('factory/land', { change: '123' }, {
+  id: 'dispatch-reviewed-head',
+  runId: 'pr-123-head12',
+})
+// The linked child is now durably published and visible. Release dispatch locks here.
+const result = yield* Fractal.await(child)
+```
+
+`start` accepts either a typed `ProgramMission` with its schema's input type or a mission ID
+string with `Readonly<Record<string, string>>` input. Its required options are
+`{ readonly id: string; readonly runId: string }`. It returns
+`Effect.Effect<ChildHandle, ChildConflict, ProgramServices>`, where `ChildHandle` is the exported
+schema and type `{ run: string }`. In the example, `child.run` is the canonical subject
+`mission-run/pr-123-head12`, not an acknowledgement token or a guessed generated ID.
+
+The two IDs are distinct contracts:
+
+- `id` is the durable operation/journal key. Replay after a lost acknowledgement returns the
+  same handle without publishing a second child.
+- `runId` is the explicit public mission-run declaration ID, validated and normalized by the
+  existing declaration ID rules. It is not a replacement for the journal key.
+
+The start acknowledgement is sent only after linked-child publication is committed and visible,
+not merely after queuing a request. A dispatcher can hold its reviewed-slot and per-change locks
+through `start`, release them after it returns, then await outside the locks. Forking and polling
+a guessed ID does not provide this publication guarantee.
+
+An explicit-ID collision can adopt only the same creation identity, parent and input contract.
+A different parent, payload or conflicting public ID returns the exported typed error
+`ChildConflict { _tag: 'ChildConflict', run: string, reason: string }`; it never reparents an
+existing run or silently creates another child. The public ID remains searchable across controller
+parents, but lookup does not transfer ownership.
+
+`Fractal.await(handle)` returns `Effect.Effect<ChildRun, ChildFailed, ProgramServices>`. It observes
+the recorded subject and returns its existing terminal result, including an already terminal
+result; it does not start another child. It uses the same success and `ChildFailed` outcomes above.
+The engine reuses the existing persisted waiting-child association and child store.
+`Fractal.run` still starts **and waits**; its replay behavior and
+`program:STEP:ATTEMPT:KEY` journal identity are unchanged. Old `id` values do not become public IDs.
+
+Start-only children remain linked: parent cancellation cancels them even when the parent has not
+called `await`. Both operations preserve the original authenticated initiating principal inherited
+through the parent. Requester attribution is not authority. In particular, a child's own
+[Landing resource lane](resources.md#host-owned-profiles-with-landing) is authorized from that
+principal, not from possession of a handle or the parent's resource grant.
 
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
 input, product })))`, is a child run of `mission` with `input`. Its value is the child's product

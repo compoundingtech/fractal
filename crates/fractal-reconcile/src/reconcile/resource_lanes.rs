@@ -377,10 +377,18 @@ mod tests {
         };
         let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy));
+        for override_kind in ["capacity", "disk", "io"] {
+            let mut request = profile_request();
+            match override_kind {
+                "capacity" => request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB }),
+                "disk" => request.disk = Some(fractal_runtime::DiskRequest { bytes: GIB, path: "/workspace".into() }),
+                "io" => request.io = Some(fractal_runtime::IoClass::Heavy),
+                _ => unreachable!(),
+            }
+            assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string()
+                .contains("profile-override-conflict"), "{override_kind} must remain host-owned");
+        }
         let mut request = profile_request();
-        request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
-        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("profile-override-conflict"));
-        request = profile_request();
         request.profile = Some("unknown.workload".into());
         assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
         request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
@@ -392,6 +400,72 @@ mod tests {
         let original = raw.clone();
         reconciler.resolve_resource_profile(&mut raw).unwrap();
         assert_eq!(raw, original);
+    }
+
+    #[test]
+    fn landing_profile_restart_preserves_one_estimate_and_shared_memory_io_custody() {
+        use super::super::tests::FakeRuntime;
+        use crate::store::resource_membership::BlockedBy;
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("graph.db");
+        let mut seed = profile_seed();
+        seed.io = Some(fractal_runtime::IoClass::Heavy);
+        let expected = seed.estimate().unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), seed)]),
+            heavy_io_slots: Some(1),
+            landing: fractal_runtime::host::LandingPolicy {
+                allowed_actors: BTreeSet::from(["person/operator".into()]),
+                memory_bytes: 8 * GIB, heavy_io_slots: 1,
+            }, ..Default::default()
+        };
+        let mut intent = profile_request();
+        intent.class = fractal_runtime::RequestClass::Landing;
+        intent.owner.run = "person/operator".into();
+        let accepted = {
+            let store = Arc::new(Store::open(&database, "node").unwrap());
+            store.start_resource_authority("node", "epoch-before").unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+                .with_finite_resources(Some(policy.clone()));
+            let mut accepted = intent.clone();
+            reconciler.resolve_resource_profile(&mut accepted).unwrap();
+            let fit = Fit { room: test_fit().room, heavy_io_slots: policy.heavy_io_slots,
+                landing: policy.landing.clone(), ..Default::default() };
+            assert!(matches!(store.request_resource_membership(&accepted, fit, 1).unwrap(), Admission::Admitted(_)));
+            assert_eq!(reconciler.held_lanes("seat", 1).unwrap(), 8 * GIB);
+            accepted
+        };
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        store.start_resource_authority("node", "epoch-after").unwrap();
+        let mut changed_policy = policy.clone();
+        changed_policy.profiles.get_mut("check.unit").unwrap().memory = 12 * GIB;
+        changed_policy.profiles.get_mut("check.unit").unwrap().io = None;
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(changed_policy));
+        let mut replay = intent;
+        reconciler.resolve_resource_profile(&mut replay).unwrap();
+        assert_eq!(replay, accepted);
+        assert_eq!(replay.profile_estimate, Some(expected));
+        assert_eq!(store.resource_memberships_for_host("node").unwrap().len(), 1);
+        assert_eq!(reconciler.held_lanes("seat", 2).unwrap(), 8 * GIB,
+            "restart must not double-charge the Landing carve-out");
+        assert_eq!(store.resource_lane_aggregate("node", "checks").unwrap(), accepted.capacity);
+        for (id, room, slots, blocked_by) in [
+            ("memory-contender", 8 * GIB, 2, BlockedBy::Holder),
+            ("io-contender", 128 * GIB, 1, BlockedBy::Io),
+        ] {
+            let mut contender = accepted.clone();
+            contender.id = id.into();
+            contender.name = id.into();
+            contender.profile = None;
+            contender.profile_estimate = None;
+            contender.class = fractal_runtime::RequestClass::Check;
+            let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: room }),
+                heavy_io_slots: Some(slots), landing: policy.landing.clone(), ..Default::default() };
+            assert!(matches!(store.request_resource_membership(&contender, fit, 3).unwrap(), Admission::Queued { .. }));
+            assert_eq!(store.resource_membership_record(&contender.id, &contender.owner).unwrap().blocked_by, Some(blocked_by));
+            store.withdraw_resource_membership(&contender.id, &contender.owner, 4).unwrap();
+        }
     }
 
     #[test]
@@ -410,6 +484,7 @@ mod tests {
             .with_finite_resources(Some(policy.clone()));
         let mut candidate = LaneRequest {
             id: "landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+            profile: None, profile_estimate: None, disk_path: None,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 40 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Landing, disk: None, io: Some(fractal_runtime::IoClass::Heavy),
@@ -436,9 +511,7 @@ mod tests {
             goal "Verify authenticated landing."
             step "land" {
                 agentless
-                lane "landing" host="node" class="landing" coverage="logical" {
-                    capacity cores=1 memory="1G";
-                }
+                lane "landing" host="node" profile="check.unit" class="landing" coverage="logical"
                 exec "land" { command "true"; }
             }
         }"#;
@@ -482,18 +555,22 @@ mod tests {
             assert!(!exec.environment.contains_key("ST_AGENT"));
             assert!(!exec.environment.contains_key("FRACTAL_AGENT"));
             assert!(!exec.tags.contains_key("st3.agent"));
-            let lane = lower_request(spec.resource_lane.as_ref().unwrap(), "landing-exec".into(), Owner {
+            let mut lane = lower_request(spec.resource_lane.as_ref().unwrap(), "landing-exec".into(), Owner {
                 run: run.subject.clone(), step: run.steps[0].subject.clone(),
                 attempt: run.steps[0].attempt, invocation: Some("exec/landing/land".into()),
             });
             let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
                 .with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                    profiles: BTreeMap::from([("check.unit".into(), profile_seed())]),
                     landing: fractal_runtime::host::LandingPolicy {
                         allowed_actors: BTreeSet::from([if authorize_default {
                             "person/requester".into()
                         } else { "agent/example/lander".into() }]), ..Default::default()
                     }, ..Default::default()
                 }));
+            reconciler.resolve_resource_profile(&mut lane).unwrap();
+            assert_eq!(lane.capacity, Some(profile_seed().capacity()));
+            assert_eq!(lane.profile_estimate, Some(profile_seed().estimate().unwrap()));
             let mut fit = reconciler.resource_lane_fit(&lane).unwrap();
             fit.room = test_fit().room;
             let admission = store.request_resource_membership(&lane, fit, 1).unwrap();
@@ -507,6 +584,8 @@ mod tests {
             let record = store.resource_membership_record(&lane.id, &lane.owner).unwrap();
             assert_eq!(record.request.class, fractal_runtime::RequestClass::Landing);
             assert_eq!(record.state, if allowed { "admitted" } else { "refused" });
+            assert_eq!(record.request.profile_estimate, lane.profile_estimate);
+            if !allowed { assert!(record.grant.is_none()); }
         }
     }
 
@@ -519,6 +598,7 @@ mod tests {
             id: "denied-landing".into(),
             lane: LaneRequest {
                 id: "shell:denied-landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+                profile: None, profile_estimate: None, disk_path: None,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }),
                 class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
                 disk: None, io: None, admission_timeout_ms: None,

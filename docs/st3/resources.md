@@ -70,6 +70,43 @@ child slice. CPU/memory limits (and any explicit MemoryHigh) apply per generatio
 bounds never shrink below live launch, admitted or retiring snapshots. Both levels enable IO
 accounting, and enforced launch verifies the actual parent/child controls before payload release.
 
+### Host-owned profiles with Landing
+
+A named host profile and Landing authorization compose without another capacity resolver.
+For a host whose `finite_resources.profiles` contains `land-check-native`, a program declares:
+
+```ts
+const lane = yield* Fractal.resources.lane('factory-landing', {
+  host: 'worker',
+  profile: 'land-check-native',
+  maxMembers: 1,
+  class: 'landing',
+  diskPath: '/workspace',
+  coverage: 'enforced',
+})
+```
+
+The equivalent direct DSL lane is:
+
+```kdl
+lane "factory-landing" host="worker" profile="land-check-native" max-members=1 class="landing" disk-path="/workspace" coverage="enforced"
+```
+
+Both paths use the same host-owned profile resolver as shell execution. Do not duplicate seed
+amounts in the caller or supply capacity, disk-byte or IO overrides for a known profile: those
+overrides are refused. `diskPath` selects the filesystem, not a disk-byte override. The resolved
+estimate is frozen once in the durable request and retained through replay/restart, even if the
+host seed changes.
+
+The profile supplies the footprint; it does not grant Landing authority or add another memory/IO
+budget. Admission charges the existing host totals and applies the protected Landing carve-out
+described below. The owning run's original authenticated initiating principal must be authorized
+by `finite_resources.landing.allowedActors`. An unauthorized root is visibly refused as
+`unauthorized-landing`, never downgraded to another class.
+[Linked children](program-engine.md#6-linked-child-runs-worker-turns-and-asks), including children
+published with `Fractal.start`, inherit that principal and request their own DSL/program lane.
+A handle, requester label or parent lane is not a substitute for that authorization.
+
 
 ## Shell callers
 
@@ -423,12 +460,15 @@ Positive nonlaunch evidence can remove an exact rejected preparation; absence of
 
 ## Durable execution receipts
 
-Every terminal top-level resource execution (`parent` absent) records one immutable
-`resource.exec-receipt` claim in the existing replicated claims log, atomically with its terminal
-execution update. Nested executions do not append another receipt. The claim is system-only,
-once per resource subject, with durable retention; it observes execution, not admission authority
-or proof that a process tree has retired. `state` is `completed`, `refused` or `cancelled`, including
-terminal refusal or cancellation before payload launch.
+Terminal top-level shell resource executions (`parent` absent) and direct DSL/program resource
+roots record the existing immutable `resource.exec-receipt` claim in the replicated claims log.
+Shell receipts are committed atomically with the terminal execution update; nested shell executions
+do not append another root receipt. Direct DSL/program receipts bind the exact owner step run,
+attempt and runtime generation and are emitted only after confirmed whole-tree retirement.
+The claim is system-only, once per resource subject, with durable retention. It observes execution,
+not admission authority; a receipt kind or terminal state alone is not retirement proof.
+`state` is `completed`, `refused` or `cancelled`; shell semantics retain terminal refusal or
+cancellation before payload launch.
 
 Fields carry `exec_id`, executing `host`, `class` (`landing`, `check`, `agent`), `owner` and
 `coverage` (`logical`, `enforced`). Declared profile fields are optional `memory_bytes`,
@@ -466,6 +506,49 @@ To select a host/class across all heads, omit `--subject-prefix` and use the sam
 There is no independent indexed host/class filter in `claims ls`. These examples select only
 one page: continue an ascending query with `--after-index` set to the response's `next_cursor`
 until it is absent. Filter every page, including pages with no matching host/class rows.
+
+### Binding a direct proof to its retired execution
+
+Direct DSL/program roots use this same receipt schema and authority, not a separate proof record.
+Before payload release, the durable runtime-generation launch snapshot freezes the payload's
+actual `argv`, excluding credential and daemon wrappers. `argv_sha256` uses the shared shell
+convention: lowercase SHA-256 of UTF-8 arguments joined by NUL, with no trailing NUL.
+At confirmed retirement, receipt emission combines that immutable command binding with the
+same runtime generation's exit code/signal and the membership's exact owner, class and profile.
+Nonzero and signal outcomes remain truthful; terminal denial never fabricates a launched receipt.
+
+Use the indexed exact receipt lookup with the proof's **step-run ID and attempt**, additionally
+selecting a runtime generation when the step legitimately has multiple roots. The read returns the
+authoritative receipt reference and its bound fields; it does not mint a grant. This is distinct
+from browsing head-prefix claims above: a latest-success or latest-desired-declaration join cannot
+identify a proof. `CommandResult` has no exec-ID field and none is needed for this lookup.
+
+The exact read is
+`GET /v1/internal/resources/exec-receipt?stepRun=<proof-step>&attempt=N`,
+with optional `&generation=...`. The corresponding CLI is:
+
+```sh
+fractal --json resources exec-receipt --step-run "$proof_step" --attempt "$proof_attempt"
+# Add --generation "$proof_generation" to select one runtime generation explicitly.
+```
+
+The store exposes the typed `ReceiptReference` in `store::resource_exec_receipts`.
+These surfaces read the existing authoritative record; neither the reference nor the lookup
+introduces a new credential or grants admission authority.
+
+A light finalizer runs after the program resource scope closes (scope release awaits retirement),
+or after the DSL proof's retirement boundary. Pass the proof's step-run ID and attempt explicitly;
+the finalizer's own `ST_STEP_RUN` is not the proof's identity. Require the exact host, attempt and
+runtime generation, confirmed retirement, expected argv digest, expected head/clean observations,
+class/profile and exit outcome before accepting evidence.
+
+Ambiguous roots, missing launch snapshots or outcomes, unconfirmed retirement, stale generations
+and wrong host/attempt/head/command visibly refuse. Historical launches without a frozen command
+binding remain ineligible: neither a changed desired declaration nor daemon restart may relabel
+old evidence. Do not fall back to a previous successful attempt or fill missing fields from current
+configuration. Logical coverage never fabricates measured cgroup peaks. Existing program/DSL
+retirement accounting and shell receipt semantics remain unchanged.
+
 
 ## Coverage and boundaries
 

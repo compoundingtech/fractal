@@ -573,6 +573,87 @@ fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_repl
 }
 
 #[test]
+fn program_and_dsl_landing_profiles_share_host_seed_and_refuse_caller_overrides() {
+    use crate::reconcile::{NativeRuntime, Reconciler, RuntimeStep, resource_lanes};
+    use crate::reconcile::tests::apply_source;
+    use crate::store::resource_membership::{Owner, RefusalCode};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "landing-profile");
+    running_attempt(&engine, &run, 1, 1);
+    let seed = fractal_runtime::ResourceProfileSeed {
+        cores: 4, memory: 8 << 30, memory_high: None,
+        learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly,
+        recovery_capable: false, source: Some("declared".into()), reason: Some("landing checks".into()),
+        disk: None, io: Some(fractal_runtime::IoClass::Heavy),
+    };
+    let runtime = Arc::new(NativeRuntime::new(dir.path(), None, Path::new("unused-pty")));
+    let reconciler = Reconciler::new(engine.store.clone(), runtime,
+        "node".into(), Arc::new(tokio::sync::Notify::new()))
+        .with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("landing.check".into(), seed.clone())]),
+            heavy_io_slots: Some(2), ..Default::default()
+        }));
+    let payload = json!({"name":"landing", "host":"node", "profile":"landing.check",
+        "coverage":"logical", "class":"landing"});
+    let acquire = |key: &str, payload: &Value| {
+        engine.handle(&json!({"t":"resource", "step":run.steps[0].subject, "attempt":1,
+            "seq":key, "key":key, "operation":"resource.lane.acquire", "payload":payload}), 1).unwrap();
+        let request = engine.requests(&run.subject).into_iter().find(|request| request.key == key).unwrap();
+        assert!(reconciler.settle_program_resource(&engine, &run, &request,
+            "resource.lane.acquire", payload, false).unwrap());
+        request
+    };
+    let request = acquire("profile", &payload);
+    let owner = Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(), attempt: 1,
+        invocation: Some("program:profile".into()) };
+    let record = engine.store.resource_membership_record(&request.idempotency_key(), &owner).unwrap();
+    assert_eq!(record.state, "refused");
+    assert_eq!(record.refusal_code, Some(RefusalCode::UnauthorizedLanding));
+    assert!(record.grant.is_none());
+    assert_eq!(record.request.class, fractal_runtime::RequestClass::Landing);
+    assert_eq!(record.request.capacity, Some(seed.capacity()));
+    assert_eq!(record.request.profile_estimate, Some(seed.estimate().unwrap()));
+    for (key, field, value) in [
+        ("capacity-override", "capacity", json!({"cores":4,"memory":8_u64 << 30})),
+        ("disk-override", "disk", json!({"bytes":0,"path":"/workspace"})),
+        ("io-override", "io", json!("heavy")),
+    ] {
+        let mut overridden = payload.clone();
+        overridden[field] = value;
+        acquire(key, &overridden);
+        assert_eq!(engine.store.resource_memberships_for_host("node").unwrap().len(), 1,
+            "{key} must fail before creating resource custody");
+    }
+    let source = r#"version 2
+mission "dsl-profile" state="ready" {
+  goal "Use the same execution-host estimate as a program."
+  step "work" {
+    agentless
+    lane "landing" host="node" profile="landing.check" class="landing" coverage="logical"
+    exec "work" { command "true"; }
+  }
+}"#;
+    apply_source(&engine.store, source, "dsl-profile-source");
+    let intent = crate::graph::parse_intent(source, "node").unwrap();
+    let spec = &intent.missions["dsl-profile"].steps["work"];
+    let declarations = crate::graph::parse_execution_intent(
+        spec.declarations_kdl.as_deref().unwrap(), "node", &run.id).unwrap();
+    let (subject, member) = declarations.subjects.iter()
+        .find_map(|(subject, desired)| desired.member.as_ref().map(|member| (subject, member))).unwrap();
+    let mut member = member.clone();
+    let step = RuntimeStep { spec, dependency_prefix: String::new(), parent: None, mission_capacity: None };
+    reconciler.bind_resource_lane(&run, &step, &run.steps[0], &mut member, subject).unwrap();
+    let dsl = resource_lanes::request(&member).unwrap().unwrap();
+    assert_eq!(dsl.profile, record.request.profile);
+    assert_eq!(dsl.profile_estimate, record.request.profile_estimate);
+    assert_eq!(dsl.capacity, record.request.capacity);
+    assert_eq!(dsl.disk, record.request.disk);
+    assert_eq!(dsl.io, record.request.io);
+    assert_eq!(dsl.class, record.request.class);
+}
+
+#[test]
 fn launch_freeze_defers_resource_exec_and_clear_invalidates_the_pending_effect() {
     frozen_resource_exec(false);
 }
