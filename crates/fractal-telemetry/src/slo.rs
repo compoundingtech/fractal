@@ -514,6 +514,66 @@ pub struct DatabaseSize {
     pub physical_growth_span_ms: Option<u128>,
 }
 
+/// Independently measured archive file lengths, never subtracted from the hot-store gauge.
+/// These are capacity measurements, not proof of object integrity or catalogue completeness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ArchiveBytes {
+    pub segment_file_bytes: u64,
+    pub index_bytes: u64,
+    pub overlay_bytes: u64,
+    pub staging_bytes: u64,
+    pub orphan_bytes: u64,
+    pub backup_bytes: u64,
+    pub files: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArchiveSizeStatus { NotActivated, Available, Unavailable }
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DatabaseArchiveSize {
+    pub measured_at_unix_ms: u128,
+    /// Hash of the canonical local measurement root, never the private filesystem path.
+    pub scope: String,
+    pub status: ArchiveSizeStatus,
+    pub bytes: Option<ArchiveBytes>,
+    /// Segment files plus separately owned index and overlay files.
+    pub archive_bytes: Option<u64>,
+    /// All files, additionally including staging, orphans and backup-owned copies.
+    pub capacity_bytes: Option<u64>,
+    pub growth_bytes_per_day: Option<i64>,
+    pub growth_span_ms: Option<u128>,
+    pub baseline_at_unix_ms: Option<u128>,
+    pub error: Option<String>,
+}
+
+static DATABASE_ARCHIVE: std::sync::Mutex<Option<DatabaseArchiveSize>> = std::sync::Mutex::new(None);
+
+pub fn note_database_archive_size(size: &DatabaseArchiveSize) {
+    *DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size.clone());
+}
+
+pub fn database_archive_size() -> Option<DatabaseArchiveSize> {
+    DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+fn database_archive_row(size: Option<DatabaseArchiveSize>, now: u128) -> Value {
+    let fresh = size.as_ref().is_some_and(|size| size.measured_at_unix_ms <= now
+        && now - size.measured_at_unix_ms <= 2 * 60 * 60 * 1000);
+    json!({
+        "name": "database-archive",
+        "kind": "gauge",
+        "about": "Separately measured local wire-archive bytes and net daily growth; not a hot-store saving or durability proof",
+        "fresh": fresh,
+        "status": if fresh { size.as_ref().map(|size| size.status) } else { None },
+        "size": size,
+        "integrity": "not-assessed",
+        "catalogue_coverage": Value::Null,
+        "budget": Value::Null,
+    })
+}
+
 /// This member's newest store size, which the daemon measures hourly.
 static DATABASE: std::sync::Mutex<Option<DatabaseSize>> = std::sync::Mutex::new(None);
 
@@ -564,6 +624,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "size": database_size().map_or(Value::Null, |size| json!(size)),
             "budget": database_budget(),
         }),
+        database_archive_row(database_archive_size(), u128::from(smallclaims::windows::budgets::unix_ms())),
     ]
 }
 
@@ -919,6 +980,43 @@ fn database_line(target: &Value) -> (String, &'static str, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_row_is_a_separate_informational_gauge_and_stale_is_unknown() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::Available, bytes: Some(ArchiveBytes::default()),
+            archive_bytes: Some(0), capacity_bytes: Some(0), growth_bytes_per_day: None,
+            growth_span_ms: None, baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size.clone()), 100);
+        assert_eq!(row["name"], "database-archive");
+        assert_eq!(row["kind"], "gauge");
+        assert_eq!(row["status"], "available");
+        assert!(row["budget"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert_eq!(row["integrity"], "not-assessed");
+        assert!(row["catalogue_coverage"].is_null());
+        for now in [99, 100 + 2 * 60 * 60 * 1000 + 1] {
+            let stale = database_archive_row(Some(size.clone()), now);
+            assert_eq!(stale["fresh"], false);
+            assert!(stale["status"].is_null());
+        }
+        let missing = database_archive_row(None, 100);
+        assert_eq!(missing["fresh"], false);
+        assert!(missing["size"].is_null());
+    }
+
+    #[test]
+    fn unconfigured_archive_is_not_a_zero_byte_success() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::NotActivated, bytes: None, archive_bytes: None,
+            capacity_bytes: None, growth_bytes_per_day: None, growth_span_ms: None,
+            baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size), 100);
+        assert_eq!(row["status"], "not-activated");
+        assert!(row["size"]["archive_bytes"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert!(row["budget"].is_null());
+    }
 
     #[test]
     fn database_unknown_growth_cannot_prove_health_or_hide_live_breach() {
