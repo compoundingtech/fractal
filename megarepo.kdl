@@ -1,4 +1,0 @@
-// Keep shared generators and the Nix build toolchain on the fleet's published revision.
-members {
-  effect-utils "overengineeringstudio/effect-utils#fb314b7a46169ac73e953b0b410b53dbda5d07f9"
-}
