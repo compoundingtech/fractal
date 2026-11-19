@@ -255,7 +255,7 @@ fn github_client() -> reqwest::Client {
                 // Follow REST redirects explicitly so every HTTP hop is admitted.
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
-                .user_agent("fractal-resource-observer/0.1")
+                .user_agent("st3-resource-observer/0.1")
                 .connect_timeout(GITHUB_CONNECT_TIMEOUT)
                 .timeout(GITHUB_REQUEST_TIMEOUT)
                 .build()

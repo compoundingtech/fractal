@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn lexical_and_callback_scopes_match_on_success_nesting_and_unwind() {
-        const CHILD: &str = "FRACTAL_BLOCKING_SCOPE_TEST_CHILD";
+        const CHILD: &str = "ST3_BLOCKING_SCOPE_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())

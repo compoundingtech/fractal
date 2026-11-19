@@ -170,7 +170,7 @@ fn retention_elapsed_budget_commits_a_prefix_and_resumes_without_losing_pins() {
 
 #[test]
 fn retention_committed_request_crash_child() {
-    let Ok(path) = std::env::var("FRACTAL_RETENTION_CRASH_FIXTURE") else {
+    let Ok(path) = std::env::var("ST_RETENTION_CRASH_FIXTURE") else {
         return;
     };
     let store = Store::open(std::path::Path::new(&path), "alder", Arc::new(Plain)).unwrap();
@@ -191,7 +191,7 @@ fn retention_recovers_after_process_exit_before_response_delivery() {
             "retention_committed_request_crash_child",
             "--nocapture",
         ])
-        .env("FRACTAL_RETENTION_CRASH_FIXTURE", &path)
+        .env("ST_RETENTION_CRASH_FIXTURE", &path)
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(23));

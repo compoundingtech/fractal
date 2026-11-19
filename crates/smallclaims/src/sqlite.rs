@@ -543,7 +543,7 @@ impl WriterConnection {
         let telemetry = telemetry::Writer::new(&connection);
         let writer_telemetry = telemetry.clone();
         let thread = std::thread::Builder::new()
-            .name("fractal-writer".into())
+            .name("st3-writer".into())
             .spawn(move || {
                 // A commit observer can release the final WriterConnection owner
                 // on this thread. Keep admission independently until SQLite closes,
@@ -2667,7 +2667,7 @@ mod tests {
     #[test]
     fn batched_profiles_keep_each_origin_and_flush_before_acknowledgement() {
         // Isolate the process-global profiler, as in profile's cancellation regression.
-        const CHILD: &str = "FRACTAL_PROFILE_BATCH_ORIGINS_TEST_CHILD";
+        const CHILD: &str = "ST3_PROFILE_BATCH_ORIGINS_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())

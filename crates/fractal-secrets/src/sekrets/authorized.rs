@@ -256,7 +256,7 @@ impl Http {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .timeout(std::time::Duration::from_secs(60))
-            .user_agent("fractal-sekrets")
+            .user_agent("st-sekrets")
             .build()?;
         Ok(Arc::new(Self { runtime, client }))
     }

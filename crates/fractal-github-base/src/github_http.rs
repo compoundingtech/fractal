@@ -723,7 +723,7 @@ where
         .headers_mut()
         .entry(reqwest::header::USER_AGENT)
         .or_insert(reqwest::header::HeaderValue::from_static(
-            "fractal-resource-observer/0.1",
+            "st3-resource-observer/0.1",
         ));
     let url = request.url().clone();
     anyhow::ensure!(

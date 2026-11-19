@@ -409,7 +409,7 @@ impl Store {
     /// stderr tracing subscriber unless telemetry export is on, so a tracing line from a trim
     /// never reached a member's journal. A test's `trim_log_hook` sees the line too.
     fn trim_log(&self, line: std::fmt::Arguments<'_>) {
-        let line = format!("fractal: {line}");
+        let line = format!("st3: {line}");
         if let Some(hook) = self.trim_log_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
             hook(&line);
         }

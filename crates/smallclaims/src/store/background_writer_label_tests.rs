@@ -20,7 +20,7 @@ fn slow_records() -> Vec<Value> {
 #[test]
 fn background_writer_pages_are_named_operations_in_the_profile() {
     // Profiling is process-global, so a child gets its own enabled profiler.
-    const CHILD: &str = "FRACTAL_PROFILE_BACKGROUND_WRITER_LABEL_TEST_CHILD";
+    const CHILD: &str = "ST3_PROFILE_BACKGROUND_WRITER_LABEL_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())

@@ -6,10 +6,10 @@ mod tests {
 
     #[test]
     fn xdg_environment_reaches_config_and_state_readers() {
-        const CHILD: &str = "FRACTAL_PRODUCT_DIRS_TEST_CHILD";
+        const CHILD: &str = "ST_PRODUCT_DIRS_TEST_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
             let root = PathBuf::from(root);
-            let selected = std::env::var("FRACTAL_PRODUCT_DIRS_TEST_SELECTED").unwrap();
+            let selected = std::env::var("ST_PRODUCT_DIRS_TEST_SELECTED").unwrap();
             let config_dir = root.join("config").join(&selected);
             let state_dir = root.join("state").join(&selected);
             assert_eq!(fractal_daemon::config::Config::default_path(), config_dir.join("config.toml"));
@@ -56,7 +56,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD, root.path())
-                .env("FRACTAL_PRODUCT_DIRS_TEST_SELECTED", selected)
+                .env("ST_PRODUCT_DIRS_TEST_SELECTED", selected)
                 .env("HOME", root.path().join("home"))
                 .env("XDG_CONFIG_HOME", root.path().join("config"))
                 .env("XDG_STATE_HOME", root.path().join("state"))

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Use Fractal naming in supporting-crate diagnostics, private test markers and migration output commands.",
+  "summary": "Use Fractal naming in supporting-crate diagnostics, private test fixtures and migration output commands.",
   "replay": { "status": "none", "detail": "No graph replay changes." },
   "schema": { "status": "none", "detail": "Persisted identifiers, signed domains and wire protocols are unchanged." },
   "rules": { "status": "none", "detail": "No authority or permission changes." },

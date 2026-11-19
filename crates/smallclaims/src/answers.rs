@@ -852,7 +852,7 @@ impl AnswersCache {
         let (cache, store) = (self.clone(), store.clone());
         let readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let thread_job = job.clone();
-        let spawned = std::thread::Builder::new().name("fractal-answers".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("st3-answers".into()).spawn(move || {
             let (cut, kind) = thread_job;
             let started = Instant::now();
             let store: &Store = (*store).borrow();

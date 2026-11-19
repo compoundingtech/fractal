@@ -766,7 +766,7 @@ jobs in that commit.
 
 Under `ST3_PROFILE_DIR`, an operation counts the time before its writer job starts
 as writer wait, and the job itself as writer hold. The batch `COMMIT` appears under
-`(unlabeled fractal-writer)`, whose statement count is the number of batches. Phase times
+`(unlabeled st3-writer)`, whose statement count is the number of batches. Phase times
 and the enclosing operation can overlap; they must not be added as independent
 request durations.
 

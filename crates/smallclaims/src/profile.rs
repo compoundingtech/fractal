@@ -182,7 +182,7 @@ pub fn init_from_env() {
     }
     ENABLED.store(true, Ordering::Relaxed);
     let _ = std::thread::Builder::new()
-        .name("fractal-profile".into())
+        .name("st3-profile".into())
         .spawn(flush_loop);
     eprintln!(
         "fractal: profiling into {} (slow after {} ms)",
@@ -1556,7 +1556,7 @@ mod tests {
     fn canceled_operation_records_blocking_writer_work_when_last_worker_exits() {
         // Profiling is process-global. A child gives this test its own enabled profiler without
         // changing the accounting of other tests running in parallel.
-        const CHILD: &str = "FRACTAL_PROFILE_CANCELLATION_TEST_CHILD";
+        const CHILD: &str = "ST3_PROFILE_CANCELLATION_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1846,7 +1846,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn a_stage_span_counts_its_reads_and_an_item_span_does_not() {
         // Profiling is process-global, so this runs in a child with its own enabled profiler.
-        const CHILD: &str = "FRACTAL_PROFILE_STAGE_IO_TEST_CHILD";
+        const CHILD: &str = "ST3_PROFILE_STAGE_IO_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not() {
         // Profiling is process-global, so this runs in a child with its own enabled profiler.
-        const CHILD: &str = "FRACTAL_PROFILE_STATEMENT_TAG_TEST_CHILD";
+        const CHILD: &str = "ST3_PROFILE_STATEMENT_TAG_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
