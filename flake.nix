@@ -372,6 +372,10 @@
           inherit version cargoDeps;
           src = self;
           cargoBuildFlags = sharedWorkspaceTestFlags;
+          # cargoSetupHook otherwise forces system libraries, overriding rusqlite's
+          # bundled feature and bypassing the SQLite flags in .cargo/config.toml.
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           CLI_BUILD_STAMP = buildStamp;
           ST2_EXECUTOR_BUILD_IDENTITY = buildStamp;
           AGENT_SPEC_REVISION = agentSpecRevision;
@@ -426,6 +430,8 @@
           pname = "fractal";
           inherit version;
           src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
@@ -663,6 +669,8 @@
           pname = "st3-deploy-policy-${name}";
           inherit version cargoDeps;
           src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           ST3_DEPLOY_POLICY_TEST_MODE = name;
           ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
@@ -680,6 +688,8 @@
           pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" "--bin" "fractal-mcp" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
@@ -705,6 +715,8 @@
           pname = "fractal-fabric-adapter";
           inherit version cargoDeps;
           src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "fractal-fabric-adapter" ];
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
@@ -889,6 +901,8 @@
           pname = "fractal-provider-runtime-check";
           inherit version cargoDeps;
           src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
           cargoBuildFlags = [ "-p" "fractal-resource-providers" ];
           cargoTestFlags = [ "-p" "fractal-resource-providers" "--lib" "--test" "integration" ];
           nativeBuildInputs = [ pkgs.bash pkgs.git pkgs.python3 pkgs.lld ptyPackage ]
@@ -959,6 +973,17 @@
         # wants them.
         checks.shared-drivers = sharedDriverCheck;
         checks.st3 = st3Check;
+        checks.bundled-sqlite-env =
+          assert builtins.all (package:
+            package.drvAttrs.dontCargoUseSystemLibs
+            && package.drvAttrs.LIBSQLITE3_SYS_USE_PKG_CONFIG == "0"
+          ) [
+            sharedDriverCheck st3Check fractal fractalChatgpt fractalMcp fractalFabricAdapter
+            (mkDeployPolicyCheck "absent" null) providerRuntimeCheck
+          ];
+          pkgs.runCommand "bundled-sqlite-env" { } ''
+            touch "$out"
+          '';
         checks.st3-deploy-policy-absent = mkDeployPolicyCheck "absent" null;
         checks.st3-deploy-policy-packaged = mkDeployPolicyCheck "packaged" deployPolicyFixture;
         checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;

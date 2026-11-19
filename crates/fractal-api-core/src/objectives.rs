@@ -159,9 +159,22 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
         if no_events { "no-qualifying-events" } else { "no-data" },
     );
     let diagnostic_target = row["target"].as_str().unwrap_or_default().to_owned();
-    let diagnostic_current = row["current"].as_str().unwrap_or_default().to_owned();
+    let sparse_diagnostic_empty = matches!(row["id"].as_str(), Some("terminal-attach" | "person-read-fresh"))
+        && row["status"] == "no-data";
+    let retained_hour_events = window(3_600_000).and_then(|window| window["eligible"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let retained_hour_has_events = retained_hour_events.is_some_and(|events| events > 0.0);
+    let diagnostic_current = if let Some(events) = retained_hour_events.filter(|events| sparse_diagnostic_empty && *events > 0.0) {
+        format!("p99 unavailable in this process; {events} qualifying events retained in the last hour")
+    } else {
+        row["current"].as_str().unwrap_or_default().to_owned()
+    };
+    let sparse_empty = sparse_diagnostic_empty && !retained_hour_has_events;
     let unit = if cadence_ms == 0 { "events" } else { "covered milliseconds" };
-    let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64()).unwrap_or_default();
+    let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let coverage_text = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+        |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
     let burn = |evidence: BudgetEvidence| if evidence.eligible && evidence.total > 0.0 {
         format!("{:.2}×", evidence.bad / evidence.total / policy.allowance)
     } else {
@@ -171,14 +184,28 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
     let slow = pair(policy.slow);
     row["target"] = json!(format!("≤ {:.1}% bad {unit}; diagnostic {diagnostic_target}", policy.allowance * 100.0));
     row["current"] = json!(format!("{} / {} bad {unit}; diagnostic {diagnostic_current}", horizon.bad, horizon.total));
+    if sparse_empty {
+        row["current"] = json!(if evidence["available"] == true
+            && window(policy.horizon_ms).is_some_and(|window|
+                window["eligible"].as_f64().is_some() && window["bad"].as_f64().is_some()) {
+            format!("No qualifying events in the last hour; {} / {} bad {unit} over the accounting horizon", horizon.bad, horizon.total)
+        } else {
+            "No qualifying events in the last hour; accounting evidence unavailable".to_owned()
+        });
+    }
     row["window"] = json!(if policy.horizon_ms.is_multiple_of(86_400_000) {
         format!("{}d", policy.horizon_ms / 86_400_000)
     } else { duration(policy.horizon_ms) });
     row["remaining_percent"] = json!(remaining);
     row["status"] = json!(status);
+    row["coverage"] = json!(coverage);
+    if sparse_empty && horizon.total == 0.0 {
+        row["status"] = json!("no-data");
+        row["remaining_percent"] = Value::Null;
+    }
     row["explain"] = json!(format!(
-        "{} Operational budget: {:.1}% bad {unit}, {:.1}% observed coverage over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
-        row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, coverage * 100.0, duration(policy.horizon_ms),
+        "{} Operational budget: {:.1}% bad {unit}, {coverage_text} over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
+        row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, duration(policy.horizon_ms),
         burn(fast.0), burn(fast.1), policy.fast.burn_rate, burn(slow.0), burn(slow.1), policy.slow.burn_rate,
         if cadence_ms == 0 { "" } else { " Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h." },
     ));
@@ -215,7 +242,8 @@ fn p99(id: &str, about: &str, what: &str, target_ms: Option<f64>, windows: &Valu
     if samples == 0 && WINDOWS.iter().all(|w| count(&windows[*w]) == 0) {
         return json!({
             "id": id, "kind": "objective", "about": about,
-            "target": format!("p99 ≤ {}", ms(target)), "current": "no samples", "window": "1h",
+            "target": format!("p99 ≤ {}", ms(target)),
+            "current": if matches!(id, "terminal-attach" | "person-read-fresh") { "No qualifying events" } else { "no samples" }, "window": "1h",
             "remaining_percent": null, "status": "no-data",
             "explain": format!(
                 "{about}. Goal: 99 of every 100 {what} finish within {}. Nothing has been measured in the last hour, so there is no budget to spend or save yet.",
@@ -638,6 +666,29 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_row_corpus_covers_every_shipped_row() {
+        use crate::objective::Indicator;
+
+        let targets: Vec<_> = crate::slo::shipped().iter()
+            .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
+            .map(|objective| {
+                let mut target = json!({"name": objective.name});
+                if objective.target("p99", true).is_some() {
+                    target["remote_windows"] = json!({});
+                }
+                target
+            })
+            .collect();
+        let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
+        emitted.push(divergence(0));
+        let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        actual.sort_unstable();
+        let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+        let expected: Vec<_> = corpus["rows"].as_array().unwrap().iter().map(|row| row.as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the shared Rust/TypeScript native row corpus when emitted rows change");
+    }
+
     fn window(count: u64, p99: f64, over: u64) -> Value {
         json!({"count": count, "p50_ms": 1.0, "p99_ms": p99, "max_ms": p99 + 1.0,
             "over_target": over, "over_target_share": over as f64 / count.max(1) as f64})
@@ -731,6 +782,83 @@ mod tests {
             }));
         }
         json!({"available": true, "windows": windows})
+    }
+
+    #[test]
+    fn sparse_organic_latency_shows_no_qualifying_events_and_coverage() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            for coverage in [None, Some(0.0), Some(0.25), Some(1.0)] {
+                let mut evidence = retained_budget(0, 0);
+                for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+                    window["coverage"] = json!(coverage);
+                }
+                let report = json!({"targets": [{
+                    "name": name, "about": "Organic successful first response", "p99_ms": 200,
+                    "windows": windows(0, 0.0, 0), "budget": evidence,
+                }]});
+                let rendered = rows(&report, &[], 0, 0);
+                let row = by_id(&rendered, name);
+                assert_eq!(row["status"], "no-data");
+                assert!(row["remaining_percent"].is_null());
+                assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+                assert_eq!(row["coverage"], json!(coverage));
+                let expected = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+                    |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
+                assert!(row["explain"].as_str().unwrap().contains(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_terminal_coverage_is_unknown_without_ledger_evidence() {
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "no-data");
+        assert!(row["remaining_percent"].is_null());
+        assert!(row["coverage"].is_null());
+        assert_eq!(row["current"], "No qualifying events in the last hour; accounting evidence unavailable");
+        assert!(row["explain"].as_str().unwrap().contains("unknown observed coverage"));
+    }
+
+    #[test]
+    fn a_quiet_terminal_hour_preserves_eligible_accounting_history() {
+        let mut evidence = retained_budget(100, 0);
+        evidence["windows"]["1h"]["eligible"] = json!(0);
+        evidence["windows"]["1h"]["samples"] = json!(0);
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+            "budget": evidence,
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "met");
+        assert_eq!(row["remaining_percent"], 100.0);
+        assert_eq!(row["coverage"], 1.0);
+        assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+    }
+
+    #[test]
+    fn a_restart_does_not_erase_retained_hourly_qualifying_events() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            // The process-local histogram starts empty, but the durable hour still has events.
+            let report = json!({"targets": [{
+                "name": name, "p99_ms": 200, "windows": windows(0, 0.0, 0),
+                "budget": retained_budget(100, 0),
+            }]});
+            let rendered = rows(&report, &[], 0, 0);
+            let row = by_id(&rendered, name);
+            assert_eq!(row["status"], "met");
+            assert_eq!(row["remaining_percent"], 100.0);
+            assert_eq!(row["coverage"], 1.0);
+            for field in ["current", "explain"] {
+                let text = row[field].as_str().unwrap();
+                assert!(text.contains("100 qualifying events retained in the last hour"), "{text}");
+                assert!(!text.contains("No qualifying events"), "{text}");
+            }
+        }
     }
 
     #[test]

@@ -8,6 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 pub const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 /// Limit both candidate inspection and mutations, including responses still in use.
 pub const CLEANUP_CHUNK: usize = 64;
+/// Stop starting response checks after this much work. A check, its mutation and COMMIT
+/// are indivisible; this cooperative budget is not a hard bound on writer occupancy.
+pub const CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 /// An RTC alone cannot advance the retention clock beyond recent durable evidence.
 pub const CLOCK_SLACK_MS: i64 = 5 * 60 * 1_000;
 
@@ -148,12 +151,15 @@ pub fn clock_limit(connection: &Connection) -> Result<Option<i64>> {
 /// Inspect at most 64 rows in completion order through the table's existing rowid tree.
 /// Stop at the first young row. Move pinned responses to the tail without deleting them:
 /// companion DELETE triggers must not run for a live response.
+/// After the first candidate, yield when the elapsed work budget is spent. Unexamined rows
+/// remain in completion order for the next committed chunk; no receipt is skipped or expired early.
 pub fn cleanup_tx(
     transaction: &Transaction<'_>,
     now_unix_ms: i64,
     limit: usize,
     mut in_use: impl FnMut(&Transaction<'_>, &str) -> Result<bool>,
 ) -> Result<Cleanup> {
+    let started = std::time::Instant::now();
     let candidates = transaction.prepare_cached(
         "SELECT rowid,operation_id,response,expires_at_unix_ms,replay_safe FROM idempotency
          WHERE rowid > (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
@@ -163,7 +169,9 @@ pub fn cleanup_tx(
     )?.collect::<Result<Vec<_>,_>>()?;
     let mut result = Cleanup::default();
     for (rowid, key, response, expiry, replay_safe) in candidates {
-        if expiry > now_unix_ms {
+        if expiry > now_unix_ms
+            || (result.examined != 0 && started.elapsed() >= CLEANUP_BUDGET)
+        {
             break;
         }
         result.examined += 1;

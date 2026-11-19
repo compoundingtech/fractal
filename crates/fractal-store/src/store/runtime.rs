@@ -162,6 +162,8 @@ pub struct AgentResourcesEntry {
     pub index: u64,
     pub local: u64,
     pub history: bool,
+    /// Effective local policy used when folding cards, independent of graph/local claim cuts.
+    pub idle_residency: crate::config::IdleResidencyPolicy,
     /// None certifies the whole roster; Some records the lazily materialized page subjects.
     pub covered: Option<BTreeSet<String>>,
     /// Earliest wall-clock boundary in queue metadata; absent means no expiring work lease.
@@ -198,11 +200,14 @@ impl FractalRuntime {
         migrate_local_usage_seen(connection)?;
         // Before the projection backfills, which fold marks in.
         message_marks::create_table(connection)?;
+        mail_input_acceptance::create_schema(connection)?;
+        mail_delivery_source::create_schema(connection)?;
         message_outbox::create_table(connection)?;
         stream_mirror::create_table(connection)?;
         relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
+        wake_demand::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
         // The remaining initial DDL has no backfill transaction. Keep existing-store
         // upgrade progress unchanged, and commit this chunk only for a fresh store.
@@ -223,6 +228,7 @@ impl FractalRuntime {
         message_marks::create_triggers(connection)?;
         relayed_closes::create_triggers(connection)?;
         stream_mirror::create_triggers(connection)?;
+        mail_delivery_source::install(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;

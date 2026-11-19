@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept underscore-joined built-in row references such as transaction/writer_hold in both the TypeScript objective DSL and the Rust KDL parser. Keep declaration-name validation unchanged, and check a shared reference corpus against emitted built-in rows.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No database or wire-schema changes."},
+  "rules": {"status": "changed", "detail": "Native row references accept underscore-joined words. Bindings still inherit the referenced row's measurements and resolve references at evaluation time."},
+  "compatibility": {"status": "changed", "detail": "Existing declarations retain their meaning. Underscore-joined native references require the updated DSL and daemon parser."},
+  "downtime": {"status": "none", "detail": "No extra interruption beyond installing the updated daemon."},
+  "manual": {"status": "none", "detail": "No configuration migration is required."},
+  "recovery": {"status": "none", "detail": "No store migration; remove newly accepted references before returning to an older parser."}
+}

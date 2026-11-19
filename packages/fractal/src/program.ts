@@ -92,7 +92,7 @@ export interface ProgramIntent<
   ES extends Codec | undefined,
 > extends Pick<
   MissionIntent,
-  'budget' | 'declaredPriority' | 'declaredLane' | 'declaredBudgets'
+  'budget' | 'declaredPriority' | 'declaredLane' | 'declaredBudgets' | 'resources' | 'docs'
 > {
   readonly id: string
   readonly goal: string
@@ -207,13 +207,14 @@ export function mission(
 /**
  * The child mission a worker turn runs, and its product's path below the child run
  * (`review/verdict` names `resource/mission-run/CHILD/review/verdict`), whose value is the step's.
+ * An array of product paths decodes a record keyed by those paths instead of a single value.
  */
 export class Worker extends Context.Service<
   Worker,
   {
     readonly mission: string
     readonly input?: Readonly<Record<string, string>>
-    readonly product?: string
+    readonly product?: string | readonly string[]
   }
 >()('fractal/Worker') {
   /** Runs the worker turns it is provided to as child runs of `mission`. */
@@ -304,12 +305,17 @@ export function step(
       const decode = () => {
         if (success === undefined) return Effect.void
         // The daemon keys products by full subject: `resource/<child run>/<path>`.
-        const subject = `resource/${done.run}/${worker.product}`
-        const value = worker.product === undefined ? undefined : done.products?.[subject]
-        if (value === undefined)
-          return Effect.die(
-            new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`),
-          )
+        const read = (path: string) => {
+          const subject = `resource/${done.run}/${path}`
+          const value = done.products?.[subject]
+          if (value === undefined) throw new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`)
+          return value
+        }
+        const value = worker.product === undefined
+          ? undefined
+          : typeof worker.product === 'string'
+            ? read(worker.product)
+            : Object.fromEntries(worker.product.map((path) => [path, read(path)]))
         return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
       }
       return options.execution === true

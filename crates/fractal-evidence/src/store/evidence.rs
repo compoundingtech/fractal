@@ -127,6 +127,7 @@ impl EvidenceStore for Store {
         let cache = self.fractal.agent_resources_cache.lock()
             .map_err(|_| anyhow::anyhow!("agent resources cache poisoned"))?;
         let entry = cache.iter().rev().find(|entry| entry.index == index && entry.local == local
+            && entry.idle_residency == crate::config::idle_residency_policy()
             && !entry.history && entry.covered.is_none())
             .context("the complete current agents source is unavailable")?;
         Ok(AgentsPublicationSource {
@@ -199,6 +200,7 @@ impl EvidenceStore for Store {
         let Some((cut, local, valid_until, items)) = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
+            .filter(|entry| entry.idle_residency == crate::config::idle_residency_policy())
             .max_by_key(|entry| (entry.index, entry.local))
             .map(|entry| (entry.index, entry.local, entry.valid_until_unix_ms, Arc::clone(&entry.items)))
         else {

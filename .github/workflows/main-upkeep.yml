@@ -58,6 +58,7 @@ jobs:
       - proof-upgrade-impact
       - proof-genie-freshness
       - proof-hm-module-eval
+      - proof-bundled-sqlite-packages
       - proof-ci-script-tests
       - proof-typescript-client
       - proof-swift-client-changes
@@ -2853,6 +2854,48 @@ jobs:
         env:
           CACHE_REASON: Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  proof-bundled-sqlite-packages:
+    name: post-merge bundled-sqlite-packages
+    needs: [main-checks, proof-pick-runner]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) ) }}
+    runs-on:
+      [
+        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3 }};github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Record effective bundled SQLite derivation environment
+        run: |
+          nix derivation show .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter |
+            jq '.derivations | to_entries | map({derivation: .key, env: (.value.env | {pname, dontCargoUseSystemLibs, LIBSQLITE3_SYS_USE_PKG_CONFIG, buildInputs})})'
+      - name: Build bundled SQLite packages, including fractal-migrate
+        run: "nix build --no-link --print-build-logs .#checks.x86_64-linux.bundled-sqlite-env .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Uses the runner's Nix store and declared read-only binary caches; no separate Actions build cache.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   proof-ci-script-tests:
     name: post-merge ci-script-tests
     env:
@@ -5324,6 +5367,7 @@ jobs:
       - proof-ci-script-tests
       - proof-evidence-gate-ci-script-tests
       - proof-hm-module-eval
+      - proof-bundled-sqlite-packages
       - proof-evidence-gate-rust-tests
       - proof-evidence-gate-linux-clippy
       - proof-evidence-gate-linux-fleet-compat
@@ -5382,6 +5426,10 @@ jobs:
         env:
           HM_RESULT: ${{ needs.proof-hm-module-eval.result }}
         run: test "$HM_RESULT" = success
+      - name: Require bundled SQLite package links to pass
+        env:
+          SQLITE_RESULT: ${{ needs.proof-bundled-sqlite-packages.result }}
+        run: test "$SQLITE_RESULT" = success
       - name: Report job cache coverage
         if: always()
         shell: bash

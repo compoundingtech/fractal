@@ -24,6 +24,9 @@ These always wake even if marked silent:
 - ready steps, faults, GitHub watch events and work handoffs;
 - daemon run reports, provider-capacity retry nudges, product-wait and planning notices.
 
+The same classification decides which messages resume a seat the daemon suspended for idleness;
+see [idle residency](idle-residency.md#wake-demand-idle-r05-idle-r06-idle-r08) (specified, not implemented).
+
 The accepted silent kind is recorded as `st3-silent` in message tags. Signed silent requests
 carry that tag in the device's signed tags; signed claims are never rewritten. Message views
 retain the accepted tag; person and system exceptions still always wake. The raw tag-based
@@ -49,6 +52,17 @@ Held mail is never lost. Until it is read it is unread like any other message:
 for a turn does not count as late in the `message-delivery` check, does not keep a stopping seat
 running, and does not block a rollout drain. `fractal doctor`'s `held-mail` check lists each seat with
 up to 128 oldest unoffered silent messages unread for over a day, selected from an indexed held flag. Backlog cleanup excludes unoffered silent messages.
+
+The store also maintains a disposable, versioned wake-demand projection for future idle
+residency readers. It classifies sender/tag metadata with the same acceptance rules, includes
+messages held only by the messages shard, and clears pending demand at staging, delivery,
+read or close. Silent mail is indexed separately and is never wake demand. Reads prefer the
+oldest pending person message, then the oldest other wake message, with subject as tie-breaker.
+The result carries independent graph, local-mark, mirrored-send and mirrored-lifecycle
+positions plus the observed shard cut. An unavailable shard, unfinished projection work or
+lagging mirror cannot prove absence of demand. Opening the store rebuilds historical metadata
+in restartable 64-subject transactions; reads do not backfill. No suspend or wake behavior
+consumes this projection yet.
 
 ## Coordination cost
 

@@ -492,3 +492,43 @@ The full registry-kind coverage assertion remains intact.
 Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
 not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
 the three-seed cap, and majority trim coverage remain enforced.
+
+`claims-v37.json` adds the eight durable residency evidence kinds from the complete
+reader-first registry. Versions 1 through 36 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v37.json`.
+The simulation and audit reports select v37. Residency inputs bind their host to
+the subject, use integer 0/1 outcome flags and unavailable memory coverage without
+fabricated deltas. The focused residency corpus regression validates every new kind.
+Adding kinds shifts the shared seeded schedule; prior characterization remains
+historical. Exact trim equality, continuation and majority coverage stay enforced.
+
+In [hosted run 44419937655, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44419937655/job/135233311105),
+seed 34 converged without an initial trim, then trimmed on every modern node
+after the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts.
+The shard passed 6,487 tests and failed only the stale seed-34 trim expectation.
+The measured v37 never-trim set is `[34, 179]`; exact per-seed equality,
+old-build-excusal continuation, the three-seed cap and majority coverage remain enforced.
+
+`claims-v38.json` adds the durable native admission evidence kinds
+`resource.admission.observed`, `resource.admission.coverage`, and `gate.admission.observed`
+to the registry that already includes residency. Versions 1 through 37 remain frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v38.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v38.
+Native admission draws use the originating simulation host, a coherent epoch and simulation
+clock, a typed queued owner, and a finite admission request. Gate evidence records a durable
+accepted outcome with the same onset and observation clock; these facts confer no build grant.
+The focused `the_corpus_generates_valid_native_admission_inputs` regression checks all three
+specifications against the live registry, validates and admits their generated inputs, and
+replicates every resulting claim to the oracle. Full registry-kind coverage remains intact.
+New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
+old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
+must come from actual v38 outcomes rather than assuming historical results still apply.
+
+In [hosted run 44486252490, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44486252490/job/135438980421),
+seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
+`after excuse and cut=None`), so its v37 non-trimming expectation no longer applies.
+The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
+The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
+the three-seed cap and majority trim coverage remain enforced.

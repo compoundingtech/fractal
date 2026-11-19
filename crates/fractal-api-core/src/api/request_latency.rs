@@ -135,6 +135,38 @@ pub enum Wait {
     Fresh,
 }
 
+/// Explicit bulk operations, independent of interactive latency objectives. Shared
+/// page routes are not exports: only the dedicated route proves the operation.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum ExportOperation {
+    Backup,
+    AuthorityProof,
+    Replication,
+}
+
+impl ExportOperation {
+    fn classify(method: &Method, route: &str) -> Option<Self> {
+        match (method.as_str(), route) {
+            ("GET", "/v1/backup") => Some(Self::Backup),
+            ("POST", "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export") => {
+                Some(Self::AuthorityProof)
+            }
+            ("POST", "/v1/internal/replication/export" | "/v1/internal/replication/shard/{shard}/export") => {
+                Some(Self::Replication)
+            }
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Backup => "backup-export",
+            Self::AuthorityProof => "authority-proof-export",
+            Self::Replication => "replication-export",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Sample {
     count: u64,
@@ -242,6 +274,8 @@ pub struct Meter {
     // complete denominator even if the route table has already filled.
     work_actions: BTreeMap<WorkAction, Sample>,
     agents_reads: BTreeMap<AgentsRead, Sample>,
+    // Bounded by the dedicated operation enum, not the arbitrary route table cap.
+    exports: BTreeMap<ExportOperation, Sample>,
     roster_stages: BTreeMap<RosterStage, Sample>,
     work_stages: BTreeMap<WorkStage, Sample>,
     /// Windows by path: `GET /route`, `stream COLLECTION`, or a long poll's route.
@@ -333,6 +367,9 @@ impl Meter {
         }
         if let Some(read) = AgentsRead::classify(method, route, query) {
             self.agents_reads.entry(read).or_default().record(elapsed);
+        }
+        if let Some(operation) = ExportOperation::classify(method, route) {
+            self.exports.entry(operation).or_default().record(elapsed);
         }
     }
 
@@ -510,6 +547,11 @@ impl Meter {
                 row["population"] = json!(stage.population());
                 row
             }))
+            .chain(self.exports.iter().map(|(operation, sample)| {
+                let mut row = sample.snapshot(operation.name(), "export-operation");
+                row["operation_class"] = json!(operation.name());
+                row
+            }))
             .collect()
     }
 }
@@ -517,6 +559,81 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn organic_terminal_first_screen_counts_but_plural_listing_does_not() {
+        let now = Instant::now();
+        let mut meter = Meter::default();
+        meter.time(now, Timed::resolve("stream terminals", false, Wait::No), Duration::from_secs(5));
+        let listing = meter.targets_snapshot(now).finish();
+        let attach = listing["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "terminal-attach").unwrap();
+        assert_eq!(attach["windows"]["1h"]["count"], 0);
+        assert!(crate::slo::targets().for_path("stream terminals").is_none());
+
+        // The collections socket records this singular key only after a screen send succeeds.
+        meter.time(now, Timed::resolve("stream terminal", false, Wait::No), Duration::from_millis(120));
+        meter.time(now, Timed::resolve("GET /v1/client/terminals/{id}/screen", false, Wait::No), Duration::from_millis(80));
+        let measured = meter.windows_snapshot(now).finish();
+        let attach = measured["targets"].as_array().unwrap().iter()
+            .find(|row| row["name"] == "terminal-attach").unwrap();
+        assert_eq!(attach["windows"]["1h"]["count"], 2);
+        assert_eq!(attach["windows"]["1h"]["over_target"], 0);
+        assert_eq!(attach["windows"]["1h"]["max_ms"], 120.0);
+    }
+
+    #[test]
+    fn dedicated_exports_keep_separate_classes_without_reclassifying_reads() {
+        let mut meter = Meter::default();
+        for (method, route, duration) in [
+            (Method::GET, "/v1/backup", 4000),
+            (Method::POST, "/v1/agents/rename-id/proof/export", 2000),
+            (Method::POST, "/v1/missions/rename-id/proof/export", 3000),
+            (Method::POST, "/v1/internal/replication/export", 500),
+            (Method::POST, "/v1/internal/replication/shard/{shard}/export", 700),
+            (Method::GET, "/v1/client/sessions/{*id}", 900),
+            // A mailbox page can serve either an ordinary listing or an export.
+            (Method::GET, "/v1/messages/page", 600),
+            // A similarly named route or the wrong method is not an export.
+            (Method::GET, "/v1/agents/rename-id/proof/export", 100),
+            (Method::POST, "/v1/internal/replication/receive", 800),
+        ] {
+            meter.record(&method, route, route, None, Duration::from_millis(duration));
+        }
+        let rows = meter.snapshot();
+        let operations = rows.iter().filter(|row| row["scope"] == "export-operation").collect::<Vec<_>>();
+        assert_eq!(operations.len(), 3);
+        for (class, count, max_ms) in [
+            ("backup-export", 1, 4000),
+            ("authority-proof-export", 2, 3000),
+            ("replication-export", 2, 700),
+        ] {
+            let row = operations.iter().find(|row| row["operation_class"] == class).unwrap();
+            assert_eq!(row["count"], count);
+            assert_eq!(row["max_ms"], max_ms);
+        }
+        let targets = crate::slo::targets();
+        assert_eq!(targets.for_path("GET /v1/client/sessions/{*id}").unwrap().name, "person-read");
+        for route in ["GET /v1/backup", "POST /v1/agents/rename-id/proof/export",
+            "POST /v1/internal/replication/export", "GET /v1/messages/page"] {
+            assert!(targets.for_path(route).is_none(), "{route}");
+        }
+    }
+
+    #[test]
+    fn export_classes_survive_a_full_route_table() {
+        let mut meter = Meter::default();
+        for index in 0..ROUTES {
+            let route = format!("/unrelated/{index}");
+            meter.record(&Method::GET, &route, &route, None, Duration::ZERO);
+        }
+        meter.record(&Method::GET, "/v1/backup", "/v1/backup", None, Duration::from_secs(2));
+        let rows = meter.snapshot();
+        assert!(!rows.iter().any(|row| row["scope"] == "route" && row["route"] == "/v1/backup"));
+        let export = rows.iter().find(|row| row["operation_class"] == "backup-export").unwrap();
+        assert_eq!(export["count"], 1);
+        assert_eq!(export["max_ms"], 2000);
+    }
 
     #[test]
     fn http_completion_never_waits_for_blocked_ledger_reports() {
