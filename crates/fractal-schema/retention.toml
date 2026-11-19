@@ -29,6 +29,14 @@
 "resource.admission.observed" = { class = "durable" }
 "resource.admission.coverage" = { class = "durable" }
 "gate.admission.observed" = { class = "durable" }
+"residency.wake-demand" = { class = "durable" }
+"residency.resumed" = { class = "durable" }
+"residency.first-turn" = { class = "durable" }
+"residency.outcome" = { class = "durable" }
+"residency.sleep-ended" = { class = "durable" }
+"residency.eligibility-outcome" = { class = "durable" }
+"residency.unrouted" = { class = "durable" }
+"residency.host-sample" = { class = "durable" }
 "harness.invocation" = { class = "durable" }
 "effect.intended" = { class = "durable" }
 "effect.in-flight" = { class = "durable" }

@@ -125,6 +125,11 @@ pub fn mail_source_sent_through(connection: &Connection) -> Result<u64> {
     Ok(u64::try_from(cursor(connection, "mail_delivery_source_v1_sent_through")?)?)
 }
 
+/// Lifecycle rowid covered by this graph snapshot, independent of the send cursor.
+pub fn lifecycle_through(connection: &Connection) -> Result<u64> {
+    Ok(u64::try_from(cursor(connection, LIFECYCLE_THROUGH)?)?)
+}
+
 /// Serializes [`mirror`], so two catch-ups never page over the same rows at once.
 #[derive(Default)]
 pub struct Mirroring(Mutex<()>);
@@ -209,6 +214,7 @@ pub fn mirror(graph: &Store) -> Result<usize> {
                 // The sends queued usage and held-mail work; settle it in this transaction, as
                 // the graph's own projection pass does after it admits sends.
                 agent_messages::flush(transaction)?;
+                wake_demand::flush(transaction)?;
                 Ok(added)
             })
             .map_err(|error| anyhow::anyhow!(error))??;

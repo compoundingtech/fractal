@@ -2895,6 +2895,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 }
 
 #[test]
+fn agent_card_residency_is_optional_and_names_policy_epoch_deadline_and_refusal() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("RESIDENCY"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "member".into(),
+        eligible_since: Some("2026-11-18T10:00:00Z".into()),
+        due_at: Some("2026-11-18T10:30:00Z".into()),
+        refusal_reason: None,
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    member\n"));
+    assert!(rendered.contains("  ELIGIBLE   2026-11-18T10:00:00Z\n"));
+    assert!(rendered.contains("  DUE        2026-11-18T10:30:00Z\n"));
+    assert!(!rendered.contains("  REFUSAL"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "off".into(),
+        eligible_since: None,
+        due_at: None,
+        refusal_reason: Some("policy-off".into()),
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    off\n  REFUSAL    policy-off\n"));
+    assert!(!rendered.contains("  DUE"));
+}
+
+#[test]
 fn declared_admission_human_output_is_explicitly_not_enforced() {
     let mut agent = stopped_agent(serde_json::Value::Null);
     assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
@@ -5581,6 +5607,7 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                 &run_id,
                 mission,
                 &"a".repeat(64),
+                false,
                 Path::new("/work/demo"),
                 "agent/operator",
                 &BTreeMap::new(),
@@ -5596,6 +5623,67 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                     .contains_key(&format!("mission-run/{mission}/2026-10-07"))
             );
             assert!(!intent.mission_runs.contains_key("mission-run/2026-10-07"));
+        }
+    }
+}
+
+#[test]
+fn mission_start_preserves_explicit_revision_pin_intent() {
+    let revision = "a".repeat(64);
+    for follow_head in [false, true] {
+        let kdl = mission_run_intent(
+            "release/demo/pin-intent",
+            "release/demo",
+            &revision,
+            follow_head,
+            Path::new("/work/demo"),
+            "person/operator",
+            &BTreeMap::new(),
+            "run",
+            None,
+            None,
+            false,
+        );
+        let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+        let creation = intent.mission_runs["mission-run/release/demo/pin-intent"]
+            .creation.as_ref().unwrap();
+        assert_eq!(creation.revision, revision);
+        assert_eq!(creation.follow_head, follow_head);
+    }
+}
+
+#[test]
+fn mission_start_keeps_exact_declarations_for_older_daemons() {
+    let revision = "a".repeat(64);
+    for (health, supported) in [
+        (json!({}), false),
+        (json!({"capabilities": {}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 0}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 1}}), true),
+    ] {
+        for explicit_revision in [None, Some(revision.as_str())] {
+            let follow_head = mission_start_follows_head(explicit_revision, &health);
+            assert_eq!(follow_head, supported && explicit_revision.is_none());
+            let kdl = mission_run_intent(
+                "release/demo/skew",
+                "release/demo",
+                &revision,
+                follow_head,
+                Path::new("/work/demo"),
+                "person/operator",
+                &BTreeMap::new(),
+                "run",
+                None,
+                None,
+                false,
+            );
+            assert!(kdl.contains(&format!("mission \"mission/release/demo@{revision}\"")), "{kdl}");
+            assert_eq!(kdl.contains("follow-head"), follow_head, "{kdl}");
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+            let creation = intent.mission_runs["mission-run/release/demo/skew"]
+                .creation.as_ref().unwrap();
+            assert_eq!(creation.revision, revision);
+            assert_eq!(creation.follow_head, follow_head);
         }
     }
 }
@@ -5692,6 +5780,7 @@ fn mission_start_after_names_the_run_to_wait_for() {
         "release/demo/2",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5741,6 +5830,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/3",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5774,6 +5864,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/4",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),

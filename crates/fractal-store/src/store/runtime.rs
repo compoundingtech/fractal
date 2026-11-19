@@ -162,6 +162,8 @@ pub struct AgentResourcesEntry {
     pub index: u64,
     pub local: u64,
     pub history: bool,
+    /// Effective local policy used when folding cards, independent of graph/local claim cuts.
+    pub idle_residency: crate::config::IdleResidencyPolicy,
     /// None certifies the whole roster; Some records the lazily materialized page subjects.
     pub covered: Option<BTreeSet<String>>,
     /// Earliest wall-clock boundary in queue metadata; absent means no expiring work lease.
@@ -205,6 +207,7 @@ impl FractalRuntime {
         relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
+        wake_demand::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
         // The remaining initial DDL has no backfill transaction. Keep existing-store
         // upgrade progress unchanged, and commit this chunk only for a fresh store.

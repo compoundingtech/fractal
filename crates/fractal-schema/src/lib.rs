@@ -25,6 +25,7 @@ pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
+pub mod residency;
 pub mod review;
 pub mod task_grants;
 pub mod usage_limits;
@@ -790,6 +791,7 @@ impl Registry {
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
+        residency::validate(subject, kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -1296,6 +1298,12 @@ fn build_registry() -> Registry {
             github_plugin::WORKFLOW_RUN_FAMILY,
             "github-workflow-run/OWNER/REPO/RUN_ID",
             "One completed CI run of a GitHub repository, written once by its repository's poller.",
+            false,
+        ),
+        (
+            "residency",
+            "residency/HOST/EPISODE/ID",
+            "Durable residency evidence, scoped to an owner host and logical episode.",
             false,
         ),
         (
@@ -3446,6 +3454,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             },
         );
     }
+    residency::register(&mut claims);
     claims
 }
 
@@ -5546,6 +5555,10 @@ mod tests {
         for family in ["resource-admission", "gate-admission"] {
             current.subjects.remove(family).unwrap();
         }
+        for kind in residency::KINDS {
+            current.claims.remove(*kind).unwrap();
+        }
+        current.subjects.remove("residency").unwrap();
         for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
             github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
             current.claims.remove(kind).unwrap();

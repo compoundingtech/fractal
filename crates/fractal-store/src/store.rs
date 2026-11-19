@@ -316,6 +316,7 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod wake_demand;
 pub mod message_marks;
 pub mod mail_input_acceptance;
 pub mod mail_delivery_source;
@@ -847,7 +848,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h921f972a6b71 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfc9ed02b4ad7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -909,6 +910,10 @@ WHERE kind='harness.timeline'
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
+-- Retained ownership, including operator-authored and carried work, at client snapshots.
+CREATE INDEX IF NOT EXISTS claims_residency_claimant_index
+ON claims(json_extract(body, '$.fields.claimant'), store_index, subject)
+WHERE kind IN ('work.claimed', 'work.progress', 'work.renewed', 'step-run.carried');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
@@ -8149,6 +8154,7 @@ fn create_declared_mission_run_tx(
             .map_err(internal)?;
     }
     let mut body = json!({
+        "revision_pinned": !creation.follow_head,
         "fields": {
             "status": "running",
             "admission_publication": admission_publication,

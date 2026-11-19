@@ -41,6 +41,7 @@ pub mod references;
 pub mod private_notes;
 mod private_notes_fs;
 pub mod restart;
+pub mod residency;
 pub mod rollout;
 pub mod sekrets_daemon;
 pub mod store;

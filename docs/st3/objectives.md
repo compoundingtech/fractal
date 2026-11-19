@@ -223,6 +223,15 @@ The transaction family keeps three separate populations; request completion, pub
 capacity time are never averaged together. The `writer-hold` holder-attribution row is a separate
 diagnostic, not a second operational transaction budget.
 
+Dedicated bulk exports have separate diagnostic operation classes in the native
+request-latency `routes` array: select `scope=export-operation` and
+`operation_class=backup-export`, `authority-proof-export`, or `replication-export`.
+These count completed response envelopes, overlap the original route totals, and remain
+available when the arbitrary-route table fills. Do not sum scopes. They do not change any
+interactive objective or invent an export latency target. A shared mailbox page can serve
+either an ordinary listing or an export, so its route alone does not classify it as an export;
+ordinary session opens likewise remain in `person-read`, regardless of duration.
+
 For example, a 0.45% transaction/write slow share is below its 1% allowance even if one long
 transaction misses the max aspiration. A 35.24% person-read slow share burns at 7.05× its 5%
 allowance: it cannot establish a 14.4× fast burn. It establishes a slow burn only if **both**

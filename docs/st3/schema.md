@@ -26,7 +26,6 @@ Storage digest: `e91bf306edf1a9f7579fb61a08e92441685725ff5298f5fb0cd4db8dbf0ba57
 | `external` | `external/PROVIDER/KIND/IDENTITY` | no | An external account or actor, distinct from a native person. |
 | `file` | `file/HOST:/ABSOLUTE_PATH` | no | A read-only file gate target. |
 | `fleet-invite` | `fleet-invite/ID` | no | A single-use fleet join invite. |
-| `gate-admission` | `gate-admission/HOST/ID/OUTCOME` | no | One immutable transitional gate admission lifecycle receipt. |
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
 | `github-capture` | `github-capture/COMMIT_DIGEST` | no | A bounded source capture visibility marker and coverage frontier. |
 | `github-event` | `github-event/RESOURCE/ITEM/NUMBER/KEY` | no | One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller. |
@@ -52,8 +51,8 @@ Storage digest: `e91bf306edf1a9f7579fb61a08e92441685725ff5298f5fb0cd4db8dbf0ba57
 | `pty` | `pty/RUN/LOCAL_ID` | no | A mission-run terminal runtime. |
 | `read-position` | `read-position/person/NAME` | no | One person's forward-only read positions across conversations. |
 | `repair` | `repair/ID` | yes | An immutable receipt for a bounded graph or replication repair. |
+| `residency` | `residency/HOST/EPISODE/ID` | no | Durable residency evidence, scoped to an owner host and logical episode. |
 | `resource` | `resource/NAME` | yes | An observed external or durable fact bag. |
-| `resource-admission` | `resource-admission/HOST or resource-admission/HOST/ID` | no | A host authority's durable admission source cut or membership lifecycle evidence. |
 | `revision-proposal` | `revision-proposal/ID` | no | A mission revision proposal. |
 | `rule` | `rule/NAME` | no | A permission rule, its mode, and the writes it audited. |
 | `run-generation` | `run-generation/ID` | no | An immutable mission-run generation. |
@@ -131,7 +130,6 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `fleet.member-left` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key!:string` |  |
 | `fleet.member-removed` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key:string`, `reason!:string`, `removed_by:subject-reference(person)` |  |
 | `fleet.shard-bounds` | `host` | `system-only` | `append` | `durable` | `member_key!:string`, `shard_high_water!:object` |  |
-| `gate.admission.observed` | `gate-admission` | `system-only` | `once` | `durable` | `at_ms!:integer`, `class!:string`, `coverage!:string`, `epoch!:string`, `host!:string`, `id!:string`, `onset_ms!:integer`, `outcome!:string`, `reason!:string`, `schema!:string` |  |
 | `gate.head-bound` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `author!:subject-reference(agent|person)`, `boundary!:subject-reference`, `change!:object`, `episode!:integer`, `generation!:subject-reference(run-generation)`, `head!:object`, `mission_revision!:string`, `observation!:string`, `owner!:subject-reference`, `previous_binding:string`, `reason!:string`, `request_operation!:subject-reference(gate-operation)`, `review_targets!:array`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `step_definition!:string` | `gate` |
 | `gate.remediation-attached` | `gate-operation` | `system-only` | `append` | `durable` | `attempt_receipt!:string`, `author_attempt!:integer`, `author_generation!:subject-reference(run-generation)`, `author_step!:subject-reference(step-run)`, `binding_claim!:string`, `boundary_attempt!:integer`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `reviewed_head!:object`, `verdict!:string` | `gate` |
 | `gate.requested` | `gate-operation` | `system-only` | `once` | `durable` | `attempt:integer`, `author:subject-reference(agent|person)`, `baseline:boolean`, `binding_claim:string`, `capability_expires_at:string`, `capability_hash:string`, `change:object`, `continuity:object`, `decisions:array`, `delta_ref:string`, `dispatch:object`, `episode:integer`, `gate:string`, `gate_subject:subject-reference(gate-operation)`, `generation:subject-reference(run-generation)`, `head:object`, `host:string`, `mission_revision:string`, `mode:string`, `model:string`, `operation:subject-reference`, `owner:subject-reference`, `question:string`, `review_targets:array`, `reviewer:subject-reference`, `runner:string`, `scope:object`, `status:string`, `step_definition:string`, `token_budget:integer`, `tools:array` | `gate` |
@@ -224,8 +222,14 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `record.repaired` | `repair` | `ordinary-client` | `once` | `durable` | `reason!:string`, `record!:string`, `replacement!:string` | `repair` |
 | `render.applied` | `agent`, `exec`, `pty` | `system-only` | `append` | `local` | `warnings:array`, `writes:array` |  |
 | `repair.applied` | `repair` | `system-only` | `once` | `durable` | `affected_subjects:array`, `item_count:integer`, `reason!:string`, `token!:string` |  |
-| `resource.admission.coverage` | `resource-admission` | `system-only` | `append` | `durable` | `complete!:boolean`, `epoch!:string`, `host!:string` |  |
-| `resource.admission.observed` | `resource-admission` | `system-only` | `append` | `durable` | `admission_timeout_ms:integer`, `admitted_at:integer`, `class!:string`, `clock_uncertain!:boolean`, `coverage!:string`, `epoch!:string`, `finite!:boolean`, `host!:string`, `id!:string`, `owner!:object`, `queued_at!:integer`, `refusal:string`, `retired_at:integer`, `state!:string` |  |
+| `residency.eligibility-outcome` | `residency` | `system-only` | `once` | `durable` | `decided_at!:integer`, `eligible_since!:integer`, `host!:string`, `reason!:string`, `refused!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.first-turn` | `residency` | `system-only` | `once` | `durable` | `first_turn_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `turn_id!:string` |  |
+| `residency.host-sample` | `residency` | `system-only` | `append` | `durable` | `asleep_seats!:integer`, `held_silent_age_seconds:number`, `host!:string`, `host_available_delta_bytes:integer`, `memory_coverage!:string`, `observed_at!:integer`, `private_reclaimed_bytes:integer`, `seat:subject-reference(agent)` |  |
+| `residency.outcome` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `observed_at!:integer`, `reason!:string`, `resume_failed!:integer`, `seat:subject-reference(agent)`, `useless!:integer` |  |
+| `residency.resumed` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `incarnation!:string`, `native_session!:string`, `resumed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.sleep-ended` | `residency` | `system-only` | `once` | `durable` | `end_class!:string`, `ended_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `short_sleep!:integer`, `suspended_at!:integer` |  |
+| `residency.unrouted` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `kind!:string`, `observed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.wake-demand` | `residency` | `system-only` | `once` | `durable` | `demand_at!:integer`, `host!:string`, `origin_accepted_at!:integer`, `seat:subject-reference(agent)`, `source_message!:string`, `suspended_incarnation!:string` |  |
 | `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `queue_wait_ms!:integer`, `state!:string`, `wall_duration_ms!:integer` |  |
 | `resource.observed` | `resource` | `ordinary-client` | `append` | `durable` | `attribution_only:boolean`, `kind:string`, `observed_at:integer`, `state:any` | `resource` |
 | `revision-proposal.applied` | `revision-proposal` | `system-only` | `once` | `durable` | `reason:string`, `status:string`, `successor_generation:subject-reference` |  |

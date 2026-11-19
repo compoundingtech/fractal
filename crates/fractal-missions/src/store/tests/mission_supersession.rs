@@ -13,7 +13,7 @@ fn start_source(store: &Store, after: Option<&str>) -> MissionRunView {
     let revision = store.mission_spec("retry-work", None).unwrap().unwrap().revision;
     let after = after.map_or_else(String::new, |run| format!("after {run:?}\n"));
     apply_source(store, &format!(
-        "version 2\nmission-run \"supersession-source\" {{\n mission \"mission/retry-work@{revision}\"\n workspace \"/work/retry\"\n requester \"person/requester\"\n input \"value\" \"unchanged\"\n {after}}}\n"
+        "version 2\nmission-run \"supersession-source\" {{\n mission \"mission/retry-work@{revision}\"\n follow-head \"true\"\n workspace \"/work/retry\"\n requester \"person/requester\"\n input \"value\" \"unchanged\"\n {after}}}\n"
     ), "start-supersession-source");
     store.mission_run("supersession-source").unwrap().unwrap()
 }
@@ -591,12 +591,14 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         if pinned {
             let incompatible = fixed.replace("input \"value\"", "input \"replacement\"");
             publish_mission(&owner, &incompatible, "equivalent-later-incompatible");
-            assert!(current(&owner, &run).supersession_fault.is_some());
+            assert!(current(&owner, &run).supersession_fault.is_none());
+            assert!(current(&owner, &run).superseded_by.is_none());
             let restored = publish_mission(&owner, &fixed, "equivalent-restored-compatible");
             assert_eq!(restored.revision, selected.revision);
-            let target = replacement(&owner, &run);
-            assert_eq!(target.revision, restored.revision);
-            assert!(current(&owner, &run).supersession_fault.is_none());
+            let retained = current(&owner, &run);
+            assert_eq!(retained.revision, run.revision);
+            assert!(retained.superseded_by.is_none());
+            assert!(retained.supersession_fault.is_none());
         }
     }
 }
