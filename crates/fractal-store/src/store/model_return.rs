@@ -17,7 +17,7 @@ fn attempt_count(connection: &Connection, agent: &str, incarnation: &str) -> Res
 fn latest_restart_request(connection: &Connection, agent: &str) -> Result<Option<String>> {
     Ok(connection.query_row(&canonical_sql(
         "SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested'
-         AND json_extract(body,'$.actor') IS NOT NULL
+         AND actor IS NOT NULL
          AND json_extract(body,'$.fields.action') IN ('restart','restart-when-idle')
          ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
         [agent], |row| row.get(0)).optional()?)
