@@ -23,7 +23,7 @@ version 2
 //     --workspace "$run_root" --as person/operator --follow
 //
 // Commands in gates run through `sh -c` with a minimal environment. Use absolute binary paths.
-// `${NAME}` is an fractal variable that fractal substitutes before the command runs; write a shell
+// `${NAME}` is a Fractal variable that Fractal substitutes before the command runs; write a shell
 // variable as plain `$NAME`.
 //
 // Preview warns that the three workers are missing eligible agents. The preview looks only at
