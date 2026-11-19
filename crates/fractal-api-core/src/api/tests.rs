@@ -1251,6 +1251,8 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         .unwrap()
         .unwrap();
     assert_eq!(suspension.phase, "quiescing");
+    assert_eq!(suspension.cause(), "manual");
+    assert_eq!(suspension.mode(), "git");
     assert!(suspension.holds_seat());
     let (_, body) = ask("/v1/agents/suspend", "again").await;
     assert_eq!(body["code"], "already-suspended");
@@ -1277,6 +1279,96 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         })).await;
         assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
     }
+}
+
+#[tokio::test]
+async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let source = format!(
+        "version 2\nagent \"test/seat\" {{ host \"node\"; workspace {:?}; harness \"omp\" {{}} }}",
+        root.path().display().to_string(),
+    );
+    let request = apply_request(&state, &source, "person/test", "declare");
+    let (status, body) = json_request(app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subject = "agent/test/seat";
+    let token = state.store.selected_desired_token(subject).unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence,
+            expected_subject: None, idempotency_key: key,
+        }).unwrap()
+    };
+    let suspend = append("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"incumbent"
+    }), vec![token.clone()], None);
+    append("runtime.action.succeeded", json!({
+        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place", "source_host":"node"
+    }), vec![suspend.id.clone()], Some(crate::suspension::suspend_snapshot_key(&suspend.id)));
+    append("runtime.action.succeeded", json!({"action":"suspend"}),
+        vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
+    let before = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    let boundary = state.store.index().unwrap();
+    let error = request_suspend(&state, serde_json::from_value(json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"stale"
+    })).unwrap(), Some(SuspensionFence {
+        desired: token.clone(), incarnation: Some("successor".into()),
+    })).unwrap_err();
+    assert_eq!(error.code, "stale-fence");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().cause(), "idle");
+    let payload = json!({"subject":subject, "actor":"person/test", "idempotency_key":"make-manual"});
+    let (status, converted) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{converted}");
+    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(converted["id"], replay["id"]);
+    assert_eq!(converted["body"]["fields"]["operation_id"], before.operation_id);
+    let after = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    assert_eq!(after.cause(), "manual");
+    assert!(after.holds_seat());
+    assert_eq!(after.operation_id, before.operation_id);
+    assert_eq!(after.native_session_id, before.native_session_id);
+    assert_eq!(after.mode(), "in-place");
+    assert_eq!(after.suspended_at_unix_ms, before.suspended_at_unix_ms);
+    assert_eq!(crate::suspension::current_at(&state.store, subject, Some(boundary)).unwrap().unwrap().cause(), "idle");
+    let path = root.path().join("reopened.sqlite3");
+    state.store.copy_store_to(&path).unwrap();
+    let reopened = Store::open(&path, "node").unwrap();
+    assert_eq!(crate::suspension::current(&reopened, subject).unwrap().unwrap(), after);
+    let shown = client_suspension(&after);
+    assert_eq!(shown["cause"], "manual");
+    assert_eq!(shown["mode"], "in-place");
+    let (status, refused) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "host":"other", "idempotency_key":"move"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "snapshot-in-place");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "suspended");
+    let (status, resumed) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"same-host"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let resume = state.store.claim_by_id(resumed["id"].as_str().unwrap()).unwrap().unwrap();
+    append("runtime.action.succeeded", json!({"action":"resume", "incarnation_id":"resumed"}),
+        vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
+    append("runtime.observed", json!({"status":"running", "runtime_id":"seat", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.session-file", json!({"harness":"omp", "session_id":"native", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.observed", json!({"state":"idle", "incarnation_id":"resumed", "quiescent":true, "blocking":[]}), vec![], None);
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "resumed");
+    assert!(crate::suspension::blockers(&state.store, subject, "resumed").unwrap().is_empty());
+    let requests = state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len();
+    let (status, replay) = json_request(app, "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], converted["id"]);
+    assert_eq!(state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len(), requests);
+    let resumed_path = root.path().join("resumed.sqlite3");
+    state.store.copy_store_to(&resumed_path).unwrap();
+    let resumed_store = Store::open(&resumed_path, "node").unwrap();
+    assert_eq!(resumed_store.suspension_manual_request(subject, "agent-suspend:agent/test/seat:make-manual")
+        .unwrap().unwrap().id, converted["id"].as_str().unwrap());
 }
 
 #[tokio::test]
@@ -13284,6 +13376,15 @@ agent "example/other" {
 
 #[tokio::test]
 async fn a_claimed_step_publishes_one_attempt_bound_ready_mission() {
+    claimed_step_mission_output(false).await;
+}
+
+#[tokio::test]
+async fn a_claimed_step_publishes_a_run_scoped_ready_mission() {
+    claimed_step_mission_output(true).await;
+}
+
+async fn claimed_step_mission_output(per_run: bool) {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let source = r#"
@@ -13303,13 +13404,18 @@ version 2
   }
 
 "#;
-    let intent = parse_intent(source, "node").unwrap();
+    let source = if per_run {
+        source.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+    } else {
+        source.to_owned()
+    };
+    let intent = parse_intent(&source, "node").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
             crate::model::IntentInput {
-                kdl: source.into(),
+                kdl: source.clone(),
                 source_name: None,
             },
         )
@@ -13348,13 +13454,15 @@ version 2
   }
 
 "#;
+    let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+    let produced = produced.replace("project/work", &mission_id);
     let app = router(state.clone());
     let (status, output) = json_request(
         app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
             actor: actor.clone(),
@@ -13406,14 +13514,14 @@ version 2
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{output}");
     assert_eq!(output["code"], "wrong-mission-output");
     let (status, output) = json_request(
-        app,
+        app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
-            actor,
+            actor: actor.clone(),
             incarnation: Some("test".into()),
             idempotency_key: "publish-produced-work".into(),
         })
@@ -13421,13 +13529,13 @@ version 2
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{output}");
-    assert_eq!(output["mission"], "mission/project/work");
+    assert_eq!(output["mission"], format!("mission/{mission_id}"));
     let revision = output["revision"].as_str().unwrap();
     assert_eq!(revision.len(), 64);
     assert!(
         state
             .store
-            .mission_spec("project/work", Some(revision))
+            .mission_spec(&mission_id, Some(revision))
             .unwrap()
             .is_some()
     );
@@ -13438,9 +13546,21 @@ version 2
         .expect("attempt-bound mission output");
     assert_eq!(bound.revision, revision);
     assert_eq!(bound.claim_id, output["claim_id"]);
-    let published = state.store.mission_spec("project/work", Some(revision)).unwrap().unwrap();
+    let published = state.store.mission_spec(&mission_id, Some(revision)).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:output");
+    let (status, replay) = json_request(
+        app,
+        &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
+        serde_json::to_value(MissionProductionRequest {
+            intent: crate::model::IntentInput { kdl: produced, source_name: Some("generated.kdl".into()) },
+            actor,
+            incarnation: Some("test".into()),
+            idempotency_key: "publish-produced-work".into(),
+        }).unwrap(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, output);
 }
 
 #[test]
@@ -17118,5 +17238,54 @@ async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
         }
         connection.abort();
         server.abort();
+    }
+}
+
+#[tokio::test]
+async fn native_rename_plan_and_proof_routes_are_read_only_and_symmetric() {
+    for (family, from, to, source) in [
+        ("agents", "agent/example-plan/worker", "agent/example-plan-renamed/worker",
+            "version 2\nagent \"example-plan/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n"),
+        ("missions", "mission/example-plan", "mission/example-plan-renamed",
+            "version 2\nmission \"example-plan\" state=\"ready\" { goal \"Review candidate\"; step \"review\" { assigned-to \"person/robin\"; }; }\n"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+        let expected = intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)).map(|subject| {
+            (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+        }).collect();
+        state.store.apply(&intent, &expected, "example-plan-declare").unwrap();
+        let before = state.store.selected_desired_token(from).unwrap();
+        let app = router(state.clone());
+        let request = json!({
+            "from": from, "to": to, "actor": "person/robin",
+            "reason": "Clarify responsibility", "idempotency_key": "example-plan",
+            "expected_naming_revision": null, "expected_declaration": null,
+        });
+        let (status, plan) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id/plan"), request.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["request"], request);
+        let digest = plan["request_digest"].as_str().unwrap();
+        assert_eq!(state.store.selected_desired_token(from).unwrap(), before);
+        let (status, receipt) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id"), request,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let applied = state.store.selected_desired_token(from).unwrap();
+        for suffix in [String::new(), format!("&request_digest={digest}")] {
+            let path = format!("/v1/{family}/rename-proof?from={from}&to={to}{suffix}");
+            let (status, proof) = get_request(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{proof}");
+            assert_eq!(proof["availability"], "selected", "{proof}");
+            assert_eq!(proof["request_digest"], digest);
+            assert_eq!(state.store.selected_desired_token(from).unwrap(), applied);
+        }
+        let response = app.oneshot(Request::builder()
+            .uri(format!("/v1/{family}/rename-proof?from={from}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

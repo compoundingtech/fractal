@@ -95,6 +95,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
         let initialized = self.resource_authority.get_or_init(|| {
             (|| -> Result<()> {
+                // Preserve released shell outcomes before generic predecessor recovery can
+                // remove their cgroups or turn their memberships into admission refusals.
+                self.prepare_shell_resource_recovery()?;
                 self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
                 self.runtime.recover_resource_lanes(&self.store, &self.host, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
                 Ok(())
@@ -335,6 +338,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let runtime_id = command_execution_id(&base, &command)?;
         let root = command_root(&record.roots, &base, &runtime_id)?;
         if root.is_none() {
+            // Keep the durable resource request pending, just like a queued seat start.
+            let Some(_launch_permit) = self.admit_incarnation_launch()? else {
+                return Ok(false);
+            };
             let environment = command_environment(
                 command.options.env,
                 engine.attempt_environment(&request.step, request.attempt)?,

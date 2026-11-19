@@ -22,6 +22,11 @@ const genie = (await import(new URL('../../../slo/objectives.kdl.genie.ts', impo
 const builtins = genie.default
 const objectives = genie.objectives
 
+// Rust's emitted-row test checks this shared corpus against every shipped built-in row.
+const nativeRows = JSON.parse(
+  readFileSync(new URL('../../../fixtures/objective-native-rows.json', import.meta.url), 'utf8'),
+) as { readonly rows: readonly string[]; readonly valid: readonly string[]; readonly invalid: readonly string[] }
+
 const render = (input: ObjectiveInput & { readonly name: string }) => emit([objectiveNode(input)])
 
 const rollout = {
@@ -238,9 +243,40 @@ objective "acme/merge-latency" {
     },
   ]
   it.each(native)('lowers indicator $indicator.kind', ({ indicator, targets, kdl }) => {
-    expect(render({ name: 'shipped', about: 'Measured', indicator, targets })).toBe(
+    expect(render({ name: 'shipped', about: 'Measured', indicator, ...(targets === undefined ? {} : { targets }) })).toBe(
       `version 2\nobjective "shipped" {\n  about "Measured"\n${kdl}}\n`,
     )
+  })
+
+  it.each([...nativeRows.rows, ...nativeRows.valid])('binds native row %s without changing its identity', (row) => {
+    expect(
+      render({
+        name: 'acme/native-owner',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: row }),
+        onBreach: Fractal.response.fault({ owner: 'agent/acme/ops', condition: 'native-budget' }),
+      }),
+    ).toContain(`  indicator "native" {\n    objective "${row}"\n  }\n`)
+  })
+
+  it.each(nativeRows.invalid)('rejects malformed native row %j', (row) => {
+    expect(() =>
+      render({
+        name: 'acme/native-owner',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: row }),
+      }),
+    ).toThrow('native objective must name a well-formed built-in row')
+  })
+
+  it('does not widen the declaration name grammar for native row references', () => {
+    expect(() =>
+      render({
+        name: 'acme/writer_hold',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: 'transaction/writer_hold' }),
+      }),
+    ).toThrow()
   })
 
   it('returns frozen, checked values and keeps an unnamed objective for the subject tree', () => {
@@ -262,7 +298,7 @@ describe('Fractal.objective validation', () => {
     { name: 'an unknown field', input: { ...base, owner: 'x' }, message: /unknown field `owner`/ },
     { name: 'no about', input: { ...base, about: undefined }, message: /has no `about`/ },
     { name: 'an empty about', input: { ...base, about: '  ' }, message: /`about` is empty/ },
-    { name: 'an unknown indicator', input: { ...base, indicator: { kind: 'ratio' } }, message: /unknown indicator `ratio`/ },
+    { name: 'an unknown indicator', input: { ...base, indicator: { kind: 'histogram' } }, message: /unknown indicator `histogram`/ },
     { name: 'an empty latency', input: { name: 'x', about: 'a', indicator: { kind: 'latency', paths: [] }, targets: [{ stat: 'p99', within: '1s' }] }, message: /needs a `path`/ },
     { name: 'an extra indicator field', input: { name: 'x', about: 'a', indicator: { kind: 'statement', path: 'p' }, targets: [] }, message: /indicator `statement` has an unknown field `path`/ },
     { name: 'a fractional idle minimum', input: { name: 'cpu', about: 'a', indicator: { kind: 'cpu', idleMinMinutes: 1.5, loadMaxCores: 1 }, targets: [] }, message: /idleMinMinutes is not a positive integer/ },
@@ -294,7 +330,7 @@ describe('Fractal.objective validation', () => {
     { name: 'a remote latency below local', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }, { stat: 'p99', within: '500ms', scope: 'remote' }] }, message: /remote latency is below its own/ },
     { name: 'a fractional divergence max', input: { name: 'x', about: 'a', indicator: Fractal.indicator.divergence(), targets: [{ stat: 'open', max: 0.5 }] }, message: /no target `open` with that bound/ },
     { name: 'a min-percent over 100', input: { name: 'x', about: 'a', indicator: Fractal.indicator.share({ path: 'p' }), targets: [{ stat: 'live-share', minPercent: 101 }] }, message: /is not between 0 and 100/ },
-    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only an interval or a count takes `onBreach`/ },
+    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only claim indicators take `onBreach`/ },
     { name: 'a count with min and max', input: { ...throughput, targets: [{ stat: 'per-hour', min: 1, max: 2 }] }, message: /needs one bound/ },
     { name: 'a count with a zero minimum', input: { ...throughput, targets: [{ stat: 'per-hour', min: 0 }] }, message: /no target `per-hour` with that bound/ },
     { name: 'a count with a negative maximum', input: { ...throughput, targets: [{ stat: 'per-hour', max: -1 }] }, message: /no target `per-hour` with that bound/ },
@@ -413,6 +449,32 @@ const declared = `{
 const header = `import { Fractal } from '${indexModule}'\nimport { defineAgent, defineObjective } from '${treeModule}'\n`
 
 describe('objective subject trees', () => {
+  it.effect('loads numeric budgets and native owner bindings from module and KDL declarations', () =>
+    Effect.gen(function* () {
+      const policy = `{ allowance: 0.05, horizon: '30d', minCoverage: 0.9, minSamples: 1, fast: { burnRate: 14.4, long: '1h', short: '5m' }, slow: { burnRate: 6, long: '6h', short: '30m' } }`
+      const root = fixture({
+        'acme/ratio/objective.ts': `${header}export default Fractal.objective({ about: 'Requests', indicator: Fractal.indicator.ratio({ subjectPrefix: 'custom/acme/request/', event: { kind: 'custom.acme.request', at: 'at' }, field: 'ms', badAbove: 100 }), budget: ${policy} })`,
+        'acme/gauge/objective.ts': `${header}export default Fractal.objective({ about: 'Free capacity', indicator: Fractal.indicator.gauge({ subjectPrefix: 'custom/acme/capacity/', event: { kind: 'custom.acme.capacity', at: 'at' }, field: 'free', badBelow: 100, maxAge: '2h', cadence: '1h' }), budget: ${policy} })`,
+        'acme/native/objective.ts': `${header}export default Fractal.objective({ about: 'Native ownership', indicator: Fractal.indicator.native({ objective: 'person-read' }), onBreach: Fractal.response.fault({ owner: 'agent/acme/ops', condition: 'read-budget' }) })`,
+        'acme/native-kdl/objective.kdl': 'version 2\nobjective "acme/native-kdl" {\n about "Native ownership"\n indicator "native" { objective "transaction/read"; }\n}\n',
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      // Canonical declaration paths sort lexically: "native-kdl/" precedes "native/".
+      expect(subjects.map(({ id }) => id)).toEqual(['acme/gauge', 'acme/native-kdl', 'acme/native', 'acme/ratio'])
+    }),
+  )
+
+  it.effect('loads GitHub measurements from the same module and KDL declaration tree', () =>
+    Effect.gen(function* () {
+      const root = fixture({
+        'delivery/merged/objective.ts': `${header}export default Fractal.objective({ about: 'All-author merges', indicator: Fractal.indicator.githubMergedCount({ source: 'github-source/example', roster: 'github-scope/example', timezone: 'UTC', cut: 'now', measurement: 'targeted' }), targets: [{ stat: 'per-hour', min: 7 }] })`,
+        'delivery/ready/objective.kdl': 'version 2\nobjective "delivery/ready" {\n about "Measured final-ready latency"\n indicator "github-ready-to-merged" {\n source "github-source/example"\n roster "github-scope/example"\n timezone "UTC"\n cut "watermark"\n measurement "only"\n }\n}\n',
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      expect(subjects.map(({ id }) => id)).toEqual(['delivery/merged', 'delivery/ready'])
+    }),
+  )
+
   it.effect('declare objective/<path> from objective.ts and objective.kdl', () =>
     Effect.gen(function* () {
       const kdl = render({ ...rollout, name: 'ops/kdl' })
@@ -479,7 +541,7 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       files: {
         'ops/x/objective.ts': `${header}export default Fractal.objective({ about: 'a', indicator: Fractal.indicator.statement(), targets: [{ stat: 'p99', within: '10ms' }, { stat: 'max', within: '100ms' }] })`,
       },
-      message: 'A declared objective is an interval or count over claims named NAMESPACE/NAME; objective/ops/x is not',
+      message: 'A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/ops/x is not',
     },
     {
       name: 'a one-segment name',
@@ -530,4 +592,217 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       expect(`${error.message}${cause}`).toContain(message)
     }),
   )
+})
+
+describe('native source-backed GitHub objectives', () => {
+  const native = {
+    source: 'github-source/test',
+    roster: 'github-scope/test',
+    timezone: 'America/New_York',
+    cut: 'watermark',
+    measurement: 'only',
+  } as const
+
+  it('lowers the exact measured-only fixture accepted by the native reader', () => {
+    expect(render({
+      name: 'delivery/ready-to-merged',
+      about: 'Final ready to merge, measured without a target',
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [],
+    })).toBe(`version 2
+objective "delivery/ready-to-merged" {
+  about "Final ready to merge, measured without a target"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "America/New_York"
+    cut "watermark"
+    measurement "only"
+  }
+}
+`)
+  })
+
+  it('accepts omitted targets for both measured-only GitHub indicators like the native reader', () => {
+    for (const indicator of [
+      Fractal.indicator.githubReadyToMerged(native),
+      Fractal.indicator.githubMergedCount(native),
+    ]) {
+      const input = { name: 'delivery/measured', about: 'Measured GitHub evidence', indicator }
+      const text = render(input)
+      expect(text).toBe(render({ ...input, targets: [] }))
+      expect(text).toContain('measurement "only"')
+      expect(text).not.toContain('target "')
+    }
+    expect(() => render({
+      name: 'delivery/merged', about: 'Targeted GitHub throughput',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }),
+    })).toThrow('has no `target`')
+  })
+
+  it('keeps merged-count target values policy-owned and omits author filters', () => {
+    const text = render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, cut: 'now', measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7 }],
+    })
+    expect(text).toContain('indicator "github-merged-count"')
+    expect(text).toContain('target "per-hour" min=7')
+    expect(text).not.toContain('only "author"')
+  })
+
+  it('rejects remote scope for GitHub targets just like the native reader', () => {
+    expect(() => render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7, scope: 'remote' }],
+    })).toThrow('only a latency target has a remote scope')
+  })
+
+  it('rejects claim budgets on measured-only and targeted GitHub declarations', () => {
+    const budget = {
+      allowance: 0.05, horizon: '30d', minCoverage: 0.9, minSamples: 1,
+      fast: { burnRate: 14.4, long: '1h', short: '5m' },
+      slow: { burnRate: 6, long: '6h', short: '30m' },
+    } as const
+    for (const measurement of ['only', 'targeted'] as const) {
+      expect(() => render({
+        name: 'delivery/merged', about: 'Merge count',
+        indicator: Fractal.indicator.githubMergedCount({ ...native, measurement }),
+        targets: measurement === 'targeted' ? [{ stat: 'per-hour', min: 7 }] : [], budget,
+      })).toThrow('GitHub measurements do not take claim budgets')
+    }
+    expect(() => render({
+      name: 'delivery/ready', about: 'Final-ready latency',
+      indicator: Fractal.indicator.githubReadyToMerged(native), targets: [], budget,
+    })).toThrow('GitHub measurements do not take claim budgets')
+  })
+
+  it('rejects a hidden default target, a latency target and an implicit cut', () => {
+    const base = { name: 'delivery/merged', about: 'Merged', targets: [] } as const
+    expect(() => render({ ...base, indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }) })).toThrow('needs one per-hour minimum')
+    expect(() => render({
+      ...base,
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [{ stat: 'p95', within: '5m' }],
+    })).toThrow('neither targets')
+    expect(() => Fractal.objective({
+      ...base,
+      indicator: { ...Fractal.indicator.githubMergedCount(native), cut: undefined },
+    } as unknown as ObjectiveInput)).toThrow('cut must be')
+  })
+})
+
+describe('native numeric budgets', () => {
+  const budget = {
+    allowance: 0.05,
+    horizon: '30d',
+    minCoverage: 0.9,
+    minSamples: 20,
+    fast: { burnRate: 14.4, long: '1h', short: '5m' },
+    slow: { burnRate: 6, long: '6h', short: '30m' },
+  } as const
+  const input = {
+    name: 'acme/request-budget',
+    about: 'Request bad-event allowance',
+    indicator: Fractal.indicator.ratio({
+      subjectPrefix: 'custom/acme/request/',
+      event: { kind: 'custom.acme.request', at: 'observed_at' },
+      field: 'duration_ms',
+      badAbove: 100,
+      labels: ['route'],
+      only: [{ field: 'class', values: ['interactive'] }],
+    }),
+    targets: [],
+    budget,
+  } as const
+
+  it('lowers ratio fields, filtering and both burn pairs to kernel KDL', () => {
+    expect(render(input)).toBe(`version 2
+objective "acme/request-budget" {
+  about "Request bad-event allowance"
+  indicator "ratio" {
+    subject-prefix "custom/acme/request/"
+    event "custom.acme.request" at="observed_at"
+    value "duration_ms" bad-above=100
+    label "route"
+    only "class" "interactive"
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=20 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}
+`)
+    expect(Object.isFrozen(Fractal.objective(input).budget?.fast)).toBe(true)
+  })
+
+  it('lowers gauge lower limits and honest coverage/cadence metadata', () => {
+    const indicator = Fractal.indicator.gauge({
+      subjectPrefix: 'custom/acme/capacity/',
+      event: { kind: 'custom.acme.capacity', at: 'observed_at' },
+      field: 'free_bytes',
+      badBelow: 1_000,
+      maxAge: '2h',
+      cadence: '1h',
+    })
+    const text = render({ ...input, indicator })
+    expect(text).toContain('indicator "gauge"')
+    expect(text).toContain('value "free_bytes" bad-below=1000')
+    expect(text).toContain('max-age "2h"')
+    expect(text).toContain('cadence "1h"')
+    expect(text).toContain('short="5m"')
+  })
+
+  it.each([
+    { ...input, budget: undefined },
+    { ...input, window: { span: '1h' } },
+    { ...input, targets: [{ stat: 'p99', within: '1s' }] },
+    { ...input, indicator: { ...input.indicator, badAbove: Number.NaN } },
+    { ...input, indicator: { ...input.indicator, event: { kind: 'custom.acme.request' } } },
+    { ...input, budget: { ...budget, allowance: 1 } },
+    { ...input, budget: { ...budget, minCoverage: 0 } },
+    { ...input, budget: { ...budget, minSamples: 0 } },
+    { ...input, budget: { ...budget, fast: { ...budget.fast, short: '1h' } } },
+    { ...input, budget: { ...budget, slow: { ...budget.slow, long: '31d' } } },
+    { ...input, budget: { ...budget, fast: { ...budget.fast, burnRate: 2 } } },
+    { ...input, indicator: { ...input.indicator, kind: 'gauge', maxAge: '1m', cadence: '1h' } },
+    { ...input, indicator: { ...input.indicator, kind: 'gauge', maxAge: '2h', cadence: '1h', badBelow: 1 } },
+  ])('rejects invalid numeric semantics %#', (value) => {
+    expect(() => Fractal.objective(value as ObjectiveInput)).toThrow()
+  })
+})
+
+describe('native objective ownership bindings', () => {
+  const input = {
+    name: 'acme/person-read',
+    about: 'Fleet ownership of native latency',
+    indicator: Fractal.indicator.native({ objective: 'person-read/remote' }),
+    onBreach: Fractal.response.fault({ owner: 'agent/acme/ops', condition: 'person-read-budget' }),
+  } as const
+
+  it('lowers a native row reference without redefining targets or budget', () => {
+    expect(render(input)).toBe(`version 2
+objective "acme/person-read" {
+  about "Fleet ownership of native latency"
+  indicator "native" {
+    objective "person-read/remote"
+  }
+  on-breach "fault" condition="person-read-budget" owner="agent/acme/ops"
+}
+`)
+  })
+
+  it('rejects target, window and budget overrides and malformed row references', () => {
+    for (const value of [
+      { ...input, indicator: { kind: 'native', objective: '../bad' } },
+      { ...input, targets: [{ stat: 'p99', within: '1s' }] },
+      { ...input, window: { span: '1h' } },
+      { ...input, budget: { allowance: 0.05 } },
+    ]) {
+      expect(() => Fractal.objective(value as ObjectiveInput)).toThrow()
+    }
+  })
 })

@@ -1817,19 +1817,43 @@ async fn observe_poll(
             ).await;
         }
     }
+    // History shares this observer's authenticated acquisition budget and deadline,
+    // but never its operational facts: replay must not wake old watch events.
+    // Like workflow-run publication above, a capture failure is reported separately:
+    // a fenced or broken history source must not discard already-read live changes.
+    // The ledger owns durable coverage; a failed step makes no claim of completeness
+    // and requests no accelerated continuation for a source configuration defect.
+    let capture_delay = if let Some(ledger) = request.github_capture.as_deref() {
+        // Select the authored source by its locator, not GitHub's redirected name.
+        // The ledger resolves committed node identity for renamed repositories.
+        let repository = &request.locator;
+        match ledger.step(api_base, repository, token).await {
+            Ok(progress) => progress.continue_after_ms.filter(|_| progress.active),
+            Err(error) => {
+                tracing::warn!(
+                    repository, capture_status = "failed", error = %format_args!("{error:#}"),
+                    "could not acquire or publish GitHub capture"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Once either listing exhausts its reconciliation burst, throttle the observation,
     // including pagination in the other listing. Keep every frozen watermark and cursor.
     let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
         .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
+    let normal_delay = if more && !reconcile_backoff {
+        super::PROVIDER_CONTINUE_MS
+    } else {
+        300_000
+    };
+    let delay = capture_delay.map_or(normal_delay, |delay| normal_delay.min(u128::from(delay)));
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // Large listings continue immediately only while the reconciliation burst permits it.
-        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
-            super::PROVIDER_CONTINUE_MS
-        } else {
-            300_000
-        }),
+        next_check_unix_ms: now_ms().saturating_add(delay),
     })
 }
 
@@ -2227,6 +2251,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         }
     }
 

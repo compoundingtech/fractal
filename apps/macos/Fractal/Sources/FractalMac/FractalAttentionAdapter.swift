@@ -309,11 +309,17 @@ actor FractalAttentionAdapter: AttentionAdapter {
           },
           custom: $0.custom ?? false, recommendedAnswerID: $0.recommendation?.answer)
       },
-      update: item.update.map { UpdateNote(about: $0.about, summary: $0.summary, speech: $0.speech) },
+      update: item.update.map { UpdateNote(type: $0.type, about: $0.about, summary: $0.summary, speech: $0.speech) },
       workDoneDefaults: Self.workDoneDefaults(parameters["work.done"]),
       url: try FractalAskURL.make(base: fractalURL, agentRef: agentRef), isUrgent: item.urgent == true,
       seenAt: item.seenAt.flatMap(Self.date(iso:)), snoozedUntil: item.snoozedUntil.flatMap(Self.date(iso:)),
-      conversationID: agentRef)
+      conversationID: agentRef, requesterID: item.requesterID,
+      snapshotContext: AttentionContext(
+        detail: item.detail.isEmpty || item.detail == item.title ? nil : item.detail,
+        request: item.request.map {
+          Self.request($0, subjects: ($0.subjects ?? []).map(Self.subject), carrier: item.sourceID)
+        },
+        updateSubjects: (item.update?.subjects ?? []).map(Self.subject)))
   }
 
   /// The server-filled `work.done` summary and answer (an update's `Read` / `{id: read}`).
@@ -326,7 +332,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
     return WorkDoneAnswer(summary: summary, answerID: id, answerText: text)
   }
 
-  private static func entry(_ row: SloRow) -> SloEntry {
+  static func entry(_ row: SloRow) -> SloEntry {
     SloEntry(
       id: row.id, kind: row.kind == "budget" ? .budget : .objective, about: row.about,
       target: row.target, current: row.current, window: row.window, status: row.status,

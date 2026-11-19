@@ -20,8 +20,10 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;
+pub mod resource_exec_receipts;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -254,8 +256,10 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+mod github_capture_config;
 pub mod objective_series;
 pub mod runtime_starts;
+pub mod runtime_cleanup;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
 pub mod turn_invocations;
@@ -840,7 +844,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h921f972a6b71 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -874,6 +878,9 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
+ON claims(subject, json_extract(body, '$.fields.request_key'))
+WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
 -- Last activity is the greatest numeric acceptance time, independent of local arrival.
 CREATE INDEX IF NOT EXISTS claims_actor_activity_time_index
 ON claims(actor, length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
@@ -2419,6 +2426,8 @@ pub struct ObservationTrim {
 const TRIM_SCAN_PAGE: i64 = 5_000;
 
 pub struct Store {
+    /// Identity of this open, including same-process reopen or restore.
+    membership_lifetime: uuid::Uuid,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2427,6 +2436,7 @@ pub struct Store {
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
+    launch_admission: Arc<launch_freeze::Admission>,
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
@@ -2841,6 +2851,10 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
 pub type HumanAttention = (BTreeSet<String>, Vec<fractal_ui_model::missions::Gate>);
 
 impl Store {
+    pub fn ordered_membership_lifetime(&self) -> uuid::Uuid {
+        self.membership_lifetime
+    }
+
     /// Decision reads must wait for the run's committed pending projection work.
     pub fn run_projection_pending(&self, subject: &str) -> Result<bool> {
         smallclaims::touched::note_read(|| subject.to_owned());
@@ -2920,9 +2934,11 @@ impl Store {
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2933,7 +2949,9 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2951,9 +2969,11 @@ impl Store {
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2963,7 +2983,9 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2987,14 +3009,18 @@ impl Store {
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -4176,7 +4202,7 @@ impl Store {
                     run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
-                    let mut body = serde_json::to_value(mission).map_err(internal)?;
+                    let mut body = mission_publication_body(mission).map_err(internal)?;
                     if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
                     if let Some(provenance) = intent.mission_provenance.get(&mission.id)
                         && let Some(claim) = mission_provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
@@ -5124,6 +5150,20 @@ impl Store {
             (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
             (graph, _) => Ok(graph),
         }
+    }
+
+    /// Conversion requests remain replayable after their suspension lineage stops holding a seat.
+    pub fn suspension_manual_request(&self, subject: &str, key: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection.query_row(
+            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
+                    predecessors, accepted_at_unix_ms
+             FROM claims INDEXED BY claims_suspend_manual_request_index
+             WHERE subject=?1 AND json_extract(body,'$.fields.request_key')=?2
+               AND kind='runtime.action.succeeded'
+               AND json_extract(body,'$.fields.operation_status')='manual'",
+            params![subject, key], claim_from_row,
+        ).optional()?)
     }
 
     /// Native occupants of an operation key, including divergent replicated requests.
@@ -11382,6 +11422,65 @@ fn migrate_occurrence_creation_projections_tx(transaction: &Transaction<'_>) -> 
     Ok(())
 }
 
+/// Re-derive cancellation episodes written before the fenced response reducer. Updating the
+/// reducer alone leaves an older writer's unfenced derived `ready` effect materialized forever.
+/// Select only affected run trees through the kind/subject indexes, never replay the claim log.
+fn migrate_person_cancellation_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
+    if transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_cancellation_projection_rules' AND value='1')",
+        [], |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let timing = std::env::var_os("ST3_PROJECTION_MIGRATION_TIMING")
+        .map(|_| std::time::Instant::now());
+    let subjects = transaction.prepare(
+        "SELECT DISTINCT json_extract(asking.body, '$.fields.origin_step')
+         FROM claims cancelled JOIN claims asking ON asking.subject=cancelled.subject
+         WHERE cancelled.kind='work.person-cancelled' AND asking.kind='work.person-asked'
+           AND json_extract(asking.body, '$.fields.origin_step') IS NOT NULL",
+    )?.query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut aggregates = BTreeSet::new();
+    let mut unresolved = 0usize;
+    for subject in subjects {
+        if let Some(aggregate) = run_part_of_tx(transaction, &subject).map_err(anyhow::Error::new)? {
+            aggregates.insert(aggregate);
+        } else {
+            unresolved += 1;
+        }
+    }
+    let selected = aggregates.len();
+    let mut degraded = 0usize;
+    for aggregate in aggregates {
+        let result = match aggregate {
+            Aggregate::RunPart(top) => rebuild_run_part_with_notifications_tx(transaction, &top, false),
+            Aggregate::RunTree(root) => rebuild_run_tree_with_notifications_tx(transaction, &root, false),
+            _ => unreachable!("run_part_of_tx only returns run aggregates"),
+        };
+        degraded += usize::from(!settle_run_refold_result(result).map_err(anyhow::Error::new)?);
+    }
+    // Missing historical owners and persistently degraded runs cannot become repairable by
+    // reopening. Keep their existing health state, but do not repeat every successful refold.
+    // Actual errors (including contention/deadlines) propagate and roll this marker back.
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h7f69e83e8327 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('person_cancellation_projection_rules','1')",
+        [],
+    )?;
+    if unresolved != 0 || degraded != 0 {
+        tracing::warn!(unresolved_origins = unresolved, degraded_aggregates = degraded,
+            "person cancellation projection migration skipped unrepairable history");
+    }
+    if let Some(started) = timing {
+        tracing::info!(migration = "person_cancellation", selected_aggregates = selected,
+            unresolved_origins = unresolved, degraded_aggregates = degraded,
+            elapsed_ms = %started.elapsed().as_millis(),
+            "projection migration completed");
+    }
+    Ok(())
+}
+
 fn work_extension_roots_tx(transaction: &Transaction<'_>) -> Result<(BTreeSet<String>, bool)> {
     let subjects = transaction
         .prepare("SELECT DISTINCT subject FROM claims WHERE kind='work.extended'")?
@@ -12113,6 +12212,10 @@ fn replicated_work_validation_fields<'a>(
     if kind == "mission.published"
         && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
     {
+        let scoped = crate::mission::declares_per_run_missions(&mission);
+        if scoped != (body.pointer("/fields/per_run_missions").and_then(Value::as_u64) == Some(1)) {
+            return Err(anyhow::anyhow!("per-run-missions-marker: mission publication must carry its derived per_run_missions=1 marker"));
+        }
         mission_capacity::validate_mission(transaction, origin, &mission).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
@@ -12136,13 +12239,15 @@ fn replicated_work_validation_fields<'a>(
     )?;
     insert_event(transaction, record.store_index, kind, subject, body)?;
     projectors::project_claim(projectors::APPEND, transaction, &record)?;
-    normalize_local_projection_timestamps_tx(
-        transaction,
-        subject,
-        kind,
-        body,
-        record.accepted_at_unix_ms,
-    )?;
+    if !is_derived_person_cancellation_tx(transaction, &record)? {
+        normalize_local_projection_timestamps_tx(
+            transaction,
+            subject,
+            kind,
+            body,
+            record.accepted_at_unix_ms,
+        )?;
+    }
     invocation_receipts::record_diagnostic_tx(transaction, origin, &record)?;
     Ok(record)
 }
@@ -12215,6 +12320,25 @@ fn mission_run_creation_time(fields: &Value, accepted_at: u128) -> u128 {
         .and_then(|(deadline, timeout)| deadline.checked_sub(timeout))
         .map(u128::from)
         .unwrap_or(accepted_at)
+}
+
+/// Older writers emitted an unfenced state effect after the authoritative cancellation.
+/// Every local projection side effect, including timestamp normalization, must ignore it.
+fn is_derived_person_cancellation_tx(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool> {
+    if claim.kind != "step-run.state"
+        || claim.actor.as_deref() != Some("daemon/runtime")
+        || !matches!(claim.body.pointer("/fields/status").and_then(Value::as_str), Some("ready" | "failed"))
+    {
+        return Ok(false);
+    }
+    for predecessor in &claim.predecessors {
+        if transaction.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Local writers often prepare rows before appending their claim. Use the resulting claim's
@@ -12318,6 +12442,17 @@ fn normalize_local_projection_timestamps_tx(
     Ok(())
 }
 
+/// Keep the historical raw mission body for projectors, and persist explicit schema fields
+/// for scoped outputs so older admission code sees (and refuses) the new marker.
+pub fn mission_publication_body(mission: &MissionSpec) -> Result<Value> {
+    let mut body = serde_json::to_value(mission)?;
+    if crate::mission::declares_per_run_missions(mission) {
+        let fields = schema_fields_for_body("mission.published", &body)?;
+        body["fields"] = serde_json::to_value(fields)?;
+    }
+    Ok(body)
+}
+
 pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, Value>> {
     if let Some(fields) = body.get("fields").and_then(Value::as_object) {
         return Ok(fields
@@ -12340,11 +12475,17 @@ pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<Strin
     }
     if kind == "mission.published" {
         let mission: MissionSpec = serde_json::from_value(body.clone())?;
-        return Ok(BTreeMap::from([
+        let mut fields = BTreeMap::from([
             ("revision".into(), Value::String(mission.revision.clone())),
             ("state".into(), serde_json::to_value(&mission.state)?),
             ("body".into(), body.clone()),
-        ]));
+        ]);
+        // This closed-schema marker prevents old replicas from selecting the revision
+        // and treating its run template as a shared literal mission identity.
+        if crate::mission::declares_per_run_missions(&mission) {
+            fields.insert("per_run_missions".into(), Value::from(1));
+        }
+        return Ok(fields);
     }
     Ok(body
         .as_object()
@@ -17288,6 +17429,12 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    rebuild_run_part_with_notifications_tx(transaction, top, true)
+}
+
+fn rebuild_run_part_with_notifications_tx(
+    transaction: &Transaction<'_>, top: &str, notify: bool,
+) -> Result<(), FractalError> {
     let root = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.to_owned());
     require_healthy_run_refold_tx(transaction, &root)?;
     #[cfg(any(test, feature = "test-support"))]
@@ -17418,7 +17565,7 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
     }
     #[cfg(any(test, feature = "test-support"))]
     RUN_PART_RUNS.with(|count| count.set(count.get() + runs.len()));
-    rebuild_runs_tx(transaction, &runs)
+    rebuild_runs_tx(transaction, &runs, notify)
 }
 
 /// The generations of one run: projected, created by claims, or named by its asks.
@@ -17530,6 +17677,12 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
+    rebuild_run_tree_with_notifications_tx(transaction, root, true)
+}
+
+fn rebuild_run_tree_with_notifications_tx(
+    transaction: &Transaction<'_>, root: &str, notify: bool,
+) -> Result<(), FractalError> {
     require_healthy_run_refold_tx(transaction, root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
@@ -17561,12 +17714,12 @@ pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<
         .into_iter()
         .map(|run| run.trim_start_matches("mission-run/").to_owned()),
     );
-    rebuild_runs_tx(transaction, &runs)
+    rebuild_runs_tx(transaction, &runs, notify)
 }
 
 /// Forget `runs` and their generations, steps and proposals, then project their claims again in
 /// the replay's order and passes.
-fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Result<(), FractalError> {
+fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>, notify: bool) -> Result<(), FractalError> {
     let strings = |sql: &str, value: &str| string_column_tx(transaction, sql, value);
     let mut generations = BTreeSet::new();
     let mut proposals = BTreeSet::new();
@@ -17675,7 +17828,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         }
     }
     reapply_local_work_lease_renewals_tx(transaction)?;
-    if projection_work_pending_tx(transaction)? {
+    if notify && projection_work_pending_tx(transaction)? {
         // Claims already advanced their cursor in earlier chunks. Publish a durable local
         // change for every rebuilt run so incremental decision readers revisit skipped work.
         note_run_projection_finished_tx(transaction, runs)?;
@@ -17757,6 +17910,12 @@ fn rebuild_base_aggregate_tx(
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE subject=?1)", [subject], |row| row.get(0),
+        ).map_err(internal)?;
+        if !retained {
+            runtime_cleanup::forget_subject(transaction, subject).map_err(internal)?;
+        }
     }
     Ok(())
 }
@@ -19899,18 +20058,8 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     if claim.kind == "step-run.state" {
-        // Native cancellation is projected from the response itself with its attempt and
-        // asking-episode fence. Older writers also emitted an unfenced derived state claim;
-        // replay must not let that redundant effect fail a resumed origin or erase its lease.
-        if matches!(status, "failed" | "ready") && claim.actor.as_deref() == Some("daemon/runtime") {
-            for predecessor in &claim.predecessors {
-                if transaction.prepare_cached(
-                    "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
-                ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0)).map_err(internal)?
-                {
-                    return Ok(());
-                }
-            }
+        if is_derived_person_cancellation_tx(transaction, claim).map_err(internal)? {
+            return Ok(());
         }
         // A retained completed projection can outlive its admission claim. A duplicate
         // completion is not a new admission and must not manufacture a fresh budget.

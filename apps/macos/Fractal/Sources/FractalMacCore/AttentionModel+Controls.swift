@@ -13,18 +13,22 @@ extension AttentionModel {
     return false
   }
 
-  /// The panel's window came on screen or left it. Leaving pops every page to the top level, as
-  /// Control Center reopens there (drafts stay); coming on screen marks the cards it holds and
-  /// re-reads the open page, which refreshes skip while nobody sees it.
+  /// The panel's window came on screen or left it. Leaving pops every page to the top level and
+  /// both inbox tabs back to Asks, as Control Center reopens there (drafts stay); coming on
+  /// screen marks the cards it holds and re-reads the open page, which refreshes skip while
+  /// nobody sees it.
   public func setPanelVisible(_ visible: Bool) async {
     isPanelVisible = visible
     guard visible else {
       if navigationEntries.count > 1 { navigationEntries = [navigationEntries[0]] }
       backFrom = nil
+      glanceTab = .asks
+      inboxTab = .asks
       return
     }
     for record in rowsInPanel.values { await markSeen(record) }
     await readOpenPage()
+    await warmDetails()
   }
 
   /// A card's row is in the panel (or reached a new revision there): seen if the panel is visible.

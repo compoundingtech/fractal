@@ -28,6 +28,8 @@ const ROOT_NODES: &[&str] = &[
     "planning-session",
     "message",
     "objective",
+    "github-source",
+    "github-scope",
     "notice-owner",
     "repair",
     "schedule",
@@ -387,6 +389,12 @@ fn parse_desired_node(
         return Err(FractalError::new(
             "objective-inside-mission",
             "an objective declaration must be at the root",
+        ));
+    }
+    if matches!(kind, "github-source" | "github-scope") && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "github-configuration-inside-mission",
+            "GitHub acquisition and effective-dated membership are root declarations",
         ));
     }
     if kind == crate::notice_owner::KIND && context.owner_run.is_some() {
@@ -1716,6 +1724,14 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     match kind {
         "account" => validate_account(node)?,
         "objective" => validate_objective(node)?,
+        "github-source" => {
+            fractal_schema::github_capture::declarations::parse_source(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-source", message))?;
+        }
+        "github-scope" => {
+            fractal_schema::github_capture::declarations::parse_roster(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-scope", message))?;
+        }
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -6647,5 +6663,47 @@ mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seco
             assert_eq!(error.details["field"], "declared_budgets.attention");
             assert!(error.details["subject"].is_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod github_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_effective_scope_are_root_declarations() {
+        let intent = parse_intent(r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+github-scope "public-example" {
+    revision "authored-one"
+    repository "R_example" from-ms=100
+}
+"#, "member-one").unwrap();
+        assert_eq!(intent.subjects["github-source/public-example"].kind, "github-source");
+        assert_eq!(intent.subjects["github-scope/public-example"].kind, "github-scope");
+    }
+
+    #[test]
+    fn enabling_source_without_authority_is_a_typed_validation_error() {
+        let source = r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#;
+        assert_eq!(parse_intent(source, "member-one").unwrap_err().code, "invalid-github-source");
+        let disabled = source.replace("enabled #true", "enabled #false");
+        assert!(parse_intent(&disabled, "member-one").is_ok());
     }
 }

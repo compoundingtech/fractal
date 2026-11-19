@@ -2613,6 +2613,12 @@ pub struct HarnessTodoTotals {
 /// Where a seat's latest suspend or resume stands.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentSuspension {
+    /// Missing on older daemons means manual. Unknown values are retained.
+    #[serde(default)]
+    pub cause: Option<String>,
+    /// Missing on older daemons means git. Unknown values are retained.
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]

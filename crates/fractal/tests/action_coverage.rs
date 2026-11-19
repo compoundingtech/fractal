@@ -126,6 +126,49 @@ async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_launch_freeze_sets_shows_and_clears_owned_barriers() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let server = daemon.server.take().unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    std::fs::remove_file(daemon.socket()).unwrap();
+    daemon.state.owning_person = Some(PERSON.into());
+    daemon.serve().await;
+    let initial = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert!(initial["freeze"].is_null());
+    let placed = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "set", "--id", "daemon-replacement",
+        "--reason", "Replace daemon", "--duration-ms", "60000", "--wait-ms", "0",
+        "--as", PERSON,
+    ]).await);
+    assert_eq!(placed["id"], "daemon-replacement");
+    assert_eq!(placed["owner"], PERSON);
+    assert_eq!(placed["reason"], "Replace daemon");
+    assert!(placed["expires_at_unix_ms"].is_u64());
+    let shown = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert_eq!(shown["freeze"], placed);
+    assert_eq!(shown["deferred"], json!([]));
+    for (id, actor) in [("wrong-id", PERSON), ("daemon-replacement", "person/other")] {
+        assert!(!daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "clear", "--id", id, "--as", actor,
+        ]).await.status.success());
+        assert_eq!(cli_value(daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "show",
+        ]).await)["freeze"], placed);
+    }
+    let cleared = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "clear", "--id", "daemon-replacement", "--as", PERSON,
+    ]).await);
+    assert_eq!(cleared["cleared"], true);
+    assert!(cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "show",
+    ]).await)["freeze"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -3468,17 +3511,37 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
             family, "rename-id", from, to, "--as", "person/robin",
             "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
+        let before_plan = daemon.store().index().unwrap();
+        let mut plan_arguments = arguments.to_vec();
+        plan_arguments.push("--plan");
+        let plan = cli_value(daemon.cli("person/robin", &plan_arguments).await);
+        assert_eq!(plan["admissible"], true);
+        assert_eq!(plan["request"]["from"], from);
+        assert_eq!(plan["request"]["to"], to);
+        assert_eq!(daemon.store().index().unwrap(), before_plan);
+        let digest = plan["request_digest"].as_str().unwrap();
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
         assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let proof_arguments = [family, "rename-proof", from, to, "--request-digest", digest];
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["request_digest"], digest);
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["claim"]["body"]["fields"]["request"], plan["request"]);
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(replay["claim_id"], receipt["claim_id"]);
         assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["request_digest"], digest);
         assert_eq!(daemon.store().index().unwrap(), index);
     }
 }

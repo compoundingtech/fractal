@@ -1362,6 +1362,8 @@ enum MissionViewCommand {
     },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
     /// Legacy: use `fractal apply FILE`; publish authored KDL after checking exec gates.
     ///
@@ -2259,6 +2261,30 @@ const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
     "terminal.read",
 ];
 
+/// CLI mirror of the daemon's person-pairing ceiling; the daemon revalidates the grant.
+const PERSON_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
+    "read.glasses",
+    "control.glasses",
+    "read.arrangements",
+    "control.arrangements",
+    "terminal.read",
+    "control.attention",
+    "control.launches",
+];
+
+fn parse_person_pairing_scope(value: &str) -> std::result::Result<String, String> {
+    if PERSON_PAIRING_SCOPES.contains(&value) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("person pairing scope `{value}` is not one of the limited pairing scopes: {}", PERSON_PAIRING_SCOPES.join(", ")))
+    }
+}
+
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
 /// Hard maximum grant lifetime.
@@ -2293,6 +2319,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// One exact person-device scope from the limited pairing ceiling; repeat for each scope.
+        /// Nothing is granted implicitly. Use --scope instead for assistant grants.
+        #[arg(long = "person-scope", value_name = "SCOPE", value_parser = parse_person_pairing_scope, conflicts_with_all = ["read_only", "full_control", "assistant"])]
+        person_scopes: Vec<String>,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
@@ -3081,6 +3111,8 @@ enum AgentsCommand {
     Rename(AgentRenameArgs),
     /// Change an agent's canonical ID, preserving its immutable identity and harness.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     /// Show one agent's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `fractal missions queued AGENT`.
     Queue(AgentQueueArgs),
@@ -3109,6 +3141,18 @@ struct IdentityRenameArgs {
     expected_declaration: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: Option<String>,
+    /// Evaluate this exact rename request without writing claims or changing names.
+    #[arg(long)]
+    plan: bool,
+}
+
+#[derive(Args)]
+struct IdentityRenameProofArgs {
+    from: String,
+    to: String,
+    /// Require evidence for this exact planned request digest.
+    #[arg(long)]
+    request_digest: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3247,6 +3291,11 @@ async fn run_identity_rename(
         idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
     };
     let client = generated_client(endpoint, None)?;
+    if args.plan {
+        let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+        let plan = client.identity_rename_plan(kind, &request).await?;
+        return print_value(&plan, json_output);
+    }
     let receipt = if agent {
         client.agent_rename_id(&request).await?
     } else {
@@ -3258,6 +3307,18 @@ async fn run_identity_rename(
     println!("{} -> {} ({})", receipt.from, receipt.canonical_id, receipt.applied);
     println!("{} at frontier {}", receipt.replication.state, receipt.replication.frontier);
     Ok(())
+}
+
+async fn run_identity_rename_proof(
+    endpoint: &Endpoint,
+    args: IdentityRenameProofArgs,
+    agent: bool,
+    json_output: bool,
+) -> Result<()> {
+    let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+    let client = generated_client(endpoint, None)?;
+    let proof = client.identity_rename_proof(kind, &args.from, &args.to, args.request_digest.as_deref()).await?;
+    print_value(&proof, json_output)
 }
 
 #[derive(Args)]
@@ -6201,7 +6262,7 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 
 async fn run(cli: Cli) -> Result<()> {
     if let Command::ResourcePayload { result, argv } = cli.command {
-        return resources_cli::payload(&result, argv);
+        return resources_cli::payload(&result, argv).await;
     }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
@@ -6690,6 +6751,10 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
+        Command::Hosts { command: hosts_cli::HostsCommand::LaunchFreeze {
+            command: hosts_cli::LaunchFreezeCommand::Set { actor, .. }
+                | hosts_cli::LaunchFreezeCommand::Clear { actor, .. },
+        } } => actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
@@ -7736,6 +7801,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
+        .context("opening native SLO accounting before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -7869,6 +7936,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
+                    "per_run_missions": 1,
                     "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
@@ -8043,10 +8111,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     {
         let store = store.clone();
+        let state_dir = config.state_dir.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let mut rows = fractal_daemon::api::slo_rows(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -10342,6 +10412,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            person_scopes,
             fabric_gateway,
             gateway,
             assistant: None,
@@ -10361,23 +10432,29 @@ async fn run_devices(
                     );
                 }
             }
-            let response = client
-                .pairing_begin_person(&PersonPairingBegin {
-                    api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name,
-                    person_id: person.clone(),
-                    full_control: full_control.then_some(true),
-                    scopes: read_only.then(|| {
+            let request = PersonPairingBegin {
+                api_version: CLIENT_V0_API_VERSION.into(),
+                device_name,
+                person_id: person.clone(),
+                full_control: full_control.then_some(true),
+                scopes: if person_scopes.is_empty() {
+                    read_only.then(|| {
                         READ_ONLY_PAIRING_SCOPES
                             .iter()
                             .map(|scope| (*scope).to_owned())
                             .collect()
-                    }),
-                    fabric_gateway: fabric_gateway.then_some(true),
-                })
-                .await?;
+                    })
+                } else {
+                    Some(person_scopes)
+                },
+                fabric_gateway: fabric_gateway.then_some(true),
+            };
+            let response = client.pairing_begin_person(&request).await?;
             print_client_value(&response, json_output)?;
             if !json_output {
+                if let Some(scopes) = &request.scopes {
+                    println!("Requested scopes: {}", scopes.join(", "));
+                }
                 if let Some(fingerprint) = &response.value.person_root_fingerprint {
                     println!(
                         "Person-root fingerprint: {fingerprint}\nCopy this separately from the pairing code to the new device's fingerprint field or --fingerprint option."
@@ -10694,6 +10771,7 @@ async fn run_devices_complete(
             },
             path.display()
         );
+        println!("Granted scopes: {}", device.session.scopes.join(", "));
     }
     Ok(())
 }
@@ -15419,8 +15497,10 @@ fn render_client_agent(
         };
         let _ = writeln!(
             output,
-            "SUSPENSION   {} {}{session}{failure}",
-            suspension.action, suspension.phase
+            "SUSPENSION   {} {} · {} · {}{session}{failure}",
+            suspension.action, suspension.phase,
+            suspension.cause.as_deref().unwrap_or("manual"),
+            suspension.mode.as_deref().unwrap_or("git"),
         );
     }
     if let Some(rollout) = &agent.rollout {
@@ -16174,6 +16254,19 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
     } else {
         format!("agent/{actor}")
     };
+    // Custom shells have no driver to export an incarnation. Their launch does
+    // export the operation: resolve its exact local PTY before consulting a
+    // runtime projection that may still describe the predecessor.
+    if let Some(operation) = fractal_drivers::contracts::env("ST3_START_OPERATION")
+        && let Ok(session) = std::env::var("PTY_SESSION")
+        && let Some(root) = std::env::var_os("PTY_ROOT").filter(|value| !value.is_empty())
+    {
+        let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root)).snapshot()?;
+        return Ok(observations.iter().find(|observation| observation.name == session)
+            .and_then(|observation| pty_observation_incarnation(
+                &subject, std::slice::from_ref(observation), Some(&operation),
+            )));
+    }
     let status: StatusResponse = client
         .get(&format!(
             "/v1/status?subject={}&summary=true",
@@ -16192,6 +16285,7 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
 fn pty_observation_incarnation(
     actor: &str,
     observations: &[fractal_runtime::PtyObservation],
+    operation: Option<&str>,
 ) -> Option<String> {
     let subject = if actor.starts_with("agent/") {
         actor
@@ -16201,6 +16295,9 @@ fn pty_observation_incarnation(
     let observation = observations.iter().find(|observation| {
         observation.status == "running"
             && observation.tags.get("st3.subject").map(String::as_str) == Some(subject)
+            && operation.is_none_or(|operation| {
+                observation.tags.get("st3.start-operation").map(String::as_str) == Some(operation)
+            })
     })?;
     Some(format!(
         "{}:{}",
@@ -16216,7 +16313,7 @@ fn current_local_pty_incarnation(actor: &str) -> Result<Option<String>> {
     let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root))
         .snapshot()
         .context("reading the local PTY registry for the native driver incarnation")?;
-    Ok(pty_observation_incarnation(actor, &observations))
+    Ok(pty_observation_incarnation(actor, &observations, None))
 }
 
 async fn current_local_agent_incarnation(client: &Client, actor: &str) -> Result<Option<String>> {
@@ -16419,6 +16516,10 @@ async fn send_message(
     args: MessageSendArgs,
     attachments: Vec<fractal_daemon::model::AttachmentInput>,
 ) -> Result<Option<MessageSendReceipt>> {
+    if fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").is_some() {
+        anyhow::ensure!(args.idempotency_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
+            "a program message requires an explicit stable --idempotency-key");
+    }
     let id = uuid::Uuid::now_v7().simple().to_string();
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.

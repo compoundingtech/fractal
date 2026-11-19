@@ -711,11 +711,11 @@
     },
     {
       "command": "st agents rename-id",
-      "description": "Change a seat's canonical ID while preserving its immutable identity and harness",
+      "description": "Preview or change a seat's canonical ID while preserving its immutable identity and harness",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st agents rename-id proof export",
@@ -732,6 +732,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st agents rename-proof",
+      "description": "Read selected native agent rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st agents repos",
@@ -1579,6 +1587,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st hosts launch-freeze show",
+      "description": "Inspect the connected host's launch freeze and deferred starts",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; inspect absent, active and cleared host-local barriers"
+    },
+    {
+      "command": "st hosts launch-freeze set",
+      "description": "Drain earlier spawns and arm an owned bounded launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; verify barrier identity, owner, reason and expiry"
+    },
+    {
+      "command": "st hosts launch-freeze clear",
+      "description": "Release a matching owned launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; reject wrong identity and actor before clearing"
+    },
+    {
       "command": "st hosts hold",
       "description": "Place an authenticated execution-host admission hold",
       "tests": [
@@ -1924,11 +1956,11 @@
     },
     {
       "command": "st missions rename-id",
-      "description": "Change a mission's canonical ID while preserving its immutable identity and revision history",
+      "description": "Preview or change a mission's canonical ID while preserving its immutable identity and revision history",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st missions rename-id proof export",
@@ -1945,6 +1977,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st missions rename-proof",
+      "description": "Read selected native mission rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st missions report-to",

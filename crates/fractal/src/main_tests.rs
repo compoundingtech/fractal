@@ -2800,6 +2800,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",
@@ -6142,15 +6165,26 @@ fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value(
         pid: Some(42),
         created_at: Some("2026-09-22T12:00:00.000Z".into()),
         display_name: None,
-        tags: BTreeMap::from([("st3.subject".into(), "agent/run/worker".into())]),
+        tags: BTreeMap::from([
+            ("st3.subject".into(), "agent/run/worker".into()),
+            ("st3.start-operation".into(), "exact-start".into()),
+        ]),
     }];
 
     assert_eq!(
-        pty_observation_incarnation("agent/run/worker", &observations).as_deref(),
+        pty_observation_incarnation("agent/run/worker", &observations, None).as_deref(),
         Some("42:2026-09-22T12:00:00.000Z")
     );
     assert_eq!(
-        pty_observation_incarnation("agent/run/other", &observations),
+        pty_observation_incarnation("agent/run/other", &observations, None),
+        None
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("exact-start")).as_deref(),
+        Some("42:2026-09-22T12:00:00.000Z")
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("predecessor")),
         None
     );
 }
@@ -7727,6 +7761,72 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
         .is_err(),
         "read-only and full-control pairing must be mutually exclusive"
     );
+}
+
+#[test]
+fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
+    let base = ["fractal", "devices", "--as", "person/alex", "pair", "tag-reader"];
+    let scopes = [
+        "--person-scope", "read.projections",
+        "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain(scopes)).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { person_scopes, .. }), ..
+    }) = cli.command else {
+        panic!("expected a person pairing command")
+    };
+    assert_eq!(person_scopes, ["read.projections", "read.glasses", "read.arrangements"]);
+    for conflict in ["--read-only", "--full-control", "--assistant"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn person_scope_pairing_sends_exact_request_and_preserves_daemon_error() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send(body).unwrap();
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+                    "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                    "request_id": "request/pairing-test", "code": "validation",
+                    "message": "daemon scope validation detail", "retryable": false, "details": {}
+                })))
+            }
+        }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("pairing.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let endpoint = Endpoint::Unix(socket);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cli = Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/alex", "pair", "tag-reader",
+        "--person-scope", "read.projections", "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ]).unwrap();
+    let Command::Devices(args) = cli.command else { panic!("expected devices") };
+    let error = run_devices(endpoint, &Config::default(), args, true).await.unwrap_err();
+    assert!(error.to_string().contains("daemon scope validation detail"), "{error}");
+    let request: PersonPairingBegin = serde_json::from_value(received.await.unwrap()).unwrap();
+    assert_eq!(request.device_name, "tag-reader");
+    assert_eq!(request.person_id, "person/alex");
+    assert_eq!(request.scopes.unwrap(), ["read.projections", "read.glasses", "read.arrangements"]);
+    assert_eq!(request.full_control, None);
+    assert_eq!(request.fabric_gateway, None);
+    server.abort();
 }
 
 #[test]
@@ -10687,4 +10787,40 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
     assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
+
+#[test]
+fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
+    for family in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", family, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/operator", "--reason", "Clarify responsibility",
+            "--idempotency-key", "example-plan", "--plan", "--json",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename plan"),
+        };
+        assert!(args.plan);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-plan"));
+        for digest in [None, Some("sha256:example&exact")] {
+            let mut argv = vec![
+                "st", family, "rename-proof", "agent/example-old", "agent/example-new", "--json",
+            ];
+            if let Some(digest) = digest {
+                argv.extend(["--request-digest", digest]);
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let args = match cli.command {
+                Command::Agents { command: AgentsCommand::RenameProof(args) }
+                | Command::Missions { command: MissionViewCommand::RenameProof(args) } => args,
+                _ => panic!("expected local rename proof"),
+            };
+            assert_eq!(args.from, "agent/example-old");
+            assert_eq!(args.to, "agent/example-new");
+            assert_eq!(args.request_digest.as_deref(), digest);
+        }
+        assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
+    }
 }

@@ -34,6 +34,13 @@ use crate::store::declared_objectives::DeclaredObjective;
 use smallclaims::error::internal;
 use crate::store::objective_series::time_ms;
 
+#[path = "declared_objectives_budget.rs"]
+mod budget;
+pub(crate) use budget::{BudgetEvidence, classify_budget};
+
+#[path = "declared_github_objectives.rs"]
+mod github;
+
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
 /// Open samples over target an explanation names; the rest are counted.
@@ -52,6 +59,7 @@ struct Tracked {
     samples: BTreeMap<String, Sample>,
     /// A count's events in the window, by subject.
     events: BTreeMap<String, Counted>,
+    numeric: budget::Observations,
     /// Whether a count has read an event claim for this revision.
     seen: bool,
     /// Each label's values on the event claims a count has read for this revision: a value's row
@@ -69,6 +77,8 @@ struct Tracked {
 enum Measure {
     Interval(Box<Interval>),
     Count(Box<Count>),
+    Ratio(Box<crate::objective::Ratio>),
+    Gauge(Box<crate::objective::Gauge>),
 }
 
 /// A subject's event: its earliest event claim's time and id (the id breaks a tie, so every member
@@ -252,7 +262,7 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
 
 
 /// The declared objectives' rows, evaluated at `now`.
-pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
+pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Vec<Value>> {
     let declared = store.declared_objectives()?;
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -266,10 +276,64 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
             *entry = Tracked::new(&declaration);
         }
         let name = declaration.name();
+        if entry.objective.as_ref().is_ok_and(|objective| objective.declarable() &&
+            matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_))) {
+            continue;
+        }
+        if let Ok(objective) = &entry.objective
+            && let Indicator::Native { objective: source } = &objective.indicator
+        {
+            let response = objective.on_breach.as_ref().map_or_else(
+                || response(store, None),
+                |breach| format!(
+                    "A burning or exhausted native row opens one member-local operational.failure `{}` on daemon/{} addressed to {}; delivery requires that owner to remain a live declared reviewer, regardless of its host.",
+                    breach.condition, store.origin(), breach.owner,
+                ),
+            );
+            let mut produced = Vec::new();
+            for source_row in native_rows {
+                if source_row["kind"] != "objective" { continue; }
+                let Some(id) = source_row["id"].as_str() else { continue };
+                if !native_owns(source, id) { continue; }
+                let mut row = source_row.clone();
+                row["id"] = Value::String(format!("{}{}", objective.name, &id[source.len()..]));
+                row["about"] = Value::String(objective.about.clone());
+                row["explain"] = Value::String(format!(
+                    "{} Bound as {} at revision {} to native objective {source}. {response}",
+                    source_row["explain"].as_str().unwrap_or(""), declaration.subject, entry.short_revision(),
+                ));
+                produced.push(row);
+            }
+            if produced.is_empty() {
+                // A wholly missing source is unknown, not proof its previously burning children ended.
+                let mut ids = entry.ids.clone();
+                ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
+                if ids.is_empty() { ids.insert(objective.name.clone()); }
+                for id in ids {
+                    produced.push(json!({
+                        "id": id, "kind": "objective", "about": objective.about,
+                        "target": "native objective", "current": "native source unavailable", "window": "now",
+                        "remaining_percent": null, "status": "no-data",
+                        "explain": format!("Native objective {source} has no source row on this member. {response}"),
+                    }));
+                }
+            }
+            entry.ids = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+            rows.extend(produced);
+            continue;
+        }
         let measure = match &entry.objective {
             Ok(objective) if objective.declarable() => match (&objective.indicator, objective.window) {
                 (Indicator::Interval(interval), Some(window)) => Some((Measure::Interval(interval.clone()), window)),
                 (Indicator::Count(count), Some(window)) => Some((Measure::Count(count.clone()), window)),
+                (Indicator::Ratio(ratio), _) => objective.budget.as_ref().map(|budget| (
+                    Measure::Ratio(ratio.clone()),
+                    Window { ms: budget.horizon_ms, min_samples: budget.min_samples },
+                )),
+                (Indicator::Gauge(gauge), _) => objective.budget.as_ref().map(|budget| (
+                    Measure::Gauge(gauge.clone()),
+                    Window { ms: budget.horizon_ms, min_samples: budget.min_samples },
+                )),
                 _ => None,
             },
             _ => None,
@@ -298,9 +362,55 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
                 let judged = produced.first().and_then(|row| row["id"].as_str()).map(str::to_owned).into_iter().collect();
                 (produced, judged)
             }
+            Measure::Ratio(ratio) => {
+                entry.read(store, &[&ratio.event], &ratio.subject_prefix, |entry, claim| {
+                    entry.observe_numeric(claim, &ratio.at, &ratio.field, &ratio.labels, &ratio.excludes, &ratio.only);
+                })?;
+                entry.numeric.prune(now.saturating_sub(window.ms), false);
+                let produced = entry.budget_rows(&declaration.subject, None, now, &response);
+                let judged = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+                (produced, judged)
+            }
+            Measure::Gauge(gauge) => {
+                entry.read(store, &[&gauge.event], &gauge.subject_prefix, |entry, claim| {
+                    entry.observe_numeric(claim, &gauge.at, &gauge.field, &gauge.labels, &gauge.excludes, &gauge.only);
+                })?;
+                let policy = entry.objective.as_ref().expect("decoded objective").budget.as_ref().expect("gauge budget");
+                let retention = window.ms
+                    .max(policy.fast.long_ms)
+                    .max(policy.fast.short_ms)
+                    .max(policy.slow.long_ms)
+                    .max(policy.slow.short_ms)
+                    .max(gauge.cadence_ms.saturating_mul(2));
+                // Keep every evaluated window and its immediate predecessor. Measurement
+                // clips that predecessor's held value to max-age; older points cannot help.
+                entry.numeric.prune(now.saturating_sub(retention), true);
+                let produced = entry.budget_rows(&declaration.subject, Some(gauge), now, &response);
+                let judged = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
+                (produced, judged)
+            }
         };
         entry.ids = judged;
         rows.extend(produced);
+    }
+    Ok(rows)
+}
+
+/// Source-backed objectives use only the committed domain projection, never the generic
+/// earliest-claim-wins interval/count cache. The state directory belongs to the caller.
+pub fn github_rows(store: &Store, state_dir: &std::path::Path, now: u64) -> anyhow::Result<Vec<Value>> {
+    let declared = store.declared_objectives()?;
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = Vec::new();
+    for declaration in declared {
+        let entry = tracked.entry(declaration.subject.clone()).or_insert_with(|| Tracked::new(&declaration));
+        if entry.revision != declaration.revision { *entry = Tracked::new(&declaration); }
+        let Ok(objective) = &entry.objective else { continue; };
+        if !objective.declarable() || !matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_)) { continue; }
+        let row = github::row(store, state_dir, objective, &declaration.revision, now);
+        entry.ids = if objective.on_breach.is_some() { BTreeSet::from([objective.name.clone()]) } else { BTreeSet::new() };
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -323,22 +433,25 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
 /// fault for each of its missed rows and end it when the row is met again, or once the objective
 /// no longer judges the row.
 pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalError> {
-    let responders: Vec<(String, Breach, BTreeSet<String>)> = {
+    let responders: Vec<(String, Breach, BTreeSet<String>, bool)> = {
         let evaluations = store.fractal.extensions.get::<Evaluations>();
         let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
         tracked
             .values()
             .filter_map(|tracked| {
                 let objective = tracked.objective.as_ref().ok()?;
-                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone()))
+                let native = matches!(objective.indicator, Indicator::Native { .. });
+                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })
             .collect()
     };
     let mut total = ObjectiveFaults::default();
-    for (name, breach, ids) in responders {
-        if store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
+    for (name, breach, ids, native) in responders {
+        // Replicated claim evidence has one delivery host; native evidence belongs to this member.
+        if !native && store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
             continue;
         }
+        let owned = crate::objective_faults::owned_rows(store, &name)?;
         let check = check_with_response(
             store,
             rows,
@@ -346,10 +459,16 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name },
         )?;
         total.opened += check.opened;
-        total.recovered += check.recovered + end_unjudged(store, |id| owns(&name, id), &ids)?;
+        total.recovered += check.recovered
+            + end_unjudged(store, |id| owned.contains(id) || (!native && owns(&name, id)), &ids)?;
         total.unowned += check.unowned;
     }
     Ok(total)
+}
+
+/// Native objectives can expose independent child rows (transactions, remote paths, CPU modes).
+fn native_owns(name: &str, id: &str) -> bool {
+    id.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('{'))
 }
 
 /// Whether row `id` is one of objective `name`'s: `NAME` or `NAME/pNN`, either with a
@@ -377,6 +496,7 @@ impl Tracked {
             cursor: 0,
             samples: BTreeMap::new(),
             events: BTreeMap::new(),
+            numeric: budget::Observations::default(),
             seen: false,
             labels: BTreeMap::new(),
             unreadable: 0,
@@ -457,7 +577,7 @@ impl Tracked {
         let why = match &self.objective {
             Err(error) => format!("does not decode on this build: {error}"),
             Ok(objective) => format!(
-                "is a `{}` indicator named `{}`, and a fleet declares only an interval or count named NAMESPACE/NAME",
+                "is a `{}` indicator named `{}`, and is not a supported fleet declaration named NAMESPACE/NAME",
                 objective.indicator.kind(),
                 objective.name
             ),

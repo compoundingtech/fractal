@@ -22,6 +22,42 @@ pub fn validate_mission_id(value: &str) -> Result<(), FractalError> {
     validate_id(value, "mission")
 }
 
+pub const MISSION_RUN_TEMPLATE: &str = "${ST_MISSION_RUN}";
+
+/// Resolve only the run-scoped output identity, not arbitrary environment or input variables.
+/// `run` is the durable full run ID also exported to workers as `ST_MISSION_RUN`.
+pub fn resolve_produced_mission(value: &str, run: &str) -> Result<String, FractalError> {
+    let resolved = value.replace(MISSION_RUN_TEMPLATE, run);
+    validate_id(&resolved, "mission")?;
+    if value.contains(MISSION_RUN_TEMPLATE)
+        && !resolved.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-._".contains(&byte))
+    {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "run-scoped mission IDs allow only ASCII letters, digits, '/', '-', '.', and '_'",
+        ));
+    }
+    if resolved.contains(['$', '{', '}']) {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "produces-mission supports only the ${ST_MISSION_RUN} template",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Whether this declaration needs the fleet's per-run output admission barrier.
+pub fn declares_per_run_missions(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.produces_mission.as_deref().is_some_and(|id| id.contains(MISSION_RUN_TEMPLATE))
+            || step.nested_mission.as_deref().is_some_and(declares_per_run_missions)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_per_run_missions(branch))
+            })
+    })
+}
+
 pub fn parse_missions(
     document: &KdlDocument,
     default_host: &str,
@@ -2475,7 +2511,8 @@ fn parse_produced_mission(node: &KdlNode) -> Result<String, FractalError> {
         .strip_prefix("mission/")
         .unwrap_or(&values[0])
         .to_owned();
-    validate_id(&id, "mission")?;
+    // Validate the fixed syntax here; the durable run ID and final length are checked on use.
+    resolve_produced_mission(&id, "mission-run/run")?;
     Ok(id)
 }
 
@@ -3643,5 +3680,36 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+}
+
+#[cfg(test)]
+mod produced_mission_tests {
+    use super::*;
+
+    #[test]
+    fn run_scoped_identity_is_stable_and_isolated() {
+        let template = "consent/${ST_MISSION_RUN}";
+        let first = resolve_produced_mission(template, "abc123").unwrap();
+        assert_eq!(first, "consent/abc123");
+        assert_eq!(resolve_produced_mission(template, "abc123").unwrap(), first);
+        assert_ne!(resolve_produced_mission(template, "def456").unwrap(), first);
+        assert_eq!(resolve_produced_mission("consent/shared", "abc123").unwrap(), "consent/shared");
+    }
+
+    #[test]
+    fn output_templates_are_narrow_and_validate_the_expanded_identity() {
+        for invalid in ["consent/${input.id}", "consent/${HOME}", "consent/${ST_MISSION_RUN", "consent/$name"] {
+            assert!(resolve_produced_mission(invalid, "abc123").is_err(), "{invalid}");
+        }
+        for invalid in ["", "/leading", "trailing/", "double//slash", "white space", "non-ascii-é"] {
+            assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", invalid).is_err(), "{invalid}");
+        }
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(152)).is_ok());
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(153)).is_err());
+        let node: KdlDocument = r#"produces-mission "consent/${ST_MISSION_RUN}""#.parse().unwrap();
+        assert_eq!(parse_produced_mission(&node.nodes()[0]).unwrap(), "consent/${ST_MISSION_RUN}");
+        let node: KdlDocument = r#"produces-mission "consent/${input.id}""#.parse().unwrap();
+        assert!(parse_produced_mission(&node.nodes()[0]).is_err());
     }
 }

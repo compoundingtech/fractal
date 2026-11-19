@@ -65,6 +65,26 @@ pub const MANIFEST: Manifest = Manifest {
     name: "github",
     graph_kinds: &[
         GraphKind {
+            kind: fractal_schema::github_capture::FACT_KIND,
+            subject_prefix: "github-fact/",
+            max_fields_bytes: fractal_schema::github_capture::MAX_FACT_BYTES,
+        },
+        GraphKind {
+            kind: fractal_schema::github_capture::COMMIT_KIND,
+            subject_prefix: "github-capture/",
+            max_fields_bytes: fractal_schema::github_capture::MAX_COMMIT_BYTES,
+        },
+        GraphKind {
+            kind: fractal_schema::github_capture::AUTHORITY_KIND,
+            subject_prefix: "github-source/",
+            max_fields_bytes: fractal_schema::github_capture::MAX_COMMIT_BYTES,
+        },
+        GraphKind {
+            kind: fractal_schema::github_capture::FENCED_KIND,
+            subject_prefix: "github-source/",
+            max_fields_bytes: fractal_schema::github_capture::MAX_COMMIT_BYTES,
+        },
+        GraphKind {
             kind: fractal_schema::github_plugin::ITEM_STATE,
             subject_prefix: "resource/",
             max_fields_bytes: fractal_schema::github_plugin::MAX_ITEM_STATE_BYTES,
@@ -93,7 +113,7 @@ pub struct MirrorItem {
 }
 
 pub struct GithubPluginStore {
-    connection: Mutex<Connection>,
+    pub(super) connection: Mutex<Connection>,
     /// Observers this process knows have no row, so forgetting them again reads nothing.
     absent: Mutex<HashSet<String>>,
     /// Each repository whose fill failed: when the next may start, and the wait after that.
@@ -142,6 +162,7 @@ impl GithubPluginStore {
     }
 
     fn migrate(connection: &Connection) -> Result<()> {
+        super::github_capture::migrate(connection)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         anyhow::ensure!(
             version <= SCHEMA_VERSION,

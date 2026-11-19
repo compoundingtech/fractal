@@ -98,6 +98,98 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### GitHub capture rebuildable projection
+
+The `fractal_reconcile::reconcile::github_capture` maintainer owns the
+`capture_v1_*` cache schema (`lv-h6b101dd45bbc`), including serialized claim,
+fact, coverage and checkpoint records and the source, repository, entity,
+authority and claim identifiers used in columns and index expressions.
+These remain inline in a rebuildable plugin projection; authoritative claims
+are unchanged. The schema TODO requires bounded physical units or references
+for variable columns **and index keys**, preserving replay and lookup semantics.
+
+The same maintainer owns ingestion (`lv-h8b8be878a0a1`), conflict insertion and
+reclamation (`lv-hd1bc48ebaa1b`, `lv-h0fde81c700c9`), cursor publication
+(`lv-h822e800d8a42`), authority-scoped heads (`lv-h6a2ba291f8fd`,
+`lv-hbd54d59b8187`), fact images (`lv-hdf91a9ae9fee`), coverage
+(`lv-h0e8f2194bce1`), checkpoints (`lv-hf86388bd4ff5`), receipts
+(`lv-h4ed2b30a6d8e`) and history (`lv-hd74cfac88e82`). Their TODOs retain
+debt for complete encoded value/key and cleanup costs; checkpoint preparation,
+publication and reclamation must preserve the exact committed generation.
+Row/page bounds do not establish encoded-byte or statement-cost bounds.
+
+`lv-h5234cc786356` is the conservative unresolved-sink registration for the
+literal `BEGIN DEFERRED` that pins a read-only WAL snapshot, not a payload
+write. Its tracing TODO must retain the pinned-reader lifetime and coherent
+paged measurement semantics when resolving the physical representation.
+
+The `fractal_reconcile::reconcile::github_capture_tests` maintainer owns
+fixture claim/conflict inserts (`lv-h4237074c7d77`, `lv-h5478e08a3895`) and
+the corresponding pinned-reader statement (`lv-hc21aef8d0305`). The
+`fractal_reconcile::reconcile::github_capture_writer_tests` maintainer owns
+checkpoint and coverage abort triggers (`lv-h3c8316ee30c4`,
+`lv-h3fc1c5936921`). These use generic fixture records and literal trigger
+messages to prove replay, conflict detection, snapshot coherence and crash
+recovery. Representation changes must retain those assertions and trace their
+keys/records back to the production projection; the fixtures are not a
+permanent size exemption.
+
+### Person cancellation projection repair (PR #6672)
+
+The `fractal_store::store` maintainer owns `lv-h7f69e83e8327`, the literal
+one-time migration marker in `meta`, and the existing `lv-hc9b442dfc294`
+predecessor existence reader. The latter binds an existing claim identity and
+reads only a boolean; it does not materialize a body. `flow-h1f241b496964`
+now includes suppression of local projection timestamp normalization for
+causally derived cancellation effects. This preserves claim admission and
+does not create a new payload representation. Reference conversion must retain
+exact predecessor lookup and canonical replay/local timestamp agreement.
+
+The `fractal_seats::store::person_work` maintainer owns fixture-only
+`lv-h1be5f67a49da`, `lv-h29fc8987584d`, `lv-h4477e8df1206`,
+`lv-h7cb24bb2ce91`, `lv-h7f6f0e52476e` and `lv-h84685552bc74`.
+These delete the literal migration marker, set the historical step status by
+existing subject identity, or install aborting triggers proving reopen does
+not repeat repair or alter retained claims. They retain existing inline
+subject/meta values rather than introduce new variable payloads. Encoded key
+sizes remain unproven; future reference/keyed reclamation work must preserve
+these exact fixture assertions and the production one-time marker semantics.
+
+### Historical runtime cleanup receipts (PR #6690)
+
+The `fractal_store::store::runtime_cleanup` maintainer owns `lv-haba524422e8c`,
+`lv-h355a9421263e`, `lv-h3a3c620624e1`, `lv-he32bd26469c5` and `lv-hf597e11eb8de`.
+The node-local table stores runtime ID, incarnation and subject TEXT values with
+an exact-generation primary key and a subject index. These are existing runtime
+identities, not payload copies; their encoded sizes remain unproven. The reader
+returns only an existence flag. Writes publish an exact cleanup proof; removal
+uses subject or runtime/generation equality and preserves receipts belonging to
+other retained desired subjects. Keeping these small logical records inline
+preserves atomic proof publication and fenced reclamation, but is not a size
+bound. The owning maintainer must reference variable identity columns and index
+keys and stage keyed reclamation without losing exact-generation equality or
+whole-scope proof semantics. These inventory entries record that representation
+debt; they do not waive the guard or assert bounded storage work.
+
+### Custom-shell first work claim (PR #6692)
+
+`fractal_api_core::api::work_incarnation_tests` owns `lv-hc143d361eb67`,
+`lv-h2519c27cb02c`, `lv-hc3b8ab661222`, `lv-h2b140334f07c`,
+`lv-h21aa596bea94` and `lv-hd2266ef36f4b`. These regression-fixture statements
+insert a local start's subject, operation ID, body/result JSON and completion flags,
+then mutate or remove its original request or completion to exercise refusal.
+They keep the existing inline table representation; they introduce no production
+producer. The maintainer retains `bound-or-reference-values-and-reclamation`:
+any future representation must preserve exact request snapshots and refusal tests.
+
+`fractal_seats::store::runtime_starts` owns `lv-hc2a32f40789d`. The dynamic
+canonical-observation selector binds one subject and the maximum position, reads
+one existing claim ID, then loads its existing fields JSON for writer-fenced
+admission. Keeping this selector inline preserves the same newest-observation
+authority as normal reconciliation; `LIMIT 1` does not prove value sizes.
+The maintainer retains `trace-statement-and-value-representation` to trace the
+selected claim ID/body and their existing storage before changing representation.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds

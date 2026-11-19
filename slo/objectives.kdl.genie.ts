@@ -19,12 +19,22 @@ import * as Fractal from '../packages/fractal/src/objective.ts'
 
 const { indicator } = Fractal
 
+/** Operational budgets are distinct from the stricter percentile and maximum diagnostics. */
+const budget = (allowance: number): Fractal.BudgetPolicy => ({
+  allowance,
+  horizon: '30d',
+  minCoverage: 0.9,
+  minSamples: 1,
+  fast: { burnRate: 14.4, long: '1h', short: '5m' },
+  slow: { burnRate: 6, long: '6h', short: '30m' },
+})
+
 /** The objectives, in the order `slo/objectives.kdl` lists them. */
 export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: string })[] = [
   Fractal.objective({
     name: 'person-read',
     about:
-      'Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents',
+      'Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents; 5% slow-event allowance at 300ms, local and remote separately; p99 remains the aspiration',
     indicator: indicator.latency({
       paths: [
         // Agents list
@@ -57,6 +67,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
         'GET /v1/documents/content',
       ],
     }),
+    budget: budget(0.05),
     targets: [
       { stat: 'p99', within: '300ms' },
       // The same reads through this daemon from another machine that owns them.
@@ -68,20 +79,22 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     about:
       'An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other',
     indicator: indicator.latency({ paths: ['GET /v1/client/agents (fresh)'] }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '300ms' }],
   }),
   Fractal.objective({
     name: 'projection-fresh',
     about:
-      'From a commit to the published missions, agents or attention view that carries it, timed by each refresher; refreshers fold at most once a second',
+      'From a commit to the published missions, agents or attention view that carries it, timed by each refresher; 5% slow-publication allowance at 1500ms; p99 remains the aspiration',
     indicator: indicator.latency({
       paths: ['publish missions', 'publish agents', 'publish attention'],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '1500ms' }],
   }),
   Fractal.objective({
     name: 'write-ack',
-    about: 'Writes and acks: send, work actions, harness events',
+    about: 'Writes and acks: send, work actions, harness events; 5% slow-event allowance at 300ms; p99 remains the aspiration',
     indicator: indicator.latency({
       paths: [
         'POST /v1/messages',
@@ -99,6 +112,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
         'POST /v1/messages/read/{*subject}',
       ],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '300ms' }],
   }),
   Fractal.objective({
@@ -107,6 +121,7 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
     indicator: indicator.latency({
       paths: ['GET /v1/client/terminals/{id}/screen', 'stream terminal'],
     }),
+    budget: budget(0.05),
     targets: [{ stat: 'p99', within: '200ms' }],
   }),
   Fractal.objective({
@@ -120,8 +135,9 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
   }),
   Fractal.objective({
     name: 'transaction',
-    about: "Any transaction, read or write, and any hold of the store's writer",
+    about: "Read transactions, write transactions and holds of the store's writer: independent 1% slow-event allowances at 300ms; max remains diagnostic",
     indicator: indicator.transaction(),
+    budget: budget(0.01),
     targets: [{ stat: 'max', within: '300ms' }],
   }),
   Fractal.objective({
@@ -203,8 +219,9 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
   Fractal.objective({
     name: 'database',
     about:
-      "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run",
+      "This member's store: live pages at most 8GB and growth at most 300MB/day; 5% bad covered capacity-hours, sampled hourly with finite coverage",
     indicator: indicator.database(),
+    budget: budget(0.05),
     targets: [
       { stat: 'live-gb', max: 8.0 },
       { stat: 'growth-mb-per-day', max: 300 },

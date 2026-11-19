@@ -5496,6 +5496,36 @@ mod tests {
     }
 
     #[test]
+    fn details_preview_enter_is_scoped_and_expanded_text_scrolls() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = terminal_details_fixture();
+        let agent = "agent/example/atlas/builder";
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        let row = agents.iter_mut().find(|row| row.id == agent).unwrap();
+        row.details.goal = Some("A long goal with enough prose to fill the details pane. ".repeat(100));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.is_empty());
+        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == KeyCode::Enter));
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ui.terminal_details_have_focus());
+        ui.effects.clear();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::CONTROL);
+        assert!(ui.details_expanded.is_empty(), "modified Enter retains its existing scope");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.contains_key(agent));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::PageDown, KeyModifiers::NONE);
+        let key = format!("details:{agent}");
+        assert!(ui.conversation_state.panes.borrow().get(&key).is_some_and(|state| state.top > 0));
+        assert!(ui.effects.is_empty(), "details never forward Enter or scrolling to the terminal");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.details_expanded.contains_key(agent));
+    }
+
+    #[test]
     fn terminal_details_captures_and_focus_keep_passthrough_isolated() {
         use ratatui::{Terminal, backend::TestBackend};
         let agent = "agent/example/atlas/builder";

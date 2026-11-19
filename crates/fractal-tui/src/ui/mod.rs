@@ -615,6 +615,7 @@ pub struct Ui {
     terminal_body: Cell<Option<Rect>>,
     /// Leader+d gives the agent details the keys; Escape/Tab returns to passthrough.
     terminal_details_focused: Cell<bool>,
+    details_expanded: HashMap<String, (Option<String>, Option<String>)>,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -997,6 +998,7 @@ impl Ui {
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
             terminal_details_focused: Cell::new(false),
+            details_expanded: HashMap::new(),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -3447,7 +3449,9 @@ impl Ui {
                 .set_symbol("│")
                 .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
         }
-        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
+        let expanded = self.details_expanded.get(&agent.id)
+            .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step);
+        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner(), expanded);
         if fixed_width.is_some() {
             let focused = self.terminal_details_focused.get()
                 && self.focused_pane() == Some(Pane::Terminal(agent.id.clone()));
@@ -4050,6 +4054,7 @@ impl Ui {
                 ),
                 ("ctrl+↑ ctrl+↓", "focus the previous or next tool"),
                 ("ctrl+enter", "expand/collapse the focused tool; read its full content"),
+                ("enter in details", "expand/collapse the current step's text (or click more/less)"),
                 ("ctrl+u", "load/hide focused tool images inline (outside a draft)"),
                 (
                     "ctrl+p",
@@ -4585,6 +4590,19 @@ impl Ui {
             }
         }
     }
+    fn toggle_details_preview(&mut self, id: &str) {
+        let Some(agent) = self.world.agents.items().iter().find(|agent| agent.id == id) else {
+            return;
+        };
+        if self.details_expanded.get(id)
+            .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step)
+        {
+            self.details_expanded.remove(id);
+        } else {
+            self.details_expanded.insert(id.to_owned(), (agent.mission.clone(), agent.step.clone()));
+        }
+    }
+
 
     fn focus_terminal_details(&mut self, focused: bool) {
         self.terminal_details_focused.set(focused);
@@ -4741,6 +4759,11 @@ impl Ui {
                         KeyCode::Down => self.scroll_pane(pane.as_ref().unwrap(), 1),
                         KeyCode::PageUp => self.scroll_pane(pane.as_ref().unwrap(), -10),
                         KeyCode::PageDown => self.scroll_pane(pane.as_ref().unwrap(), 10),
+                        KeyCode::Enter if key.modifiers.is_empty() && key.kind == KeyEventKind::Press => {
+                            if let Some(Pane::Terminal(agent)) = self.focused_pane() {
+                                self.toggle_details_preview(&agent);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -6947,6 +6970,7 @@ impl Ui {
                 self.glasses.sidebar.focused = true;
             }
             Hit::Actions(agent) => self.popover = Some(format!("actions:{agent}")),
+            Hit::DetailsPreview(agent) => self.toggle_details_preview(&agent),
             Hit::Key(key)
                 if self
                     .popover
@@ -8317,6 +8341,68 @@ mod tests {
             )),
             "the whole answer is sent"
         );
+    }
+
+    #[test]
+    fn details_preview_bounds_prose_and_resets_for_a_new_step() {
+        let mut world = demo::test_world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        let id = agents[0].id.clone();
+        agents[0].mission = Some("mission/example/preview".into());
+        agents[0].step = Some("implement".into());
+        agents[0].details.progress = None;
+        agents[0].details.goal = Some(
+            "Read the current step before starting implementation. Keep the surrounding \
+             context visible while reviewing the goal. A bounded preview leaves room \
+             for queued work and runtime information. Expand this description to read \
+             every requirement, then collapse it when finished. The final requirement \
+             is to preserve scrolling for the entire expanded description. END_OF_GOAL".into(),
+        );
+        let mut ui = Ui::new(world);
+        let render = |ui: &Ui| {
+            let agent = ui.world.agents.items().iter().find(|agent| agent.id == id).unwrap();
+            let expanded = ui.details_expanded.get(&id)
+                .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step);
+            screens::agent_details(&ui.world, agent, 60, "·", expanded)
+        };
+        let collapsed = render(&ui);
+        let shown = collapsed.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("… more (Enter)"), "{shown}");
+        let start = collapsed.lines.iter().position(|line| line.to_string().starts_with("Read the current")).unwrap();
+        let hint = collapsed.lines.iter().position(|line| line.to_string() == "… more (Enter)").unwrap();
+        assert_eq!(hint - start, 4, "preview is bounded by wrapped lines");
+        assert_eq!(collapsed.lines[hint].spans[0].style, theme::dim());
+        assert!(!shown.contains("END_OF_GOAL"), "{shown}");
+        assert!(shown.contains("runs as"), "{shown}");
+        assert!(collapsed.targets.iter().any(|target| target.hit == Hit::DetailsPreview(id.clone())));
+        ui.click(Hit::DetailsPreview(id.clone()));
+        let expanded = render(&ui);
+        let full = expanded.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(full.contains("END_OF_GOAL"), "{full}");
+        assert!(full.contains("less (Enter)"), "{full}");
+        println!("EXPANDED (60 columns)\n{full}\nDEFAULT PREVIEW (60 columns)\n{shown}");
+        ui.click(Hit::DetailsPreview(id.clone()));
+        assert_eq!(render(&ui).lines, collapsed.lines);
+        ui.toggle_details_preview(&id);
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        agents[0].step = Some("review".into());
+        assert!(render(&ui).lines.iter().any(|line| line.to_string() == "… more (Enter)"));
+    }
+
+    #[test]
+    fn details_preview_leaves_short_text_unchanged() {
+        let mut world = demo::test_world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        agents[0].mission = Some("mission/example/preview".into());
+        agents[0].step = Some("implement".into());
+        agents[0].details.progress = Some("A short status.".into());
+        agents[0].details.goal = Some("A short goal.".into());
+        let agent = &world.agents.items()[0];
+        let collapsed = screens::agent_details(&world, agent, 60, "·", false);
+        let expanded = screens::agent_details(&world, agent, 60, "·", true);
+        assert_eq!(collapsed.lines, expanded.lines);
+        assert!(!collapsed.targets.iter().any(|target| matches!(target.hit, Hit::DetailsPreview(_))));
+        assert!(collapsed.lines.iter().any(|line| line.to_string() == "A short goal."));
     }
 
     #[test]

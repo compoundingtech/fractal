@@ -1756,6 +1756,25 @@ fractal work publish-mission step-run/GENERATION/compile-mission generated.kdl -
 
 The published document must contain exactly one ready mission with the declared ID. Fractal publishes the immutable revision and binds it to the producing definition and attempt.
 
+For an isolated output per producer run, declare
+`produces-mission "consent/${ST_MISSION_RUN}"`. Only this output-ID field expands the
+`${ST_MISSION_RUN}` placeholder; the worker publishes the concrete ID using the same
+`ST_MISSION_RUN` environment value (the durable run ID, without `mission-run/`).
+Retries, replays and daemon restarts within that run resolve the same ID. A new run,
+including an explicit successor, resolves a different ID. Resolution uses the producer's
+pinned revision, and `uses-mission output-of` still binds the exact produced revision.
+Other template variables are refused. Run-scoped IDs must resolve to 1–160 bytes of
+ASCII letters, digits, `/`, `-`, `.`, or `_`, without leading/trailing or doubled slashes.
+Literal output IDs retain their existing validation.
+
+Publication requires every active fleet member to advertise
+`daemon.started.features.per_run_missions=1`; unfenced legacy writers also block it.
+Run-scoped revisions carry the closed-schema `mission.published.per_run_missions=1`
+marker, so downgraded replicas quarantine them as unknown fields instead of selecting
+a literal shared ID. Upgrade or fence every peer before publication. This does not
+automatically retire the produced mission when its runs finish; explicit retirement
+continues to use the normal ownership and active-run fences.
+
 A later step can start that exact output:
 
 ```kdl

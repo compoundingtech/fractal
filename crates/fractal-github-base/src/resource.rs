@@ -41,6 +41,8 @@ pub struct ObservationRequest {
     /// Where a `github.repository` observation with `main_performance_failures` records each
     /// recent completed Workspace CI run, once. Without one, no CI run is read.
     pub workflow_runs: Option<Arc<dyn WorkflowRunLedger>>,
+    /// Claim-backed history acquisition, independent of operational collection fields.
+    pub github_capture: Option<Arc<dyn crate::github_capture::GitHubCaptureLedger>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -937,7 +939,7 @@ async fn github_listing_at_field(
 
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
-async fn github_graphql_with_cache_eligibility(
+pub(crate) async fn github_graphql_with_cache_eligibility(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,
@@ -1499,6 +1501,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1546,6 +1549,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1623,6 +1627,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1647,6 +1652,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1703,6 +1709,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1738,7 +1745,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None, github_capture:None };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1833,6 +1840,7 @@ mod tests {
                     refresh: false,
                     webhook_covered: false,
                     workflow_runs: None,
+                    github_capture: None,
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),
