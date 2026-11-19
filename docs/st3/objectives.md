@@ -66,6 +66,8 @@ agent "ops/budget-owner" {
 
 This inert top-level agent needs no task children. A run-owned agent still needs a launch;
 invalid or conflicting explicitly declared launches are rejected as before.
+Its agent card has no runtime or current session. Changing a previously launched root to an
+inert declaration does not reuse historical runtime or harness observations as current state.
 
 ## Indicators
 
