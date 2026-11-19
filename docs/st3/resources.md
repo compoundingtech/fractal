@@ -140,6 +140,15 @@ inputs and output destinations must already be accessible to the dedicated user.
 does not make an operator's home directory readable or broaden its ACLs. A build caller whose
 inputs are inaccessible must arrange an accessible source/output layout before cutover.
 
+Provisioned roots are owned by the slot user with group `staff` and mode `2770`;
+the slot user's primary group is `nobody`. Cross-UID access uses inherited ACLs, not
+group membership. The root's inheritable caller ACE needs `list`, `add_file`, `search`,
+`add_subdirectory`, `delete_child`, `readattr`, `writeattr`, `readextattr`, `writeextattr`,
+and `readsecurity`, with `file_inherit,directory_inherit`: the caller creates job directories,
+reads results written by the payload and removes the retired job tree. Fractal adds the
+same inheritable rights for the admitted slot user on the caller-created job directory,
+without changing the caller's home or source-tree ACLs.
+
 The resource scheduling class remains `landing`, `check` or `agent` for every Darwin lane;
 it does not change the eligible slot set. `build` and `check` are not Darwin shell lane
 aliases. The slot-backed shell path does not change program/DSL lane execution: those
@@ -243,8 +252,10 @@ Linux defaults to enforced coverage: a transient scope beneath `app-lanes.slice`
 CPU limits. macOS shell execution uses the canonical `heavy`, `gate` and `eval` lanes above with
 logical coverage and dedicated-UID custody. Unsupported lanes or unavailable custody refuse
 before payload launch; there is no detached-process fallback.
-A nested resource exec validates and inherits its parent's membership through an environment
-marker instead of reserving a second footprint; custody lasts until every execution root retires.
+On Linux a nested resource exec validates and inherits its parent's membership through an
+environment marker instead of reserving a second footprint; custody lasts until every execution
+root retires. Darwin shell custody refuses nested roots with `darwin-custody-nested`: a second
+helper cannot bind an occupied UID slot. Invoke child commands directly inside the admitted job.
 Disk accounting uses declared reservations, not measured disk peaks; memory peaks come from cgroup
 `memory.peak` on enforced hosts and are absent on logical-only hosts.
 

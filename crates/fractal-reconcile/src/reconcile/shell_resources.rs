@@ -360,6 +360,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             anyhow::ensure!(!fs::symlink_metadata(&workspace)?.file_type().is_symlink()
                 && workspace.canonicalize()?.starts_with(slot.root().canonicalize()?),
                 "darwin-custody-workspace: job workspace escaped its admitted slot root");
+            // The slot UID has primary group nobody, not the root's staff group.
+            // Retain the inherited caller ACE and grant only this job's slot UID access.
+            let ace = format!("_fractal-{} allow list,add_file,search,add_subdirectory,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,file_inherit,directory_inherit", slot.name());
+            let permission = std::process::Command::new("/bin/chmod").args(["+a", &ace]).arg(&workspace).output()
+                .context("grant admitted UID access to its job workspace")?;
+            anyhow::ensure!(permission.status.success(), "darwin-custody-workspace: cannot grant slot access: {}",
+                String::from_utf8_lossy(&permission.stderr));
             if execution.command.cwd.is_empty() {
                 execution.command.cwd = workspace.to_string_lossy().into_owned();
             }
@@ -513,4 +520,22 @@ fn darwin_job_workspace(cwd: &str, id: &str) -> Option<PathBuf> {
         .map(|slot| slot.root().to_path_buf())
         .find(|root| Path::new(cwd).starts_with(root))
         .map(|root| root.join(id))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    use super::*;
+
+    #[test]
+    fn results_and_cleanup_stay_in_the_admitted_job_workspace() {
+        use fractal_runtime::darwin_slot::Slot;
+        for slot in [Slot::Heavy1, Slot::Gate1, Slot::Gate2, Slot::Gate3, Slot::Eval1] {
+            let cwd = slot.root().join("sources");
+            assert_eq!(darwin_job_workspace(cwd.to_str().unwrap(), "job"),
+                Some(slot.root().join("job")));
+        }
+        assert!(darwin_job_workspace("/workspace/project", "job").is_none());
+        assert!(darwin_job_workspace("/Users/Shared/fractal-jobs/heavy10/job", "job").is_none());
+        assert!(darwin_job_workspace("", "job").is_none());
+    }
 }
