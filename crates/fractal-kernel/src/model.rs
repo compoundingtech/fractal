@@ -1369,6 +1369,9 @@ pub struct NamedCancellation {
 pub struct MissionRunCreation {
     pub mission: String,
     pub revision: String,
+    /// The exact revision was resolved for admission, not explicitly pinned by the caller.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow_head: bool,
     pub workspace: String,
     pub requester: String,
     #[serde(default)]
