@@ -79,8 +79,10 @@ fn a_long_document_renders_as_written_with_its_version_and_changed_time() {
     assert!(lines.iter().any(|line| line == "Line 399: plain text with no links."), "{body}");
     // Markdown links show their words, and the address behind them is the link.
     assert!(lines.iter().any(|line| line.contains("See the soil notes and the harvest.")), "{body}");
-    assert_eq!(fractal_conversation_ui::text::link_for("the harvest").as_deref(), Some("doc/garden/harvest"));
-    assert_eq!(fractal_conversation_ui::text::link_for("the soil notes").as_deref(), Some("./soil.md"));
+    let targets: Vec<_> = doc.lines.iter().flat_map(|line| &line.spans)
+        .filter_map(|span| span.link.as_deref()).collect();
+    assert!(targets.contains(&"doc/garden/harvest"));
+    assert!(targets.contains(&"./soil.md"));
 
     // The page ends with its outgoing links, each once, each one a click on that document.
     let links = lines.iter().position(|line| line.starts_with("Links ")).expect(&body);
@@ -369,10 +371,15 @@ fn only_document_references_open_as_documents() {
     for not in ["doc/", "doc/garden/", "doc/garden/plan@abc", "mission/example/orchard", "https://example.com/doc/x"] {
         assert_eq!(openable(not), None, "{not}");
     }
-    assert!(inside_word("my", "x"));
-    assert!(inside_word("", "-more"));
-    assert!(!inside_word("see ", ". Then"));
-    assert!(!inside_word("(", ")"));
+    let links = |source: &str| {
+        text::markdown(source, 80, theme::text()).into_iter()
+            .flat_map(|line| line.spans.into_iter().filter_map(|span| span.link))
+            .map(|target| target.to_string()).collect::<Vec<_>>()
+    };
+    assert!(links("mydoc/garden/plan").is_empty());
+    assert_eq!(links("doc/garden/plan-more"), ["doc/garden/plan-more"]);
+    assert_eq!(links("see doc/garden/plan. Then"), ["doc/garden/plan"]);
+    assert_eq!(links("(doc/garden/plan)"), ["doc/garden/plan"]);
 }
 
 #[test]

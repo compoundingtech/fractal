@@ -1816,6 +1816,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fractal-client",
+ "fractal-ui-model",
  "ratatui",
  "serde",
  "serde_json",

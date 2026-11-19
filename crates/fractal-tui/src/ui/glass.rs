@@ -1791,7 +1791,7 @@ impl Ui {
             }
             spans.push(Span::styled(label, style));
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), area.width);
         self.draw_list_as(
             buf,
             Rect {
@@ -2566,7 +2566,7 @@ impl Ui {
             if x + width > area.x + area.width {
                 break;
             }
-            buf.set_line(x, area.y, &line, width);
+            self.draw_line(buf, x, area.y, &line, width);
             self.hit(Rect { x, width, ..area }, hit);
             x += width + 2;
         }
@@ -2810,7 +2810,7 @@ impl Ui {
                 self.hit(rect, hit);
             }
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
         let width = selector_width;
         let x = area.x + left_width;
@@ -3243,7 +3243,7 @@ impl Ui {
             Span::styled(palette.query.clone(), theme::text().bg(theme::MANTLE)),
             Span::styled("▏", theme::fg(theme::ACCENT).bg(theme::MANTLE)),
         ]);
-        buf.set_line(rect.x + 1, rect.y + 1, &input, rect.width - 2);
+        self.draw_line(buf, rect.x + 1, rect.y + 1, &input, rect.width - 2);
         let matches = self.matches(palette);
         let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
         let mut current = None;
@@ -3320,7 +3320,7 @@ impl Ui {
         self.frame.borrow_mut().palette_top = top;
         for (offset, (index, line)) in rows.iter().skip(top).take(list_height).enumerate() {
             let y = rect.y + 2 + offset as u16;
-            buf.set_line(rect.x + 1, y, line, rect.width - 2);
+            self.draw_line(buf, rect.x + 1, y, line, rect.width - 2);
             if let Some(index) = index {
                 self.hit(
                     Rect {
@@ -10357,7 +10357,7 @@ mod tests {
             agent: shell.clone(),
             title: "shell".into(),
             name: "shell".into(),
-            lines: vec![ratatui::text::Line::from("$ echo in the shell")],
+            lines: vec![Line::from("$ echo in the shell")],
             cursor: None,
             stale: None,
             ended: None,
