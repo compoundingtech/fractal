@@ -174,11 +174,9 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
             if let Some(request_id) = request_id {
                 let mut response: shell_resources::RequestCancellation = client.post(
                     &format!("/v1/internal/resources/by-request/{request_id}/cancel"), &json!({})).await?;
-                if wait {
-                    if let Some(execution) = &mut response.execution {
-                        while !matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
-                            *execution = client.post(&format!("/v1/internal/resources/{}/wait?after={}", execution.command.id, execution.revision), &json!({})).await?;
-                        }
+                if wait && let Some(execution) = &mut response.execution {
+                    while !matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
+                        *execution = client.post(&format!("/v1/internal/resources/{}/wait?after={}", execution.command.id, execution.revision), &json!({})).await?;
                     }
                 }
                 return print_value(&serde_json::to_value(response)?, json_output);
@@ -287,10 +285,9 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
         }
         eprintln!("resources: {} {} blockedBy={} {}", execution.state, id,
             execution.blocked_by.map_or("none", |blocked| blocked.as_str()), execution.reason);
-        if matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
-            if let Some(path) = &args.receipt_file {
-                write_receipt(path, &execution)?;
-            }
+        if matches!(execution.state.as_str(), "completed" | "refused" | "cancelled")
+            && let Some(path) = &args.receipt_file {
+            write_receipt(path, &execution)?;
         }
         match execution.state.as_str() {
             "completed" => {

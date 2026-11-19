@@ -87,7 +87,8 @@ pub struct RequestCancellation {
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS shell_resource_request_cancellations_v1 (
+    // UUID tombstones stay inline for atomic cancellation; retention does not bound cleanup work.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h68c595b5ab84 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resource_request_cancellations_v1 (
         id TEXT PRIMARY KEY CHECK(length(id)=36), cancelled_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS shell_resource_request_cancellation_time_v1
         ON shell_resource_request_cancellations_v1(cancelled_at);")?;
@@ -161,7 +162,8 @@ impl RequestScope<'_> {
 
 fn expire_request_cancellations(connection: &Connection, now: u64) -> Result<()> {
     if let Some(cutoff) = now.checked_sub(REQUEST_TOMBSTONE_RETENTION_MS) {
-        connection.execute("DELETE FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1", [cutoff])?;
+        // Seven-day retention does not bound the number of expired tombstones deleted per submission.
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h3ecd1f97c431 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1", [cutoff])?;
     }
     Ok(())
 }
@@ -216,7 +218,7 @@ impl Store {
                 "resource request was cancelled before acceptance").into());
         }
         // One row per command does not bound its serialized argv/result bytes.
-        let inserted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
+        let inserted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h319ba7a29fc7 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
         if inserted == 0 {
             let body: String = transaction.query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [&execution.command.id], |row| row.get(0))?;
@@ -273,7 +275,8 @@ impl Store {
             cancel_command(&transaction, &id)?;
             execution.cancel = true;
         } else {
-            transaction.execute("INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
+            // Keep cancellation atomic with request lookup; UUID keys do not prove total storage cost.
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hc433437e984c owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
                 VALUES(?1,?2) ON CONFLICT(id) DO NOTHING", rusqlite::params![id, now])?;
         }
         transaction.commit()?;
