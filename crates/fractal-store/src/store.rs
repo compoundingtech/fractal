@@ -6468,6 +6468,32 @@ impl Store {
         Ok(hosted)
     }
 
+    /// Declared agents with a readable member on `host`, in subject order. Seek the
+    /// existing host index and decode only matching members, never declaration bodies.
+    pub fn hosted_agents(&self, host: &str) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject, member FROM desired INDEXED BY desired_agent_host_index
+             WHERE kind='agent' AND json_extract(member, '$.host')=?1 ORDER BY subject",
+        )?;
+        let rows = statement.query_map([host], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut agents = Vec::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row: future or malformed members are unavailable.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                agents.push(subject);
+            }
+        }
+        Ok(agents)
+    }
+
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
