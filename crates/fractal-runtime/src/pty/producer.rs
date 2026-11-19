@@ -675,7 +675,7 @@ mod tests {
         runtime.acknowledge_launcher(&mut ownership, false).unwrap();
         drop(lock);
         // A missing scope and free spawn lock cannot close a crash-before-ack.
-        let error = runtime.spawn_checked(
+        let error = runtime.clone().with_launch_operation(Some(crate::LaunchOperation(operation.clone()))).spawn_checked(
             id, &Launch::Argv(vec!["true".into()]), root.path(),
             &BTreeMap::from([("ST3_START_OPERATION".into(), operation.clone())]),
             None, &BTreeMap::from([("st3.start-operation".into(), operation.clone())]),

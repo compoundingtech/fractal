@@ -66,6 +66,7 @@ impl RuntimeControl for Runtime {
     fn start_guarded(
         &self,
         member: &MemberSpec,
+        _operation: Option<&fractal_runtime::LaunchOperation>,
         guard: &dyn Fn() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         guard()?;

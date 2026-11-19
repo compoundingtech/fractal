@@ -7949,7 +7949,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "mission_resource_lane": 2,
                     "idle_residency": 1,
                     "per_run_missions": 1,
-                    "shell_resource_exec": 1,
+                    "shell_resource_exec": 2,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
