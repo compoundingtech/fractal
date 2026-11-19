@@ -854,6 +854,10 @@ const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfc9ed02b4ad7 owner
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_resource_exec_owner_attempt_index
+ON claims(json_extract(body,'$.fields.owner.step'), json_extract(body,'$.fields.owner.attempt'),
+          json_extract(body,'$.fields.runtime_generation'))
+WHERE kind='resource.exec-receipt';
 CREATE INDEX IF NOT EXISTS claims_terminal_history_index ON claims(store_index)
 WHERE kind IN ('mission-run.state','step-run.state','work.failed')
   AND json_extract(body,'$.fields.status') IN ('failed','cancelled','completed');

@@ -910,6 +910,7 @@ impl Store {
         let mut empty = true;
         let mut uncertain = false;
         let mut retirement_errors = Vec::new();
+        let mut retired_roots = Vec::new();
         for child in &member.child_runs {
             smallclaims::touched::note_read(|| child.clone());
             let status = self.readers.get().query_row("SELECT status FROM mission_runs WHERE id=?1",
@@ -927,10 +928,13 @@ impl Store {
         }
         for root in &member.roots {
             if let Some(execution) = &root.execution {
-                if let Err(error) = self.retire_resource_root(grant, runtime, &root.runtime_id, &execution.generation_id) {
-                    empty = false;
-                    uncertain = true;
-                    retirement_errors.push(format!("{}: {error:#}", root.runtime_id));
+                match self.retire_resource_root(grant, runtime, &root.runtime_id, &execution.generation_id) {
+                    Ok(generation) => retired_roots.push((root, generation)),
+                    Err(error) => {
+                        empty = false;
+                        uncertain = true;
+                        retirement_errors.push(format!("{}: {error:#}", root.runtime_id));
+                    }
                 }
             } else {
                 empty = false; // A prepared generation with unknown launch outcome retains custody.
@@ -938,20 +942,40 @@ impl Store {
             }
         }
         let teardown_error = (!retirement_errors.is_empty()).then(|| retirement_errors.join("; "));
-        self.update_resource_membership(grant, |member| {
-            if empty { member.state = "retired".into(); member.retired_at = Some(now_ms); member.reason = "execution tree confirmed empty".into(); }
-            else if uncertain { member.state = "uncertain".into(); member.reason = teardown_error.clone()
-                .unwrap_or_else(|| "execution retirement unconfirmed; custody retained".into()); }
-            else { member.state = "retiring".into(); member.reason = "awaiting linked child termination; custody retained".into(); }
-            Ok(())
-        })?;
+        // Membership retirement and its existing terminal receipts commit together. Restart
+        // cannot publish a retired membership while losing its immutable command binding.
+        let mut connection = self.connection.write();
+        let tx = connection.transaction()?;
+        let mut current = read(&tx, &grant.membership_id)?;
+        fenced(&tx, &current, grant)?;
+        if current.state == "retired" { return Ok(true); }
+        let previous = current.state.clone();
+        if empty {
+            current.state = "retired".into();
+            current.retired_at = Some(now_ms);
+            current.reason = "execution tree confirmed empty".into();
+        } else if uncertain {
+            current.state = "uncertain".into();
+            current.reason = teardown_error.clone().unwrap_or_else(|| "execution retirement unconfirmed; custody retained".into());
+        } else {
+            current.state = "retiring".into();
+            current.reason = "awaiting linked child termination; custody retained".into();
+        }
+        write(&tx, &current)?;
+        if empty && (current.request.id.starts_with("dsl:") || current.request.id.starts_with("program:")) {
+            for (root, generation) in retired_roots {
+                super::resource_exec_receipts::append_root_tx(&tx, &self.origin, &current, root, &generation)?;
+            }
+        }
+        tx.commit()?;
+        self.observe_resource_transition(&connection, &current, Some(&previous), now_ms, false);
         if let Some(error) = teardown_error { anyhow::bail!("resource tree retirement failed: {error}"); }
         Ok(empty)
     }
 
-    fn retire_resource_root(&self, grant: &Grant, runtime: &ExecRuntime, id: &str, generation: &str) -> Result<()> {
+    fn retire_resource_root(&self, grant: &Grant, runtime: &ExecRuntime, id: &str, generation: &str) -> Result<ExecGeneration> {
         match runtime.retire_if(id, generation) {
-            Ok(_) => Ok(()),
+            Ok(execution) => Ok(execution),
             Err(error) => {
                 self.update_resource_membership(grant, |member| {
                     member.state = "uncertain".into();
@@ -1716,6 +1740,56 @@ mod tests {
         assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().execution_ended_at, None);
         store.end_resource_execution(&grant, "runtime-1", 900).unwrap();
         assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().execution_ended_at, Some(900));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_dsl_and_program_receipts_publish_only_after_whole_tree_retirement() {
+        if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+            eprintln!("native receipt retirement requires a systemd user manager");
+            return;
+        }
+        for kind in ["dsl", "program"] {
+            let store = fixture();
+            let root = tempfile::tempdir().unwrap();
+            let runtime = runtime(root.path());
+            let mut request = request(&format!("{kind}:proof"));
+            request.name = format!("receipt-{}", uuid::Uuid::new_v4().simple());
+            request.coverage = Coverage::Enforced;
+            let grant = grant(&store, &request, 1);
+            let policy = fractal_runtime::FiniteLane { name: request.name.clone(), capacity: request.capacity,
+                member_capacity: request.capacity, memory_high_bytes: None, require_enforced: true };
+            let binding = fractal_runtime::ResourceExecutionBinding {
+                membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                authority_epoch: grant.authority_epoch.clone(),
+            };
+            store.prepare_resource_membership(&grant, "proof-root").unwrap();
+            let argv = vec!["sh".into(), "-c".into(), "sleep 60 & exit 7".into()];
+            let generation = runtime.spawn_in_lane_authorized("proof-root", &fractal_runtime::Launch::Argv(argv.clone()),
+                root.path(), &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &policy, binding: &binding, guard: &|| Ok(()),
+                    authorize: &|execution, release| store.release_resource_payload(&grant, "proof-root", execution, release),
+                }).unwrap();
+            store.launch_resource_membership(&grant, "proof-root", &generation, 2).unwrap();
+            let selector = super::super::resource_exec_receipts::ReceiptQuery {
+                step_run: request.owner.step.clone(), attempt: request.owner.attempt,
+                generation: Some(generation.generation_id.clone()),
+            };
+            assert!(store.resource_exec_receipt(&selector).is_err());
+            let ended = runtime.wait_for_exit("proof-root", &generation.generation_id).unwrap();
+            store.end_resource_execution(&grant, "proof-root", 3).unwrap();
+            assert!(store.resource_exec_receipt(&selector).is_err(), "leader exit is not tree retirement");
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 4).unwrap());
+            assert!(runtime.retired_if("proof-root", &generation.generation_id).unwrap());
+            let receipt = store.resource_exec_receipt(&selector).unwrap();
+            assert_eq!(receipt.fields.argv, argv);
+            assert_eq!(receipt.fields.exit_code, ended.exit_code);
+            assert_eq!(receipt.fields.exit_signal, ended.exit_signal);
+            assert_eq!(receipt.fields.retired_at, 4);
+            assert_eq!(receipt.fields.owner, request.owner);
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 5).unwrap());
+            assert_eq!(store.resource_exec_receipt(&selector).unwrap().claim_id, receipt.claim_id);
+        }
     }
 
     #[cfg(target_os = "linux")]

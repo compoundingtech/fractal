@@ -515,6 +515,10 @@ actual `argv`, excluding credential and daemon wrappers. `argv_sha256` uses the 
 convention: lowercase SHA-256 of UTF-8 arguments joined by NUL, with no trailing NUL.
 At confirmed retirement, receipt emission combines that immutable command binding with the
 same runtime generation's exit code/signal and the membership's exact owner, class and profile.
+Direct-root receipts have `state: retired`; `runtime_generation` and `retired_at` bind the
+physical attempt. Subjects are
+`resource/exec/{hex(head_start) or _}/root/{hex(host)}/{hex(runtime_id)}/{hex(generation)}`.
+Repository observations are optional recorded facts, not assertions inferred from desired state.
 Nonzero and signal outcomes remain truthful; terminal denial never fabricates a launched receipt.
 
 Use the indexed exact receipt lookup with the proof's **step-run ID and attempt**, additionally
@@ -532,9 +536,11 @@ fractal --json resources exec-receipt --step-run "$proof_step" --attempt "$proof
 # Add --generation "$proof_generation" to select one runtime generation explicitly.
 ```
 
-The store exposes the typed `ReceiptReference` in `store::resource_exec_receipts`.
-These surfaces read the existing authoritative record; neither the reference nor the lookup
-introduces a new credential or grants admission authority.
+The typed store read is `Store::resource_exec_receipt(&ReceiptQuery) -> ReceiptReference`
+in `store::resource_exec_receipts`. The response includes `claimId`, `subject`, `origin`,
+and typed bound `fields`, never grants or a new credential. Missing/ineligible bindings,
+ambiguity and stale generations return typed `resource-receipt-*` errors.
+Run-bound callers may read proof steps of their own run.
 
 A light finalizer runs after the program resource scope closes (scope release awaits retirement),
 or after the DSL proof's retirement boundary. Pass the proof's step-run ID and attempt explicitly;

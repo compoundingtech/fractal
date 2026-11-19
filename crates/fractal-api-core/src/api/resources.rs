@@ -9,6 +9,7 @@ pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> b
     match path.strip_prefix("/v1/internal/resources") {
         Some("") => *method == Method::GET,
         Some("/exec") => *method == Method::POST,
+        Some("/exec-receipt") => *method == Method::GET,
         Some(rest) if rest.starts_with("/by-request/") => {
             let mut segments = rest.strip_prefix("/by-request/").unwrap_or_default().split('/');
             match (segments.next(), segments.next(), segments.next()) {
@@ -246,6 +247,19 @@ fn present(mut execution: Execution) -> Execution {
     execution.command.environment.clear();
     execution.command.parent = None;
     execution
+}
+
+pub(super) async fn exec_receipt(State(state): State<AppState>, bound: Option<BoundActor>,
+    run: Option<Extension<BoundRun>>, Query(query): Query<crate::store::resource_exec_receipts::ReceiptQuery>,
+) -> Result<Json<crate::store::resource_exec_receipts::ReceiptReference>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let receipt = state.store.resource_exec_receipt(&query).map_err(ApiError::bad)?;
+    // A light finalizer may inspect another step of its run, never another run's authority.
+    // The response contains only immutable receipt fields, not membership grants.
+    if caller.as_ref().is_some_and(|caller| caller.owner.run != receipt.fields.owner.run) {
+        return Err(ApiError::bad(FractalError::new("resource-receipt-owner", "receipt belongs to another mission run")));
+    }
+    Ok(Json(receipt))
 }
 
 pub(super) async fn list(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Query(query): Query<ListQuery>) -> Result<Json<Value>, ApiError> {

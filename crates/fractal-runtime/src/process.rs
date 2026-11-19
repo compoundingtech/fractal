@@ -84,6 +84,11 @@ pub struct ExecGeneration {
     pub payload_released_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_membership: Option<ResourceExecutionBinding>,
+    /// Frozen before gate release, before daemon/isolation wrappers; old launches are ineligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_launch: Option<crate::PayloadLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement_repository: Option<crate::RepositoryObservation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -177,6 +182,7 @@ pub struct ExecRuntime {
     finite_lane: Option<FiniteLane>,
     resource_membership: Option<ResourceExecutionBinding>,
     launch_operation: Option<crate::LaunchOperation>,
+    payload_launch: Option<crate::Launch>,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -268,6 +274,7 @@ impl ExecRuntime {
             finite_lane: None,
             resource_membership: None,
             launch_operation: None,
+            payload_launch: None,
         }
     }
 
@@ -291,6 +298,12 @@ impl ExecRuntime {
 
     pub fn with_launch_operation(mut self, operation: Option<crate::LaunchOperation>) -> Self {
         self.launch_operation = operation;
+        self
+    }
+
+    /// The daemon supplies the payload before adding its credential/driver wrappers.
+    pub fn with_payload_launch(mut self, launch: crate::Launch) -> Self {
+        self.payload_launch = Some(launch);
         self
     }
 
@@ -556,6 +569,8 @@ impl ExecRuntime {
             start_operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
+            payload_launch: self.finite_lane.as_ref().map(|_| crate::PayloadLaunchSnapshot::capture(self.payload_launch.as_ref().unwrap_or(launch), cwd)),
+            retirement_repository: None,
         };
         let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
         children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
@@ -1009,10 +1024,20 @@ impl ExecRuntime {
             .context("execution scope has no whole-tree retirement proof")?;
         anyhow::ensure!(self.retired_if(id, expected_generation)?,
             "execution retains whole-tree custody after scope retirement");
-        let current = self.read_generation_path(&self.record_path(id))?
+        let mut current = self.read_generation_path(&self.record_path(id))?
             .context("execution generation disappeared after retirement")?;
         anyhow::ensure!(current.generation_id == expected_generation,
             "execution generation changed after retirement");
+        if current.retirement_repository.is_none() {
+            if let Some(snapshot) = &current.payload_launch {
+                current.retirement_repository = Some(crate::RepositoryObservation::capture(Path::new(&snapshot.cwd)));
+                self.update_generation(id, &current)?;
+            }
+        }
+        let current = self.read_generation_path(&self.record_path(id))?
+            .context("execution generation disappeared while binding retirement")?;
+        anyhow::ensure!(current.generation_id == expected_generation,
+            "execution generation changed while binding retirement");
         Ok(current)
     }
 
@@ -1235,6 +1260,15 @@ impl ExecRuntime {
             }
             anyhow::ensure!(generation.resource_membership == current.resource_membership,
                 "execution resource membership binding changed");
+            if generation.payload_launch.is_none() && current.payload_launch.is_some() {
+                generation.to_mut().payload_launch = current.payload_launch.clone();
+            }
+            anyhow::ensure!(generation.payload_launch == current.payload_launch,
+                "execution payload launch snapshot changed");
+            // The first confirmed retirement observation is immutable, including unknowns.
+            if current.retirement_repository.is_some() {
+                generation.to_mut().retirement_repository = current.retirement_repository.clone();
+            }
             if generation.payload_released_at_unix_ms.is_none() && current.payload_released_at_unix_ms.is_some() {
                 generation.to_mut().payload_released_at_unix_ms = current.payload_released_at_unix_ms;
             }
@@ -1725,6 +1759,58 @@ mod tests {
     }
 
     #[test]
+    fn payload_snapshot_is_immutable_across_restart_and_stale_observers() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        fs::create_dir_all(&runtime.state_dir).unwrap();
+        let historical: ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema":SCHEMA, "pid":123, "startToken":1, "createdAtUnixMs":1,
+            "generationId":"frozen", "exitCode":7, "groupExited":true
+        })).unwrap();
+        assert!(historical.payload_launch.is_none());
+        let mut frozen = historical.clone();
+        frozen.payload_launch = Some(crate::PayloadLaunchSnapshot::capture(
+            &crate::Launch::Argv(vec!["proof".into(), "--head=one".into()]), root.path()));
+        frozen.retirement_repository = Some(crate::RepositoryObservation { head: Some("head-one".into()), clean: Some(true) });
+        runtime.write_generation("proof", &frozen).unwrap();
+        // A stale observer cannot erase a launch binding or retirement observation.
+        runtime.update_generation("proof", &historical).unwrap();
+        let restarted = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(restarted.read_generation_path(&restarted.record_path("proof")).unwrap(), Some(frozen.clone()));
+        let mut changed = frozen.clone();
+        changed.payload_launch.as_mut().unwrap().argv.push("--head=two".into());
+        assert!(restarted.update_generation("proof", &changed).is_err());
+        runtime.write_generation("historical", &historical).unwrap();
+        assert!(runtime.update_generation("historical", &frozen).is_err(),
+            "current desired argv must never fill a historical launch binding");
+    }
+
+    #[test]
+    fn payload_snapshot_excludes_daemon_wrapper_and_credentials_before_release() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = crate::Launch::Argv(vec!["proof".into(), "--head=one".into()]);
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_payload_launch(payload);
+        let lane = FiniteLane { name: "payload_snapshot".into(), capacity: None,
+            member_capacity: None, memory_high_bytes: None, require_enforced: false };
+        let mut environment: BTreeMap<_, _> = std::env::vars().collect();
+        environment.insert("ST_RUN_CREDENTIAL".into(), "private-environment-value".into());
+        let generation = runtime.spawn_in_lane_authorized("wrapped",
+            &crate::Launch::Shell("exit 7".into()), root.path(), &environment,
+            FiniteExecutionAuthorization { lane: &lane, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|generation, release| {
+                    let persisted = runtime.read_generation_path(&runtime.record_path("wrapped"))?.unwrap();
+                    assert_eq!(persisted.payload_launch, generation.payload_launch);
+                    assert_eq!(persisted.payload_launch.as_ref().unwrap().argv, ["proof", "--head=one"]);
+                    assert!(!serde_json::to_string(&persisted)?.contains("private-environment-value"));
+                    release()?;
+                    Ok(())
+                }
+            }).unwrap();
+        assert_eq!(runtime.wait_for_exit("wrapped", &generation.generation_id).unwrap().exit_code, Some(7));
+    }
+
+    #[test]
     fn finite_authorization_wraps_actual_release_and_observes_durable_receipt() {
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
@@ -1742,6 +1828,9 @@ mod tests {
                 assert_eq!(bound.generation_id, execution.generation_id);
                 assert_eq!(bound.payload_released_at_unix_ms, None);
                 assert_eq!(bound.resource_membership, Some(fixture_resource_binding()));
+                let snapshot = bound.payload_launch.as_ref().expect("payload snapshot precedes release");
+                assert_eq!(snapshot.argv, ["sh", "-c", "touch payload-started; exit 9"]);
+                assert_eq!(snapshot.argv_sha256, crate::argv_sha256(&snapshot.argv));
                 assert!(!root.path().join("payload-started").exists());
                 let timestamp = release()?;
                 let receipt = runtime.read_generation_path(&runtime.record_path("authorized"))?.unwrap();
@@ -2231,6 +2320,8 @@ mod tests {
                     start_operation: None,
                     payload_released_at_unix_ms: None,
                     resource_membership: None,
+                    payload_launch: None,
+                    retirement_repository: None,
                 };
                 control.write_generation("control", &generation).unwrap();
                 let before = fs::read(control.record_path("control")).unwrap();
@@ -2388,6 +2479,8 @@ mod tests {
             start_operation: None,
             payload_released_at_unix_ms: None,
             resource_membership: None,
+            payload_launch: None,
+            retirement_repository: None,
         };
         fs::create_dir_all(&runtime.state_dir).unwrap();
         runtime.write_generation("completed", &generation).unwrap();

@@ -312,7 +312,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 driver: None, terminal_size: None, capacity: None, declared_priority: None, declared_lane: None, declared_budgets: None,
             };
             resource_lanes::set_request(&mut member, &request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, &member.launch, None, &|| {
                 anyhow::ensure!(!self.store.shell_resource(&execution.command.id)?.cancel, "shell request cancelled before payload release");
                 self.store.shell_resource_owner_live(&request.owner)?;
                 Ok(())
