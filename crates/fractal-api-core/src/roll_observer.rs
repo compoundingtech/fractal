@@ -12,27 +12,24 @@ pub fn observe(store: &Store, claim_id: &str) -> Result<Value> {
     // committed. Share capture/publication serialization with the native census.
     let source = store.extension::<crate::roll_source::CaptureLock>();
     let _capture = source.0.lock().map_err(|_| anyhow::anyhow!("source capture lock poisoned"))?;
-    let now = {
-        let writer = store.connection.write();
-        let accepted: u64 = smallclaims::store::checkpoint_agreement::write_time(&writer, store.origin())?
-            .try_into().context("native acceptance clock overflow")?;
-        crate::roll_source::now_ms()?.max(accepted)
-    };
-    let resolved = roll_completion::resolved_target(store, claim_id)?;
-    ensure!(resolved.host == store.origin(), "resolved target is not this daemon's host");
-    // Match the running daemon's health implementation, not an executable on PATH.
-    store.index()?;
-    let ready = fractal_runtime::systemd::health().unresponsive.is_none();
-    let home_profile = home_profile();
-    let (adoption, evidence) = measure(
-        &resolved.target,
-        &resolved.expected_system_path,
-        &resolved.expected_home_path,
-        Path::new("/run/current-system"),
-        home_profile.as_deref(),
-        fractal_drivers::version::build_commit(),
-        ready,
-    );
+    let ((resolved, adoption, evidence), now) = after_measurement(store, || {
+        let resolved = roll_completion::resolved_target(store, claim_id)?;
+        ensure!(resolved.host == store.origin(), "resolved target is not this daemon's host");
+        // Match the running daemon's health implementation, not an executable on PATH.
+        store.index()?;
+        let ready = fractal_runtime::systemd::health().unresponsive.is_none();
+        let home_profile = home_profile();
+        let (adoption, evidence) = measure(
+            &resolved.target,
+            &resolved.expected_system_path,
+            &resolved.expected_home_path,
+            Path::new("/run/current-system"),
+            home_profile.as_deref(),
+            fractal_drivers::version::build_commit(),
+            ready,
+        );
+        Ok((resolved, adoption, evidence))
+    })?;
     roll_completion::publish_observation(store, Receipt::HostObserved {
         version: 1,
         roll_id: resolved.roll_id,
@@ -43,6 +40,19 @@ pub fn observe(store: &Store, claim_id: &str) -> Result<Value> {
         adoption,
         evidence: evidence.map(Box::new),
     }, now)
+}
+
+/// Never date an observation from the beginning of a possibly slow measurement.
+/// The caller retains source-capture serialization through signed publication.
+fn after_measurement<T>(store: &Store, measure: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
+    let measured = measure()?;
+    let now = {
+        let writer = store.connection.write();
+        let accepted: u64 = smallclaims::store::checkpoint_agreement::write_time(&writer, store.origin())?
+            .try_into().context("native acceptance clock overflow")?;
+        crate::roll_source::now_ms()?.max(accepted)
+    };
+    Ok((measured, now))
 }
 
 fn home_profile() -> Option<PathBuf> {
@@ -104,6 +114,33 @@ fn classify(target: &Identity, proof: &Verification) -> Adoption {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measurement_crossing_deadline_uses_completion_native_clock() {
+        let store = Store::open_memory("host-a").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("current-system");
+        std::os::unix::fs::symlink(root.path(), &profile).unwrap();
+        let source = store.extension::<crate::roll_source::CaptureLock>();
+        let _capture = source.0.lock().unwrap();
+        let started = crate::roll_source::now_ms().unwrap();
+        let deadline = started + 24 * 60 * 60 * 1_000;
+        let ((adoption, proof), observed) = after_measurement(&store, || {
+            // Exercise a real profile read, not caller-supplied evidence. A
+            // non-store target correctly stays unknown independently of timing.
+            let result = measure(&target(), "/nix/store/system", "/nix/store/home",
+                &profile, Some(&profile), &"b".repeat(40), true);
+            // Advance the actual native acceptance clock while measurement is
+            // in progress: sampling before this callback would falsely predate
+            // the deadline. No sleep or fake clock implementation is involved.
+            store.set_write_clock_at(u128::from(deadline + 1))?;
+            Ok(result)
+        }).unwrap();
+        assert_eq!(adoption, Adoption::Unknown);
+        assert!(proof.is_none());
+        assert!(started <= deadline);
+        assert!(observed > deadline, "a measurement finishing late cannot be dated at its start");
+    }
 
     #[test]
     fn every_declared_component_requires_exact_observed_proof() {

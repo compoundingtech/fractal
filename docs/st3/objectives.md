@@ -272,8 +272,8 @@ The producer calls the target daemon's `POST /v1/slo/observe` with only
 `{"claim_id":"SIGNED_RESOLUTION_CLAIM_ID"}`. The daemon independently reads its own
 active system/home profiles, running compiled revision and readiness. It rejects
 another host's resolution and never accepts caller-provided adoption, paths, health,
-or revision evidence. Missing observations and unavailable explicit factory proof
-remain unknown.
+or revision evidence. Missing supported observations remain unknown. The removed
+`factory_revision` field is rejected rather than promising an unavailable reader.
 
 The internal collector publishes a signed `host-observed` resource observation
 under `resource/fleet/roll-completion/ROLL/HOST/OBSERVED_AT_MS`; only a verified
@@ -281,6 +281,11 @@ direct `host/HOST` signature with no actor attribution may assert that host's
 adoption. Generic public claim publication forbids **all** host-observed receipts,
 even for a bound roll authority, so the daemon cannot be used as a signing oracle.
 The collector returns its signed observation `claim_id` with the admission result.
+The observation time is sampled only after resolution authentication, graph
+readiness, daemon health and active-profile reads finish. It is floored by the
+native acceptance clock, with source-census/publication serialization held until
+the signed observation is published. A measurement that crosses the deadline
+cannot count as timely by retaining its start time.
 These existing generic claims carry their signature proof through ordinary graph
 replication and replay; there are no new schema claim kinds.
 
