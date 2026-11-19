@@ -4749,7 +4749,12 @@ struct SlowExport {
     slow: Arc<std::sync::atomic::AtomicBool>,
     fail_next: Arc<std::sync::atomic::AtomicBool>,
     receives: Arc<std::sync::atomic::AtomicUsize>,
-    pause_after_receipt: Option<Arc<tokio::sync::Notify>>,
+    pause_after_receipt: Option<Arc<ReceiptBarrier>>,
+}
+
+struct ReceiptBarrier {
+    received: tokio::sync::Notify,
+    page: Mutex<Option<ReplicationExchange>>,
 }
 
 impl Backend for SlowExport {
@@ -4793,7 +4798,8 @@ impl Backend for SlowExport {
                 carrier,
                 authenticated_member_key,
             ).map_err(anyhow::Error::msg)?;
-            received.notify_one();
+            *received.page.lock().unwrap() = Some(exchange.clone());
+            received.received.notify_one();
             return std::future::pending().await;
         }
         let result = self
@@ -5088,7 +5094,10 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
     let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
     let http = replication_http_client();
     let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
-    let received = Arc::new(tokio::sync::Notify::new());
+    let received = Arc::new(ReceiptBarrier {
+        received: tokio::sync::Notify::new(),
+        page: Mutex::new(None),
+    });
     {
         let backend = SlowExport {
             local: Local(left.clone()),
@@ -5102,11 +5111,14 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 result = &mut interrupted => panic!("exchange passed the receipt barrier: {result:?}"),
-                () = received.notified() => {}
+                () = received.received.notified() => {}
             }
         }).await.expect("exchange did not reach durable receipt");
         // Dropping the worker future cancels it before admission, projection or the push.
     }
+    // The peer can append transport observations while handling the query.
+    // Replay the actual received page, not the earlier fixture inventory.
+    let page = received.page.lock().unwrap().take().expect("durable received page");
     let pending = |store: &Store| -> usize {
         store.connection.write().query_row(
             "SELECT COUNT(*) FROM replica_envelopes WHERE writer='cedar' AND receipt_state='pending'",
