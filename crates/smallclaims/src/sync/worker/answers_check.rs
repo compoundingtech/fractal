@@ -379,8 +379,9 @@ mod tests {
             exchange: &crate::replication::ReplicationExchange,
             round_trip: Option<Duration>,
             carrier: crate::replication::ReplicationCarrier,
+            authenticated_member_key: Option<&str>,
         ) -> Result<crate::replication::ReplicationReceiveResponse> {
-            self.0.receive(peer, fleet_id, exchange, round_trip, carrier).await
+            self.0.receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key).await
         }
 
         async fn checkpoint_manifest(&self, request: &CheckpointManifestRequest) -> Result<CheckpointManifestPage> {

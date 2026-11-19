@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Yield signature verdict writer loans at a cooperative time boundary, not only a row-count boundary",
+  "replay": {"status": "none", "detail": "Queued verdict work resumes from its existing durable queue."},
+  "schema": {"status": "none", "detail": "No storage-format changes."},
+  "rules": {"status": "none", "detail": "Authority checks, signature verification and verdict activation are unchanged."},
+  "compatibility": {"status": "none", "detail": "No API or protocol changes; request deadlines are unchanged."},
+  "downtime": {"status": "none", "detail": "Effective on the next normal binary rollout."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "After at least one claim makes progress, a loan commits before starting another claim when its 10 ms cooperative budget has elapsed. A single claim, dependency requeue page and COMMIT are not preempted and can exceed the budget."}
+}

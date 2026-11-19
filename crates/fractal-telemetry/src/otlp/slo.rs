@@ -115,7 +115,8 @@ pub fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Value> {
                 }
             }
             // The writer-hold row's windows go out under `transaction`; its holders are not gauges.
-            "database" | "writer-hold" => {}
+            // Database capacity observations are not latency windows or latency targets.
+            "database" | "database-archive" | "writer-hold" => {}
             _ => {
                 let owner = if population.is_some() { "reported" } else { "owner" };
                 series(owner, &row["windows"]);
@@ -218,7 +219,7 @@ pub async fn run(exporter: OtlpExporter, windows: fn() -> Value) {
             Err(error) => {
                 if !failing {
                     failing = true;
-                    eprintln!("st3: reading the SLO windows for OpenTelemetry export failed: {error}");
+                    eprintln!("fractal: reading the SLO windows for OpenTelemetry export failed: {error}");
                 }
                 continue;
             }
@@ -230,7 +231,7 @@ pub async fn run(exporter: OtlpExporter, windows: fn() -> Value) {
             Ok(_) => failing = false,
             Err(error) if !failing => {
                 failing = true;
-                eprintln!("st3: OpenTelemetry export of the SLO windows failed: {error:#}");
+                eprintln!("fractal: OpenTelemetry export of the SLO windows failed: {error:#}");
             }
             Err(_) => {}
         }
@@ -289,6 +290,8 @@ mod tests {
                 "1h": {"cores": null, "minutes": 42}}, "minutes": 42,
                 "idle": {"minutes": 12, "cores": 0.1, "not_idle": {}}},
             {"name": "database", "max_live_gb": 5, "size": {"live_gb": 1.0}},
+            {"name": "database-archive", "kind": "gauge", "fresh": true, "status": "available",
+             "size": {"archive_bytes": 42, "growth_bytes_per_day": null}, "budget": null},
             {"name": "ios-connect", "p99_ms": 1500, "population": "client-observed-latencies",
              "windows": windows(20, 900.0, 0)},
             {"name": "ios-live-share", "min_percent": 99, "population": "client-observed-foreground-ms",
@@ -322,10 +325,11 @@ mod tests {
         // An hour not yet known sends no point rather than a zero.
         assert!(!points(&body, "st_slo_cpu_cores").iter().any(|point| label(point, "window") == Some("1h")));
         assert_eq!(points(&body, "st_slo_cpu_max_cores")[0]["asDouble"], 1.0);
-        // The database row is not a window and goes out through no gauge here.
+        // Database capacity rows are not windows and go out through no latency gauge here.
         for metric in body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array().unwrap() {
             for point in metric["gauge"]["dataPoints"].as_array().unwrap() {
                 assert_ne!(label(point, "target"), Some("database"));
+                assert_ne!(label(point, "target"), Some("database-archive"));
             }
         }
     }

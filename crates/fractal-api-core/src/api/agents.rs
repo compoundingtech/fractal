@@ -135,7 +135,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
-            "the seat has a rollout; inspect it or retry with st agents rollout",
+            "the seat has a rollout; inspect it or retry with fractal agents rollout",
         )));
     }
     if crate::suspension::current(&state.store, &subject)
@@ -298,7 +298,7 @@ pub async fn override_placement_source(
     Ok(Json(claim))
 }
 
-/// Start a stopped mission seat on the declaration its run gave it, as `st agents start` does.
+/// Start a stopped mission seat on the declaration its run gave it, as `fractal agents start` does.
 pub async fn start_mission_seat(
     State(state): State<AppState>,
     Json(request): Json<MissionSeatStartRequest>,
@@ -474,7 +474,7 @@ pub async fn hold_lane_burst(
     // granted burst, set the seat's lane back to its own and the run's compiles were OOM-killed).
     let (burst, restored) = state.seat_admission.burst_ask(&subject, capacity, reason, now, request.held, live);
     if restored {
-        eprintln!("st3: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
+        eprintln!("fractal: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
             capacity.cores, capacity.memory);
         super::signal_changed(&state);
     }

@@ -67,9 +67,11 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "apps/ios/fixtures/observation-minute.json",
     "claude-channel",
     "fixtures/objective-native-rows.json",
-    "scripts/ci-test-paths.rs"
+    "scripts/ci-test-paths.rs",
+    "slo/dotfiles-merge-latency.kdl"
    ]
   },
   "fractal-api-mailbox": {

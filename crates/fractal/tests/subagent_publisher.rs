@@ -350,7 +350,7 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
     server.abort();
 }
 
-/// An omp seat's channel observer, as `st driver omp-channel` runs it, bound to native session
+/// An omp seat's channel observer, as `fractal driver omp-channel` runs it, bound to native session
 /// `native-1`. The seat is declared, so the agents list shows it.
 fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::EventObserver {
     let intent = fractal_daemon::parse_intent(

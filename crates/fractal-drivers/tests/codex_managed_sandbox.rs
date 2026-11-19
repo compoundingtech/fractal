@@ -141,7 +141,7 @@ fn the_profile_writes_the_workspace_and_temp_and_refuses_everything_else() {
 }
 
 #[test]
-fn the_profile_reaches_the_st_socket_and_the_network() {
+fn the_profile_reaches_the_fractal_socket_and_the_network() {
     if !available() {
         return;
     }

@@ -7,7 +7,7 @@ Suppose the `agent/example/worker` seat looks quiet and a message appears to be 
 The sender retains the message ID:
 
 ```sh
-sent_message="$(st conversations send agent/example/worker \
+sent_message="$(fractal conversations send agent/example/worker \
   --from person/operator \
   --subject 'Catalog status' \
   --body 'Please report the active catalog run.')"
@@ -16,7 +16,7 @@ sent_message="$(st conversations send agent/example/worker \
 This is the wrong way for that sender to inspect it:
 
 ```sh
-st conversations read "$sent_message" --as person/operator
+fractal conversations read "$sent_message" --as person/operator
 ```
 
 `conversations read` is recipient-only because it records delivery and read lifecycle for the
@@ -26,8 +26,8 @@ read command was removed.
 Use a non-mutating view for a message you sent:
 
 ```sh
-st conversations thread "$sent_message"
-st subject show "$sent_message"
+fractal conversations thread "$sent_message"
+fractal subject show "$sent_message"
 ```
 
 The recipient uses `conversations read --as` for its own inbox and archives the message after its
@@ -38,11 +38,11 @@ related action is complete.
 These five views answer different questions in useful order:
 
 ```sh
-st now --as person/operator
-st agents tree --status running --enrich
-st agents queue agent/example/worker
-st work ls --as agent/example/worker
-st missions show mission-run/example/catalog/first
+fractal now --as person/operator
+fractal agents tree --status running --enrich
+fractal agents queue agent/example/worker
+fractal work ls --as agent/example/worker
+fractal missions show mission-run/example/catalog/first
 ```
 
 - `now` summarizes what needs action for the selected person and the current fleet.
@@ -58,5 +58,5 @@ A seat receives work as mission steps, not as messages. If the question is why a
 started some work, look for the step and its blockers rather than for a message.
 
 If an ID from those views needs deeper inspection, pass that exact typed subject to
-`st subject show`. Run `st COMMAND SUBCOMMAND --help` before concluding that an operation no
+`fractal subject show`. Run `fractal COMMAND SUBCOMMAND --help` before concluding that an operation no
 longer exists; the help for the exact subcommand is the authoritative command shape.

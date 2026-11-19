@@ -321,6 +321,63 @@ mission "example/report" state="ready" {
 }
 
     #[test]
+    fn closed_old_boot_producer_does_not_publish_a_clean_fault_pair() {
+        use sha2::{Digest, Sha256};
+        use serde_json::json;
+
+        if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        let producer = fractal_runtime::PtyRuntime::new(registry.clone());
+        let runtime_id = "closed-worker";
+        let operation = "closed-operation";
+        let directory = root.path().join(".st3-pty-spawn-locks")
+            .join(format!("{:x}", Sha256::digest(registry.as_os_str().as_encoded_bytes())))
+            .join(format!("{:x}.producers", Sha256::digest(runtime_id.as_bytes())))
+            .join(format!("{:x}", Sha256::digest(operation.as_bytes())));
+        fs::create_dir_all(&directory).unwrap();
+        let work = "st3-closed-worker-closed-operation.scope";
+        let server = fractal_runtime::server_unit(runtime_id, 123);
+        for (name, value) in [
+            ("owner.json", json!({"version":1, "runtime_id":runtime_id,
+                "operation":operation, "scope":work, "launcher_acknowledged":true,
+                "publication_pending":false})),
+            ("server-123.json", json!({"version":1, "unit":server, "pid":123,
+                "start_token":1, "boot_id":"linux:previous-boot"})),
+            ("closure.json", json!({"version":1, "reason":"runtime-vanished",
+                "publication_pending":false, "scopes":[
+                    {"version":1, "unit":work, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null},
+                    {"version":1, "unit":server, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null}
+                ]})),
+        ] {
+            fs::write(directory.join(name), serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let subject = "agent/closed-worker";
+        for _ in 0..3 {
+            // The placement-away no-op reports clean before the stop's closure check.
+            reconciler.record_member_reconcile_result(subject, Ok(())).unwrap();
+            let result = producer.start_operation_closed(runtime_id, operation)
+                .and_then(|closed| {
+                    anyhow::ensure!(closed, "producer closure unverified");
+                    Ok(())
+                });
+            assert!(result.is_ok(), "{result:?}");
+            reconciler.record_member_reconcile_result(subject, result).unwrap();
+            assert!(store.member_reconcile_fault(subject, None).unwrap().is_none());
+            assert!(store.claims_for(subject, Some("runtime.reconcile-decision")).unwrap().is_empty(),
+                "an already-closed producer must not alternate clean and fault decisions");
+        }
+    }
+
+    #[test]
     fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
         for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
             "unsupported", "unproven-stop"] {
@@ -8549,11 +8606,12 @@ mission "task" state="ready" {{
             ),
             "running-render-failure",
         );
+        let run_scratch = tempfile::tempdir().unwrap();
         store
             .create_mission_run(&MissionRunRequest {
                 mission: "task".into(),
                 revision: None,
-                workspace: workspace_path.clone(),
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
                 requester: Some("person/test".into()),
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -12590,6 +12648,91 @@ schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
     }
 
     #[test]
+    fn scheduled_recovery_acknowledges_existing_checkout_runs_before_admission() {
+        use serde_json::json;
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            apply_source(&store, &format!(r#"version 2
+schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace "{}" }}
+}}"#, root.path().display()), "recovery-cycle");
+            let request = store.append_claim(&ClaimInput {
+                subject: "schedule/cycle".into(), kind: "schedule.work-requested".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), json!("node")), ("occurrence".into(), json!(4)),
+                    ("mission".into(), json!("mission/scheduled-cycle")),
+                    ("mission_revision".into(), json!(revision)),
+                    ("workspace".into(), json!(root.path().to_string_lossy())), ("inputs".into(), json!({})),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let run_request = MissionRunRequest {
+                mission: "scheduled-cycle".into(), revision: Some(revision),
+                workspace: root.path().join("pre-upgrade-run").to_string_lossy().into_owned(),
+                requester: Some("daemon/node".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: format!("schedule-work:{}", request.id),
+            };
+            let run = if legacy {
+                store.create_mission_run(&run_request).unwrap()
+            } else {
+                store.create_scheduled_mission_run(&run_request, None, "schedule/cycle", 4).unwrap()
+            };
+            // Model an already admitted pre-upgrade checkout without bypassing admission.
+            fs::write(root.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            let schedule = store.desired_subjects().unwrap().into_iter().find(|s| s.subject == "schedule/cycle").unwrap();
+            reconciler.reconcile_schedule_work_with_start(&schedule, |_, _, _, _| {
+                panic!("an existing run must be acknowledged without starting or inspecting scratch")
+            }).unwrap();
+            let starts = store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].body["fields"]["mission_run"], run.subject);
+            assert!(store.claims_for(&schedule.subject, Some("schedule.work-failed")).unwrap().is_empty());
+            assert!(store.pending_schedule_work_requests(&schedule.subject).unwrap().is_empty());
+            assert!(store.schedule_has_active_started_run(&schedule.subject).unwrap());
+            reconciler.reconcile_schedule_work(&schedule).unwrap();
+            assert_eq!(store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn inherited_checkout_scratch_fails_child_and_loop_steps_durably() {
+        for loop_round in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            let body = if loop_round {
+                r#"loop "dispatch" { max-rounds 1; round { completion { when "all-steps-exhausted"; }; step "done" { agentless; }; }; }"#.to_owned()
+            } else {
+                format!(r#"step "dispatch" {{ agentless; uses-mission "scheduled-cycle@{revision}"; }}"#)
+            };
+            apply_source(&store, &format!(r#"version 2
+mission "parent" state="ready" {{
+  goal "Handle an inherited unsafe scratch directory."
+  completion {{ when "all-steps-exhausted"; }}
+  {body}
+}}"#), "inherited-checkout-parent");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "parent".into(), revision: None,
+                workspace: root.path().to_string_lossy().into_owned(),
+                requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "inherited-checkout-run".into(),
+            }).unwrap();
+            fs::create_dir(root.path().join(".git")).unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
+            let current = store.mission_run(&run.subject).unwrap().unwrap();
+            assert_eq!(current.steps.iter().find(|step| step.step == "dispatch").unwrap().status, "failed");
+            assert!(store.mission_run_for_parent_step(&current.steps[0].subject).unwrap().is_none());
+            assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+                claim.body.pointer("/fields/code").and_then(Value::as_str)
+                    == Some("mission-workspace-in-worktree")
+            }));
+        }
+    }
+
+    #[test]
     fn subscription_start_contention_waits_without_durable_failure_then_starts() {
         use serde_json::json;
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
@@ -13866,6 +14009,41 @@ schedule "{name}" {{
             .and_then(Value::as_str)
             .unwrap();
         assert!(Path::new(&store.mission_run(run).unwrap().unwrap().workspace).is_dir());
+    }
+
+    #[tokio::test]
+    async fn scheduled_work_rejects_checkout_scratch_before_creating_a_directory() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(checkout.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+        let workspace_root = checkout.path().join("cycles");
+        let at = (Utc::now() + chrono::Duration::milliseconds(50))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nschedule \"cycle\" {{ at \"{at}\"; work {{ mission \"scheduled-cycle@{revision}\"; workspace {:?} }} }}",
+                workspace_root.display().to_string()
+            ),
+            "schedule-unsafe-workspace",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        reconciler.reconcile_once().unwrap();
+        assert!(!workspace_root.exists(), "admission must not dirty the checkout");
+        assert!(store.claims_for("schedule/cycle", Some("schedule.work-started")).unwrap().is_empty());
+        assert!(!store.claims_for("schedule/cycle", Some("schedule.work-failed")).unwrap().is_empty());
+        assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str)
+                == Some("mission-workspace-in-worktree")
+        }));
     }
 
     #[tokio::test]
@@ -15933,7 +16111,7 @@ mission "collision" state="ready" {
         let mut request = MissionRunRequest {
             mission: "collision".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -26272,7 +26450,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "resource-input".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::from([("source".into(), "resource/source".into())]),
@@ -26327,7 +26505,7 @@ version 2
         let request = |mission: &str| MissionRunRequest {
             mission: mission.into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -26401,7 +26579,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "restart".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),

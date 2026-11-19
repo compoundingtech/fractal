@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Real scratch daemon API + HTTP/stdio MCP exercise; never uses ambient st state."""
+"""Real scratch daemon API + HTTP/stdio MCP exercise; never uses ambient Fractal state."""
 import base64, concurrent.futures, json, os, pathlib, selectors, socket, sqlite3, subprocess, tempfile, time, urllib.request, urllib.error, urllib.parse
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'tmp/target')) / 'debug'
-STATE = pathlib.Path(tempfile.mkdtemp(prefix='st-chatgpt-', dir=os.environ.get('TMPDIR')))
+STATE = pathlib.Path(tempfile.mkdtemp(prefix='fractal-chatgpt-', dir=os.environ.get('TMPDIR')))
 ENV = dict(os.environ, XDG_CONFIG_HOME=str(STATE / 'config'), XDG_STATE_HOME=str(STATE / 'xdg-state'))
 for key in ['ST_AGENT', 'ST3_SOCKET', 'ST_SOCKET', 'ST3_CONFIG']:
     ENV.pop(key, None)

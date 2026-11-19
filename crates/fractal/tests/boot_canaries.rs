@@ -1,19 +1,21 @@
 //! Boot canaries: a seat that cannot start never ships.
 //!
-//! Each case runs a real st3 daemon with real `pty` seats of one harness (Claude, Codex, pi, omp or
+//! Each case runs a real fractal daemon with real `pty` seats of one harness (Claude, Codex, pi, omp or
 //! OpenCode) whose provider is a token-free stand-in speaking that harness's wire contract
 //! (`scripts/fractal-boot-canaries`, no login, no model). Every seat must reach a claimed step, with its
-//! current incarnation, and read an st message within the time bound, and none may park in the
+//! current incarnation, and read a Fractal message within the time bound, and none may park in the
 //! crash-loop guard. The scenarios are the launches that broke in production:
 //!
 //! - `fresh`: a new seat boots.
 //! - `restart`: the seat is restarted and the new incarnation boots.
 //! - `daemon-restart`: the daemon dies with the seat's provider, and the new daemon, whose latest
 //!   observation of the seat is still its dead predecessor, boots a replacement.
-//! - `reexec`: the st binary is replaced and the seat's driver and channels re-exec into it.
+//! - `reexec`: the fractal binary is replaced and the seat's driver and channels re-exec into it.
 //! - `concurrent`: five seats launch at once.
 //! - `suspend`: a quiet seat suspends and resumes its own native session, and a resume whose
 //!   transcript is gone fails with a typed reason while the seat stays suspended.
+//! - `idle-suspend`: a signed fleet member automatically stops a quiet seat, then wake-class mail
+//!   resumes the same native session through a ready channel and reaches its first native turn.
 //!
 //! The stand-ins answer instantly where the real providers take seconds. That is the point: a race
 //! between a provider and the daemon that a slow provider hides, a fast one hits every time.
@@ -146,7 +148,7 @@ fn canary(harness: &str, scenario: &str) {
         (tempfile::tempdir().unwrap(), false)
     };
     let evidence = evidence_root.path().join("evidence");
-    // The replacement binary for `reexec` is a copy of st3, hundreds of megabytes in a debug build:
+    // The replacement binary for `reexec` is a copy of fractal, hundreds of megabytes in a debug build:
     // it goes on the target directory's disk, not the small tmpfs the daemon's sockets live on.
     let scratch = tempfile::Builder::new()
         .prefix("boot-canary-scratch-")
@@ -184,7 +186,7 @@ fn canary(harness: &str, scenario: &str) {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
         .is_some_and(|result| result["verdict"] == "pass")
         && output.status.success();
-    if matches!(scenario, "when-idle" | "idle-hold") {
+    if matches!(scenario, "when-idle" | "idle-hold" | "idle-suspend") {
         eprintln!(
             "{}",
             result.as_ref().map(String::as_str).unwrap_or_default()
@@ -352,6 +354,14 @@ fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
         return;
     }
     canary("codex", "import");
+}
+
+#[test]
+fn omp_idle_suspension_wakes_the_same_native_session_and_takes_a_first_turn() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    canary("omp", "idle-suspend");
 }
 
 #[test]

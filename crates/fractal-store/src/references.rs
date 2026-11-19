@@ -41,7 +41,7 @@ const PROOF_RUN: &str = "migration-proof";
 
 /// What a variable whose value only a run knows is replaced with. A reference that contains it
 /// cannot be checked before the run and is skipped.
-const RUN_VALUE: &str = "st-run-value";
+const RUN_VALUE: &str = "fractal-run-value";
 
 /// Every reference in the graph's ready missions and current declarations that no longer
 /// resolves. A mission's loop rounds are checked with it, since they share its run's

@@ -29,7 +29,7 @@ perf_start_daemon "$st3_bin" "$root"
 trap 'perf_stop_daemon "$root"' EXIT
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
-st3="$root/bin/st3"
+fractal="$root/bin/st3"
 
 seat() {
   printf 'agent/perf/seat-%02d' "$1"
@@ -43,7 +43,7 @@ seat() {
       "$i" "$root/workspace"
   done
 } >"$root/kdl/seats.kdl"
-"$st3" apply "$root/kdl/seats.kdl" --no-gate-check --as "$operator" >/dev/null
+"$fractal" apply "$root/kdl/seats.kdl" --no-gate-check --as "$operator" >/dev/null
 
 # A direct run is ready for its seat. A relay run waits on the next seat first,
 # so every seat has both ready runs and waiting runs to pass over.
@@ -75,19 +75,19 @@ mission "perf/relay-$(printf %02d "$i")" state="ready" {
   }
 }
 KDL
-  "$st3" apply "$root/kdl/direct-$i.kdl" --as "$operator" >/dev/null
-  "$st3" apply "$root/kdl/relay-$i.kdl" --as "$operator" >/dev/null
+  "$fractal" apply "$root/kdl/direct-$i.kdl" --as "$operator" >/dev/null
+  "$fractal" apply "$root/kdl/relay-$i.kdl" --as "$operator" >/dev/null
 done
 
 for round in $(seq 1 "$((direct_runs > relay_runs ? direct_runs : relay_runs))"); do
   for i in $(seq 1 "$seats"); do
     id=$(printf %02d "$i")
     if (( round <= direct_runs )); then
-      "$st3" missions start "perf/direct-$id" --id "perf-direct-$id-$round" \
+      "$fractal" missions start "perf/direct-$id" --id "perf-direct-$id-$round" \
         --workspace "$root/workspace" --as "$operator" >/dev/null
     fi
     if (( round <= relay_runs )); then
-      "$st3" missions start "perf/relay-$id" --id "perf-relay-$id-$round" \
+      "$fractal" missions start "perf/relay-$id" --id "perf-relay-$id-$round" \
         --workspace "$root/workspace" --as "$operator" >/dev/null
     fi
   done
@@ -99,7 +99,7 @@ placements=(top bottom before after)
 : >"$root/moved-runs"
 for _ in $(seq 1 "$moves"); do
   seat_subject="$(seat $((RANDOM % seats + 1)))"
-  mapfile -t queued < <("$st3" agents queue "$seat_subject" --json | jq -r '.value.runs[].mission_run_id')
+  mapfile -t queued < <("$fractal" agents queue "$seat_subject" --json | jq -r '.value.runs[].mission_run_id')
   (( ${#queued[@]} >= 2 )) || continue
   run_index=$((RANDOM % ${#queued[@]}))
   anchor_index=$(((run_index + 1 + RANDOM % (${#queued[@]} - 1)) % ${#queued[@]}))
@@ -113,7 +113,7 @@ for _ in $(seq 1 "$moves"); do
   # A move is fenced to the client's snapshot. A busy graph can move on
   # between the snapshot read and the action, so retry a stale fence.
   for attempt in 1 2 3 4 5; do
-    if "$st3" agents queue move "$seat_subject" "${queued[$run_index]}" "${anchor[@]}" \
+    if "$fractal" agents queue move "$seat_subject" "${queued[$run_index]}" "${anchor[@]}" \
       --reason "synthetic reorder" --as "$operator" --json >/dev/null 2>"$root/move-error"; then
       echo "${queued[$run_index]}" >>"$root/moved-runs"
       break
@@ -125,28 +125,28 @@ done
 
 # Cancelled runs stay named by moves, so replay still reads them.
 sort -u "$root/moved-runs" | head -n "$cancels" | while read -r run; do
-  "$st3" missions cancel "$run" --reason "synthetic cancellation" --as "$operator" >/dev/null
+  "$fractal" missions cancel "$run" --reason "synthetic cancellation" --as "$operator" >/dev/null
 done
 
 for number in $(seq 1 "$messages"); do
   recipient="$(seat $((number % seats + 1)))"
-  message="$("$st3" conversations send "$recipient" --from "$operator" \
+  message="$("$fractal" conversations send "$recipient" --from "$operator" \
     --subject "synthetic note $number" --body "A synthetic note for the performance fixture." --json \
     | jq -r '.subject // .value.subject // .id')"
   if (( number % 6 != 0 )); then
-    "$st3" conversations archive "$message" --as "$recipient" >/dev/null
+    "$fractal" conversations archive "$message" --as "$recipient" >/dev/null
   fi
 done
 
-index="$("$st3" trace show --json --limit 1 | jq -s 'map(.store_index) | max')"
+index="$("$fractal" trace show --json --limit 1 | jq -s 'map(.store_index) | max')"
 filler=$((target_claims - index))
 if (( filler > 0 )); then
   mapfile -t seat_subjects < <(for i in $(seq 1 "$seats"); do seat "$i"; done)
   python3 "$here/timeline.py" "$root/st3.sock" "$filler" "${seat_subjects[@]}"
 fi
 
-"$st3" trace show --json --limit 1 | jq -s '{claims: (map(.store_index) | max)}' >"$root/fixture-summary.json"
-jq -n --argjson queues "$(for i in $(seq 1 "$seats"); do "$st3" agents queue "$(seat "$i")" --json | jq '.value | {agent_id, runs: (.runs | length), moves: .move_count}'; done | jq -s .)" \
+"$fractal" trace show --json --limit 1 | jq -s '{claims: (map(.store_index) | max)}' >"$root/fixture-summary.json"
+jq -n --argjson queues "$(for i in $(seq 1 "$seats"); do "$fractal" agents queue "$(seat "$i")" --json | jq '.value | {agent_id, runs: (.runs | length), moves: .move_count}'; done | jq -s .)" \
   '$queues' >"$root/fixture-queues.json"
 cat "$root/fixture-summary.json"
 

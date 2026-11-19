@@ -1024,3 +1024,21 @@ and index representation; the insertion/expiry
 `bound-or-reference-values-and-reclamation` tasks must bound physical storage
 and incremental reclamation without weakening cancellation tombstones or replay.
 This review records transitional debt, not a permanent exemption or size proof.
+
+### Durable phone service minutes
+
+The `fractal_store::store::observation_minutes` maintainer owns the summary
+report, exact-minute, once-only cardinality and live-window sinks (`lv-hfcc0104f3a41`,
+`lv-h8d4d7e936cfe`, `lv-h0b3749d94a8e`, `lv-h9b74750ad85e`). They read canonical
+claim bodies through source/report, subject and numeric-minute seek indexes. The phone
+producer limits a report to 32 validated samples and canonical bounded histogram
+bins, but these producer limits do not establish a general physical value-size
+proof. The tracing TODO retains exact source, report and minute identities while
+resolving body/key representation; it is not permission to scan retained history.
+
+The schema site's `lv-ha5268709f026` identity includes the additive
+`claims_observation_report_index` and `claims_observation_minute_time_index`.
+The first uses source/report strings as variable index keys; the second combines
+a numeric minute with a variable subject key. Both index existing canonical
+claims without adding authoritative tables. Any later reference conversion must
+preserve exact retry, conflict exclusion, minute range and replication semantics.

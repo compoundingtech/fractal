@@ -1,6 +1,6 @@
 //! Local Claude process ownership. Environment/session labels locate a witness; they never
 //! replace the kernel's parent and birth-time proof. This is isolation from inherited context,
-//! not a security boundary against a same-user process rewriting all of st's local state.
+//! not a security boundary against a same-user process rewriting all of Fractal's local state.
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::{

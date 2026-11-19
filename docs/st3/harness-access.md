@@ -169,7 +169,7 @@ that server's command in `.mcp.json` runs without another dialog, so the approva
 workspace file says at launch; that is code execution from repository content, the same trust the
 workspace's project hooks already have. A workspace that holds untrusted content, such as a fork's
 branch checked out for review, must not be a seat workspace; the same goes for any workspace that holds someone else's branch or fork. Each approval is logged by the driver
-(`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
+(`fractal: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
 visible after the fact.
 
 The driver resolves `claude` once, on the seat's own PATH, and uses that path both for the plugin check

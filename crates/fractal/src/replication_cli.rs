@@ -1,6 +1,47 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
+
+#[derive(Args)]
+pub(super) struct ArchiveCandidatesArgs {
+    /// Existing offline SQLite copy; never discovered, copied from a host, or modified.
+    #[arg(long)]
+    source_copy: PathBuf,
+    /// New private artifact directory; existing, overlapping, and symlink paths are refused.
+    #[arg(long)]
+    output: PathBuf,
+    /// Explicit Unix time in milliseconds used for both retention windows; no clock default.
+    #[arg(long)]
+    as_of_unix_ms: u128,
+    /// Acknowledge that the source is an offline copy and outputs are analysis-only, not daemon stores.
+    #[arg(long, required = true)]
+    offline_copy: bool,
+}
+
+pub(super) async fn run_archive_candidates(args: ArchiveCandidatesArgs) -> Result<()> {
+    anyhow::ensure!(args.offline_copy, "--offline-copy acknowledgement is required");
+    crate::stderr_message(
+        "st",
+        format_args!(
+            "analysis only: constructing both 30-day and 14-day candidates in {}; no activation. \
+             Never use these candidate stores with a daemon or deployment. Full JSON report follows on stdout.",
+            args.output.display()
+        ),
+    );
+    let report = tokio::task::spawn_blocking(move || {
+        fractal_daemon::task_cpu::blocking("replication.archive_candidates", || {
+            fractal_store::wire_archive_candidates::construct(
+                &args.source_copy,
+                &args.output,
+                args.as_of_unix_ms,
+            )
+        })
+    })
+    .await
+    .context("offline archive candidate construction worker stopped")??;
+    // Always emit the complete auditable report, including in native (non --json) mode.
+    print_value(&report, true)
+}
 
 pub(super) async fn run_replication(
     client: &Client,
@@ -9,6 +50,9 @@ pub(super) async fn run_replication(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        ReplicationCommand::ArchiveCandidates(_) => {
+            unreachable!("archive candidates dispatches before configuration and daemon discovery")
+        }
         ReplicationCommand::Replay { confirm } => {
             let mut client = client.clone();
             // Match planned checkpoint maintenance, rather than the interactive 15-second limit.
@@ -407,4 +451,121 @@ fn replication_replay_requires_explicit_confirm_flag() {
             command: ReplicationCommand::Replay { confirm: parsed }
         } if parsed == confirm));
     }
+}
+
+#[test]
+fn archive_candidates_requires_explicit_offline_inputs() {
+    let options = [
+        "--source-copy", "fixture.sqlite",
+        "--output", "candidates",
+        "--as-of-unix-ms", "1795046400000",
+        "--offline-copy",
+    ];
+    for omitted in [0..2, 2..4, 4..6, 6..7] {
+        let args = ["st", "replication", "archive-candidates"]
+            .into_iter()
+            .chain(options.iter().enumerate().filter_map(|(index, value)| {
+                (!omitted.contains(&index)).then_some(*value)
+            }));
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn archive_candidates_parses_explicit_options_and_json() {
+    let cli = Cli::try_parse_from([
+        "st", "--json", "replication", "archive-candidates",
+        "--source-copy", "fixture.sqlite",
+        "--output", "candidates",
+        "--as-of-unix-ms", "1795046400000",
+        "--offline-copy",
+    ]).unwrap();
+    assert!(cli.json);
+    let Command::Replication {
+        command: ReplicationCommand::ArchiveCandidates(args),
+    } = cli.command else {
+        panic!("expected archive candidates");
+    };
+    assert_eq!(args.source_copy, PathBuf::from("fixture.sqlite"));
+    assert_eq!(args.output, PathBuf::from("candidates"));
+    assert_eq!(args.as_of_unix_ms, 1_795_046_400_000);
+    assert!(args.offline_copy);
+}
+
+#[test]
+fn archive_candidates_rejects_invalid_timestamps() {
+    for timestamp in ["not-a-time", "-1", "1.5", "340282366920938463463374607431768211456"] {
+        assert!(Cli::try_parse_from([
+            "st", "replication", "archive-candidates",
+            "--source-copy", "fixture.sqlite",
+            "--output", "candidates",
+            "--as-of-unix-ms", timestamp,
+            "--offline-copy",
+        ]).is_err());
+    }
+}
+
+#[tokio::test]
+async fn archive_candidates_dispatches_without_a_daemon() {
+    let fixture = tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let missing_source = fixture.path().join("missing.sqlite");
+    let output = fixture.path().join("candidates");
+    let cli = Cli::try_parse_from([
+        "st", "--endpoint", "unix:///archive-candidates-no-daemon.sock",
+        "replication", "archive-candidates",
+        "--source-copy", missing_source.to_str().unwrap(),
+        "--output", output.to_str().unwrap(),
+        "--as-of-unix-ms", "1795046400000",
+        "--offline-copy",
+    ]).unwrap();
+    let error = run(cli).await.unwrap_err();
+    assert!(!daemon_is_unreachable(&error), "{error:#}");
+    assert!(!missing_source.exists(), "must not create a missing source");
+    assert!(!output.exists(), "invalid source must not publish output");
+}
+
+#[tokio::test]
+async fn archive_candidates_builds_both_fixture_windows_without_daemon_discovery() {
+    let fixture = tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let source = fixture.path().join("source.sqlite");
+    let output = fixture.path().join("candidates");
+    drop(Store::open(&source, "archive-cli-fixture").unwrap());
+    let before = std::fs::read(&source).unwrap();
+    // Even an unusable endpoint must not be parsed or contacted by this offline command.
+    let cli = Cli::try_parse_from([
+        "st", "--json", "--endpoint", "not-a-valid-endpoint",
+        "replication", "archive-candidates",
+        "--source-copy", source.to_str().unwrap(),
+        "--output", output.to_str().unwrap(),
+        "--as-of-unix-ms", "1795046400000",
+        "--offline-copy",
+    ]).unwrap();
+    run(cli).await.unwrap();
+    let report: Value = serde_json::from_slice(
+        &std::fs::read(output.join("report.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["artifact_kind"], "offline-wire-archive-candidates");
+    assert_eq!(report["activation_allowed"], false);
+    let windows: Vec<_> = report["candidates"].as_array().unwrap().iter()
+        .map(|candidate| candidate["window_days"].as_u64().unwrap())
+        .collect();
+    assert_eq!(windows, vec![30, 14]);
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
+#[tokio::test]
+async fn archive_candidates_dispatch_refuses_missing_acknowledgement() {
+    let fixture = tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let source = fixture.path().join("source.sqlite");
+    let output = fixture.path().join("candidates");
+    let error = run_archive_candidates(ArchiveCandidatesArgs {
+        source_copy: source.clone(),
+        output: output.clone(),
+        as_of_unix_ms: 1_795_046_400_000,
+        offline_copy: false,
+    }).await.unwrap_err();
+    assert!(error.to_string().contains("--offline-copy"));
+    assert!(!source.exists());
+    assert!(!output.exists());
 }

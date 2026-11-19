@@ -4,12 +4,12 @@
 One isolated daemon (private HOME, XDG dirs, PATH and sockets) runs one Claude seat whose
 `claude` is ./claude, a stand-in selected through a private managed runtime profile that drives
 the real hook, status-line and channel contracts.
-The eval checks, from outside the seat, that st3 alone:
+The eval checks, from outside the seat, that Fractal alone:
 - publishes harness.observed working and idle from the seat's hooks;
 - binds Claude's native session, so the client API timeline shows the native transcript;
 - records the status line (harness.usage carries the stand-in's model and context);
 - delivers a message through the channel and sees it read;
-- reports claude-hooks pass in `st doctor`;
+- reports claude-hooks pass in `fractal doctor`;
 - launches nothing whose argv or environment names an `st2` program or an `/st2/` path, and
   creates no st2 state directory.
 """
@@ -110,7 +110,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         result = subprocess.run([str(self.binary), "--endpoint", str(self.endpoint), *args], env=self.env,
                                 capture_output=True, text=True, timeout=60)
         if check and result.returncode:
-            raise RuntimeError(f"st {' '.join(args)}: {result.stderr.strip()}")
+            raise RuntimeError(f"fractal {' '.join(args)}: {result.stderr.strip()}")
         return result.stdout
 
     def api(self, path):
@@ -287,7 +287,7 @@ agent "native-seat" {{
         checks["st_hooks"] = sorted(set(hook_set))
         if not hook_set or not all(value.startswith(f"ST_HOOKS={root / 'state/hooks/sets/sha256-'}")
                                    for value in hook_set):
-            fail(f"ST_HOOKS is not st3's set: {hook_set}")
+            fail(f"ST_HOOKS is not Fractal's set: {hook_set}")
         checks["harness_record_files"] = []
         for name in ("harness-state", "harness-context", "harness-timeline"):
             paths = list((root / "state").rglob(name))
@@ -295,7 +295,7 @@ agent "native-seat" {{
                 fail(f"the fresh seat used polled {name} records")
         spools = list((root / "state/drivers").rglob("st-harness-events.sqlite"))
         if len(spools) != 1:
-            fail("the fresh seat has no unique st-owned observation outbox")
+            fail("the fresh seat has no unique Fractal-owned observation outbox")
         with sqlite3.connect(spools[0]) as connection:
             snapshots = connection.execute("SELECT kind,body FROM snapshots").fetchall()
             checks["snapshot_schemas"] = {kind: json.loads(body)["schema"] for kind, body in snapshots}

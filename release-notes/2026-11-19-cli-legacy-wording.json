@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal naming in CLI guidance, diagnostics and private test helpers",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "Wire versions, actor-contract output and generated schemas remain unchanged."},
+  "rules": {"status": "none", "detail": "Command behavior and mission rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "Legacy executable aliases, JSON compatibility wording, environment contracts, service names, socket names and persisted built-in identities are preserved. The recording publication gate rejects both historical and renamed scenario scratch prefixes."},
+  "downtime": {"status": "none", "detail": "No migration or service restart is required for wording changes."},
+  "manual": {"status": "changed", "detail": "Demo commands, setup and uninstall guidance, and selected CLI diagnostics now use Fractal naming. Private fixture helpers and source comments use the same vocabulary."},
+  "recovery": {"status": "none", "detail": "Binary rollback requires no state changes."}
+}
