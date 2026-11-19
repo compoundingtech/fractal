@@ -1593,6 +1593,7 @@ mission "shell-owner" state="ready" {{
             head_start: Some("abc123".into()), head_end: Some("def456".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
             wall_duration_ms: 1234, memory_peak_bytes: None,
+            ..PayloadResult::default()
         }).unwrap()).unwrap();
         if expire_owner {
             store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
@@ -1679,6 +1680,7 @@ mission "shell-owner" state="ready" {{
                 head_start: Some("abc123".into()), head_end: Some("def456".into()),
                 clean_start: Some(true), clean_end: Some(false),
                 exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+                ..PayloadResult::default()
             }).unwrap()).unwrap();
             fs::rename(temporary, path).unwrap();
         }));

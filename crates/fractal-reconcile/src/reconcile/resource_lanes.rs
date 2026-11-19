@@ -140,6 +140,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
         let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        fit.recovery_capable = request.profile.as_ref().and_then(|key| policy.profiles.get(key))
+            .is_some_and(|seed| seed.recovery_capable);
+        if cfg!(target_os = "linux") {
+            smallclaims::touched::note_read(|| "host-lane-pressure".into());
+            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+        }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
