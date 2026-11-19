@@ -25,9 +25,10 @@ A named lane policy binds an execution host, `maxMembers`, an explicit CPU/memor
 required coverage. A request without a profile is refused with typed code `missing-profile`;
 there is no implicit finite-execution footprint. The host refuses a conflicting policy for an
 existing name. Every request has a class: `landing`, `check` or `agent` (the default). Classes
-are served in that order. Within a class, FIFO is preferred, but a fitting later ticket may
-backfill a head that does not fit until that head has waited 15 minutes. A lower class never
-bypasses a higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+are served in that order. Landing is strict FIFO, without backfill. Within the other classes,
+FIFO is preferred, but a fitting later ticket may backfill a head that does not fit until that
+head has waited 15 minutes. A lower class never bypasses a higher-class head.
+Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
@@ -172,8 +173,8 @@ withdraw   cancel       uncertain      cancel tree       descendants remain
 ```
 
 The host evaluates holds, class priority, logical occupancy and physical fit in its writer
-transaction. Within the highest waiting class it prefers FIFO, but before the head has waited
-15 minutes a later ticket may pass only when the earlier ticket does not fit and the later one
+transaction. Landing is strict FIFO with no same-class backfill. Within check or agent,
+before the head has waited 15 minutes a later ticket may pass only when the earlier ticket does not fit and the later one
 fits all current budgets: ARC-aware memory, mount disk floors and reservations, and heavy-IO
 tokens. Fresh fit observations, not a previous blocked reason, decide backfill. Lower classes
 cannot pass a higher-class head.
@@ -227,6 +228,49 @@ contains `diskFloorBytes` (default 2 GiB), `diskFloors` (path-to-floor overrides
 filesystem), and `heavyIoSlots` (default one; explicit `null` marks an unconstrained host).
 Multiple floor overrides for the same filesystem use the largest floor. These are host policy
 values, not caller semaphores or independent CI limits.
+
+`finite_resources.landing` is the sole host policy for landing admission:
+
+- `allowedActors`: exact actor subjects permitted to request class `landing` (default `[]`).
+- `memoryBytes`: bytes carved out of existing host lane room (default `0`).
+- `heavyIoSlots`: slots carved out of the existing `heavyIoSlots` total (default `0`).
+
+For example, with total `heavyIoSlots = 2`, a landing reservation of `heavyIoSlots = 1`
+leaves at most one heavy-IO slot for ordinary work; it does not create a third slot.
+Ordinary finite work and seat starts/raises exclude unused landing memory. Landing custody
+consumes the reservation first, so it is not charged twice. Host holds, outside-memory
+pressure, disk floors, total room and total IO limits still apply to landing.
+The reservation is minimum protected headroom, not a ceiling: landing may also consume
+ordinary room. An authorized landing backlog can starve check/agent work by design.
+
+The host grant boundary authorizes every request path (shell, program and DSL) from native
+invocation ownership, the owning mission run's immutable `initiating_principal` in its
+canonical `mission-run.created` receipt, or authenticated local-operator ownership.
+The receipt records the serving boundary's authenticated principal, never `--as`, a claimed
+actor or `requester` attribution. A BoundRun creator resolves to its own recorded initiating
+principal. System subscription/linked/scheduled children and supersession inherit their
+parent's original principal; a retry requested by another authenticated principal records
+that principal instead. Historical receipts with no principal remain unauthorized.
+An unconfigured host refuses landing visibly with `unauthorized-landing`; it never
+downgrades the class. Inspection and terminal receipts retain `class: landing`, and shell
+refusals carry `refusalCode` (`refusal_code` and `refusal_reason` in the durable receipt).
+`declared_priority` remains declaration metadata, not a second admission-class control.
+
+This is a same-UID cooperative control, not a cryptographic actor boundary: actor identity is
+asserted through the daemon's existing caller binding and native ownership records. A process
+that can rewrite the user's daemon state/configuration is outside this threat model.
+Deploy a daemon supporting these keys before adding them to host configuration; unknown host
+policy fields are rejected rather than ignored.
+After rollout, restart a historical factory intake root once from the Factory Manager seat
+through native `fractal missions start`; pre-roll roots cannot lend landing authority.
+Legacy client-v0 `mission.start` has no authenticated write principal and creates roots without
+one, even when its session supplies an allowlisted `authority_actor`. Such roots cannot use landing.
+
+Agentless work requests its landing lane **on the step itself** (a DSL exec lane or program
+resource), authorized by that run's recorded initiating principal. Native exec caller identity
+is unchanged here: a new run started by an anonymous agentless native exec records no
+initiating principal, even when `--as` or `requester` names an allowlisted actor, and cannot use
+landing. Acquiring a parent lane does not confer Landing authority on an anonymously started run.
 
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`

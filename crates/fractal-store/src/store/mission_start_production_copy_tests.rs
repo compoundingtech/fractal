@@ -123,6 +123,7 @@ fn scheduled_mission_start_writer_hold_on_production_copy() {
                 parent_step_run: parent_step_run.clone(),
                 default_selector: None,
                 started_by: None,
+                system_parent_run: None,
             });
             let result = store.create_mission_run_inner(&request, context, Some(&subject), None);
             let mut receipt = lend_receipt(started.elapsed());

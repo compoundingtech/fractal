@@ -30,6 +30,8 @@ pub struct Execution {
     pub state: String,
     pub reason: String,
     pub blocked_by: Option<resource_membership::BlockedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_code: Option<resource_membership::RefusalCode>,
     pub queued_at: u64,
     pub revision: u64,
     pub queue_wait_ms: u64,
@@ -60,6 +62,7 @@ impl Store {
         anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
+            refusal_code: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None };
         // One row per command does not bound its serialized argv/environment/result bytes.
         self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",

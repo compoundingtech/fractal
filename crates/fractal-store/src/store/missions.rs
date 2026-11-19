@@ -51,6 +51,23 @@ enum RunCreationSource<'a> {
     Supersession(&'a MissionRunView, &'a str),
     Declaration(MissionWorkspaceDeclaration),
 }
+
+/// The first canonical creation receipt is immutable authority; requester is attribution only.
+fn initiating_principal_tx(connection: &Connection, subject: &str) -> Result<Option<String>, FractalError> {
+    // Canonical ancestry remains inline; trace its principal value and claim ordering before changing representation.
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-h1945b7eb9ba4 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT json_extract(body,'$.fields.initiating_principal') FROM claims
+         WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+        [subject], |row| row.get(0)).optional().map(Option::flatten).map_err(internal)
+}
+
+pub(super) fn resolve_initiating_principal_tx(connection: &Connection, principal: Option<&str>) -> Result<Option<String>, FractalError> {
+    match principal {
+        Some(run) if run.starts_with("mission-run/") => initiating_principal_tx(connection, run),
+        Some(actor) => identities::resolve_reference_conn(connection, actor).map(Some),
+        None => Ok(None),
+    }
+}
 pub(super) fn continuity_step_paths_tx(
     connection: &Connection,
     source: &MissionRunView,
@@ -467,6 +484,11 @@ pub(super) fn mission_spec_at(
 }
 
 impl Store {
+    pub fn mission_run_initiating_principal(&self, subject: &str) -> Result<Option<String>, FractalError> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        initiating_principal_tx(&self.readers.get(), subject)
+    }
+
     /// Incoming named edges, using the target index rather than scanning declaration bodies.
     /// While a preexisting store's edge index is still being folded in bounded background
     /// steps, the same answer comes straight from the selected declarations.
@@ -567,6 +589,15 @@ impl Store {
         run: &str,
         options: &MissionRunRetryRequest,
     ) -> Result<MissionRunView, FractalError> {
+        self.retry_mission_run_as(run, options, None)
+    }
+
+    pub fn retry_mission_run_as(
+        &self,
+        run: &str,
+        options: &MissionRunRetryRequest,
+        principal: Option<&str>,
+    ) -> Result<MissionRunView, FractalError> {
         let source = self.mission_run(run).map_err(internal)?.ok_or_else(|| {
             FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist"))
         })?;
@@ -582,7 +613,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, None, None, None,
-            Some(RunCreationSource::Retry(&source, options)), None,
+            Some(RunCreationSource::Retry(&source, options)), None, principal,
         )
     }
 
@@ -598,7 +629,7 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, FractalError> {
-        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None, None)
     }
 
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
@@ -611,7 +642,7 @@ impl Store {
         workspace_declaration: MissionWorkspaceDeclaration,
     ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref,
-            Some(RunCreationSource::Declaration(workspace_declaration)), None)
+            Some(RunCreationSource::Declaration(workspace_declaration)), None, None)
     }
 
     /// Complete an authorized revision cutover inside its approval transaction.
@@ -691,6 +722,7 @@ impl Store {
                 default_selector: selector.as_deref()
                     .map(serde_json::from_str).transpose().map_err(internal)?,
                 started_by: starter.clone(),
+                system_parent_run: Some(source.subject.clone()),
             })
         }).transpose()?;
         let request = MissionRunRequest {
@@ -705,7 +737,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, child, None, None,
-            Some(RunCreationSource::Supersession(source, publication)), Some(transaction),
+            Some(RunCreationSource::Supersession(source, publication)), Some(transaction), None,
         )
     }
 
@@ -717,6 +749,7 @@ impl Store {
         latest_ref: Option<(&str, &str)>,
         source: Option<RunCreationSource<'_>>,
         provided_transaction: Option<&Transaction<'_>>,
+        principal: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
         let (retry, supersession, workspace_declaration) = match source {
             Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
@@ -944,8 +977,18 @@ impl Store {
             "person",
         );
         // Retrying preserves the requester's semantic binding but authenticates the retry author.
+        let initiating_principal = if principal.is_some() {
+            resolve_initiating_principal_tx(transaction, principal)?
+        } else if let Some((source, _)) = supersession {
+            initiating_principal_tx(transaction, &source.subject)?
+        } else if let Some(parent) = child.as_ref().and_then(|child| child.system_parent_run.as_deref()) {
+            initiating_principal_tx(transaction, parent)?
+        } else {
+            None
+        };
         let starter = retry.map(|(_, options)| options.actor.clone())
             .or_else(|| child.as_ref().and_then(|child| child.started_by.clone()))
+            .or_else(|| initiating_principal.clone())
             .unwrap_or_else(|| requester.clone());
         let mode = request.mode.as_deref().unwrap_or("run");
         if !matches!(mode, "run" | "eval") {
@@ -1077,6 +1120,9 @@ impl Store {
             }
         });
         let mut body = body;
+        if let Some(principal) = initiating_principal {
+            body["fields"]["initiating_principal"] = json!(principal);
+        }
         let workspace_declaration = match workspace_declaration {
             Some(declaration) => Some(declaration),
             None => match retry.map(|(source, _)| source).or_else(|| supersession.map(|(source, _)| source)) {

@@ -239,6 +239,7 @@ impl OwnedSetsStore for Store {
                 guard: None,
                 force: None,
                 source_map,
+                initiating_principal: None,
             },
         )
     }

@@ -13,6 +13,8 @@ pub struct CommitChecks<'a> {
     pub force: Option<&'a str>,
     /// Recorded beside an owned-set commit only; never part of any digest.
     pub source_map: Option<&'a fractal_schema::source_map::SourceMap>,
+    /// Authenticated serving-boundary identity, independent of declaration attribution.
+    pub initiating_principal: Option<&'a str>,
 }
 
 pub struct Check {

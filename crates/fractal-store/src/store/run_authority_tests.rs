@@ -53,6 +53,7 @@ fn start(store: &Store, mission: &str, key: &str, started_by: Option<&MissionRun
         parent_step_run: parent.steps[0].subject.clone(),
         default_selector: None,
         started_by: Some(parent.subject.clone()),
+        system_parent_run: Some(parent.subject.clone()),
     });
     store.create_mission_run_inner(&MissionRunRequest {
         mission: mission.into(),

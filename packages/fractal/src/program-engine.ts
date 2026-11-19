@@ -50,6 +50,7 @@ export const ResourceError = Schema.TaggedStruct('ResourceError', {
     // Persisted program results retain historical refusal codes.
     'impossible-capacity',
     'cancelled', 'retired', 'retiring', 'uncertain', 'invalid-state',
+    'unauthorized-landing',
     'resource-operation-refused', 'execution-timeout', 'stale-membership', 'execution-refused',
   ]),
   message: Schema.String,

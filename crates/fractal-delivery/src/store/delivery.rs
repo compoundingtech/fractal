@@ -308,6 +308,7 @@ impl DeliveryStore for Store {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
             parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
+            system_parent_run: Some(parent.subject.clone()),
         });
         let suffix = std::path::Path::new(&request.workspace).file_name()
             .and_then(|name| name.to_str()).ok_or_else(|| FractalError::new(

@@ -138,7 +138,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| "seat-admission".into());
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
-        let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, landing: policy.landing.clone(), ..Fit::default() };
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
@@ -289,6 +289,151 @@ mod tests {
 
     fn test_fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
+    }
+
+    #[test]
+    fn host_landing_policy_reaches_finite_admission_and_shared_seat_accounting() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            heavy_io_slots: Some(2),
+            landing: fractal_runtime::host::LandingPolicy {
+                allowed_actors: BTreeSet::from(["person/operator".into()]),
+                memory_bytes: 40, heavy_io_slots: 1,
+            }, ..Default::default()
+        };
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy.clone()));
+        let mut candidate = LaneRequest {
+            id: "landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 40 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Landing, disk: None, io: Some(fractal_runtime::IoClass::Heavy),
+            owner: Owner { run: "person/operator".into(), step: "shell".into(), attempt: 1, invocation: None },
+        };
+        assert_eq!(reconciler.held_lanes("seat", 1).unwrap(), 40);
+        let mut fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert_eq!(fit.landing, policy.landing);
+        fit.room = Some(fractal_runtime::Capacity { cores: 8, memory: 100 });
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 1).unwrap(), Admission::Admitted(_)));
+        assert_eq!(reconciler.held_lanes("seat", 1).unwrap(), 40, "landing custody replaces, rather than doubles, its carve-out");
+        candidate.id = "denied".into();
+        candidate.owner.run = "person/other".into();
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 2).unwrap(),
+            Admission::Refused { code: crate::store::resource_membership::RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn ownerless_landing_exec_authorizes_only_the_authenticated_initiating_principal() {
+        use super::super::tests::{FakeRuntime, apply_source};
+        let source = r#"version 2
+        mission "landing" state="ready" {
+            goal "Verify authenticated landing."
+            step "land" {
+                agentless
+                lane "landing" host="node" class="landing" coverage="logical" {
+                    capacity cores=1 memory="1G";
+                }
+                exec "land" { command "true"; }
+            }
+        }"#;
+        for (principal, requester, allowed, authorize_default) in [
+            (Some("agent/example/lander"), Some("agent/example/lander"), true, false),
+            (Some("person/operator"), Some("agent/example/lander"), false, false),
+            (None, Some("agent/example/lander"), false, false),
+            (None, None, false, true),
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, source, "landing-source");
+            store.start_resource_authority("node", "epoch").unwrap();
+            let run = if let Some(principal) = principal {
+                let revision = store.mission_spec("landing", None).unwrap().unwrap().revision;
+                let declaration = format!(
+                    "version 2\nmission-run \"landing/request\" {{ mission {:?}; workspace \"/work\"; requester {:?}; }}",
+                    format!("mission/landing@{revision}"), requester.unwrap_or("person/requester"),
+                );
+                let intent = crate::graph::parse_intent(&declaration, "node").unwrap();
+                let preview = store.mission(&intent, crate::model::IntentInput {
+                    kdl: declaration, source_name: None,
+                }).unwrap();
+                store.apply_as_impl(&intent, &preview.subject_tokens, "landing-run",
+                    Some(principal), None, crate::store::publication::CommitChecks {
+                        initiating_principal: Some(principal), ..Default::default()
+                    }).unwrap();
+                store.mission_run("landing/request").unwrap().unwrap()
+            } else {
+                store.create_mission_run(&crate::model::MissionRunRequest {
+                    mission: "landing".into(), revision: None, workspace: "/work".into(),
+                    requester: requester.map(str::to_owned), mode: Some("run".into()),
+                    inputs: BTreeMap::new(), idempotency_key: "landing-run".into(),
+                }).unwrap()
+            };
+            assert_eq!(store.mission_run_initiating_principal(&run.subject).unwrap().as_deref(), principal);
+            let intent = crate::graph::parse_intent(source, "node").unwrap();
+            let spec = &intent.missions["landing"].steps["land"];
+            let declarations = crate::graph::parse_execution_intent(
+                spec.declarations_kdl.as_deref().unwrap(), "node", &run.id).unwrap();
+            let exec = declarations.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
+            assert!(!exec.environment.contains_key("ST_AGENT"));
+            assert!(!exec.environment.contains_key("FRACTAL_AGENT"));
+            assert!(!exec.tags.contains_key("st3.agent"));
+            let lane = lower_request(spec.resource_lane.as_ref().unwrap(), "landing-exec".into(), Owner {
+                run: run.subject.clone(), step: run.steps[0].subject.clone(),
+                attempt: run.steps[0].attempt, invocation: Some("exec/landing/land".into()),
+            });
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+                .with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                    landing: fractal_runtime::host::LandingPolicy {
+                        allowed_actors: BTreeSet::from([if authorize_default {
+                            "person/requester".into()
+                        } else { "agent/example/lander".into() }]), ..Default::default()
+                    }, ..Default::default()
+                }));
+            let mut fit = reconciler.resource_lane_fit(&lane).unwrap();
+            fit.room = test_fit().room;
+            let admission = store.request_resource_membership(&lane, fit, 1).unwrap();
+            if allowed {
+                assert!(matches!(admission, Admission::Admitted(_)));
+            } else {
+                assert!(matches!(admission, Admission::Refused {
+                    code: crate::store::resource_membership::RefusalCode::UnauthorizedLanding, reason
+                } if reason.contains("allowedActors")));
+            }
+            let record = store.resource_membership_record(&lane.id, &lane.owner).unwrap();
+            assert_eq!(record.request.class, fractal_runtime::RequestClass::Landing);
+            assert_eq!(record.state, if allowed { "admitted" } else { "refused" });
+        }
+    }
+
+    #[test]
+    fn shell_landing_refusal_is_persisted_through_the_real_reconciler() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        store.submit_shell_resource(crate::store::shell_resources::Command {
+            id: "denied-landing".into(),
+            lane: LaneRequest {
+                id: "shell:denied-landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+                capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }),
+                class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
+                disk: None, io: None, admission_timeout_ms: None,
+                owner: Owner { run: "person/operator".into(), step: "shell:denied-landing".into(),
+                    attempt: 1, invocation: Some("shell:denied-landing".into()) },
+            },
+            argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(),
+            timeout_ms: None, parent: None,
+        }, 1).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("denied-landing").unwrap();
+        assert_eq!(execution.state, "refused");
+        assert_eq!(execution.refusal_code, Some(crate::store::resource_membership::RefusalCode::UnauthorizedLanding));
+        assert!(execution.reason.contains("unauthorized-landing"));
+        assert!(execution.started_at.is_none());
+        let record = store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner).unwrap();
+        assert_eq!(record.state, "refused");
+        assert!(record.grant.is_none());
     }
 
     #[test]
