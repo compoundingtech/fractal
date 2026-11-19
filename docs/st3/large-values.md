@@ -1024,3 +1024,15 @@ and index representation; the insertion/expiry
 `bound-or-reference-values-and-reclamation` tasks must bound physical storage
 and incremental reclamation without weakening cancellation tombstones or replay.
 This review records transitional debt, not a permanent exemption or size proof.
+
+### Authenticated Landing ancestry (#6834)
+
+The `fractal_store::store::missions` maintainer owns `lv-h1945b7eb9ba4`,
+the canonical creation-receipt lookup for an initiating principal. It binds the
+mission-run subject TEXT key and reads the original principal from claim JSON,
+ordered by canonical claim identity. These values remain inline to preserve the
+immutable ancestry authority used by Landing admission; one selected row is not
+a bound on encoded bytes or query cost. The
+`trace-statement-and-value-representation` task is to trace the canonical SQL
+expansion, subject key and extracted principal through a bounded/reference
+representation without substituting requester attribution for creation authority.
