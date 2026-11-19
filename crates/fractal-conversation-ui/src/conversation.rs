@@ -14,7 +14,7 @@ use crate::theme::{self, Theme};
 use crate::{Body, Entry, ToolState};
 pub use crate::{Density, bundle_id, folds};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use crate::text::{Line, Span};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};

@@ -11,7 +11,7 @@
 //! selected, whether st's integration is ready, and whether the person is signed in. A fact the
 //! screen cannot know says so.
 
-use super::{Guard, theme};
+use super::{Guard, text, theme};
 use anyhow::Result;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -22,8 +22,8 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    text::{Line, Span},
 };
+use fractal_conversation_ui::text::{Line, Span};
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -207,6 +207,7 @@ pub struct Screen {
     top: usize,
     /// What a click would hit, as drawn last: the item and the screen rows it covers.
     hits: Vec<(Rect, Item)>,
+    links: Vec<(Rect, String)>,
 }
 
 enum Reaction {
@@ -231,6 +232,7 @@ impl Screen {
             cancelled: false,
             top: 0,
             hits: Vec::new(),
+            links: Vec::new(),
         }
     }
 
@@ -520,8 +522,10 @@ impl Screen {
         }
         self.top = self.top.min(lines.len().saturating_sub(body));
         self.hits.clear();
+        self.links.clear();
         for (row, line) in lines.iter().skip(self.top).take(body).enumerate() {
-            buffer.set_line(left, area.y + 1 + row as u16, line, width as u16);
+            text::draw_line(buffer, left, area.y + 1 + row as u16, line, width as u16,
+                |rect, url| self.links.push((rect, url.to_owned())));
         }
         for (first, item, last, columns) in &marks {
             let from = (*first).max(self.top);
@@ -575,10 +579,12 @@ impl Screen {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut marks = Vec::new();
         let wrap = |text: &str, indent: usize, style: Style| -> Vec<Line<'static>> {
-            wrap_text(text, width.saturating_sub(indent))
-                .into_iter()
-                .map(|piece| Line::from(Span::styled(format!("{}{piece}", " ".repeat(indent)), style)))
-                .collect()
+            let prefix = [text::run(" ".repeat(indent), style)];
+            text::wrap(
+                &[text::run(text::sanitize(text), style)],
+                width.saturating_sub(indent).max(8) + indent,
+                &prefix, &prefix, None,
+            )
         };
         let focus = |item: Item| self.focus == item && !matches!(self.phase, Phase::Running);
 
@@ -829,35 +835,6 @@ pub fn merge_rows(old: &[Row], fresh: Vec<Row>) -> Vec<Row> {
         .collect()
 }
 
-/// Words broken at spaces to fit `width`; a word longer than the line is cut.
-pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(8);
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            let mut word = word.to_owned();
-            while word.chars().count() > width {
-                if !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                }
-                let cut: String = word.chars().take(width).collect();
-                word = word.chars().skip(width).collect();
-                lines.push(cut);
-            }
-            let needed = line.chars().count() + usize::from(!line.is_empty()) + word.chars().count();
-            if needed > width && !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(&word);
-        }
-        lines.push(line);
-    }
-    lines
-}
 
 /// Show the screen and run the worker for it. `check` judges the text fields; `work` sets up
 /// st and the selected agents, reporting as it goes, and runs on its own thread; `handover` lets
@@ -878,16 +855,28 @@ where
     let mut guard = Some(Guard::enter(false)?);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
+    let hyperlinks = super::hyperlinks::supported(&std::env::var("TERM").unwrap_or_default());
     let stopping = super::stop_flag()?;
     let (events, incoming): (Sender<Event_>, Receiver<Event_>) = mpsc::channel();
     let work = &work;
     std::thread::scope(|scope| -> Result<()> {
         let mut left_at: Option<Instant> = None;
         loop {
+            let mut links = Vec::new();
             terminal.draw(|frame| {
                 let area = frame.area();
                 screen.draw(area, frame.buffer_mut());
+                if hyperlinks {
+                    links = super::hyperlinks::collect_links(
+                        frame.buffer_mut(),
+                        screen.links.iter().enumerate().map(|(index, (rect, url))| (index, *rect, url.as_str())),
+                        |_, _, _| false,
+                    );
+                }
             })?;
+            if hyperlinks {
+                super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
+            }
             while let Ok(event) = incoming.try_recv() {
                 if let Event_::Handover(id, reply) = event {
                     // Give the harness the whole terminal, then take it back as it was.
@@ -1294,8 +1283,30 @@ mod tests {
 
     #[test]
     fn wrapping_breaks_at_words_and_cuts_only_what_cannot_fit() {
-        assert_eq!(wrap_text("one two three", 7), ["one two", "three"]);
-        assert_eq!(wrap_text("abcdefghij", 8), ["abcdefgh", "ij"]);
-        assert_eq!(wrap_text("first\nsecond", 20), ["first", "second"]);
+        let wrapped = |source, width| text::wrap(&[text::run(source, Style::default())], width, &[], &[], None)
+            .iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(wrapped("one two three", 7), ["one two", "three"]);
+        assert_eq!(wrapped("abcdefghij", 8), ["abcdefgh", "ij"]);
+        assert_eq!(wrapped("first\nsecond", 20), ["first", "second"]);
+    }
+
+    #[test]
+    fn wrapped_setup_links_keep_the_full_target_on_every_row() {
+        let url = "https://example.com/setup/a/very/long/instruction";
+        let mut screen = Screen::new(form());
+        screen.phase = Phase::Done { failed: Some(format!("Read {url}")) };
+        screen.focus = Item::Continue;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 80));
+        screen.draw(buffer.area, &mut buffer);
+        let segments: Vec<_> = screen.links.iter().filter(|(_, target)| target == url).collect();
+        assert!(segments.len() > 1);
+        let mut visible = String::new();
+        for (rect, _) in segments {
+            for x in rect.x..rect.right() {
+                visible.push_str(buffer[(x, rect.y)].symbol());
+            }
+        }
+        assert_eq!(visible, url);
+        assert!(buffer.content.iter().all(|cell| !cell.symbol().contains('\x1b')));
     }
 }
