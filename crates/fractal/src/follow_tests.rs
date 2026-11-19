@@ -95,6 +95,7 @@ fn run(status: &str, phase: &str) -> Value {
         "generation": "run-generation/fixture", "initial_revision": "fixture", "revision": "fixture",
         "root_revision": "fixture", "root_mission_run": RUN, "workspace": "/tmp/follow-fixture",
         "requester": "person/avery", "mode": "run", "status": status, "phase": phase,
+        "inputs": {},
         "created_at_unix_ms": 0, "updated_at_unix_ms": 0, "steps": [],
     })
 }
