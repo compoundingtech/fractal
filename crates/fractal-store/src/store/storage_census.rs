@@ -55,7 +55,7 @@ impl State {
 
 pub(super) fn install(connection: &rusqlite::Connection) -> anyhow::Result<()> {
     connection.execute_batch(
-        "CREATE TEMP TABLE storage_local_appends (
+        /* sqlite-large-value: allow-for-now lv-h435fccc8730a owner=fractal_store::store::storage_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_local_appends (
              kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
          ) WITHOUT ROWID;
          CREATE TEMP TRIGGER storage_local_append AFTER INSERT ON main.local_observations BEGIN

@@ -7,7 +7,7 @@ fn seed(state: &AppState, from: usize, to: usize) {
                 "custom/census/reading", "custom.census.reading", None,
                 &json!({"fields": {"reading": index, "note": "é"}}), &[], None)?;
             transaction.execute(
-                "INSERT INTO local_observations(after_store_index, subject, kind, body, observed_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h370bbcccfca8 owner=fractal_api_core::api::storage_census_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_observations(after_store_index, subject, kind, body, observed_at_unix_ms)
                  VALUES (0, 'agent/test.census', 'harness.telemetry', ?1, ?2)",
                 rusqlite::params![json!({"fields":{"reading":index}}).to_string(), index as i64],
             )?;

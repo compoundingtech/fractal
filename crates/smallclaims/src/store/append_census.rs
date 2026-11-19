@@ -18,7 +18,7 @@ pub(super) fn install(connection: &Connection) -> anyhow::Result<()> {
         // Reuse the graph's existing write-time metrics; only copy their tiny baseline, not
         // claim history. This avoids adding a second counter write to every graph append.
         connection.execute_batch(
-            "CREATE TEMP TABLE storage_append_baseline (
+            /* sqlite-large-value: allow-for-now lv-hf81b16e35691 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_baseline (
                  kind TEXT, writer TEXT, claims INTEGER, bytes INTEGER,
                  PRIMARY KEY(kind, writer)
              ) WITHOUT ROWID;
@@ -34,7 +34,7 @@ pub(super) fn install(connection: &Connection) -> anyhow::Result<()> {
         // The messages runtime has no exporter counters. Keep its counters connection-local,
         // with the same transactional body-byte accounting as the graph's claims_stored.
         connection.execute_batch(
-            "CREATE TEMP TABLE storage_append_counters (
+            /* sqlite-large-value: allow-for-now lv-hdb019a72e227 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_counters (
                  kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
              ) WITHOUT ROWID;
              CREATE TEMP TRIGGER storage_append AFTER INSERT ON main.claims BEGIN
@@ -45,8 +45,8 @@ pub(super) fn install(connection: &Connection) -> anyhow::Result<()> {
              END;"
         )?;
     }
-    connection.execute_batch("CREATE TEMP TABLE storage_census_start(unix_ms INTEGER NOT NULL);")?;
-    connection.execute("INSERT INTO storage_census_start VALUES (?1)", [super::now_ms() as i64])?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8d638151f55e owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_census_start(unix_ms INTEGER NOT NULL);")?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hae824bbd6681 owner=smallclaims::store::append_census TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO storage_census_start VALUES (?1)", [super::now_ms() as i64])?;
     Ok(())
 }
 
