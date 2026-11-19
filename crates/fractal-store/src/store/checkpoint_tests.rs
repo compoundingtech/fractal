@@ -3011,11 +3011,11 @@ fn claim_archives_preserve_latest_witnesses_and_exact_historical_reads() {
     let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
     for window in [HotWindow::Days14, HotWindow::Days30] {
         let protected = scratch.path().join(format!("protected-{}", window.milliseconds()));
-        assert!(store.write_claim_archive(&staged, &[latest.id.clone()], cut, window, &protected).is_err());
+        assert!(store.write_claim_archive(&staged, std::slice::from_ref(&latest.id), cut, window, &protected).is_err());
         assert!(!protected.exists(), "protected witnesses never receive an archive object");
     }
     let path = scratch.path().join("historical");
-    let seal = store.write_claim_archive(&staged, &[historical.id.clone()], cut, HotWindow::Days30, &path).unwrap();
+    let seal = store.write_claim_archive(&staged, std::slice::from_ref(&historical.id), cut, HotWindow::Days30, &path).unwrap();
     let archive = ClaimArchive::open(&path, &seal).unwrap();
     let cold_record = archive.evidence(&historical.id).unwrap().record();
     let expected = serde_json::to_value(&historical).unwrap();
