@@ -56,6 +56,17 @@ declaration is published. Reapply older no-launch declarations that omitted an e
 to persist that resolved placement. Repeated reconciliation retains one message per episode;
 a recovered objective that burns again opens a new episode and message.
 
+```kdl
+agent "ops/budget-owner" {
+  host "monitor"
+  name "Budget owner"
+  description "Own service budget episodes without starting a runtime"
+}
+```
+
+This inert top-level agent needs no task children. A run-owned agent still needs a launch;
+invalid or conflicting explicitly declared launches are rejected as before.
+
 ## Indicators
 
 ### Native telemetry

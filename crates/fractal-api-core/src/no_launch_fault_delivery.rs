@@ -49,7 +49,7 @@ fn deliver(reconciler: &Reconciler<FakeRuntime>) {
 #[test]
 fn signed_members_deliver_one_message_per_burn_episode_only_at_the_no_launch_owner() {
     for owner in [
-        "agent \"example/slo-owner\" { host \"birch\"; }",
+        "agent \"example/slo-owner\" { host \"birch\"; name \"Budget owner\"; description \"Own service burn episodes\"; }",
         "host \"birch\" { agent \"example/slo-owner\" {} }",
     ] {
         let anchor = key();

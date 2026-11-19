@@ -1549,7 +1549,7 @@ fn parse_agent(
         .as_array_mut()
         .expect("canonical children are an array");
     canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
-    canonical_children.push(serde_json::json!({"name": "host", "arguments": [host]}));
+    canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
@@ -1651,11 +1651,14 @@ fn parse_agent(
             },
         )?;
     }
+    // A top-level root may be an inert identity/mail owner. A run-owned agent must
+    // still supply work to execute; declared launches were validated above.
     if context
         .subjects
         .get(&subject)
         .is_some_and(|subject| subject.member.is_none())
         && task_names.is_empty()
+        && context.owner_run.is_some()
     {
         return Err(FractalError::new(
             "missing-agent-launch",
@@ -4612,6 +4615,25 @@ mod tests {
                 Some(expected),
             );
         }
+    }
+
+    #[test]
+    fn inert_roots_do_not_relax_run_owned_or_declared_launch_validation() {
+        assert_eq!(
+            parse_execution_intent(
+                "version 2\nagent \"owner\" { host \"node\"; }",
+                "node",
+                "run-1",
+            )
+            .unwrap_err()
+            .code,
+            "missing-agent-launch",
+        );
+        assert!(parse_intent(
+            "version 2\nagent \"example/owner\" { host \"node\"; command \"true\"; argv \"false\"; }",
+            "node",
+        )
+        .is_err());
     }
 
     #[test]
