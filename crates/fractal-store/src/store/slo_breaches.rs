@@ -516,6 +516,7 @@ impl Store {
             let run=format!("mission-run/slo/{episode}");
             let declaration=MissionRunDeclaration{subject:run.clone(),creation:Some(MissionRunCreation{
                 mission:mission.id.clone(),revision:mission.revision.clone(),workspace:prepared.workspace.clone(),
+                follow_head:false,
                 requester:"daemon/runtime".into(),inputs:BTreeMap::new(),mode:"run".into(),after:None,
                 report_to:None,report_completed:false}),..Default::default()};
             create_declared_mission_run_tx(tx,&self.origin,&declaration,&batch)?;

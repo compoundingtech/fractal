@@ -2903,6 +2903,7 @@
             "lifecycle": { "$ref": "#/$defs/AgentLifecycle", "description": "The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row." },
             "checkout": { "oneOf": [{ "$ref": "#/$defs/AgentCheckout" }, { "type": "null" }], "description": "The requested Git worktree repository, base and branch. Present before launch; it does not assert that checkout succeeded." },
             "suspension": { "oneOf": [{ "$ref": "#/$defs/AgentSuspension" }, { "type": "null" }], "description": "The seat's latest suspend or resume and its phase. An older daemon omits the field." },
+            "residency": { "oneOf": [{ "$ref": "#/$defs/AgentResidency" }, { "type": "null" }], "description": "Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed." },
             "resources": { "type": "array", "items": { "$ref": "#/$defs/DeclaredResource" }, "description": "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }
           }
         }
@@ -2981,12 +2982,25 @@
     },
     "AgentStopping": {"type": "object", "additionalProperties": false, "required": ["held"], "properties": {"held": {"type": ["string", "null"], "description": "Why the stop waits: mail the seat had not read, or work it held in another run, when the stop was declared. Null while the stop has not been deferred."}}},
     "AgentHandoff": {"type": "object", "additionalProperties": false, "required": ["phase", "destination", "sources", "pending_sources", "desired_token"], "properties": {"phase": {"type": "string", "enum": ["stopping-source", "waiting-for-destination", "starting", "running"]}, "destination": {"type": "string"}, "sources": {"type": "array", "items": {"type": "string"}}, "pending_sources": {"type": "array", "items": {"type": "string"}}, "overridden_sources": {"type": "array", "items": {"type": "string"}}, "desired_token": {"type": "string"}}},
+    "AgentResidency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "eligible_since", "due_at", "refusal_reason"],
+      "properties": {
+        "policy": { "type": "string", "description": "Effective off, never or member policy." },
+        "eligible_since": { "type": ["string", "null"], "format": "date-time", "description": "Start of continuous eligibility, never the received-mail activity clock." },
+        "due_at": { "type": ["string", "null"], "format": "date-time", "description": "Exact eligible epoch plus configured threshold." },
+        "refusal_reason": { "type": ["string", "null"], "description": "Why this snapshot cannot become idle-suspended." }
+      }
+    },
     "AgentSuspension": {
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "phase", "operation_id", "updated_at", "blocking"],
       "properties": {
         "action": { "enum": ["suspend", "resume"] },
+        "cause": { "type": ["string", "null"], "description": "manual or idle. Absent or null means manual; unknown values are retained." },
+        "mode": { "type": ["string", "null"], "description": "git or in-place. Absent or null means git; unknown values are retained." },
         "phase": { "enum": [
           "quiescing",
           "snapshotting",
@@ -3058,6 +3072,7 @@
         "revision": { "type": "string" },
         "accountable": { "type": "string", "pattern": "^person/[A-Za-z0-9_.-]+$" },
         "declared_admission": {"$ref": "#/$defs/DeclaredAdmission"},
+        "idle_suspend": { "type": "string", "enum": ["never", "member"], "description": "Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change." },
         "tree": { "type": "object" },
         "kdl": { "type": "string" },
         "revisions": { "type": "array", "items": { "type": "string" } }

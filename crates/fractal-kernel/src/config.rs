@@ -517,8 +517,7 @@ pub enum RunAuthorityMode {
 /// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
 pub const DEFAULT_MAX_PASSES_PER_MINUTE: u32 = 30;
 
-/// `[reconcile]`: maximum background pass starts per minute, and when a seat that holds claimed
-/// work and has nothing set to wake it is nudged.
+/// `[reconcile]`: background pass starts, idle-seat policies and default stall reporting.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReconcileConfig {
@@ -531,6 +530,11 @@ pub struct ReconcileConfig {
     /// How long a watched thread may stay still and its watch still count as something that will
     /// wake the seat.
     pub idle_nudge_quiet_watch: String,
+    /// Idle-residency threshold: `off` by default, or a duration of at least one minute.
+    /// Currently evaluated for diagnostics only; it does not suspend seats.
+    pub idle_suspend_after: String,
+    /// Maximum concurrent idle-residency resumes. Must be positive.
+    pub idle_resume_concurrency: usize,
     /// Whether a run that names no `report-to` reports its stalls to its requesting agent or to
     /// an agent its stuck agent is `under`. On by default.
     pub default_stall_reports: bool,
@@ -542,6 +546,8 @@ impl Default for ReconcileConfig {
             max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
+            idle_suspend_after: "off".into(),
+            idle_resume_concurrency: 2,
             default_stall_reports: true,
         }
     }
@@ -558,6 +564,7 @@ impl ReconcileConfig {
         anyhow::ensure!(self.max_passes_per_minute.is_none_or(|cap| (1..=600).contains(&cap)),
             "reconcile.max_passes_per_minute must be between 1 and 600");
         self.idle_nudge()?;
+        self.idle_residency()?;
         Ok(())
     }
 
@@ -578,6 +585,26 @@ impl ReconcileConfig {
                 &self.idle_nudge_quiet_watch,
                 "reconcile.idle_nudge_quiet_watch",
             )?,
+        })
+    }
+
+    /// The idle-residency settings these values name.
+    pub fn idle_residency(&self) -> Result<IdleResidencySettings> {
+        anyhow::ensure!(
+            self.idle_resume_concurrency > 0,
+            "reconcile.idle_resume_concurrency must be greater than zero"
+        );
+        let after_ms = match self.idle_suspend_after.trim() {
+            "off" => None,
+            after => {
+                let ms = parse_duration_ms(after, "reconcile.idle_suspend_after")?;
+                anyhow::ensure!(ms >= 60_000, "reconcile.idle_suspend_after must be at least 1m");
+                Some(ms)
+            }
+        };
+        Ok(IdleResidencySettings {
+            after_ms,
+            resume_concurrency: self.idle_resume_concurrency,
         })
     }
 }
@@ -676,6 +703,52 @@ impl Default for IdleNudgeSettings {
             quiet_watch_ms: IDLE_NUDGE_QUIET_WATCH_MS,
         }
     }
+}
+
+/// The daemon's idle-residency policy. `after_ms` is `None` while the policy is off.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdleResidencySettings {
+    pub after_ms: Option<u64>,
+    pub resume_concurrency: usize,
+}
+
+impl Default for IdleResidencySettings {
+    fn default() -> Self {
+        Self {
+            after_ms: None,
+            resume_concurrency: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IdleResidencyPolicy {
+    pub settings: IdleResidencySettings,
+    pub enabled_at_unix_ms: Option<u128>,
+}
+
+impl IdleResidencyPolicy {
+    pub fn update(&mut self, settings: IdleResidencySettings, now: u128) {
+        self.enabled_at_unix_ms = match (self.settings.after_ms, settings.after_ms) {
+            (_, None) => None,
+            (None, Some(_)) => Some(now),
+            (Some(_), Some(_)) => self.enabled_at_unix_ms,
+        };
+        self.settings = settings;
+    }
+}
+
+static IDLE_RESIDENCY_POLICY: std::sync::LazyLock<std::sync::Mutex<IdleResidencyPolicy>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(IdleResidencyPolicy::default()));
+
+/// Effective policy and its process-local activation epoch. Restarting never inherits idle age.
+pub fn idle_residency_policy() -> IdleResidencyPolicy {
+    *IDLE_RESIDENCY_POLICY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish the daemon's locally owned policy for API diagnostics and card-cache identity.
+pub fn set_idle_residency_policy(policy: IdleResidencyPolicy) {
+    *IDLE_RESIDENCY_POLICY.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
 }
 
 /// The config file the running daemon was started with, so its `[limits]` can be read again.
@@ -2126,6 +2199,116 @@ sekrets_profile = "nathan/daemon-gh"
                 toml::from_str(&format!("[reconcile]\n{field} = \"{value}\"\n")).unwrap();
             assert!(parsed.validate().is_err(), "{field} = {value}");
         }
+    }
+
+    #[test]
+    fn idle_residency_activation_epoch_is_local_and_survives_only_enabled_edits() {
+        let mut policy = IdleResidencyPolicy::default();
+        assert_eq!(policy.settings, IdleResidencySettings::default());
+        assert_eq!(policy.enabled_at_unix_ms, None);
+        let enabled = IdleResidencySettings {
+            after_ms: Some(15 * 60_000),
+            resume_concurrency: 2,
+        };
+        policy.update(enabled, 1_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        let edited = IdleResidencySettings {
+            after_ms: Some(30 * 60_000),
+            resume_concurrency: 4,
+        };
+        policy.update(edited, 2_000);
+        assert_eq!(policy.settings, edited);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        policy.update(edited, 3_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        policy.update(IdleResidencySettings::default(), 4_000);
+        assert_eq!(policy.enabled_at_unix_ms, None);
+        policy.update(enabled, 5_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(5_000));
+        // A replacement daemon loads the same enabled settings into fresh process-local state.
+        let mut restarted = IdleResidencyPolicy::default();
+        restarted.update(enabled, 6_000);
+        assert_eq!(restarted.settings, enabled);
+        assert_eq!(restarted.enabled_at_unix_ms, Some(6_000));
+    }
+
+    #[test]
+    fn idle_residency_defaults_off_and_parses_threshold_and_resume_limit() {
+        let config = Config::default();
+        let settings = config.reconcile.idle_residency().unwrap();
+        assert_eq!(settings, IdleResidencySettings::default());
+        assert_eq!(settings.after_ms, None);
+        assert_eq!(settings.resume_concurrency, 2);
+        assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
+
+        for (duration, expected_ms) in [("1m", 60_000), ("45m", 45 * 60_000), ("2h", 2 * 3_600_000)] {
+            let parsed: Config = toml::from_str(&format!(
+                "[reconcile]\nidle_suspend_after = \"{duration}\"\nidle_resume_concurrency = 3\n"
+            )).unwrap();
+            parsed.validate().unwrap();
+            assert_eq!(parsed.reconcile.idle_residency().unwrap(), IdleResidencySettings {
+                after_ms: Some(expected_ms),
+                resume_concurrency: 3,
+            });
+            let roundtrip: Config = toml::from_str(&toml::to_string(&parsed).unwrap()).unwrap();
+            assert_eq!(roundtrip.reconcile, parsed.reconcile);
+        }
+        let off: Config = toml::from_str("[reconcile]\nidle_suspend_after = \" off \"\n").unwrap();
+        assert_eq!(off.reconcile.idle_residency().unwrap().after_ms, None);
+
+        for (field, value) in [
+            ("idle_suspend_after", "\"30s\""),
+            ("idle_suspend_after", "\"0m\""),
+            ("idle_suspend_after", "\"soon\""),
+            ("idle_suspend_after", "\"1w\""),
+            ("idle_resume_concurrency", "0"),
+        ] {
+            let parsed: Config = toml::from_str(&format!("[reconcile]\n{field} = {value}\n")).unwrap();
+            let error = parsed.validate().unwrap_err().to_string();
+            assert!(error.contains(&format!("reconcile.{field}")), "{error}");
+        }
+        for value in ["-1", "\"2\"", "1.5"] {
+            assert!(toml::from_str::<Config>(&format!(
+                "[reconcile]\nidle_resume_concurrency = {value}\n"
+            )).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn idle_residency_reload_rejects_bad_policy_and_can_return_to_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[reconcile]\nidle_suspend_after = \"15m\"\nidle_resume_concurrency = 4\n").unwrap();
+        let mut effective = read_daemon_policies(Some(&path)).unwrap().1.idle_residency().unwrap();
+        let enabled = IdleResidencySettings {
+            after_ms: Some(15 * 60_000),
+            resume_concurrency: 4,
+        };
+        assert_eq!(effective, enabled);
+        for bad in [
+            "[reconcile]\nidle_suspend_after = \"soon\"\n",
+            "[reconcile]\nidle_suspend_after = \"30s\"\n",
+            "[reconcile]\nidle_resume_concurrency = 0\n",
+            "[reconcile]\nidle_resume_concurrency = -1\n",
+            "[reconcile\n",
+        ] {
+            fs::write(&path, bad).unwrap();
+            if let Ok((_, reconcile, _)) = read_daemon_policies(Some(&path)) {
+                effective = reconcile.idle_residency().unwrap();
+                panic!("invalid policy was accepted: {bad}; settings: {effective:?}");
+            }
+            assert_eq!(effective, enabled);
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(read_daemon_policies(Some(&path)).is_err());
+        assert_eq!(effective, enabled);
+        fs::write(&path, "[reconcile]\nidle_suspend_after = \"off\"\nidle_resume_concurrency = 1\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1.idle_residency().unwrap();
+        assert_eq!(effective.after_ms, None);
+        assert_eq!(effective.resume_concurrency, 1);
+        fs::write(&path, "").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1.idle_residency().unwrap();
+        assert_eq!(effective, IdleResidencySettings::default());
     }
 
     #[test]
