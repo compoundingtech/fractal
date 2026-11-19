@@ -321,6 +321,63 @@ mission "example/report" state="ready" {
 }
 
     #[test]
+    fn closed_old_boot_producer_does_not_publish_a_clean_fault_pair() {
+        use sha2::{Digest, Sha256};
+        use serde_json::json;
+
+        if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        let producer = fractal_runtime::PtyRuntime::new(registry.clone());
+        let runtime_id = "closed-worker";
+        let operation = "closed-operation";
+        let directory = root.path().join(".st3-pty-spawn-locks")
+            .join(format!("{:x}", Sha256::digest(registry.as_os_str().as_encoded_bytes())))
+            .join(format!("{:x}.producers", Sha256::digest(runtime_id.as_bytes())))
+            .join(format!("{:x}", Sha256::digest(operation.as_bytes())));
+        fs::create_dir_all(&directory).unwrap();
+        let work = "st3-closed-worker-closed-operation.scope";
+        let server = fractal_runtime::server_unit(runtime_id, 123);
+        for (name, value) in [
+            ("owner.json", json!({"version":1, "runtime_id":runtime_id,
+                "operation":operation, "scope":work, "launcher_acknowledged":true,
+                "publication_pending":false})),
+            ("server-123.json", json!({"version":1, "unit":server, "pid":123,
+                "start_token":1, "boot_id":"linux:previous-boot"})),
+            ("closure.json", json!({"version":1, "reason":"runtime-vanished",
+                "publication_pending":false, "scopes":[
+                    {"version":1, "unit":work, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null},
+                    {"version":1, "unit":server, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null}
+                ]})),
+        ] {
+            fs::write(directory.join(name), serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let subject = "agent/closed-worker";
+        for _ in 0..3 {
+            // The placement-away no-op reports clean before the stop's closure check.
+            reconciler.record_member_reconcile_result(subject, Ok(())).unwrap();
+            let result = producer.start_operation_closed(runtime_id, operation)
+                .and_then(|closed| {
+                    anyhow::ensure!(closed, "producer closure unverified");
+                    Ok(())
+                });
+            assert!(result.is_ok(), "{result:?}");
+            reconciler.record_member_reconcile_result(subject, result).unwrap();
+            assert!(store.member_reconcile_fault(subject, None).unwrap().is_none());
+            assert!(store.claims_for(subject, Some("runtime.reconcile-decision")).unwrap().is_empty(),
+                "an already-closed producer must not alternate clean and fault decisions");
+        }
+    }
+
+    #[test]
     fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
         for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
             "unsupported", "unproven-stop"] {
