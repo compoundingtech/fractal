@@ -2582,10 +2582,41 @@ def own_levels(directory, tree, base, lane_base):
     return (levels, edits) if edits else (None, [])
 
 
-def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
-    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None.
-    When the tree edits a protected file, only a note at the gate's own levels covers it (own_levels), and the verifier is asked for the
-    newest pass at those levels, as the gate asks it. Per crate, as in the gate, the verifier is not asked to prefer a level."""
+VERIFIER_ANSWERS = {}
+
+
+def run_verifier(command):
+    """The verifier's answer to `command`: the one the batch coverage() asked for (taken once), or a run of its own."""
+    answer = VERIFIER_ANSWERS.pop(tuple(command), None)
+    return answer if answer is not None else subprocess.run(command, capture_output=True, text=True)
+
+
+def ask_verifier_batch(verifier, commands):
+    """Ask the base's verifier these commands in one process (its `--batch`), so a record's signature is checked once for them all, not once
+    per check: about 2 minutes of --status on a busy host. Each answer is what its own run gives, and run_verifier hands it out. A base whose
+    verifier has no batch is asked one process per command, as before. A batch that fails, or answers in any other shape, is every command's
+    answer: each reads as a verifier that gave no answer, never as a run of its own that would hide it."""
+    if len(commands) < 2 or b'def run_batch(' not in Path(verifier).read_bytes():
+        return
+    done = subprocess.run([sys.executable, verifier, '--batch'], input=json.dumps([command[2:] for command in commands]),
+                          capture_output=True, text=True)
+    try:
+        answers = json.loads(done.stdout)
+    except ValueError:
+        answers = None
+    valid = (done.returncode == 0 and isinstance(answers, list) and len(answers) == len(commands)
+             and all(isinstance(answer, dict) and set(answer) == {'exit', 'stdout', 'stderr'} and type(answer['exit']) is int
+                     and isinstance(answer['stdout'], str) and isinstance(answer['stderr'], str) for answer in answers))
+    if not valid:
+        why = (done.stderr.strip().splitlines() or [f'exit {done.returncode}, no valid answer'])[-1][:200]
+        answers = [{'exit': 2, 'stdout': '', 'stderr': f'the verifier\'s --batch failed: {why}\n'}] * len(commands)
+    for command, answer in zip(commands, answers):
+        VERIFIER_ANSWERS[tuple(command)] = answered = subprocess.CompletedProcess(command, answer['exit'], answer['stdout'], answer['stderr'])
+        answered.batch_failed = None if valid else f'the verifier\'s --batch failed: {why}'
+
+
+def verifier_command(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
+    """(command, levels, edits): how ask_verifier asks the verifier about `check`, and own_levels' answer it judges the reply by."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
     levels, edits = own_levels(directory, tree, base, lane_base)
     if crate_key:
@@ -2598,7 +2629,15 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
             command += ['--lane-base', lane_base]
     if b'--run-input' in Path(verifier).read_bytes():
         command += run_input_arguments(check, base)
-    done = subprocess.run(command, capture_output=True, text=True)
+    return command, levels, edits
+
+
+def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None.
+    When the tree edits a protected file, only a note at the gate's own levels covers it (own_levels), and the verifier is asked for the
+    newest pass at those levels, as the gate asks it. Per crate, as in the gate, the verifier is not asked to prefer a level."""
+    command, levels, edits = verifier_command(verifier, directory, tree, check, base, repository, lane_base, crate_key)
+    done = run_verifier(command)
     try:
         result = json.loads(done.stdout)
     except ValueError:
@@ -2623,34 +2662,53 @@ def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
     lane_base = branch_point(commit, base_commit)
     verifier = Path(scratch) / 'evidence-verify'
     verifier.write_bytes(git('show', f'{base_commit}:scripts/evidence-verify').stdout)
-    lanes, rows = lane_names(base_commit) if edited_lanes_unsigned(base_commit) else set(), []
+    lanes = lane_names(base_commit) if edited_lanes_unsigned(base_commit) else set()
+    # What each check needs first, and every verifier question those answers leave, asked in one batch.
+    plans, asked = [], []
     for name in checks:
         # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
         # Otherwise a lane edit is signed, and asked about, like any other tree.
         edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
         unchanged = web_unchanged(base_commit) if name == WEB else None
-        if edits:
-            rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})', None))
-        elif name == RUST_TESTS:
+        keys = error = None
+        if name == RUST_TESTS and not edits:
             keys, error = crate_keys(base_commit, Path('.'), tree, scratch)
             if not error:
                 keys, error = only_crates(keys, crates)
-            if error:
-                rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}', []))
-            else:
+            if not error:
                 fetch_crate_notes(args.push or 'origin', keys)
-                missing, have = uncovered_crates(str(verifier), Path('.'), tree, base_commit,
-                                                 repository if judged_by_policy(base_commit) else None, lane_base, keys)
-                rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
-                             f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
-                                                                         + (' ...' if len(missing) > 6 else '') if missing else ''),
-                             [crate for crate, _ in missing]))
-        elif unchanged:
-            rows.append((name, True, 'not relevant', unchanged, None))
-        else:
-            is_covered, why = covered(str(verifier), Path('.'), tree, name, base_commit, repository, lane_base)
-            rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why, None))
+                judged = repository if judged_by_policy(base_commit) else None
+                if judged and keys and all(keys.values()):
+                    asked.append(members_verify_command(str(verifier), Path('.'), tree, base_commit, judged, lane_base))
+        elif not edits and not unchanged:
+            asked.append(verifier_command(str(verifier), Path('.'), tree, name, base_commit, repository, lane_base)[0])
+        plans.append((name, edits, unchanged, keys, error))
+    VERIFIER_ANSWERS.clear()
+    ask_verifier_batch(str(verifier), asked)
+    try:
+        rows = [coverage_row(verifier, tree, base_commit, repository, lane_base, *plan) for plan in plans]
+    finally:
+        VERIFIER_ANSWERS.clear()  # an answer is for this round only: a later round asks again after it signs
     return rows
+
+
+def coverage_row(verifier, tree, base_commit, repository, lane_base, name, edits, unchanged, keys, error):
+    """coverage()'s row for one check, from what it computed first."""
+    if edits:
+        return (name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})', None)
+    if name == RUST_TESTS:
+        if error:
+            return (name, False, 'not covered', f'cannot compute the per-crate keys: {error}', [])
+        missing, have = uncovered_crates(str(verifier), Path('.'), tree, base_commit,
+                                         repository if judged_by_policy(base_commit) else None, lane_base, keys)
+        return (name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
+                f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
+                                                            + (' ...' if len(missing) > 6 else '') if missing else ''),
+                [crate for crate, _ in missing])
+    if unchanged:
+        return (name, True, 'not relevant', unchanged, None)
+    is_covered, why = covered(str(verifier), Path('.'), tree, name, base_commit, repository, lane_base)
+    return (name, is_covered, 'covered' if is_covered else 'not covered', why, None)
 
 
 def push_record(directory, remote, tree, record):
@@ -2773,14 +2831,21 @@ def fetch_crate_notes(remote, keys):
         git('fetch', '-q', '--no-tags', remote, *refspecs[start:start + 200], check=False)
 
 
-def members_missing(verifier, directory, tree, base, repository, lane_base):
-    """{crate: reason} for the workspace members with no satisfying note, from ONE verifier run (`--members`: one process reads each record once,
-    where 52 `--crate-key` runs each read all 52 of the tree's records); None when the verifier cannot say (the caller asks crate by crate)."""
+def members_verify_command(verifier, directory, tree, base, repository, lane_base):
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', 'rust-tests', '--keys-from', base, '--members',
                '--policy-from', base, '--repository', repository]
     if lane_base and b'--lane-base' in Path(verifier).read_bytes():
         command += ['--lane-base', lane_base]
-    done = subprocess.run(command, capture_output=True, text=True)
+    return command
+
+
+def members_missing(verifier, directory, tree, base, repository, lane_base):
+    """{crate: reason} for the workspace members with no satisfying note, from ONE verifier run (`--members`: one process reads each record once,
+    where 52 `--crate-key` runs each read all 52 of the tree's records); None when the verifier cannot say (the caller asks crate by crate).
+    When the batch that asked it failed, why, as text: every crate reads it, and nothing is asked crate by crate to hide it."""
+    done = run_verifier(members_verify_command(verifier, directory, tree, base, repository, lane_base))
+    if getattr(done, 'batch_failed', None):
+        return done.batch_failed
     try:
         result = json.loads(done.stdout)
     except ValueError:
@@ -2795,6 +2860,8 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
     missing, have = [], 0
     if repository and keys and all(keys.values()):
         batched = members_missing(verifier, directory, tree, base, repository, lane_base)
+        if isinstance(batched, str):
+            return [(crate, batched) for crate in sorted(keys)], 0
         if batched is not None:
             # --members judges every workspace member; `keys` may be narrowed to some of them (--crate).
             missing = [(crate, batched[crate]) for crate in sorted(keys) if crate in batched]
