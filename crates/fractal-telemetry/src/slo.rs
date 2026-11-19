@@ -681,6 +681,15 @@ pub fn cpu_verdict(row: &Value) -> CpuVerdict {
     }
 }
 
+/// Productive seats alone made the idle minimum impossible, independently of any overlapping
+/// missing telemetry. This is ineligibility, not a passing measurement or a CPU coverage claim.
+pub fn cpu_idle_busy(row: &Value) -> bool {
+    let minutes = row["minutes"].as_u64();
+    let needed = row["idle_min_minutes"].as_u64();
+    let busy = row["idle"]["not_idle"]["seat"].as_u64();
+    matches!((minutes, needed, busy), (Some(60), Some(needed @ 1..=60), Some(busy)) if busy > 60 - needed)
+}
+
 /// `n` cores, as a target or a reading says it.
 pub fn cores(n: f64) -> String {
     format!("{n} core{}", if n <= 1.0 { "" } else { "s" })
@@ -916,6 +925,7 @@ fn cpu_lines(target: &Value) -> [(String, &'static str, String); 2] {
     let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
     let idle = match verdict.idle {
         Some(cores) => format!("{cores:.2} cores over {} idle minutes", verdict.idle_minutes),
+        None if cpu_idle_busy(target) => "not eligible: busy".into(),
         None if verdict.minutes < smallclaims::windows::cpu_minutes::MINUTES => {
             format!("the hour holds {} of 60 minutes, {} idle", verdict.minutes, verdict.idle_minutes)
         }
