@@ -3951,6 +3951,7 @@ fn client_agent_cards_presented(
     queues: &CardQueues<'_>,
     selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
+    let idle_residency_policy = crate::config::idle_residency_policy();
     let agent_subjects = status
         .subjects
         .iter()
@@ -4200,6 +4201,15 @@ fn client_agent_cards_presented(
             } else {
                 None
             };
+            let residency = crate::residency::evaluate_at(
+                store,
+                &subject.subject,
+                Some(snapshot_index),
+                idle_residency_policy.settings.after_ms,
+            )?.not_before(
+                idle_residency_policy.enabled_at_unix_ms,
+                idle_residency_policy.settings.after_ms,
+            );
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -4354,6 +4364,12 @@ fn client_agent_cards_presented(
                 } else {
                     None
                 },
+            });
+            value["residency"] = json!({
+                "policy": residency.policy,
+                "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                "refusal_reason": residency.refusal_reason,
             });
             value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
@@ -11464,6 +11480,9 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
+    state.store.record_idle_unrouted(&subject,
+        crate::store::idle_residency::UnroutedKind::ExplicitResume)
+        .map_err(ApiError::internal)?;
     let (claim, _) = state
         .store
         .append_source_gated(
