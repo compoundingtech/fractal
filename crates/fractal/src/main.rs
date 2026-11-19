@@ -9083,39 +9083,31 @@ struct MissionPublication {
     accepted_at_unix_ms: u128,
 }
 
-/// The mission's publication history, newest first, including older run revisions.
+/// Bounded recent publications for mission-start revision diagnostics, not run attribution.
 async fn mission_publications(
     client: &Client,
     mission_id: &str,
 ) -> Result<Vec<MissionPublication>> {
-    let mut publications = Vec::new();
-    let mut before = String::new();
-    loop {
-        let page: ClaimsPage = client
-            .get(&format!(
-                "/v1/claims?subject={}&kind=mission.published&order=desc&limit=100{before}",
-                urlencoding::encode(&format!("mission/{mission_id}"))
-            ))
-            .await?;
-        publications.extend(page.claims.into_iter().filter_map(|claim| {
-            Some(MissionPublication {
-                revision: claim.body.get("revision")?.as_str()?.to_owned(),
-                actor: claim.actor,
-                claim_id: claim.id,
-                origin: claim.origin,
-                accepted_at_unix_ms: claim.accepted_at_unix_ms,
-            })
-        }));
-        match page.next_cursor {
-            Some(cursor) => before = format!("&before_index={cursor}"),
-            None => return Ok(publications),
-        }
-    }
+    let page: ClaimsPage = client
+        .get(&format!(
+            "/v1/claims?subject={}&kind=mission.published&order=desc&limit=100",
+            urlencoding::encode(&format!("mission/{mission_id}"))
+        ))
+        .await?;
+    Ok(page.claims.into_iter().filter_map(|claim| {
+        Some(MissionPublication {
+            revision: claim.body.get("revision")?.as_str()?.to_owned(),
+            actor: claim.actor,
+            claim_id: claim.id,
+            origin: claim.origin,
+            accepted_at_unix_ms: claim.accepted_at_unix_ms,
+        })
+    }).collect())
 }
 
 /// Publication authority is independent of the requester who owns the run.
-fn mission_publication_note(revision: &str, publications: &[MissionPublication]) -> String {
-    let Some(publication) = publications.iter().find(|item| item.revision == revision) else {
+fn mission_publication_note(publication: Option<&MissionPublication>) -> String {
+    let Some(publication) = publication else {
         return "PUBLISHER No publication claim available; requester is not publication attribution.\n".into();
     };
     let published = i64::try_from(publication.accepted_at_unix_ms)
@@ -9129,6 +9121,37 @@ fn mission_publication_note(revision: &str, publications: &[MissionPublication])
         publication.origin,
         publication.claim_id,
     )
+}
+
+/// Read the run's indexed creation receipt, then its exact admission publication by ID.
+/// Never substitute a newer publication of the same mission or revision.
+async fn load_run_publication(client: &Client, run: &MissionRunView) -> Result<Option<MissionPublication>> {
+    let page: ClaimsPage = client.get(&format!(
+        "/v1/claims?subject={}&kind=mission-run.created&order=asc&limit=1",
+        urlencoding::encode(&run.subject),
+    )).await?;
+    let Some(created) = page.claims.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(id) = created.body["fields"]["admission_publication"].as_str() else {
+        return Ok(None);
+    };
+    let claim: ClaimRecord = client.get(&format!(
+        "/v1/claims/by-id/{}", urlencoding::encode(id),
+    )).await?;
+    if claim.kind != "mission.published"
+        || claim.subject != run.mission
+        || claim.body["revision"].as_str() != Some(run.revision.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(MissionPublication {
+        revision: run.revision.clone(),
+        actor: claim.actor,
+        claim_id: claim.id,
+        origin: claim.origin,
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    }))
 }
 
 /// Older daemons may omit the sidecar from their run view. Join only the exact revision,
@@ -9223,6 +9246,7 @@ async fn follow_mission_run_to(
     let client = &client;
     let mut prior = String::new();
     let mut event_feed = LocalEventFeed::default();
+    let mut attribution = BTreeMap::new();
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9244,13 +9268,20 @@ async fn follow_mission_run_to(
             String::new()
         };
         if summary != prior && let Some(page) = &page {
-            load_run_source_provenance(client, &mut run).await?;
+            if !attribution.contains_key(&run.revision) {
+                load_run_source_provenance(client, &mut run).await?;
+                let publication = load_run_publication(client, &run).await?;
+                attribution.insert(
+                    run.revision.clone(),
+                    (run.provenance.clone(), mission_publication_note(publication.as_ref())),
+                );
+            }
+            let (provenance, publication_note) = &attribution[&run.revision];
+            if run.provenance.is_none() {
+                run.provenance.clone_from(provenance);
+            }
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
-            let publications = mission_publications(
-                client,
-                run.mission.strip_prefix("mission/").unwrap_or(&run.mission),
-            ).await?;
-            frame.push_str(&mission_publication_note(&run.revision, &publications));
+            frame.push_str(publication_note);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
                     "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}\n",

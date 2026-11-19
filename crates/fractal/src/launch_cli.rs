@@ -708,11 +708,8 @@ pub(super) async fn run_mission_view(
                 "{}",
                 render_mission_run_page(&run, &page.runs, OutputStyle::stdout(), now)
             );
-            let publications = mission_publications(
-                client,
-                run.mission.strip_prefix("mission/").unwrap_or(&run.mission),
-            ).await?;
-            print!("{}", mission_publication_note(&run.revision, &publications));
+            let publication = load_run_publication(client, &run).await?;
+            print!("{}", mission_publication_note(publication.as_ref()));
             print_mission_tree_continuation(&run, &page, args.limit);
             // A daemon without lanes answers 404; the run itself is still shown.
             if let Ok(lanes) = client

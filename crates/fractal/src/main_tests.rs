@@ -9758,12 +9758,17 @@ mission "source-bound" state="ready" {
         inputs: BTreeMap::new(),
         idempotency_key: "source-bound-run".into(),
     }).unwrap();
+    let created = store.latest_claim(&run.subject, Some("mission-run.created")).unwrap().unwrap();
+    let admitted = created.body["fields"]["admission_publication"].as_str().unwrap().to_owned();
     let newer = source.replace("Keep a source-bound schedule.", "Newer schedule.")
         .replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         .replace("/pull/42", "/pull/43");
     let intent = fractal_daemon::parse_intent(&newer, store.origin()).unwrap();
     store.apply_internal(&intent, "newer-publication").unwrap();
     let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+    let publication = load_run_publication(&client, &run).await.unwrap().unwrap();
+    assert_eq!(publication.claim_id, admitted);
+    assert_eq!(publication.revision, run.revision);
     run.provenance = None; // An older daemon omitted the existing sidecar.
     load_run_source_provenance(&client, &mut run).await.unwrap();
     let provenance = run.provenance.take().unwrap();
@@ -9773,7 +9778,29 @@ mission "source-bound" state="ready" {
     run.revision = "0".repeat(64);
     load_run_source_provenance(&client, &mut run).await.unwrap();
     assert!(run.provenance.is_none());
+    assert!(load_run_publication(&client, &run).await.unwrap().is_none());
     server.abort();
+}
+
+#[test]
+fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
+    let source = include_str!("main.rs");
+    let lookup = source.split_once("async fn load_run_publication(").unwrap().1
+        .split_once("async fn load_run_source_provenance(").unwrap().0;
+    assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
+    assert!(lookup.contains("admission_publication"));
+    assert!(lookup.contains("/v1/claims/by-id/"));
+    assert!(!lookup.contains("mission_publications("));
+    assert!(!lookup.contains("before_index"));
+    let follow = source.split_once("async fn follow_mission_run_to(").unwrap().1
+        .split_once("client.follow_recovered()").unwrap().0;
+    assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
+    assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
+    assert!(!follow.contains("mission_publications("));
+    let show = include_str!("launch_cli.rs").split_once("MissionViewCommand::Show(").unwrap().1
+        .split_once("print_mission_tree_continuation").unwrap().0;
+    assert!(show.contains("load_run_publication(client, &run)"));
+    assert!(!show.contains("mission_publications("));
 }
 
 #[tokio::test]
@@ -9834,7 +9861,7 @@ async fn missions_start_names_a_replaced_or_missing_revision() {
     let publications = mission_publications(&client, "arrival").await.unwrap();
     assert_eq!(publications.len(), 2);
     assert_eq!(publications[0].actor.as_deref(), Some("person/test"));
-    let publication_note = mission_publication_note(&second, &publications);
+    let publication_note = mission_publication_note(publications.first());
     assert!(publication_note.starts_with("PUBLISHER person/test · single · "));
     assert!(publication_note.contains(&format!("\nPUBLICATION {}\n", publications[0].claim_id)));
     assert!(!publication_note.contains("REQUESTER"));
