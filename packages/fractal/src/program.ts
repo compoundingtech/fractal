@@ -345,7 +345,9 @@ const ReviewPublishedComment = Schema.Struct({
  * The reviewer mission must declare the named seat with native fresh-context.
  * Mutable PR heads are deliberately observed outside the activity journal.
  */
-export const review = (options: ReviewOptions) => Effect.gen(function* () {
+export const review = (
+  options: ReviewOptions,
+): Effect.Effect<ReviewResult, ReviewError | ChildFailed | ResourceError, ProgramServices> => Effect.gen(function* () {
   yield* Schema.decodeUnknownEffect(Schema.Struct({
     id: Schema.NonEmptyString,
     subject: ReviewSubject,
@@ -362,7 +364,7 @@ export const review = (options: ReviewOptions) => Effect.gen(function* () {
   // Program steps act as their run, not an agent claimant; native dispatch has no ST_AGENT.
   const callers = [program.host.run, program.host.env.ST_REQUESTER, program.host.env.ST_ASSIGNEE]
 
-  const github = <S extends Codec>(argv: readonly string[], schema: S) => Effect.gen(function* () {
+  const github = <A, I>(argv: readonly string[], schema: Schema.Codec<A, I>) => Effect.gen(function* () {
     // Observations must not adopt an earlier lane execution's cached response on replay.
     // These read-only command scopes are ephemeral; the worker's durable key is unchanged.
     const observation = yield* Effect.sync(() => globalThis.crypto.randomUUID())

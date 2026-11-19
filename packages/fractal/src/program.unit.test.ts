@@ -693,7 +693,7 @@ describe('native review lifecycle', () => {
         }) }
     }
     const host = fakeHost({
-      journal: config.journal,
+      ...(config.journal === undefined ? {} : { journal: config.journal }),
       ...(config.lane ? { resourceMembership: {
         membershipId: 'membership/review', authorityEpoch: 'epoch/1',
         generation: 'generation/1', coverage: 'logical' as const,
@@ -726,7 +726,7 @@ describe('native review lifecycle', () => {
   it.effect('accepts a reviewer-owned exact-head comment from one independent child and never posts', () =>
     Effect.gen(function* () {
       const host = setup()
-      expect(host.context.env.ST_AGENT).toBeUndefined()
+      expect(host.context.env).not.toHaveProperty('ST_AGENT')
       expect(execution.step_subject).not.toContain('review-child')
       expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: verdict })
       expect(host.children).toHaveLength(1)

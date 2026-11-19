@@ -3,7 +3,7 @@ import { bytesToHex } from '@noble/hashes/utils.js'
 import { Schema } from 'effect'
 
 const matches = (pattern: RegExp, message: string) =>
-  Schema.refine((value: string): value is string => pattern.test(value), { message })
+  Schema.refine((value: unknown): value is string => typeof value === 'string' && pattern.test(value), { message })
 const Head = Schema.String.pipe(matches(/^[0-9a-f]{40}$/, 'Expected an exact commit SHA'))
 const Digest = Schema.String.pipe(matches(/^sha256:[0-9a-f]{64}$/, 'Expected a SHA-256 digest'))
 const Seat = Schema.String.pipe(matches(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Expected a local reviewer seat ID'))
