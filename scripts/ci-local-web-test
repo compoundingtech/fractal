@@ -9,9 +9,9 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 RECORD = '''#!/usr/bin/env bash
@@ -49,8 +49,6 @@ class CiLocalWeb(unittest.TestCase):
                           'export FRACTAL_RESOURCE_PARENT=fixture FRACTAL_RESOURCE_EXEC_ID=fixture-root\n'
                           'export ST3_ENDPOINT=unix:/fixture-native FRACTAL_ENDPOINT=unix:/fixture-native\nexec "$@"\n')
         native.chmod(0o755)
-        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Linux\n')
-        (self.wrappers / 'uname').chmod(0o755)
 
     def run_web(self, command=None, **extra):
         recorder = self.home / '.local/state/st3/recorder/bin'
@@ -63,8 +61,8 @@ class CiLocalWeb(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires the real Darwin shell platform')
     def test_darwin_fractal_web_command_runs_the_lane_without_native_admission(self):
-        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         (self.wrappers / 'fractal').write_text('#!/bin/sh\necho unexpected-native-admission >&2\nexit 99\n')
         nix = self.wrappers / 'nix'
         nix.write_text('#!/bin/sh\nwhile [ "$1" != -c ]; do shift; done\nshift\nexec "$@"\n')
@@ -72,8 +70,7 @@ class CiLocalWeb(unittest.TestCase):
         loader = importlib.machinery.SourceFileLoader('darwin_web_st_test', str(ROOT / 'scripts/st-test'))
         runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(runner)
-        with mock.patch.object(runner.sys, 'platform', 'darwin'):
-            command = runner.governed(runner.LOCAL[runner.WEB], runner.WEB)
+        command = runner.governed(runner.LOCAL[runner.WEB], runner.WEB)
         self.assertEqual(command, runner.LOCAL[runner.WEB])
         done, calls = self.run_web(command=command)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -82,6 +79,17 @@ class CiLocalWeb(unittest.TestCase):
         for call in calls:
             self.assertNotIn('FRACTAL_RESOURCE_PARENT', call['env'])
             self.assertEqual(call['env']['KIT_PLAY_SET'], 'all')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires the real Linux shell platform')
+    def test_caller_uname_and_ostype_cannot_select_the_darwin_bypass(self):
+        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (self.wrappers / 'uname').chmod(0o755)
+        done, calls = self.run_web(OSTYPE='darwin99', **{'BASH_FUNC_uname%%': "() { printf 'Darwin\\n'; }"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        argv = Path(str(self.log) + '.admission').read_text().splitlines()
+        self.assertEqual(argv[argv.index('resources'):argv.index('resources') + 2], ['resources', 'exec'])
+        self.assertEqual(calls[0]['env']['FRACTAL_RESOURCE_PARENT'], 'fixture')
+        self.assertEqual(len(calls), 2)
 
     def test_its_scratch_is_removed_unless_kept_and_a_kept_one_is_named_where_fractal_test_reads_it(self):
         done, calls = self.run_web()

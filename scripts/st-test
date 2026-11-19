@@ -83,6 +83,7 @@ because one of its tests passed only on a retry (CI's own per-crate notes refuse
 as flaky_tests).
 """
 import argparse
+from urllib.parse import urlsplit
 import atexit
 import base64
 import calendar
@@ -801,7 +802,7 @@ def build_beside(environment, target, directory):
 
 
 def shared_target(tree_target=None, directory=None):
-    """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
+    """The kept target and run-long lock, or (None, lock) for a caller target; (None, None) only when disabled.
 
     With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
     caller_target = os.environ.get('CARGO_TARGET_DIR')
@@ -811,8 +812,15 @@ def shared_target(tree_target=None, directory=None):
         # request recording and every phase's execution environment.
         caller_target = str((Path(directory or Path.cwd()) / caller_target).resolve())
         os.environ['CARGO_TARGET_DIR'] = caller_target
-        recover_native_tree(caller_target)
-        return None, None
+        target = Path(caller_target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lock = lock_target(target)
+        try:
+            recover_native_tree(target)
+        except BaseException:
+            lock.close()
+            raise
+        return None, lock
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off':
         return None, None
     if tree_target and not os.environ.get('ST_EVIDENCE_TARGET'):
@@ -821,19 +829,29 @@ def shared_target(tree_target=None, directory=None):
         return tree_target, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
     make_target(target)
-    lock = open(target.parent / f'{target.name}.lock', 'w')
-    # A target several trees share is held EXCLUSIVELY for the whole run, builds and tests: cargo's own lock orders builds, but not
-    # one run's builds against another run's tests, and two runs on different trees sharing one target once relinked st3 under each
-    # other's tests (a test ran the other tree's st3), so a note could name a tree whose binaries were not the ones tested. A second
-    # run waits for the first, and says so.
+    lock = lock_target(target)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-    recover_native_tree(target)
-    prepare_targets(target)  # nobody else is using either target: the moment to keep them small
+        recover_native_tree(target)
+        prepare_targets(target)  # nobody else is using either target: the moment to keep them small
+    except BaseException:
+        lock.close()
+        raise
     return target, lock
+
+
+def lock_target(target):
+    """Keep builds and tests from separate supervisors exclusive, including caller targets."""
+    lock = open(target.parent / f'{target.name}.lock', 'a')
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        return lock
+    except BaseException:
+        lock.close()
+        raise
 
 
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
@@ -1003,6 +1021,14 @@ RESOURCE_EXEC = None  # resolved before check PATH normalization; never a candid
 ADMISSION_RECEIPTS = []
 QUARANTINED = False
 TEMP_DIRS = set()
+TEMP_IDENTITIES = {}
+NATIVE_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
+
+
+def track_native_scratch(path):
+    status = path.lstat()
+    TEMP_IDENTITIES[str(path.resolve())] = {'dev': status.st_dev, 'ino': status.st_ino}
+    TEMP_DIRS.add(path)
 
 
 def native_command(executable, environment=None):
@@ -1029,11 +1055,12 @@ def is_native_exec(argv):
 @contextlib.contextmanager
 def temporary_directory(**options):
     path = Path(tempfile.mkdtemp(**options))
-    TEMP_DIRS.add(path)
+    track_native_scratch(path)
     try:
         yield str(path)
     finally:
         TEMP_DIRS.discard(path)
+        TEMP_IDENTITIES.pop(str(path.resolve()), None)
         if not QUARANTINED:
             shutil.rmtree(path, ignore_errors=True)
 
@@ -1063,6 +1090,108 @@ def write_native_record(path, record):
         temporary.unlink(missing_ok=True)
 
 
+def native_scratch_path(value):
+    """Only generated directories below independently configured scratch roots are removable."""
+    if not isinstance(value, str):
+        raise ValueError('scratch path must be a string')
+    path = Path(value)
+    if not path.is_absolute() or '..' in path.parts or str(path.resolve()) != value:
+        raise ValueError('scratch traversal or symlink component')
+    roots = {run_tmp_root().resolve(), NATIVE_TEMP_ROOT}
+    generated = r'st-test(?:\.|-(?:(?:impact|members|coverage)-)?)[a-z0-9_]{8}'
+    if not any(path.is_relative_to(root) and path != root and
+               all(re.fullmatch(generated, part) for part in path.relative_to(root).parts) for root in roots):
+        raise ValueError('scratch is outside generated roots or has an unrecognized name')
+    return path
+
+
+def validate_native_record(path, record):
+    """Persisted data is not authority to select arbitrary environment keys or deletion paths."""
+    try:
+        keys = {'version', 'request_id', 'owner', 'endpoints', 'pins', 'scratch', 'scratch_identity', 'checkout', 'supervisor'}
+        if not isinstance(record, dict) or set(record) != keys or type(record['version']) is not int or record['version'] != 2:
+            raise ValueError('unknown record schema')
+        if str(uuid.UUID(record['request_id'])) != path.stem or record['request_id'] != path.stem:
+            raise ValueError('request id differs from record name')
+        if record['owner'] is not None and (not isinstance(record['owner'], str) or
+                not record['owner'] or any(ord(c) < 33 for c in record['owner'])):
+            raise ValueError('invalid owner')
+        endpoints = record['endpoints']
+        if not isinstance(endpoints, dict) or not set(endpoints) <= {'ST3_ENDPOINT', 'FRACTAL_ENDPOINT'}:
+            raise ValueError('unknown endpoint key')
+        for value in endpoints.values():
+            if (not isinstance(value, str) or not value or len(value) > 4096 or
+                    any(ord(c) < 33 or ord(c) == 127 for c in value)):
+                raise ValueError('invalid endpoint value')
+            if value.startswith(('unix:/', '/')):
+                endpoint_path = value[5:] if value.startswith('unix:') else value
+                if '..' in Path(endpoint_path).parts:
+                    raise ValueError('endpoint traversal')
+            else:
+                endpoint = urlsplit(value)
+                if (endpoint.scheme not in ('http', 'https') or not endpoint.hostname or
+                        endpoint.username or endpoint.password or endpoint.query or endpoint.fragment):
+                    raise ValueError('invalid endpoint address')
+                endpoint.port  # validate the optional numeric port and its range
+        pins = record['pins']
+        if not isinstance(pins, list) or not pins or len(pins) != len(set(pins)):
+            raise ValueError('invalid pins')
+        for value in [record['checkout'], *pins]:
+            if not isinstance(value, str) or not Path(value).is_absolute() or '..' in Path(value).parts or str(Path(value)) != value:
+                raise ValueError('invalid canonical resource path')
+        supervisor = record['supervisor']
+        if (not isinstance(supervisor, dict) or set(supervisor) != {'pid', 'started_ns'} or
+                any(type(supervisor[key]) is not int or supervisor[key] <= 0 for key in supervisor)):
+            raise ValueError('invalid supervisor identity')
+        scratch, identities = record['scratch'], record['scratch_identity']
+        if (not isinstance(scratch, list) or not isinstance(identities, dict) or
+                len(scratch) != len(set(scratch)) or set(scratch) != set(identities)):
+            raise ValueError('invalid scratch identities')
+        for value in scratch:
+            native_scratch_path(value)
+            identity = identities[value]
+            if (not isinstance(identity, dict) or set(identity) != {'dev', 'ino'} or
+                    any(type(identity[key]) is not int or identity[key] < 0 for key in identity)):
+                raise ValueError('invalid scratch directory identity')
+    except (ValueError, TypeError, KeyError, AttributeError, OSError, RuntimeError) as error:
+        raise NativeRetirementFailure(f'unrecognized native request record: {path}: {error}') from error
+
+
+def native_supervisor_alive(record):
+    supervisor = record['supervisor']
+    started = process_started_ns(supervisor['pid'])
+    if started is not None:
+        return started == supervisor['started_ns']
+    try:
+        os.kill(supervisor['pid'], 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    raise NativeRetirementFailure(f'cannot establish supervisor death: {supervisor}')
+
+
+def remove_native_scratch(value, identity):
+    """Pin every parent without following symlinks and verify creation identity before rmtree."""
+    path = native_scratch_path(value)
+    descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            for part in path.parent.parts[1:]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            status = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return  # a previous recovery removed scratch before losing its record
+        if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid() or
+                (status.st_dev, status.st_ino) != (identity['dev'], identity['ino'])):
+            raise NativeRetirementFailure(f'scratch identity changed; refusing cleanup: {path}')
+        shutil.rmtree(path.name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def native_records(directory=None, scratch=None):
     """Exact resource pins scope recovery; other checkouts' work is observational only."""
     directory = str(Path(directory).resolve()) if directory is not None else None
@@ -1073,8 +1202,9 @@ def native_records(directory=None, scratch=None):
             record = json.loads(path.read_text())
         except FileNotFoundError:
             continue  # another owner already completed recovery
-        if record.get('version') != 1 or record.get('request_id') != path.stem:
-            raise NativeRetirementFailure(f'unrecognized native request record: {path}')
+        except (ValueError, UnicodeError) as error:
+            raise NativeRetirementFailure(f'unrecognized native request record: {path}: {error}') from error
+        validate_native_record(path, record)
         if directory is not None and directory not in record['pins']:
             continue
         if scratch is not None and scratch not in record['scratch']:
@@ -1144,13 +1274,16 @@ class NativePhase:
             pins.add(target)  # shared_target resolved the payload-relative path once
         self.path = native_record_root() / f'{self.request}.json'
         self.entry = {
-            'version': 1, 'request_id': self.request, 'owner': native_owner(self.environment),
+            'version': 2, 'request_id': self.request, 'owner': native_owner(self.environment),
             'endpoints': {key: self.environment[key] for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT') if key in self.environment},
             'pins': sorted(pins), 'scratch': sorted(str(path.resolve()) for path in TEMP_DIRS),
             'checkout': str(Path.cwd().resolve()),
+            'scratch_identity': {str(path.resolve()): TEMP_IDENTITIES[str(path.resolve())] for path in TEMP_DIRS},
+            'supervisor': {'pid': os.getpid(), 'started_ns': process_started_ns(os.getpid())},
         }
         self.command = native_cancel_command(self.entry, argv[0])
         self.lock, self.retired, self.failure = threading.Lock(), False, None
+        validate_native_record(self.path, self.entry)
         write_native_record(self.path, self.entry)
 
     def retire(self):
@@ -1179,16 +1312,23 @@ def recover_native_records(records):
     for path, record in records:
         if not path.exists():
             continue
+        validate_native_record(path, record)
+        if native_supervisor_alive(record):
+            raise NativeRetirementFailure(f'live supervisor owns request {record["request_id"]}; refusing recovery: {record["supervisor"]}')
         command = native_cancel_command(record)
-        cancel_native_request(command, dict(os.environ, **record['endpoints']))
+        environment = dict(os.environ)
+        for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT'):
+            environment.pop(key, None)
+            if key in record['endpoints']:
+                environment[key] = record['endpoints'][key]
+        cancel_native_request(command, environment)
         for scratch in record['scratch']:
             retained = Path(scratch)
             if (retained / 'KEPT').exists():
                 continue
             if any(other != path for other, _ in native_records(scratch=retained)):
                 continue  # the last request sharing scratch owns its removal
-            with contextlib.suppress(FileNotFoundError):
-                shutil.rmtree(retained)
+            remove_native_scratch(scratch, record['scratch_identity'][scratch])
         path.unlink(missing_ok=True)
 
 
@@ -1517,7 +1657,7 @@ def run_tmpdir(keep=False):
     path = Path(tempfile.mkdtemp(prefix=RUN_TMP_PREFIX, dir=root))
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     fcntl.flock(fd, fcntl.LOCK_EX)
-    TEMP_DIRS.add(path)
+    track_native_scratch(path)
     saved, saved_tempdir = {name: os.environ.get(name) for name in TMP_NAMES}, tempfile.tempdir
     os.environ.update({name: str(path) for name in TMP_NAMES})
     tempfile.tempdir = None
@@ -1540,6 +1680,7 @@ def run_tmpdir(keep=False):
             remove_tree(path)
         os.close(fd)
         TEMP_DIRS.discard(path)
+        TEMP_IDENTITIES.pop(str(path.resolve()), None)
 
 
 def pool_max_gb():
@@ -3443,8 +3584,10 @@ def run_main(argv, cleanup):
                 rows, failed, unsigned = [], False, False
                 lanes = lane_names(base_commit)
                 unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
-                if target is None and (any(name in BUILDS for name in checks) or os.environ.get('CARGO_TARGET_DIR')):
+                if target is None and target_lock is None and (any(name in BUILDS for name in checks) or os.environ.get('CARGO_TARGET_DIR')):
                     target, target_lock = shared_target(tree_target, directory=directory)  # top-ups keep the canonical target
+                    if target_lock is not None:
+                        cleanup.callback(target_lock.close)
                 # Tree and target recovery must fence stale native work before
                 # considering any old run scratch for reclamation.
                 sweep_run_tmp(run_tmp_root())
@@ -3506,7 +3649,7 @@ def run_main(argv, cleanup):
                         wrap += ['--out', args.out]
                     environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
                     if name not in BUILDS:
-                        for variable in ('FRACTAL_AGENT', 'FRACTAL_RESOURCE_PARENT', 'FRACTAL_RESOURCE_EXEC_ID',
+                        for variable in ('ST_AGENT', 'FRACTAL_AGENT', 'FRACTAL_RESOURCE_PARENT', 'FRACTAL_RESOURCE_EXEC_ID',
                                          'ST3_ENDPOINT', 'FRACTAL_ENDPOINT'):
                             environment.pop(variable, None)
                     shell_report = Path(scratch) / f'typescript-shell-{round_number}.log' if name == 'typescript-client' else None

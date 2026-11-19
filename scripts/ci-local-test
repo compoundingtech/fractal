@@ -10,6 +10,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import tempfile
 import unittest
@@ -121,8 +122,6 @@ class CiLocal(unittest.TestCase):
         self.umask = 0o022
         self.tmp_root = root / 'short-tmp'
         self.tmp_root.mkdir()
-        (self.bin / 'uname').write_text('#!/bin/sh\necho Linux\n')
-        (self.bin / 'uname').chmod(0o755)
 
     def run_local(self, *stages, ci_linux=None, entry='ci-local', **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
@@ -146,14 +145,26 @@ class CiLocal(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires the real Darwin shell platform')
     def test_darwin_direct_call_does_not_enter_native_admission(self):
-        (self.bin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         (self.bin / 'fractal').write_text('#!/bin/sh\necho unexpected-native-admission >&2\nexit 99\n')
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(calls[-1]['argv'], ['mail-redelivery-canaries'])
         self.assertNotIn('FRACTAL_RESOURCE_PARENT', calls[-1]['env'])
         self.assertFalse(Path(str(self.log) + '.admission').exists())
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires the real Linux shell platform')
+    def test_caller_uname_and_ostype_cannot_select_the_darwin_bypass(self):
+        (self.bin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (self.bin / 'uname').chmod(0o755)
+        done, calls = self.run_local('mail-redelivery-canaries', OSTYPE='darwin99',
+                                     **{'BASH_FUNC_uname%%': "() { printf 'Darwin\\n'; }"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        argv = Path(str(self.log) + '.admission').read_text().splitlines()
+        self.assertEqual(argv[:13], ['--json', '--endpoint', 'unix:/x', 'resources', 'exec', '--as', 'agent/x',
+                                     '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        self.assertEqual(calls[-1]['argv'], ['mail-redelivery-canaries'])
 
     def test_direct_call_names_one_native_profile_and_receipt(self):
         done, calls = self.run_local('mail-redelivery-canaries')

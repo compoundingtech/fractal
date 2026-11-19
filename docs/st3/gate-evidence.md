@@ -2075,6 +2075,7 @@ no longer used by default and can be deleted.
 The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
 missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
 Darwin keeps its direct-execution path through st-test and both ci-local shell entrypoints; none invokes native resources admission.
+The shell entrypoints use Bash's own `OSTYPE`, not a caller-substitutable `uname` on PATH.
 The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
@@ -2084,12 +2085,17 @@ Before cleanup, st-test calls `fractal --json --endpoint SOCKET resources cancel
 nonlaunch tombstone authorizes client termination and scratch cleanup. Transport failure, nonzero exit or an unconfirmed response
 quarantines the pool tree, target and scratch instead of releasing them for reuse. The error prints the request ID and exact resume
 command. One atomic `~/.cache/st-test/native-requests/UUID.json` record per request survives supervisor exit.
-It contains the request ID, owner, endpoints, scratch paths and exact tree/target pins, not an executable command.
+Its strict version-2 schema contains the request ID, owner, allowlisted endpoint values, exact tree/target pins, scratch paths
+and creation device/inode identities, checkout, and supervisor PID/start time, not an executable command or arbitrary environment.
 The record directory is 0700; records are 0600 and published with file fsync, rename and directory fsync before launch.
 That record is also the scratch preservation authority: there is no second scratch-marker or tree/target journal to reconcile.
 A later owner matches the exact tree/target pins (including caller `CARGO_TARGET_DIR`) and rebuilds cancel argv from trusted code.
 Caller `CARGO_TARGET_DIR` is resolved once from the payload tree, following symlinks; that identical absolute path is used for recovery,
 request recording and the payload environment, including across pool-tree changes.
+Caller targets also hold an exclusive target lock for the complete run, including light checks' member preparation.
+Recovery refuses any request whose PID still has the recorded process start time; an unverifiable supervisor is not presumed dead.
+Scratch paths must have generated names below configured scratch roots, with no traversal or symlink components.
+Deletion opens parents without following symlinks and verifies the directory's creation device/inode identity before removal.
 Recovery cancels/confirms retirement once per record, removes unshared scratch (already missing is success), then deletes the
 record last. Every step is safe to repeat across a crash. Other checkouts' requests are not recovered by the scratch sweep.
 Tree/target recovery precedes sweeping; an old scratch directory with its own record is recovered rather than leaked.
@@ -2097,6 +2103,7 @@ There is no cancellation retry loop.
 Phase receipt files are root-only: the orchestrator must start outside native custody, and refuses inherited parent grants rather than
 double-admitting or stripping them. The heavy phases are sibling roots; their native `FRACTAL_RESOURCE_PARENT`,
 `FRACTAL_RESOURCE_EXEC_ID`, `ST3_ENDPOINT` and `FRACTAL_ENDPOINT` context survives control-plane and local-runner scrubbing.
+Light checks receive neither `ST_AGENT` nor `FRACTAL_AGENT`, and no native custody or endpoint variables.
 Proposed seeds for both keys are 4 cores, 20,615,843,021 bytes of memory, 10,000,000,000 bytes of disk and heavy IO,
 with a proposed 16 GiB memory-high threshold. These are declared-provisional full-suite envelopes with client-only learning coverage:
 neither a separately attributed build/run peak nor measured warm disk growth was found. The disk declaration is not a cold full-run
