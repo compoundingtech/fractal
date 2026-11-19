@@ -7,26 +7,26 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Local resource_profile_samples_v1 stores host-local sample rows; no graph claim schema changes."
+    "detail": "Local resource_profile_samples_v1 stores host-local sample rows. RequestClass gains the recovery enum value in wire commands and persisted execution/membership state; no graph claim schema changes."
   },
   "rules": {
     "status": "changed",
-    "detail": "Samples are recorded only in the terminal receipt transaction after confirmed whole-tree retirement; rejected or truncated retirements are not admitted."
+    "detail": "Samples are recorded only in the terminal receipt transaction after confirmed whole-tree retirement; rejected or truncated retirements are not admitted. Recovery admission requires the host profile's recoveryCapable gate and a measured filesystem free-space observation."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "Host-local store extension only; callers and wire formats unchanged."
+    "status": "changed",
+    "detail": "Recovery commands and persisted recovery-class rows are incompatible with older readers. An older node rejects recovery during Json<Command> extraction before admission; after rollback, decoding an E1 recovery execution fails and execution-list reads propagate the row error. recoveryCapable fences admission, not decoding. Existing shell_resource_exec, mission_resource_lane and resource_profile_keys health capabilities do not distinguish E1 recovery support from E0; there is no automatic mixed-version negotiation for this enum."
   },
   "downtime": {
     "status": "none",
     "detail": "No host deployment or caller cutover is activated by this change."
   },
   "manual": {
-    "status": "none",
-    "detail": "No operator action required."
+    "status": "changed",
+    "detail": "In a mixed fleet, upgrade each execution host and every client/reader of its resource state before submitting recovery commands there. Keep recoveryCapable disabled until that host is upgraded, and route recovery only to known-upgraded hosts; do not use existing health capability versions as proof of recovery support. Older hosts must continue receiving only the previously supported classes."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Retained sample rows provide permanent replay dedupe; reclamation of rows outside the trailing window remains bounded-debt follow-up."
+    "detail": "Retained sample rows provide permanent replay dedupe. Once recovery-class state is written, do not roll that host or its persisted-state readers back to E0: old deserializers cannot read the new enum and fail rather than skip or reinterpret it. Preserve the state and upgrade forward to an E1-capable reader; no downgrade converter is provided. Reclamation of samples outside the trailing window remains separate retention debt."
   }
 }
