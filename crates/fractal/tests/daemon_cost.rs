@@ -1274,6 +1274,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.to_string())
     }),
     get("GET /v1/doctor", "/v1/doctor"),
+    get("GET /v1/storage/status", "/v1/storage/status"),
     get("GET /v1/repair", "/v1/repair"),
     get("GET /v1/replication/status", "/v1/replication/status"),
     get("GET /v1/replication/records", "/v1/replication/records"),
