@@ -40,12 +40,51 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
-#[serde(rename_all = "camelCase")]
-pub enum RequestClass { Recovery, Landing, Check, #[default] Agent }
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub enum RequestClass { Recovery, Landing, Check, #[default] Agent, Unknown(String) }
 
 impl RequestClass {
     pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Recovery => "recovery",
+            Self::Landing => "landing", Self::Check => "check", Self::Agent => "agent",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// Future classes remain readable and round-trip losslessly, but grant no execution authority.
+    pub fn ensure_supported(&self) -> Result<()> {
+        anyhow::ensure!(!matches!(self, Self::Unknown(_)), "unsupported resource class {}; upgrade the execution host", self.as_str());
+        Ok(())
+    }
+}
+
+impl serde::Serialize for RequestClass {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RequestClass {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct ClassVisitor;
+        impl serde::de::Visitor<'_> for ClassVisitor {
+            type Value = RequestClass;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a resource class string")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+                Ok(match value {
+                    "recovery" => RequestClass::Recovery,
+                    "landing" => RequestClass::Landing, "check" => RequestClass::Check,
+                    "agent" => RequestClass::Agent, value => RequestClass::Unknown(value.to_owned()),
+                })
+            }
+        }
+        deserializer.deserialize_str(ClassVisitor)
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
@@ -455,7 +494,7 @@ pub(crate) fn prepare_finite(
     let (parent, member, child) = finite_slices(&policy.name, binding, unit);
     // Validate every envelope before mutating any unit.
     let parent_properties = finite_properties(policy.capacity, None, None)?;
-    let member_weights = Some(crate::resource_class::weights(policy.class));
+    let member_weights = Some(crate::resource_class::weights(&policy.class)?);
     let member_properties = member.as_ref().map(|member| {
         finite_properties(member_capacity, policy.memory_high_bytes, member_weights).map(|properties| (member, properties))
     }).transpose()?;
@@ -827,6 +866,23 @@ pub fn sccache_socket(runtime: &str, slice: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn future_resource_classes_round_trip_without_granting_authority() {
+        for name in ["future-class", "another-future-class"] {
+            let encoded = serde_json::to_string(name).unwrap();
+            let class: RequestClass = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(class, RequestClass::Unknown(name.into()));
+            assert_eq!(serde_json::to_string(&class).unwrap(), encoded);
+            assert!(class.ensure_supported().unwrap_err().to_string().contains(name));
+        }
+        for class in [RequestClass::Recovery, RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
+            let decoded: RequestClass = serde_json::from_str(&serde_json::to_string(&class).unwrap()).unwrap();
+            assert_eq!(decoded, class);
+            decoded.ensure_supported().unwrap();
+        }
+    }
+
     #[test]
     fn offline_member_grammar_accepts_exact_members_and_descendants_only() {
         let binding = crate::process::ResourceExecutionBinding {

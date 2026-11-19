@@ -1337,7 +1337,7 @@ impl NativeRuntime {
                 let lane = fractal_runtime::FiniteLane {
                     name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
                     memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
-                    class: request.class,
+                    class: request.class.clone(),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;

@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Keep accepted request snapshots and historical custody through confirmed retirement. Do not rewrite active reservations when changing host seeds."
+    "detail": "Keep accepted request snapshots and historical custody through confirmed retirement. Do not rewrite active reservations when changing host seeds. Future request-class strings remain losslessly readable as unsupported classes, including in execution lists; they cannot be submitted or acquire admission on this host. Unsupported active executions and memberships retain their state and custody for an upgraded reader rather than being reinterpreted as agent work."
   }
 }

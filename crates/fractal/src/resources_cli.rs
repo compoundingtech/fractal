@@ -232,7 +232,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
             "refused: daemon requires resource_profile_keys>=1; upgrade the execution host before requesting keyed resources or receipt files");
     }
     let cwd = std::env::current_dir()?;
-    let class = args.class.map(RequestClass::from).unwrap_or_else(|| parent.as_ref().map_or(RequestClass::Agent, |parent| parent.request.class));
+    let class = args.class.map(RequestClass::from).unwrap_or_else(|| parent.as_ref().map_or(RequestClass::Agent, |parent| parent.request.class.clone()));
     let id = uuid::Uuid::now_v7().to_string();
     let capacity = match (args.cores, args.memory.as_deref()) {
         (None, None) => None,

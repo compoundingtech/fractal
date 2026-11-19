@@ -188,7 +188,7 @@ impl Status {
     pub fn lane_head(&self, now: u64) -> Option<String> {
         self.state().lane_waits.iter()
             .filter(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
-            .min_by_key(|wait| wait.class)
+            .min_by(|left, right| left.class.cmp(&right.class))
             .map(|wait| wait.subject.clone())
     }
 
@@ -219,7 +219,7 @@ impl Status {
         let state = self.state();
         state.lane_waits.iter()
             .filter(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
-            .min_by_key(|wait| wait.class)
+            .min_by(|left, right| left.class.cmp(&right.class))
             .filter(|wait| now.saturating_sub(wait.since) >= aged)
             .map(|wait| (wait.subject.clone(), now.saturating_sub(wait.since)))
     }

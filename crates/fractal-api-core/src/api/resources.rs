@@ -253,12 +253,12 @@ pub(super) async fn list(State(state): State<AppState>, bound: Option<BoundActor
     let host = query.host.as_deref().unwrap_or(&state.node);
     let rows: Vec<_> = state.store.shell_resources(host, false).map_err(ApiError::internal)?.into_iter()
         .filter(|row| caller.as_ref().is_none_or(|caller| caller.owns(&row.command.lane.owner)))
-        .filter(|row| query.class.is_none_or(|class| row.command.lane.class == class))
+        .filter(|row| query.class.as_ref().is_none_or(|class| &row.command.lane.class == class))
         .filter(|row| query.head.as_ref().is_none_or(|head| row.head_start.as_ref() == Some(head)))
         .map(present).collect();
     let memberships: Vec<_> = state.store.resource_memberships_for_host(host).map_err(ApiError::internal)?.into_iter()
         .filter(|row| caller.as_ref().is_none_or(|caller| caller.owns(&row.request.owner)))
-        .filter(|row| query.class.is_none_or(|class| row.request.class == class))
+        .filter(|row| query.class.as_ref().is_none_or(|class| &row.request.class == class))
         .map(|mut row| { row.grant = None; row }).collect();
     let holds = if caller.is_none() { state.store.host_holds(Some(host), false).map_err(ApiError::internal)? } else { Vec::new() };
     let accountant = caller.is_none().then(|| state.seat_admission.snapshot(admission_now()));

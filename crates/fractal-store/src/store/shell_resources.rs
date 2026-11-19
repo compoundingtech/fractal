@@ -196,6 +196,7 @@ pub fn request_execution_id(scope: &RequestScope<'_>, request_id: uuid::Uuid) ->
 
 impl Store {
     pub fn submit_shell_resource(&self, mut command: Command, now: u64) -> Result<Execution> {
+        command.lane.class.ensure_supported()?;
         anyhow::ensure!(!command.id.is_empty() && !command.argv.is_empty(), "shell execution requires identity and argv");
         anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
         anyhow::ensure!(command.argv.iter().all(|argument| !argument.contains('\0')), "resource argv contains NUL");
@@ -306,6 +307,7 @@ impl Store {
         let transaction = connection.transaction()?;
         let body: String = transaction.query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [&execution.command.id], |row| row.get(0))?;
         let previous: Execution = serde_json::from_str(&body)?;
+        previous.command.lane.class.ensure_supported()?;
         // Terminal commands and their durable observations are immutable. The claim
         // is appended in this same transaction, so recovery cannot lose or duplicate it.
         if matches!(previous.state.as_str(), "completed" | "refused" | "cancelled") {
@@ -431,6 +433,28 @@ mod tests {
             profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: format!("shell:{id}"), step: format!("shell:{id}"), attempt: 1, invocation: Some(format!("shell:{id}")) },
         }, argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None }
+    }
+
+    #[test]
+    fn future_resource_class_rows_remain_readable_but_cannot_be_submitted() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut future = store.submit_shell_resource(command("future"), 1).unwrap();
+        future.command.lane.class = RequestClass::Unknown("future-class".into());
+        future.refusal_code = Some(resource_membership::RefusalCode::RecoveryNotAllowed);
+        store.update_shell_resource(&future).unwrap();
+        store.submit_shell_resource(command("current"), 2).unwrap();
+        let rows = store.shell_resources("host-a", false).unwrap();
+        assert_eq!(rows.len(), 2);
+        let future = rows.iter().find(|row| row.command.id == "future").unwrap();
+        assert_eq!(future.command.lane.class, RequestClass::Unknown("future-class".into()));
+        assert_eq!(serde_json::to_value(future).unwrap()["command"]["lane"]["class"], "future-class");
+        assert_eq!(store.shell_resource("future").unwrap().command.lane.class, future.command.lane.class);
+        assert_eq!(future.refusal_code, Some(resource_membership::RefusalCode::RecoveryNotAllowed));
+        assert!(store.update_shell_resource(future).unwrap_err().to_string().contains("unsupported resource class future-class"));
+        let mut request = command("unsupported");
+        request.lane.class = future.command.lane.class.clone();
+        assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class future-class"));
+        assert!(store.shell_resource_if_exists("unsupported").unwrap().is_none());
     }
 
     const ENV_SENTINEL: &str = "shell-environment-security-regression-sentinel";

@@ -10,12 +10,13 @@ pub struct Weights {
 
 /// Keep a tenfold separation between the existing classes. Linux weights are relative among
 /// runnable siblings, so unused service remains work-conserving rather than a fixed partition.
-pub fn weights(class: RequestClass) -> Weights {
-    match class {
+pub fn weights(class: &RequestClass) -> anyhow::Result<Weights> {
+    Ok(match class {
         RequestClass::Recovery | RequestClass::Landing => Weights { cpu: 1000, io: 1000 },
         RequestClass::Check => Weights { cpu: 100, io: 100 },
         RequestClass::Agent => Weights { cpu: 10, io: 10 },
-    }
+        RequestClass::Unknown(value) => anyhow::bail!("unsupported resource class {value}; upgrade the execution host"),
+    })
 }
 
 #[cfg(test)]
@@ -24,16 +25,17 @@ mod tests {
 
     #[test]
     fn class_weights_are_strictly_ordered_without_changing_core_quota() {
-        let landing = weights(RequestClass::Landing);
-        assert_eq!(weights(RequestClass::Recovery), landing);
-        let check = weights(RequestClass::Check);
-        let agent = weights(RequestClass::Agent);
+        let landing = weights(&RequestClass::Landing).unwrap();
+        assert_eq!(weights(&RequestClass::Recovery).unwrap(), landing);
+        let check = weights(&RequestClass::Check).unwrap();
+        let agent = weights(&RequestClass::Agent).unwrap();
         assert!(landing.cpu > check.cpu && check.cpu > agent.cpu);
         assert!(landing.io > check.io && check.io > agent.io);
         for class in [RequestClass::Recovery, RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
-            let value = weights(class);
+            let value = weights(&class).unwrap();
             assert!((1..=10000).contains(&value.cpu));
             assert!((1..=10000).contains(&value.io));
         }
+        assert!(weights(&RequestClass::Unknown("future-class".into())).is_err());
     }
 }
