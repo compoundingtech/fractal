@@ -73,7 +73,7 @@ when you need them.
 
 For this repository, **PR proof is hosted CI at the exact head**. Agents must not run
 `scripts/fractal-test` (or `scripts/st-test`) locally for PR proof. The accepted
-`"pr-proof": "hosted"` policy in `.st/prepush-policy.json` on `main` makes the pre-push hook
+`"pr-proof": "hosted"` policy in `.fractal/prepush-policy.json` on `main` makes the pre-push hook
 skip all local evidence work, including for agents with listed signers, and record `hosted_proof`.
 It is repository policy, not a per-push `ST_EVIDENCE_LOCAL=off` bypass. The public-content guard still blocks unsafe pushes.
 Policy is read from the base, preferring `.fractal/prepush-policy.json` when present; candidate policy cannot enable it.
