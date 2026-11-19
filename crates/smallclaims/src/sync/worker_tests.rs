@@ -4791,6 +4791,7 @@ impl Backend for SlowExport {
                 exchange,
                 round_trip.is_some(),
                 carrier,
+                authenticated_member_key,
             ).map_err(anyhow::Error::msg)?;
             received.notify_one();
             return std::future::pending().await;
@@ -5128,7 +5129,7 @@ async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate
     let right = Arc::new(plain_open(&right_path, "cedar").unwrap());
     assert_eq!(pending(&left), page.envelopes.len(), "receipt survives reopen before projection");
     let replay = Local(left.clone())
-        .receive("cedar", fleet_id, &page, None, Default::default())
+        .receive("cedar", fleet_id, &page, None, Default::default(), None)
         .await.unwrap();
     assert_eq!(replay.receipt.received, 0, "replay cannot insert a second envelope");
     assert_eq!(replay.receipt.duplicate, page.envelopes.len());
