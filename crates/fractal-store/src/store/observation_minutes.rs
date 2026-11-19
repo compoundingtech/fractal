@@ -188,6 +188,12 @@ mod tests {
     #[test]
     fn equal_claims_collapse_and_conflicting_claims_supply_no_evidence() {
         let store = Store::open_memory("minute-fold").unwrap();
+        let fleet = "observation-fold-fleet";
+        store.bind_fleet(fleet).unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        store.pin_fleet_anchor(key.public()).unwrap();
+        store.set_member_key(Some(key.clone())).unwrap();
+        store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
         let grant = "custom/client/fold-phone";
         store.append_client_operation_claim(&ClaimInput {
             subject: grant.into(), kind: "custom.client.pairing-completed".into(),
@@ -203,23 +209,30 @@ mod tests {
             target: "ios-connect".into(), carrier: "fabric".into(), path: None,
             start_ms: 60_000, count: 1, over: 0, max_ms: 100, buckets: vec![(103, 1)],
         };
+        let baseline = store.export_replication_exchange(fleet, &Default::default()).unwrap();
         assert!(store.accept_observation_minutes("person/example", std::slice::from_ref(&minute)).unwrap());
-        let append_independent = |minute: &ObservationMinute| {
-            store.seal_local_batches().unwrap();
-            store.with_all_runs_fenced(|tx| -> Result<(), FractalError> {
-                let claim = append_claim_tx(tx, store.origin(), &minute.subject(), KIND, Some("person/example"),
-                    &json!({"fields":minute,"evidence":[]}), &[], None).map_err(internal)?;
-                crate::pairing::append_operation_receipt_tx(tx, &claim).map_err(internal)?;
-                Ok(())
-            }).unwrap();
+        let append_independent = |origin: &str, minute: &ObservationMinute| {
+            let independent = Store::open_memory(origin).unwrap();
+            independent.pin_fleet_anchor(key.public()).unwrap();
+            independent.set_member_key(Some(key.clone())).unwrap();
+            independent.receive_replication_exchange("minute-fold", fleet, &baseline).unwrap();
+            independent.validate_replication_backlog().unwrap();
+            independent.project_replication_backlog().unwrap();
+            assert!(independent.accept_observation_minutes("person/example", std::slice::from_ref(minute)).unwrap());
+            let exchange = independent.export_replication_exchange(fleet, &Default::default()).unwrap();
+            store.receive_replication_exchange(origin, fleet, &exchange).unwrap();
+            store.validate_replication_backlog().unwrap();
+            store.project_replication_backlog().unwrap();
         };
-        // Simulate separate immutable batches, as when disconnected receivers admit
-        // the same phone report before either has received the other's claims.
-        append_independent(&minute);
+        // Disconnected receivers admit against the same pre-report graph, then send
+        // independently signed batches to the receiver through normal replication.
+        append_independent("minute-fold-equal", &minute);
         assert_eq!(store.observation_minutes(120_000).unwrap().len(), 1);
         let mut conflict = minute;
-        conflict.over = 1;
-        append_independent(&conflict);
+        conflict.report_digest = "b".repeat(64);
+        conflict.count = 2;
+        conflict.buckets = vec![(103, 2)];
+        append_independent("minute-fold-conflict", &conflict);
         assert!(store.observation_minutes(120_000).unwrap().is_empty());
     }
 
