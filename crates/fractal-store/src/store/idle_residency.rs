@@ -11,7 +11,7 @@ const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeatu
     carries: "automatic idle suspension and wake",
 };
 
-// Only demand-holding waiters recheck; a leader can disappear without a runtime action.
+// Recheck an unadmitted rival only with spare capacity; active owners invalidate slot release.
 const WAKE_QUEUE_RECHECK_MS: u128 = 1_000;
 
 // Reserve the source writer before the graph writer: separate WAL databases need both
@@ -329,10 +329,8 @@ impl Store {
         smallclaims::touched::note_read(|| "kind:runtime.action.succeeded".to_owned());
         smallclaims::touched::note_read(|| "kind:runtime.action.failed".to_owned());
         let initial = self.wake_demand(subject)?;
-        if initial.oldest.is_none() { return Ok(IdleWakeAdmission::default()); }
-        let queue_recheck_at = now.saturating_add(WAKE_QUEUE_RECHECK_MS);
-        if !initial.frontier.caught_up {
-            return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: Some(queue_recheck_at) });
+        if !initial.frontier.caught_up || initial.oldest.is_none() {
+            return Ok(IdleWakeAdmission::default());
         }
         let before = initial.frontier;
         let mut own_pending = initial.oldest;
@@ -340,6 +338,7 @@ impl Store {
         let mut candidates = Vec::new();
         let mut queued = Vec::new();
         let mut retry_at = None;
+        let mut own_eligible = false;
         let seats = self.idle_residency_episodes()?;
         for seat in seats {
             let Some((desired, _)) = self.desired_subject_with_writer(&seat)? else { continue; };
@@ -357,9 +356,7 @@ impl Store {
                 own_pending.take()
             } else {
                 let demand = self.wake_demand_untracked(&desired.subject)?;
-                if !demand.frontier.caught_up {
-                    return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
-                }
+                if !demand.frontier.caught_up { return Ok(IdleWakeAdmission::default()); }
                 demand.oldest
             };
             let Some(pending) = pending else { continue; };
@@ -377,20 +374,21 @@ impl Store {
                 let due = state.updated_at_unix_ms.saturating_add(delay);
                 if now < due { if desired.subject == subject { retry_at = Some(due); } continue; }
             }
-            if desired.subject == subject { retry_at = Some(queue_recheck_at); }
+            if desired.subject == subject { own_eligible = true; }
             candidates.push((!pending.person, pending.sent_ms, pending.subject, desired.subject, lineage, attempts));
         }
         candidates.sort();
         let available = concurrency.saturating_sub(active);
         let selected = candidates.into_iter().take(available).find(|candidate| candidate.3 == subject);
-        let demand = self.wake_demand(subject)?;
-        if before != demand.frontier {
-            return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
+        if available == 0 {
+            retry_at = None;
+        } else if own_eligible && selected.is_none() {
+            retry_at = Some(now.saturating_add(WAKE_QUEUE_RECHECK_MS));
         }
+        let demand = self.wake_demand(subject)?;
+        if before != demand.frontier { return Ok(IdleWakeAdmission::default()); }
         with_source_fence(self, || self.connection.batched(|tx| -> Result<IdleWakeAdmission> {
-            if !frontier_matches(self, tx, &demand.frontier)? {
-                return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
-            }
+            if !frontier_matches(self, tx, &demand.frontier)? { return Ok(IdleWakeAdmission::default()); }
             if owned(tx, &self.origin, subject)?.is_none() { return Ok(IdleWakeAdmission::default()); }
             declared_admission::validate_fleet(tx, &self.origin, &FEATURE).map_err(anyhow::Error::new)?;
             for (seat, lineage, pending, incarnation) in &queued {
@@ -619,12 +617,20 @@ mod tests {
             json!({"from":"person/avery","to":orchard,"content":"Person demand.","status":"sent","tags":[]}));
         assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_none());
         let resume = store.admit_idle_wake(orchard, 1, 9_000_000_000_000).unwrap().operation_id.unwrap();
-        assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_none());
+        let now = 9_000_000_000_000;
+        let (waiting, reads) = smallclaims::touched::record(|| store.admit_idle_wake(SEAT, 1, now).unwrap());
+        assert_eq!(waiting, IdleWakeAdmission::default(), "full capacity must not arm a polling deadline");
+        let incremental = crate::incremental::Incremental::default();
+        incremental.observe(&store).unwrap();
+        incremental.evaluated("member:garden", reads, waiting.retry_at_unix_ms);
+        assert!(!incremental.needs("member:garden", now + 73_000), "slow restores must not poll the queue");
         store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
             "runtime.action.succeeded", Some(orchard),
             &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"resumed","incarnation_id":"three"}}),
             &[], None, &crate::suspension::resume_completed_key(&resume))).unwrap().unwrap();
-        assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_some());
+        incremental.observe(&store).unwrap();
+        assert!(incremental.needs("member:garden", now + 73_000), "slot release re-ranks the subscribed waiter");
+        assert!(store.admit_idle_wake(SEAT, 1, now + 73_000).unwrap().operation_id.is_some());
     }
 
     #[test]
