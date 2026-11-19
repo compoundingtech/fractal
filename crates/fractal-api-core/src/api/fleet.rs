@@ -83,6 +83,7 @@ pub async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetSta
                 }),
             view: store.fleet_view_sealed()?,
             peers: replication.peers,
+            replication_health: replication.health,
             invites: store.fleet_invites(false)?,
             removed: crate::fleet::file::RemovalNotice::load(&state_dir),
         })

@@ -2025,6 +2025,7 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
             })
             .unwrap();
     }
+    state.store.record_replication_worker_heartbeat();
     // Both exchange with this daemon, then cedar's last exchange is aged a day.
     for peer in ["birch", "cedar"] {
         let source = smallclaims::store::Store::open_memory(
@@ -2033,9 +2034,13 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
         )
         .unwrap();
         let summary = source.export_replication_summary(fleet).unwrap();
+        let member_key = state.store.fleet_view_sealed().unwrap().members.into_iter()
+            .find(|member| member.name == peer && member.state == "current").unwrap().member_key;
         state
             .store
-            .receive_replication_exchange(peer, fleet, &summary)
+            .receive_replication_exchange_via(
+                peer, fleet, &summary, false, Default::default(), Some(&member_key),
+            )
             .unwrap();
     }
     state.store.age_replication_peer_for_test("cedar");
