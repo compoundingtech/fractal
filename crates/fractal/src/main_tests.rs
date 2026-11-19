@@ -9730,6 +9730,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
 
 #[tokio::test]
 async fn mission_show_joins_only_the_run_revisions_source_provenance() {
+    use fractal_daemon::SeatsStoreCore as _;
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("publisher").unwrap());
     let source = r#"version 2
@@ -9784,7 +9785,8 @@ mission "source-bound" state="ready" {
 
 #[test]
 fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
-    let source = include_str!("main.rs");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let source = fs::read_to_string(root.join("main.rs")).unwrap();
     let lookup = source.split_once("async fn load_run_publication(").unwrap().1
         .split_once("async fn load_run_source_provenance(").unwrap().0;
     assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
@@ -9797,7 +9799,8 @@ fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() 
     assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
     assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
     assert!(!follow.contains("mission_publications("));
-    let show = include_str!("launch_cli.rs").split_once("MissionViewCommand::Show(").unwrap().1
+    let show_source = fs::read_to_string(root.join("launch_cli.rs")).unwrap();
+    let show = show_source.split_once("MissionViewCommand::Show(").unwrap().1
         .split_once("print_mission_tree_continuation").unwrap().0;
     assert!(show.contains("load_run_publication(client, &run)"));
     assert!(!show.contains("mission_publications("));
