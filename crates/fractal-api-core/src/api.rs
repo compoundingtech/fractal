@@ -853,7 +853,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/claims", get(records::list_claims).post(records::post_claim))
         .route("/v1/usage", get(operations::get_usage))
-        .route("/v1/slo", get(operations::get_slo))
+        .route("/v1/slo", get(operations::get_slo).post(operations::ingest_roll))
+        .route("/v1/slo/observe", post(operations::observe_roll))
+        .route("/v1/slo/roll-intent", get(operations::roll_intent))
         .route("/v1/slo/history", get(operations::get_slo_history))
         .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
@@ -11830,6 +11832,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    rows.insert(budgets, crate::roll_completion::row(store, now));
     let admission = crate::admission_objectives::rows(store, now)?;
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, admission));
