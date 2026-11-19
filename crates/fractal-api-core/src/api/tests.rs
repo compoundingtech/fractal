@@ -293,6 +293,7 @@ mission "landing-proof" state="ready" {
             &MissionRunRequest { idempotency_key: "landing-named-child".into(), ..linked_request.clone() },
             &parent, &parent.steps[0].subject, "pr-42-head12",
             Some(if allowed { "agent/example/background" } else { "agent/example/lander" }),
+            None,
         ).unwrap();
         let scoped = state.store.create_program_child_mission_run(
             &MissionRunRequest { idempotency_key: "landing-scoped-child".into(), ..linked_request },

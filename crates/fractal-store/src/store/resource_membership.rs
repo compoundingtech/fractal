@@ -445,9 +445,16 @@ impl Store {
     pub fn attach_resource_child(&self, grant: &Grant, owner: &Owner, child: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        let mut member = read(&transaction, &grant.membership_id)?;
+        self.attach_resource_child_tx(&transaction, grant, owner, child)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Attach custody in the same writer transaction that publishes a named child.
+    pub fn attach_resource_child_tx(&self, transaction: &Transaction<'_>, grant: &Grant, owner: &Owner, child: &str) -> Result<()> {
+        let mut member = read(transaction, &grant.membership_id)?;
         authorized(&member, owner)?;
-        fenced(&transaction, &member, grant)?;
+        fenced(transaction, &member, grant)?;
         anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched"), "resource scope is closing");
         if member.child_runs.iter().any(|run| run == child) { return Ok(()); }
         let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1)",
@@ -458,7 +465,6 @@ impl Store {
         // events wake readers; emitting a lane event here self-wakes a capacity-refused parent.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h32081bb17f3d owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
             rusqlite::params![member.request.id,serde_json::to_string(&member)?])?;
-        transaction.commit()?;
         Ok(())
     }
 

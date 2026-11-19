@@ -50,7 +50,10 @@ enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
     Declaration(MissionWorkspaceDeclaration),
-    NamedProgram { report_to: Option<&'a str> },
+    NamedProgram {
+        report_to: Option<&'a str>,
+        resource: Option<(&'a resource_membership::Grant, &'a resource_membership::Owner)>,
+    },
 }
 
 /// The first canonical creation receipt is immutable authority; requester is attribution only.
@@ -640,6 +643,7 @@ impl Store {
         child: ChildMissionContext,
         run_id: &str,
         report_to: Option<&str>,
+        resource: Option<(&resource_membership::Grant, &resource_membership::Owner)>,
     ) -> Result<MissionRunView, FractalError> {
         let subject = if run_id.starts_with("mission-run/") {
             run_id.to_owned()
@@ -651,7 +655,7 @@ impl Store {
             crate::mission::validate_report_to(report_to)?;
         }
         self.create_mission_run_context(request, Some(child), Some(&subject), None,
-            Some(RunCreationSource::NamedProgram { report_to }), None, None)
+            Some(RunCreationSource::NamedProgram { report_to, resource }), None, None)
     }
 
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
@@ -775,7 +779,11 @@ impl Store {
     ) -> Result<MissionRunView, FractalError> {
         let explicit_program_id = matches!(&source, Some(RunCreationSource::NamedProgram { .. }));
         let report_to = match &source {
-            Some(RunCreationSource::NamedProgram { report_to }) => *report_to,
+            Some(RunCreationSource::NamedProgram { report_to, .. }) => *report_to,
+            _ => None,
+        };
+        let resource = match &source {
+            Some(RunCreationSource::NamedProgram { resource, .. }) => *resource,
             _ => None,
         };
         let (retry, supersession, workspace_declaration) = match source {
@@ -887,6 +895,12 @@ impl Store {
             }
             let view = serde_json::from_str(&response).map_err(internal)?;
             return Ok(view);
+        }
+        // A public name and its custody become visible in the same owner-fenced commit.
+        // Conflicts/replays above never add custody, and any later refusal rolls it back.
+        if let Some((grant, owner)) = resource {
+            self.attach_resource_child_tx(transaction, grant, owner, &subject)
+                .map_err(smallclaims::error::typed)?;
         }
         stages.enter("admission");
         owned_sets::guard_mission_start(transaction, mission_id)?;
