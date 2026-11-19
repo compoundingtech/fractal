@@ -1,8 +1,8 @@
 // Objectives and budgets in the Usage tab, as the Fractal terminal UI's Usage tab shows them
-// (crates/fractal-tui/src/ui/objectives.rs). The rows come from st's `slo.list` read, which also
+// (crates/fractal-tui/src/ui/objectives.rs). The rows come from Fractal's `slo.list` read, which also
 // says how urgent each is (`tone`) and, for a budget with enough recent readings, what it will
 // have used when it resets (`forecast_used_percent`) and when it runs out first
-// (`runs_out_at_unix_ms`). Nothing here decides what is red: st serves that.
+// (`runs_out_at_unix_ms`). Nothing here decides what is red: Fractal serves that.
 import type { SloHistory, SloRow } from '../../clients/typescript/fractal-client';
 
 export type SloTone = 'red' | 'green' | 'yellow' | 'quiet';
@@ -43,7 +43,7 @@ export const secondLine = (row: SloRow, now: number) => {
   return forecast ? { text: `${row.current} · `, forecast } : { text: `${row.current} · target ${row.target} · ${row.window}`, forecast: null };
 };
 
-/** Budgets before objectives, each in the order st lists them. */
+/** Budgets before objectives, each in the order Fractal lists them. */
 export function sloGroups(rows: readonly SloRow[]): Array<{ kind: 'budget' | 'objective'; title: string; rows: SloRow[] }> {
   return (['budget', 'objective'] as const)
     .map(kind => ({ kind, title: `${kind}s`, rows: rows.filter(row => row.kind === kind) }))

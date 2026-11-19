@@ -109,7 +109,7 @@ const accountId = (account: UsageAccount) => `account/${account.account ?? accou
 /**
  * Every declared account in name order, whether or not it spent or reported limits; then any
  * account that spent or reported limits without a declaration, the largest spender first, and
- * unattributed spend last. Nothing st recorded is left out.
+ * unattributed spend last. Nothing Fractal recorded is left out.
  */
 export function accounts(rows: readonly UsageRow[], limits: readonly UsageLimit[], declared: readonly UsageAccount[] = []): Array<{ id: string; total: Total; limit?: UsageLimit; declared?: UsageAccount }> {
   const spent = groups(rows, 'account');

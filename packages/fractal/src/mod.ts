@@ -115,7 +115,7 @@ const optionalChild = ({
 
 const Text = Schema.NonEmptyString
 
-/** An st subject ID, e.g. a seat or mission path; seats are addressed as `agent/<id>`. */
+/** A Fractal subject ID, e.g. a seat or mission path; seats are addressed as `agent/<id>`. */
 export const SubjectId = Schema.String.pipe(
   Schema.refine(
     (s): s is string =>
@@ -129,7 +129,7 @@ export const SubjectId = Schema.String.pipe(
   Schema.annotate({ identifier: 'Fractal.SubjectId' }),
 )
 
-/** A validated st subject ID. */
+/** A validated Fractal subject ID. */
 export type SubjectId = typeof SubjectId.Type
 
 const LocalId = Schema.String.pipe(
@@ -506,7 +506,7 @@ const isValidAgent = (a: typeof AgentSchemaFields.Type): boolean =>
   )
 
 /**
- * A durable st agent declaration. Roots orchestrate and delegate heavy work to
+ * A durable Fractal agent declaration. Roots orchestrate and delegate heavy work to
  * harness subagents and missions; role and persona/runtime selectors are not authored.
  */
 export const AgentSchema = AgentSchemaFields.pipe(
@@ -609,7 +609,7 @@ export const HumanGateSchema = Schema.Struct({
   ),
 }).annotate({ identifier: 'Fractal.HumanGate' })
 
-/** Graph predicates and built-in mechanical gates accepted by st. */
+/** Graph predicates and built-in mechanical gates accepted by Fractal. */
 export const GateSchema = Schema.Union([
   Schema.Struct({ name: GateName, kind: Schema.Literal('exists'), subject: FullSubject }),
   Schema.Struct({
@@ -728,7 +728,7 @@ const Dependencies = DependencyInput.pipe(
   }),
 )
 
-/** A typed st resource. */
+/** A typed Fractal resource. */
 export const ResourceSchema = Schema.Struct({
   id: SubjectId,
   kind: Schema.Literals(['vcs.repository', 'filesystem.file', 'vcs.pull-request', 'vcs.ref']),
@@ -744,7 +744,7 @@ const UniqueFields = Schema.NonEmptyArray(Text).pipe(
   Schema.refine((fields): fields is typeof fields => new Set(fields).size === fields.length),
 )
 
-/** A ref observer; st scopes its ID when declared within a mission run. */
+/** A ref observer; Fractal scopes its ID when declared within a mission run. */
 export const ObserverSchema = Schema.Struct({
   id: SubjectId,
   resource: FullSubject.pipe(Schema.refine((s): s is string => s.startsWith('resource/'))),
@@ -1056,7 +1056,7 @@ export const LoopSchema = Schema.Struct({
 
 /**
  * Scheduled work names an exact `mission@revision`, or an unpinned mission ID whose ready
- * published head st resolves at each occurrence. st reads any `@` as a pinned reference.
+ * published head Fractal resolves at each occurrence. Fractal reads any `@` as a pinned reference.
  */
 const ScheduledMission = Schema.Union([
   Revision,
@@ -1082,7 +1082,7 @@ export const ScheduleSchema = Schema.Struct({
 
 /**
  * Reference an imported agent declaration without copying its launch configuration.
- * Native st reports only to agents; people must be reached through their own agent.
+ * Native Fractal reports only to agents; people must be reached through their own agent.
  * Kit metadata on the declaration is not part of the reference.
  */
 export const ReportToSchema = Schema.declare<typeof AgentSchema.Encoded>(isAgentDeclaration).pipe(
