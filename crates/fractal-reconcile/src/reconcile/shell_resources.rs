@@ -81,6 +81,40 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(retired)
     }
 
+    fn capture_retirement_evidence(&self, execution: &mut Execution) -> Result<()> {
+        use crate::store::resource_profile_learner::{Coverage, EndReason};
+        if execution.result.as_ref().is_some_and(|result| result.evidence.retirement_generation.is_some()) {
+            return Ok(());
+        }
+        let member = self.store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner)?;
+        let Some(root) = member.roots.iter().find(|root| root.runtime_id == execution.command.id) else { return Ok(()); };
+        let Some(generation) = &root.execution else { return Ok(()); };
+        let enforced = execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced;
+        let counters = if enforced {
+            self.runtime.resource_exec_cgroup(&execution.command.id, &generation.generation_id)?
+        } else { Default::default() };
+        let declared_full = execution.command.lane.profile_estimate.as_ref().is_some_and(|estimate|
+            estimate.learning_coverage == fractal_runtime::ResourceLearningCoverage::Full);
+        let full = declared_full && enforced && member.roots.len() == 1 && member.child_runs.is_empty()
+            && counters.memory_peak_bytes.is_some() && counters.memory_events.is_some()
+            && counters.io_stat.is_some() && counters.populated.is_some();
+        let result = execution.result.get_or_insert_with(PayloadResult::default);
+        result.memory_peak_bytes = counters.memory_peak_bytes.or(result.memory_peak_bytes);
+        result.evidence = crate::store::resource_profile_learner::evidence::Evidence {
+            pre_retirement_populated: counters.populated,
+            learning_coverage: if full { Coverage::Full } else { Coverage::ClientOnly },
+            memory_events: counters.memory_events, io_stat: counters.io_stat,
+            retirement_generation: Some(generation.generation_id.clone()),
+            retirement_confirmed: false,
+            end_reason: if execution.cancel { EndReason::Cancelled }
+                else if execution.timed_out { EndReason::TimedOut }
+                else if result.exit_signal.is_some() { EndReason::Signalled }
+                else if result.exit_code.is_some() { EndReason::Natural }
+                else { EndReason::Unknown },
+        };
+        Ok(())
+    }
+
     fn shell_payload_observation(&self, execution: &Execution, generation: &str, now: u64) -> Result<PayloadResult> {
         let cwd = &execution.command.cwd;
         let head_end = std::process::Command::new("git").current_dir(cwd).args(["rev-parse", "HEAD"]).output()
@@ -90,7 +124,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .args(["status", "--porcelain", "--untracked-files=normal"]).output()
             .ok().filter(|output| output.status.success()).map(|output| output.stdout.is_empty());
         let memory_peak_bytes = if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
-            self.runtime.resource_exec_memory_peak(&execution.command.id, generation)?
+            self.runtime.resource_exec_cgroup(&execution.command.id, generation)?.memory_peak_bytes
         } else { None };
         Ok(PayloadResult {
             head_start: execution.head_start.clone(), clean_start: execution.clean_start,
@@ -98,6 +132,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             wall_duration_ms: self.store.resource_execution_elapsed(&execution.command.lane.id,
                 &execution.command.lane.owner, &execution.command.id, now)?.context("shell release clock missing")?,
             memory_peak_bytes,
+            ..PayloadResult::default()
         })
     }
 
@@ -199,6 +234,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The native root is the observer, not the payload. Only its result file can
         // identify the payload's exit code/signal; missing publication means unknown.
         execution.exit_code = None; execution.exit_signal = None;
+        let evidence = execution.result.as_ref().map(|result| result.evidence.clone());
         if !self.read_shell_payload_result(execution)? {
             let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
             if let Some(previous) = &execution.result {
@@ -207,6 +243,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             execution.result = Some(result);
         }
+        if let (Some(result), Some(evidence)) = (execution.result.as_mut(), evidence) {
+            result.evidence = evidence;
+        }
         Ok(())
     }
 
@@ -214,8 +253,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         if matches!(execution.state.as_str(), "finishing" | "finishing-refused") {
             let refused = execution.state == "finishing-refused";
+            self.capture_retirement_evidence(execution)?;
+            if self.store.update_shell_resource(execution)? { self.signal_changed(); }
             if self.retire_shell_resource(execution)? {
                 self.finalize_retired_shell_result(execution)?;
+                if let Some(result) = execution.result.as_mut() { result.evidence.retirement_confirmed = true; }
                 execution.state = if refused { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
                 execution.ended_at = Some(now);
             }
@@ -408,6 +450,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             Err(error) => return Err(error.into()),
         }
+        self.capture_retirement_evidence(execution)?;
         self.store.end_resource_execution(&grant, &execution.command.id, now)?;
         execution.state = if refusing { "finishing-refused" } else { "finishing" }.into();
         if !refusing {
@@ -419,6 +462,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // can turn a completed payload into an observation-less cancellation.
         if self.store.update_shell_resource(execution)? { self.signal_changed(); }
         if !self.retire_shell_resource(execution)? { return Ok(()); }
+        if let Some(result) = execution.result.as_mut() { result.evidence.retirement_confirmed = true; }
         execution.state = if refusing { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
         execution.ended_at = Some(now);
         self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);

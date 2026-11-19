@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Host-local retirement-qualified learner samples conservative resource profiles and brakes pressured admission. Samples persist per execution generation and the estimator reads a bounded trailing window.",
+  "replay": {
+    "status": "changed",
+    "detail": "One immutable sample row per qualified execution generation is retained, including outside the estimator's trailing window, so replays stay deduplicated."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Local resource_profile_samples_v1 stores host-local sample rows. RequestClass gains the recovery enum value in wire commands and persisted execution/membership state; no graph claim schema changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Samples are recorded only in the terminal receipt transaction after confirmed whole-tree retirement; rejected or truncated retirements are not admitted. Recovery admission requires the host profile's recoveryCapable gate and a measured filesystem free-space observation."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Recovery is a new wire and persisted RequestClass value. Readers older than E0 #6762 at e8836f59b505bd7e23f02d470a7c91eda20eaac4 reject recovery during Json<Command> extraction; after rollback, one persisted recovery execution makes their whole selected execution-list read fail. That E0 head adds lossless Unknown-class decoding and the recovery-not-allowed refusal reader: lists remain readable, but unsupported submissions/admission are rejected and active state/custody is retained unchanged with diagnostics until upgrade. recoveryCapable fences admission only, not decoding. Existing shell_resource_exec, mission_resource_lane and resource_profile_keys health versions do not distinguish E1 recovery support from E0; there is no automatic mixed-version negotiation for this enum."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No host deployment or caller cutover is activated by this change."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "In a mixed fleet, deploy at least the E0 e8836f59b505bd7e23f02d470a7c91eda20eaac4 reader to hosts and clients that may read recovery state before enabling E1 writers. Upgrade an execution host to E1 before routing recovery commands there; keep recoveryCapable disabled until then, and do not use existing health capability versions as proof of recovery support. Older hosts must continue receiving only previously supported classes."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Retained sample rows provide permanent replay dedupe. Do not roll recovery state back to readers older than E0 e8836f59b505bd7e23f02d470a7c91eda20eaac4: they cannot decode recovery-class rows. That E0 reader can list and preserve these rows without reinterpreting or launching them, but unsupported active executions and custody remain held for an upgraded reader; it does not continue E1 recovery semantics. Preserve the state and upgrade forward to E1 to resume supported reconciliation. Reclamation of samples outside the trailing window remains separate retention debt."
+  }
+}
