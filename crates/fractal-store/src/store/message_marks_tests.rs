@@ -589,13 +589,15 @@ fn freshness_membership_fixture() -> Store {
         let connection = store.connection.write();
         for (subject, member) in [
             ("agent/null", None),
+            // A malformed member cannot enter the agent host expression index. Non-agent
+            // declarations still exercise the reader's exact member-decoding contract.
             ("agent/malformed", Some("{")),
             ("agent/incomplete", Some(r#"{"host":"node"}"#)),
             ("agent/invalid", Some(r#"{"host":"node","kind":"future-kind"}"#)),
         ] {
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb36605174032 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
-                 SELECT ?1,'agent',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
+                /* sqlite-large-value: allow-for-now lv-h5affa7f5bf63 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+                 SELECT ?1,'resource',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
                 params![subject, member, RECIPIENT],
             ).unwrap();
         }
