@@ -10,9 +10,106 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import signal
+import tempfile
 import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
+
+
+def fetch_local(repo, source, commit, *, timeout=60):
+    """Called only under delivery.lock, which owns the private checkout."""
+    pack = Path(git(repo, "rev-parse", "--git-path", "objects/pack"))
+    if not pack.is_absolute():
+        pack = repo / pack
+    started = time.time_ns()
+    lsof = shutil.which("lsof")
+    if not lsof and sys.platform == "darwin":
+        lsof = "/usr/sbin/lsof"
+
+    def clean_before(cutoff):
+        if not lsof:
+            return  # No liveness proof: retain the file.
+        for pattern in ("tmp_pack_*", "tmp_idx_*"):
+            for path in pack.glob(pattern):
+                try:
+                    before = path.stat()
+                    if not path.is_file() or before.st_mtime_ns >= cutoff:
+                        continue
+                    if before.st_mtime_ns >= started - 3600 * 1_000_000_000:
+                        continue
+                    owners = subprocess.run([lsof, "-t", "--", str(path)],
+                        capture_output=True, text=True, timeout=5)
+                    # lsof returns 1 with no output for a file with no open users.
+                    # Errors, warnings, unavailable lsof and live users fail closed.
+                    if owners.returncode != 1 or owners.stdout or owners.stderr:
+                        continue
+                    after = path.stat()
+                    if (before.st_dev, before.st_ino, before.st_mtime_ns) == (
+                            after.st_dev, after.st_ino, after.st_mtime_ns):
+                        path.unlink()
+                except (OSError, subprocess.SubprocessError):
+                    continue
+
+    clean_before(started)
+    # Isolate transfer objects: fresh shared pack names do not prove ownership,
+    # even when index-pack briefly closes them before its final rename.
+    objects = pack.parent.resolve()
+    staging = Path(tempfile.mkdtemp(prefix="delivery-fetch-", dir=objects.parent))
+    (staging / "pack").mkdir()
+    env = {**os.environ, "GIT_OBJECT_DIRECTORY": str(staging),
+           "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(objects)}
+    previous_term = signal.getsignal(signal.SIGTERM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    process = None
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    try:
+        signal.signal(signal.SIGTERM, terminate)
+        # SIGTERM remains blocked until the new process group is registered.
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "fetch", "--no-tags", "--no-auto-maintenance",
+             "--no-write-fetch-head", "--keep", str(source), commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True, env=env,
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask))
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        stdout, stderr = process.communicate(timeout=timeout)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
+        # Keep downloaded objects packed. Publish complete packs before indexes
+        # advertise them; .keep is private transfer bookkeeping, not retention.
+        paths = [path for path in staging.rglob("*")
+                 if path.is_file() and path.suffix != ".keep"]
+        order = {".pack": 1, ".idx": 2, ".rev": 3}
+        for path in sorted(paths, key=lambda path: order.get(path.suffix, 0)):
+            destination = objects / path.relative_to(staging)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(path, destination)
+            except FileExistsError:
+                pass
+        # Never expose a FETCH_HEAD whose object promotion has not completed.
+        fetch_head = Path(git(repo, "rev-parse", "--absolute-git-dir")) / "FETCH_HEAD"
+        pending_head = staging / "FETCH_HEAD"
+        pending_head.write_text(commit + "\t\tlocal verified snapshot\n")
+        os.replace(pending_head, fetch_head)
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        raise
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        shutil.rmtree(staging)
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def policy_digest(policy):
@@ -587,19 +684,46 @@ class Delivery:
         repo = self.state / "checkout"
         if not repo.exists():
             run(["git", "clone", "--no-checkout", str(self.args.repo), str(repo)])
-        if self.args.ref.startswith("origin/"):
-            remote = self.args.expected_origin
-            ref = "refs/heads/" + self.args.ref[len("origin/"):]
-        else:
-            remote, ref = str(self.args.repo), self.args.ref
+        # Freshness belongs to the source repository's remote-ref updater.
+        # Snapshot its remote-tracking ref, never its potentially unpushed HEAD.
+        ref = ("refs/remotes/" + self.args.ref if self.args.ref.startswith("origin/")
+               else self.args.ref)
         observed = self.data.get("observed")
         trusted_head = self.data.get("trusted_head", self.args.trusted_commit)
+        branch = self.args.ref.removeprefix("origin/")
+        pinned = len(branch) == 40 and all(c in "0123456789abcdef" for c in branch)
         try:
-            # Capture stderr: Git fetch diagnostics can contain credential-bearing URLs.
-            subprocess.run(["git", "-C", str(repo), "fetch", "--no-tags", remote, ref],
-                           check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=60)
+            publication = subprocess.run(
+                ["git", "ls-remote", "--heads", self.args.expected_origin,
+                 "refs/heads/*" if pinned else "refs/heads/" + branch],
+                check=True, capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.record("fetch_failed", reason="publication_unavailable")
+            return  # No publication proof: no build, install or cached delivery.
+        published = [line.split()[0] for line in publication.splitlines()]
+        try:
+            snapshot = git(self.args.repo, "rev-parse", "--verify", ref + "^{commit}")
+        except (OSError, subprocess.SubprocessError):
+            self.record("fetch_failed", reason="source_snapshot_unavailable")
+            return
+        if snapshot not in published:
+            # Pinned historical commits may be ancestors of a published tip,
+            # but only using tips already present in the local object DB.
+            accepted = pinned and any(subprocess.run(
+                ["git", "-C", str(self.args.repo), "merge-base", "--is-ancestor",
+                 snapshot, tip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ).returncode == 0 for tip in published)
+            if not accepted:
+                self.record("fetch_failed", reason="source_not_published")
+                return
+        snapshot_time = git(self.args.repo, "show", "-s", "--format=%cI", snapshot)
+        self.record("source_snapshot", commit=snapshot, ref=ref,
+                    commit_time=snapshot_time)
+        try:
+            fetch_local(repo, self.args.repo, snapshot)
             head = git(repo, "rev-parse", "FETCH_HEAD^{commit}")
+            if head != snapshot:
+                raise ValueError("Fetched revision does not match the source snapshot")
         except subprocess.SubprocessError:
             if not observed or observed["commit"] != trusted_head:
                 raise ValueError("Fetch failed; no previously trusted observation is available") from None
