@@ -42,7 +42,7 @@ pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(rename_all = "camelCase")]
-pub enum RequestClass { Landing, Check, #[default] Agent }
+pub enum RequestClass { Recovery, Landing, Check, #[default] Agent }
 
 impl RequestClass {
     pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
@@ -410,7 +410,7 @@ fn finite_slices(
     (parent, member, child)
 }
 
-fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>) -> Result<Vec<String>> {
+fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>, weights: Option<crate::resource_class::Weights>) -> Result<Vec<String>> {
     let mut properties = match capacity {
         Some(capacity) => {
             anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
@@ -429,6 +429,14 @@ fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>)
         "IOAccounting=yes".to_owned(),
         memory_high_bytes.map_or_else(|| "MemoryHigh=infinity".to_owned(), |high| format!("MemoryHigh={high}")),
     ]);
+    // Class weights order contention between concurrent member executions; the aggregate
+    // parent slice stays unweighted so lanes compete by occupancy, not by class.
+    if let Some(weights) = weights {
+        properties.extend([
+            format!("CPUWeight={}", weights.cpu),
+            format!("IOWeight={}", weights.io),
+        ]);
+    }
     Ok(properties)
 }
 
@@ -446,11 +454,12 @@ pub(crate) fn prepare_finite(
     }
     let (parent, member, child) = finite_slices(&policy.name, binding, unit);
     // Validate every envelope before mutating any unit.
-    let parent_properties = finite_properties(policy.capacity, None)?;
+    let parent_properties = finite_properties(policy.capacity, None, None)?;
+    let member_weights = Some(crate::resource_class::weights(policy.class));
     let member_properties = member.as_ref().map(|member| {
-        finite_properties(member_capacity, policy.memory_high_bytes).map(|properties| (member, properties))
+        finite_properties(member_capacity, policy.memory_high_bytes, member_weights).map(|properties| (member, properties))
     }).transpose()?;
-    let child_properties = finite_properties(member_capacity, policy.memory_high_bytes)?;
+    let child_properties = finite_properties(member_capacity, policy.memory_high_bytes, member_weights)?;
     let units = std::iter::once((&parent, parent_properties))
         .chain(member_properties)
         .chain(std::iter::once((&child, child_properties)));
@@ -941,8 +950,8 @@ mod tests {
 
     #[test]
     fn finite_properties_keep_member_and_parent_envelopes_separate() {
-        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None).unwrap();
-        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2)).unwrap();
+        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None, None).unwrap();
+        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2), None).unwrap();
         assert!(parent.iter().any(|value| value == "CPUQuota=400%"));
         assert!(parent.iter().any(|value| value == "MemoryMax=4294967296"));
         assert!(parent.iter().any(|value| value == "MemoryHigh=infinity"));
@@ -952,10 +961,10 @@ mod tests {
         for properties in [&parent, &child] {
             assert!(properties.iter().any(|value| value == "IOAccounting=yes"));
         }
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0)).is_err());
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB)).is_err());
-        assert!(finite_properties(None, Some(GIB)).is_err());
-        assert!(finite_properties(None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0), None).is_err());
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB), None).is_err());
+        assert!(finite_properties(None, Some(GIB), None).is_err());
+        assert!(finite_properties(None, None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
     }
 
     #[test]

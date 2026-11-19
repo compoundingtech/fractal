@@ -21,13 +21,12 @@ serialized admission decision, the admitted generation, process placement, and r
 owns enforcement. Graph observations describe those facts; a replicated grant-shaped claim cannot
 launch a process. No standing lane worker or replicated graph semaphore grants resource capacity.
 
-A named lane policy binds an execution host, `maxMembers`, a workload profile key (or historical
-raw CPU/memory declaration), and required coverage. There is no implicit finite-execution
-footprint: an unresolved declaration without complete raw values is refused. The host refuses a
-conflicting policy for an existing name. Every request has a class: `landing`, `check` or `agent` (the default). Classes
-are served in that order. Within a class, FIFO is preferred, but a fitting later ticket may
-backfill a head that does not fit until that head has waited 15 minutes. A lower class never
-bypasses a higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+A named lane policy binds an execution host, `maxMembers`, a workload profile key and required
+coverage. Roll B refuses raw declarations and unknown keys. The host refuses a conflicting
+policy for an existing name. Classes are served in order: `recovery`, `landing`, `check`, `agent`
+(the default). Within a class, FIFO is preferred, but a fitting later ticket may backfill a head
+that does not fit until that head has waited 15 minutes. A lower class never bypasses a
+higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
@@ -58,8 +57,7 @@ key, not mutable seed revisions. Clients cannot supply `profile_estimate`.
 
 Disk location is separate: CLI `--disk-path` defaults to the caller's working directory for a
 keyed root; Effect `diskPath` and KDL `disk-path` must be explicit when the seed reserves disk.
-Until the raw-caller cutover, no-key raw declarations remain supported, and an unknown key
-requires a complete explicit raw declaration. There are no fleet-host defaults or client lookups.
+There are no fleet-host defaults or client lookups; missing or unknown keys are refused.
 Seed estimates expose their seed revision, declared source/reason, zero memory/disk samples and
 no learned revision. Optional seed `memoryHigh` is copied as `memory_high_bytes`; without it no
 MemoryHigh is synthesized. Charged/enforced memory maximum remains the seed's `memory`. Learned
@@ -68,6 +66,32 @@ Linux keeps the named parent lane's aggregate envelope separate from each execut
 child slice. CPU/memory limits (and any explicit MemoryHigh) apply per generation; aggregate
 bounds never shrink below live launch, admitted or retiring snapshots. Both levels enable IO
 accounting, and enforced launch verifies the actual parent/child controls before payload release.
+
+### Learning, pressure and recovery
+
+`learningCoverage` defaults to `client-only`; no keys currently have certified full coverage.
+Only explicit `full` coverage, confirmed retirement and untruncated measurements can train the
+learner. Untruncated means the entire cgroup was already `populated=0` before teardown, not
+merely empty after forced cleanup. OOM/limit events, cancellation, timeout, missing measurements
+and unknown retirement are excluded; natural test failures are not excluded just for failing.
+Receipts retain the evidence and learning decision. Estimates use per-key p95 with a 6/5 memory
+maximum; host `profileReadiness` attestations (`nixPerBuildCgroups`, `ioAccounting`,
+`diskMeasurement`) must all be true before learning can lower declared seeds.
+
+On Linux, `psiBrake` observes every five seconds: memory `full avg60 >= 1%` or IO
+`some avg60 >= 25%` sustained for 60 seconds pauses new admissions without killing holders.
+Resume requires both memory below 0.5% and IO below 10% for 120 seconds. Missing, malformed or
+stale observations hold admission rather than count as healthy. Darwin admission is unchanged.
+
+`recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
+observation. At most one recovery execution holds the host recovery slot. It bypasses only
+the disk floor/reservation check; CPU, memory, PSI, holds, membership and IO limits still apply.
+Execution state and both durable/file receipts preserve `admissionDecision`, including the
+`disk-floor` exemption, admission timestamp (`atMs`) and measured free bytes
+(`freeBytesAtAdmission`). These observations remain frozen across replay and retirement.
+Class contention weights are 1000 for recovery and landing, 100 for check and 10 for agent;
+priority does not create extra capacity.
+
 
 
 ## Shell callers

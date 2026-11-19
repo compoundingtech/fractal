@@ -10,6 +10,24 @@ fn reconciler() -> Reconciler<FakeRuntime> {
     )
 }
 
+#[tokio::test]
+async fn logical_admission_keeps_pressure_refresh_platform_explicit_without_native_lanes() {
+    let reconciler = reconciler();
+    assert!(reconciler.seat_admission.lanes.is_none());
+    assert!(reconciler.seat_admission.config.is_none());
+    let now = u64::try_from(now_ms() / 1000).unwrap();
+    reconciler.refresh_seat_admission_at(now);
+    let deadlines = reconciler.step_deadlines.lock().unwrap();
+    if cfg!(target_os = "linux") {
+        assert!(reconciler.seat_admission.pressure.lock().unwrap().is_some());
+        assert!(deadlines.get("resource-pressure").is_some_and(|deadline|
+            *deadline >= u128::from(now + 5) * 1000));
+    } else {
+        assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
+        assert!(!deadlines.contains_key("resource-pressure"));
+    }
+}
+
 #[test]
 fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
     use fractal_runtime::host::HostMemoryObservation;
