@@ -30,8 +30,8 @@ fn send(store: &Store, message: &str, tags: Value) -> u64 {
     let sent = store.append_claim(&ClaimInput {
         subject: message.into(), kind: "message.sent".into(), actor: Some("agent/example/sender".into()),
         fields: serde_json::from_value(json!({"from":"agent/example/sender","to":"agent/example/worker",
-            "content":"synthetic mail","tags":tags})).unwrap(),
-        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            "status":"sent","content":"synthetic mail","tags":tags})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some(format!("fixture-send-{message}")),
     }).unwrap();
     u64::try_from(sent.accepted_at_unix_ms).unwrap()
 }
@@ -41,7 +41,8 @@ fn step(store: &Store, message: &str, kind: &str) -> u64 {
         fields.insert("recipient".into(), json!("agent/example/worker"));
     }
     let receipt = store.append_claim(&ClaimInput {
-        subject: message.into(), kind: kind.into(), actor: Some("agent/example/worker".into()),
+        subject: message.into(), kind: kind.into(),
+        actor: Some(if kind == "message.closed" { "daemon/runtime" } else { "agent/example/worker" }.into()),
         fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
     u64::try_from(receipt.accepted_at_unix_ms).unwrap()
@@ -158,7 +159,7 @@ fn stream_source_and_terminal_clock_replay_through_the_mirror() {
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
     crate::store::messages_shard::record_lifecycle(&store, &sent.subject, "message.closed",
-        Some("agent/example/worker"), &BTreeMap::from([("status".into(), json!("closed"))])).unwrap();
+        Some("daemon/runtime"), &BTreeMap::from([("status".into(), json!("closed"))])).unwrap();
     crate::store::stream_mirror::mirror(&store).unwrap();
     let at = u64::try_from(sent.accepted_at_unix_ms).unwrap() + DEADLINE + 1;
     frontier(&store, at);
@@ -178,7 +179,7 @@ fn retried_send_retains_one_onset_and_never_stores_message_content() {
     let store = Store::open_memory("example-host").unwrap();
     declared(&store);
     let sent = send(&store, "message/example-retry", json!([]));
-    send(&store, "message/example-retry", json!(["retry"]));
+    assert_eq!(send(&store, "message/example-retry", json!([])), sent);
     frontier(&store, sent + DEADLINE + 1);
     let snapshot = capture(&store, sent + DEADLINE + 1).unwrap();
     assert_eq!(snapshot.samples.len(), 1);

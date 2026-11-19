@@ -444,12 +444,25 @@ pub async fn run(
                     }
                     if dirty { save_handoffs(&ledger_path, &state)?; }
                     if retry_ready(&retries, "acceptance-frontier") {
-                        match publish_acceptance_frontier(client, &state, source_cut).await {
-                            Ok(()) => { retries.remove("acceptance-frontier"); },
+                        let code = "claude-acceptance-frontier-unsettled";
+                        let key = format!("{code}:{}:{}:acceptance-frontier", state.fence.subject, state.fence.incarnation);
+                        let failure = match publish_acceptance_frontier(client, &state, source_cut).await {
+                            Ok(()) => {
+                                retries.remove("acceptance-frontier");
+                                None
+                            },
                             Err(error) => {
                                 retry_failed(&mut retries, "acceptance-frontier");
-                                tracing::warn!("Claude native acceptance frontier is not drained: {error:#}");
+                                Some(format!("Native input acceptance coverage could not be published; retaining unresolved handoff bounds and retrying publication with backoff up to 30s: {error:#}"))
                             }
+                        };
+                        // As with consumption receipts, daemon outages are protocol-visible
+                        // waiting diagnostics, not output in the person's Claude terminal.
+                        // Keep the first failed payload and drain it even if coverage recovers
+                        // before the daemon can acknowledge the diagnostic.
+                        if failure.is_some() || diagnostics.get(&key).is_some_and(|report| !report.recorded) {
+                            diagnostic(client, &state.fence, "acceptance-frontier", code,
+                                failure.as_deref().unwrap_or_default(), &mut diagnostics).await;
                         }
                     }
                 }

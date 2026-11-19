@@ -225,24 +225,47 @@ struct RetainedInputAttempts {
 
 impl<'de> Deserialize<'de> for RetainedInputAttempts {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Stored {
-            Identified {
-                #[serde(default, rename = "unidentifiedStarts")]
-                unidentified_starts: Vec<Option<u64>>,
-                #[serde(default)]
-                attempts: std::collections::BTreeMap<u64, Option<u64>>,
-            },
-            Historical(Option<u64>),
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = RetainedInputAttempts;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("identified input attempts or a historical optional start")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> std::result::Result<Self::Value, M::Error> {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Identified {
+                    #[serde(default)]
+                    unidentified_starts: Vec<Option<u64>>,
+                    #[serde(default)]
+                    attempts: std::collections::BTreeMap<u64, Option<u64>>,
+                }
+                // Decode directly from JSON's map access: an untagged enum buffers map keys
+                // as strings and loses serde_json's numeric-key decoding for attempt sequences.
+                let stored = Identified::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(RetainedInputAttempts {
+                    unidentified_starts: stored.unidentified_starts,
+                    attempts: stored.attempts,
+                })
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, start: u64) -> std::result::Result<Self::Value, E> {
+                Ok(RetainedInputAttempts {
+                    unidentified_starts: vec![Some(start)],
+                    attempts: Default::default(),
+                })
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(RetainedInputAttempts {
+                    unidentified_starts: vec![None],
+                    attempts: Default::default(),
+                })
+            }
         }
-        Ok(match Stored::deserialize(deserializer)? {
-            Stored::Identified { unidentified_starts, attempts } => Self { unidentified_starts, attempts },
-            Stored::Historical(start) => Self {
-                unidentified_starts: vec![start],
-                attempts: Default::default(),
-            },
-        })
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -988,6 +1011,46 @@ mod tests {
         reopened.reject_attempt(FILE_A, replacement.attempt_sequence.unwrap()).unwrap();
         assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
             .input_acceptance_frontier("incarnation-2", cut), Some(start - 1));
+        reopened.negative(FILE_A, NegativeReceipt::Absent).unwrap();
+        assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
+            .input_acceptance_frontier("incarnation-2", cut), Some(cut));
+    }
+
+    #[test]
+    fn retained_attempt_generations_round_trip_with_unknown_and_known_starts() {
+        let retained = RetainedInputAttempts {
+            unidentified_starts: vec![None, Some(100)],
+            attempts: std::collections::BTreeMap::from([(1, Some(200)), (u64::MAX, None)]),
+        };
+        let bytes = serde_json::to_vec(&retained).unwrap();
+        let reopened: RetainedInputAttempts = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reopened, retained);
+        assert_eq!(reopened.frontier(300), None);
+        assert!(serde_json::from_str::<RetainedInputAttempts>(
+            r#"{"attempts":{"not-a-generation":100}}"#,
+        ).is_err());
+    }
+
+    #[test]
+    fn rejecting_rebound_replacement_preserves_unknown_earlier_attempt_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ledger = open(root.path(), Harness::Codex);
+        let mut historical = begin(&mut ledger, "native-main", FILE_A);
+        historical.attempted_at_unix_ms = None;
+        ledger.record.entries = vec![historical];
+        ledger.negative(FILE_A, NegativeReceipt::RetryAfterAbandonedIncarnation).unwrap();
+        let replacement = ledger.begin(Begin {
+            filename: FILE_A.into(), binding: "native-main".into(),
+            correlation: Correlation::native(correlation("native-main", FILE_A)),
+            incarnation: Some("incarnation-2".into()),
+        }).unwrap();
+        let sequence = replacement.attempt_sequence.unwrap();
+        let cut = replacement.attempted_at_unix_ms.unwrap() + 10_000;
+        ledger.rebind("native-next", Some("incarnation-2")).unwrap();
+        let mut reopened = open(root.path(), Harness::Codex);
+        reopened.reject_attempt(FILE_A, sequence).unwrap();
+        assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
+            .input_acceptance_frontier("incarnation-2", cut), None);
         reopened.negative(FILE_A, NegativeReceipt::Absent).unwrap();
         assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
             .input_acceptance_frontier("incarnation-2", cut), Some(cut));

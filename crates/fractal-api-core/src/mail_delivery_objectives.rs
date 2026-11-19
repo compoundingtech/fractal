@@ -262,7 +262,11 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
             #[cfg(test)]
             { source_work[2] += raw.len(); }
             for (consumer, kind, at) in raw {
-                let consumer = if consumer.is_empty() { consumer } else { canonical(&connection, &consumer)? };
+                // Terminal lifecycle state closes the message, including a runtime refusal
+                // before any harness handoff; its actor is not the target input consumer.
+                let consumer = if consumer.is_empty() || matches!(kind.as_str(), "message.closed" | "message.expired") {
+                    String::new()
+                } else { canonical(&connection, &consumer)? };
                 steps.entry((message.clone(), consumer)).or_default().entry(kind)
                     .and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }

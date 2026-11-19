@@ -598,6 +598,10 @@ records once before committing its source cut. SLO reads incrementally consume o
 durable claim stream; they neither inspect the membership table nor create observations.
 Child and inherited contexts do not create another membership sample. Repeated requests
 retain their original identity and onset.
+The native registry admits these system-only claims on `resource-admission/HOST/ID`;
+`resource.admission.coverage` uses `resource-admission/HOST` for each acquired source cut.
+Both kinds remain durable replicated evidence, not launch capabilities. Ordinary public
+claim writers cannot publish either kind.
 The daemon subscribes to claim-change notifications and arms one timer for the nearest
 open deadline or 5m/30m/1h/6h/30d accounting boundary. The wake autonomously evaluates
 the full native objective set and existing owner bindings even without an SLO reader.
@@ -620,6 +624,9 @@ directory); the daemon requires an explicit source directory. `GATE_SLOT_ADMISSI
 must agree with the daemon's host identity when the machine's short hostname does not.
 The reactive importer retains source files, replays idempotently on restart and publishes
 `gate.admission.observed`; no periodic directory sampler or parallel SLO policy is involved.
+The system-only `gate.admission.observed` kind uses `gate-admission/HOST/ID/OUTCOME`.
+Each outcome receipt is immutable and retained durably; its schema admits the producer's
+logical coverage only, without granting native execution custody.
 Supersession before the deadline is visibly excluded; after the deadline it remains bad.
 Unconfirmed wrapper death leaves an open sample, not an invented successful grant.
 
@@ -672,6 +679,14 @@ heartbeat or receipt-pump wall-time assertion. The source joins each current rec
 incarnation to its frontier and evaluates budgets at the **minimum proven accounting cut**.
 A source clock behind a message onset does not manufacture a deadline failure; that message
 remains unjudged until the source cut reaches it. Frontier freshness is 120s.
+
+Ledger attempt generations survive pruning, binding changes and reopen. A rejected RPC
+resolves only its own generation; abandoned earlier attempts, including unknown source
+clocks, continue to bound coverage until authoritative native absence resolves them.
+Claude retains native acceptance timestamps independently of optional TODO journaling.
+Frontier publication failures retain those bounds and produce the protocol-visible
+`claude-acceptance-frontier-unsettled` waiting diagnostic, including after daemon recovery
+acknowledges a previously unavailable publication; they do not write into the seat terminal.
 
 The daemon starts one reactive source publication beside its roster producer. Source events
 invalidate the previous cut immediately; capture failure, startup, missing shard mirror
