@@ -2,7 +2,7 @@
 //! target through wrapping; after ratatui draws, replay only visible link cells. Every physical
 //! segment carries the same explicit ID, including across frames, so terminals group the link.
 
-use ratatui::{backend::Backend, backend::CrosstermBackend, buffer::{Cell, CellDiffOption}};
+use ratatui::{backend::Backend, backend::CrosstermBackend, buffer::{Cell, CellDiffOption, CellWidth}};
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
@@ -58,7 +58,7 @@ pub(super) fn collect_links<'a>(
         for y in rect.y..rect.bottom() {
             let mut x = rect.x;
             while x < rect.right() {
-                let width = text::width(buf[(x, y)].symbol()).max(1) as u16;
+                let width = buf[(x, y)].symbol().cell_width().max(1);
                 let end = x.saturating_add(width).min(rect.right());
                 if !(x..end).any(|column| covered(index, column, y)) {
                     // The diff option is part of cell equality, so removing a link forces a
@@ -95,7 +95,7 @@ pub(super) fn write_links<W: Write>(
             while end < link.cells.len()
                 && link.cells[end].1 == link.cells[end - 1].1
                 && link.cells[end].0 == link.cells[end - 1].0
-                    + text::width(link.cells[end - 1].2.symbol()).max(1) as u16
+                    + link.cells[end - 1].2.symbol().cell_width().max(1)
             {
                 end += 1;
             }
@@ -301,5 +301,37 @@ mod tests {
         assert_eq!(out.matches("\x1b]8;id=").count(), 1);
         assert_eq!(out.matches('漢').count(), 1);
         assert_eq!(out.matches('字').count(), 1);
+    }
+
+    #[test]
+    fn halfwidth_katakana_replay_preserves_cell_positions_and_card_edges() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 7, 1));
+        buf.set_string(0, 0, "| ｶﾞx |", ratatui::style::Style::default());
+        let before = buf.clone();
+        let links = collect_links(
+            &mut buf,
+            [(0, Rect::new(2, 0, 3, 1), "https://example.com")],
+            |_, _, _| false,
+        );
+        assert_eq!(links.len(), 1);
+        let cells: Vec<_> = links[0].cells.iter()
+            .map(|(x, y, cell)| (*x, *y, cell.symbol())).collect();
+        assert_eq!(cells, [(2, 0, "ｶﾞ"), (4, 0, "x")]);
+        for x in 0..7 {
+            assert_eq!(buf[(x, 0)].symbol(), before[(x, 0)].symbol());
+            assert_eq!(
+                buf[(x, 0)].diff_option,
+                if (2..5).contains(&x) { CellDiffOption::Skip } else { CellDiffOption::None },
+            );
+        }
+        let sink = Sink::default();
+        write_links(&mut CrosstermBackend::new(sink.clone()), &links).unwrap();
+        let bytes = sink.0.borrow();
+        let out = String::from_utf8_lossy(&bytes);
+        assert_eq!(out.matches("\x1b]8;id=").count(), 1, "{out:?}");
+        assert_eq!(out.matches("\x1b]8;;\x1b\\").count(), 1, "{out:?}");
+        assert!(out.contains("\x1b[1;3Hｶﾞ"), "{out:?}");
+        assert!(out.contains("\x1b[1;5Hx"), "{out:?}");
+        assert!(!out.contains(' ') && !out.contains('|'), "{out:?}");
     }
 }
