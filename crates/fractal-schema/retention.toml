@@ -26,6 +26,9 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"resource.admission.observed" = { class = "durable" }
+"resource.admission.coverage" = { class = "durable" }
+"gate.admission.observed" = { class = "durable" }
 "residency.wake-demand" = { class = "durable" }
 "residency.resumed" = { class = "durable" }
 "residency.first-turn" = { class = "durable" }
