@@ -98,6 +98,24 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Native fleet roll receipt source
+
+The `fractal_api_core::roll_completion` maintainer owns schema
+`lv-h965d880bf5ba` and append `lv-h5d4b16b81b87`. This separate local authority
+retains immutable versioned JSON receipt bodies and JSON-encoded receipt keys;
+the unique receipt-key index is a variable-sized key too. Inline storage keeps
+one ordered transactional append and lossless restart reconstruction for
+declarations and observations; no replicated graph digest or canonical claim
+table is changed. Neither the API body boundary nor one-row insertion proves
+encoded-byte or SQL-work bounds.
+
+The schema TODO is to chunk/reference variable bodies and keys while preserving
+immutable conflict checks and source order. The append TODO is to establish
+complete value/key costs and lossless retention/reclamation before replacing
+the current authoritative receipt representation. Owner review must retain
+the version-1 reader, historical accounting, declaration-before-observation
+ordering and crash-safe publication; it must not cap or discard valid receipts.
+
 ### GitHub capture rebuildable projection
 
 The `fractal_reconcile::reconcile::github_capture` maintainer owns the

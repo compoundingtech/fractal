@@ -1,0 +1,163 @@
+//! Only the target daemon measures and signs host adoption; callers supply a signed resolution id.
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result, ensure};
+use serde_json::Value;
+
+use crate::roll_completion::{self, Adoption, Identity, Receipt, Verification};
+use crate::store::Store;
+
+pub fn observe(store: &Store, claim_id: &str, now: u64) -> Result<Value> {
+    let resolved = roll_completion::resolved_target(store, claim_id)?;
+    ensure!(resolved.host == store.origin(), "resolved target is not this daemon's host");
+    // Match the running daemon's health implementation, not an executable on PATH.
+    store.index()?;
+    let ready = fractal_runtime::systemd::health().unresponsive.is_none();
+    let home_profile = home_profile();
+    let (adoption, evidence) = measure(
+        &resolved.target,
+        &resolved.expected_system_path,
+        &resolved.expected_home_path,
+        Path::new("/run/current-system"),
+        home_profile.as_deref(),
+        fractal_drivers::version::build_commit(),
+        ready,
+    );
+    roll_completion::publish_observation(store, Receipt::HostObserved {
+        version: 1,
+        roll_id: resolved.roll_id,
+        declared_at_ms: resolved.declared_at_ms,
+        host: resolved.host,
+        observed_at_ms: now,
+        target: resolved.target,
+        adoption,
+        evidence: evidence.map(Box::new),
+    }, now)
+}
+
+fn home_profile() -> Option<PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
+    state.is_absolute().then(|| state.join("nix/profiles/home-manager"))
+}
+
+fn active_path(path: &Path) -> Result<String> {
+    let resolved = path.canonicalize().with_context(|| format!("read active profile {}", path.display()))?;
+    ensure!(resolved.starts_with("/nix/store"), "active profile is not an immutable store output");
+    Ok(resolved.to_str().context("profile path is not UTF-8")?.to_owned())
+}
+
+fn full_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure(
+    target: &Identity,
+    expected_system: &str,
+    expected_home: &str,
+    system_profile: &Path,
+    home_profile: Option<&Path>,
+    revision: &str,
+    ready: bool,
+) -> (Adoption, Option<Verification>) {
+    // No host-local canonical factory-applier proof reader is configured here.
+    // A declared factory component therefore remains unknown, never inferred from
+    // the executor revision or a caller-supplied applied-commit file.
+    if target.factory_revision.is_some() || !full_revision(revision) {
+        return (Adoption::Unknown, None);
+    }
+    let Some((system, home)) = active_path(system_profile).ok().zip(
+        home_profile.and_then(|path| active_path(path).ok())
+    ) else {
+        return (Adoption::Unknown, None);
+    };
+    let proof = Verification {
+        system_path: system,
+        home_path: home,
+        expected_system_path: expected_system.to_owned(),
+        expected_home_path: expected_home.to_owned(),
+        daemon_revision: revision.to_owned(),
+        factory_revision: None,
+        daemon_ready: ready,
+    };
+    (classify(target, &proof), Some(proof))
+}
+
+fn classify(target: &Identity, proof: &Verification) -> Adoption {
+    let exact = proof.system_path == proof.expected_system_path
+        && proof.home_path == proof.expected_home_path
+        && target.system_path.as_deref().is_none_or(|path| path == proof.expected_system_path)
+        && target.home_path.as_deref().is_none_or(|path| path == proof.expected_home_path)
+        && proof.daemon_revision == target.daemon_revision && proof.daemon_ready
+        && target.factory_revision.as_ref().is_none_or(|revision| proof.factory_revision.as_ref() == Some(revision));
+    if exact { Adoption::Verified } else { Adoption::NotAdopted }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_declared_component_requires_exact_observed_proof() {
+        let target = target();
+        let proof = Verification {
+            system_path: "/nix/store/system".into(), home_path: "/nix/store/home".into(),
+            expected_system_path: "/nix/store/system".into(), expected_home_path: "/nix/store/home".into(),
+            daemon_revision: target.daemon_revision.clone(), daemon_ready: true, factory_revision: None,
+        };
+        assert_eq!(classify(&target, &proof), Adoption::Verified);
+        for mismatch in [
+            Verification { system_path: "/nix/store/old".into(), ..proof.clone() },
+            Verification { home_path: "/nix/store/old".into(), ..proof.clone() },
+            Verification { daemon_revision: "c".repeat(40), ..proof.clone() },
+            Verification { daemon_ready: false, ..proof.clone() },
+        ] {
+            assert_eq!(classify(&target, &mismatch), Adoption::NotAdopted);
+        }
+        let factory = Identity { factory_revision: Some("d".repeat(40)), ..target };
+        assert_ne!(classify(&factory, &proof), Adoption::Verified);
+        assert_eq!(classify(&factory, &Verification { factory_revision: Some("d".repeat(40)), ..proof }), Adoption::Verified);
+    }
+
+    fn target() -> Identity {
+        Identity { dotfiles_revision: "a".repeat(40), factory_revision: None,
+            daemon_revision: "b".repeat(40), system_path: None, home_path: None }
+    }
+
+    #[test]
+    fn missing_profiles_and_unavailable_declared_factory_are_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        for target in [target(), Identity { factory_revision: Some("c".repeat(40)), ..target() }] {
+            let (adoption, proof) = measure(&target, "/nix/store/system", "/nix/store/home",
+                &missing, Some(&missing), &"b".repeat(40), true);
+            assert_eq!(adoption, Adoption::Unknown);
+            assert!(proof.is_none());
+        }
+    }
+
+    #[test]
+    fn local_nonstore_profiles_cannot_become_adoption_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let system = root.path().join("system");
+        let home = root.path().join("home");
+        std::fs::create_dir(&system).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let (adoption, proof) = measure(&target(), system.to_str().unwrap(), home.to_str().unwrap(),
+            &system, Some(&home), &"b".repeat(40), true);
+        assert_eq!(adoption, Adoption::Unknown);
+        assert!(proof.is_none());
+    }
+
+    #[test]
+    fn short_or_unknown_compiled_revision_is_never_proof() {
+        assert!(full_revision(&"a".repeat(40)));
+        assert!(full_revision(&"b".repeat(64)));
+        for revision in ["unknown", "abcdef0", "", &"g".repeat(40)] {
+            assert!(!full_revision(revision));
+        }
+    }
+}
