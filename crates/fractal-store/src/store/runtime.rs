@@ -375,6 +375,10 @@ impl Runtime for FractalRuntime {
     }
 
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()> {
+        // Core source tables (including repaired-claim membership) are installed
+        // after create_schema. This common hook runs after that on fresh opens,
+        // reopens and upgrades, before projections or readers can use reductions.
+        card_actual::install(transaction)?;
         if let Some(views) = &self.ivm_views {
             // An admitted frontier identifies pending work, never successful projection.
             // Existing sources require an explicit installer and dependency certificate.
@@ -818,7 +822,6 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(&transaction)?;
-        card_actual::install(&transaction)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
@@ -830,7 +833,6 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         mission_supersession::install_schema(connection)?;
-        card_actual::install(connection)?;
     }
     Ok(())
 }

@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "Canonical ordering, repairs, carried response membership, deadlines, overrides, host authority, and evaluation versus presentation semantics are preserved. Shared actual reductions exclude writer transactions, and effective claim-position changes invalidate their subject's prefix, including duplicate-envelope position joins."},
   "compatibility": {"status": "none", "detail": "Existing peers and clients remain compatible."},
   "downtime": {"status": "none", "detail": "No interruption beyond installing the updated daemon."},
-  "manual": {"status": "none", "detail": "No configuration or manual migration is required. The local index and revision fences install automatically."},
+  "manual": {"status": "none", "detail": "No configuration or manual migration is required. The local index installs automatically; revision fences install after the graph source tables exist on fresh opens, reopens and older-store upgrades."},
   "recovery": {"status": "none", "detail": "The previous binary can still read the store; new local indexes and derived fences do not replace claims."}
 }

@@ -206,4 +206,46 @@ mod tests {
         }
         assert_eq!(read(&store, late.store_index), 2);
     }
+
+    #[test]
+    fn upgrading_a_store_without_graph_repair_membership_installs_dependent_fences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.db");
+        let claim = {
+            let store = Store::open(&path, "alder").unwrap();
+            append(&store, 100, "running")
+        };
+        {
+            // Model the pre-digest graph layout, before either the graph-owned
+            // repair membership or these runtime-local reduction fences existed.
+            let connection = Connection::open(&path).unwrap();
+            let triggers = connection.prepare(
+                "SELECT name FROM sqlite_schema WHERE type='trigger'
+                 AND (name GLOB 'card_actual_*' OR name GLOB 'projection_digest_*')"
+            ).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            for name in triggers {
+                connection.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\""))).unwrap();
+            }
+            connection.execute_batch(
+                "DROP TABLE card_actual_revisions;
+                 DROP TABLE projection_digest_repaired_claims;
+                 DELETE FROM meta WHERE key='projection_digest_registry';"
+            ).unwrap();
+        }
+        // Exercise both the old-store upgrade and the ordinary reopen path.
+        for _ in 0..2 {
+            let store = Store::open(&path, "alder").unwrap();
+            let connection = store.readers.get();
+            let fences: usize = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger'
+                 AND name GLOB 'card_actual_repair_*'", [], |row| row.get(0)
+            ).unwrap();
+            assert_eq!(fences, 4);
+            assert_eq!(latest_actual_at(&connection, "agent/example", Some(claim.store_index)).unwrap()
+                .unwrap()["status"], "running");
+            drop(connection);
+            assert_eq!(read(&store, claim.store_index), 1);
+        }
+    }
 }
