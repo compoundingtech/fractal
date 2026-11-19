@@ -804,9 +804,14 @@ def shared_target(tree_target=None):
     """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
     With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
-    if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
+    caller_target = os.environ.get('CARGO_TARGET_DIR')
+    if caller_target:
+        recover_native_tree(caller_target)
+        return None, None
+    if os.environ.get('ST_EVIDENCE_TARGET') == 'off':
         return None, None
     if tree_target and not os.environ.get('ST_EVIDENCE_TARGET'):
+        recover_native_tree(tree_target)
         prepare_targets(tree_target, owned=in_pool(tree_target))
         return tree_target, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
@@ -1111,6 +1116,13 @@ class NativePhase:
         self.entry = {'command': self.command, 'endpoints': endpoints,
                       'scratch': [str(path) for path in tuple(TEMP_DIRS)]}
         with NATIVE_JOURNAL_LOCK:
+            # Fence scratch before publishing a request journal: SIGKILL can
+            # leave admitted work alive without reaching the failure handler.
+            for scratch in self.entry['scratch']:
+                marker = Path(scratch) / '.native-requests.json'
+                owners = json.loads(marker.read_text()) if marker.exists() else {}
+                owners[str(self.path)] = True
+                write_native_journal(marker, owners)
             for path in self.paths:
                 entries = json.loads(path.read_text()) if path.exists() else {}
                 entries[self.request] = self.entry
@@ -1138,6 +1150,8 @@ class NativePhase:
                     entries = json.loads(path.read_text())
                     entries.pop(self.request)
                     write_native_journal(path, entries)
+                if not self.path.exists():
+                    release_native_scratch(self.path, self.entry['scratch'])
             self.retired = True
 
 
@@ -1149,10 +1163,20 @@ def recover_native_tree(directory):
     for entry in entries.values():
         cancel_native_request(entry['command'], dict(os.environ, **entry['endpoints']))
     path.unlink()
-    for scratch in {value for entry in entries.values() for value in entry['scratch']}:
+    release_native_scratch(path, {value for entry in entries.values() for value in entry['scratch']}, cleanup=True)
+
+
+def release_native_scratch(journal, scratches, cleanup=False):
+    for scratch in scratches:
         retained = Path(scratch)
-        marker = retained / '.native-quarantine'
-        if marker.exists() and marker.read_text() == str(path) and not (retained / 'KEPT').exists():
+        marker = retained / '.native-requests.json'
+        owners = json.loads(marker.read_text()) if marker.exists() else {}
+        owners.pop(str(journal), None)
+        write_native_journal(marker, owners)
+        quarantine = retained / '.native-quarantine'
+        if quarantine.exists() and quarantine.read_text() == str(journal):
+            quarantine.unlink()
+        if cleanup and not owners and not quarantine.exists() and not (retained / 'KEPT').exists():
             shutil.rmtree(retained)
 
 
@@ -1183,6 +1207,8 @@ def governed(argv, name, output=None):
     Receipts outlive temporary check trees. Queue events keep admission time out
     of the payload clock, including checks that never enter ci-local.
     """
+    if sys.platform == 'darwin':
+        return list(argv)
     if os.environ.get('FRACTAL_RESOURCE_PARENT'):
         raise Failure('phase-receipts-require-root: start st-test outside native resource custody; inherited grants cannot own phase receipt files')
     fractal = RESOURCE_EXEC or shutil.which('fractal')
@@ -1443,7 +1469,8 @@ def sweep_run_tmp(root):
         try:
             status = entry.lstat()
             if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid() or (entry / KEPT).exists()
-                    or (entry / '.native-quarantine').exists() or time.time() - status.st_mtime < RUN_TMP_FRESH):
+                    or (entry / '.native-quarantine').exists() or (entry / '.native-requests.json').exists()
+                    or time.time() - status.st_mtime < RUN_TMP_FRESH):
                 continue  # another account's, or kept, or too new to judge
             fd = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
@@ -1464,7 +1491,6 @@ def run_tmpdir(keep=False):
     evidence-wrap's key files, and it is removed when the run ends, unless --keep. scripts/ci-local and scripts/ci-local-web set their own."""
     root = run_tmp_root()
     root.mkdir(parents=True, exist_ok=True)
-    sweep_run_tmp(root)
     path = Path(tempfile.mkdtemp(prefix=RUN_TMP_PREFIX, dir=root))
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     fcntl.flock(fd, fcntl.LOCK_EX)
@@ -2103,7 +2129,8 @@ def reap_stale():
         if not match:
             continue
         scratch = Path(match.group(1))
-        if (scratch / '.native-quarantine').exists() or native_journal(scratch / 'tree').exists():
+        if ((scratch / '.native-quarantine').exists() or (scratch / '.native-requests.json').exists()
+                or native_journal(scratch / 'tree').exists()):
             continue
         try:
             os.kill(int((scratch / 'pid').read_text()), 0)
@@ -3396,6 +3423,9 @@ def run_main(argv, cleanup):
                 unsignable = lanes if edited_lanes_unsigned(base_commit) else set()  # lanes whose edits the base's wrapper refuses to sign
                 if target is None and any(name in BUILDS for name in checks):
                     target, target_lock = shared_target(tree_target)  # once: a top-up round builds in the same target, under the same lock
+                # Tree and target recovery must fence stale native work before
+                # considering any old run scratch for reclamation.
+                sweep_run_tmp(run_tmp_root())
                 warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
                 # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
                 # lane runs in a thread, so the first caller fetches under a lock.

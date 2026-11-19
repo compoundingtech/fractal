@@ -2074,6 +2074,7 @@ no longer used by default and can be deleted.
 `st-test-build` covers preparation, Rust build/check suites and web; `st-test-run` covers the standalone Rust test phase.
 The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
 missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
+Darwin keeps its direct-execution path; it does not invoke native resources admission.
 The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
@@ -2083,7 +2084,10 @@ Before cleanup, st-test calls `fractal --json --endpoint SOCKET resources cancel
 nonlaunch tombstone authorizes client termination and scratch cleanup. Transport failure, nonzero exit or an unconfirmed response
 quarantines the pool tree, target and scratch instead of releasing them for reuse. The error prints the request ID and exact resume
 command; the adjacent `.native-execs.json` journal survives process exit. A later owner must complete that same cancellation once
-before reusing the tree or shared target; another failure refuses reuse. There is no cancellation retry loop.
+before reusing the tree or any shared target, including a caller's `CARGO_TARGET_DIR`; another failure refuses reuse.
+Scratch gets a durable `.native-requests.json` preservation marker before the request journal is published, so a killed supervisor
+cannot leave sweepable scratch beneath still-live native work. Tree/target recovery precedes the run's scratch sweep.
+Confirmed retirement removes the corresponding scratch ownership marker. There is no cancellation retry loop.
 Phase receipt files are root-only: the orchestrator must start outside native custody, and refuses inherited parent grants rather than
 double-admitting or stripping them. The heavy phases are sibling roots; their native `FRACTAL_RESOURCE_PARENT`,
 `FRACTAL_RESOURCE_EXEC_ID`, `ST3_ENDPOINT` and `FRACTAL_ENDPOINT` context survives control-plane and local-runner scrubbing.

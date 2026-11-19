@@ -698,6 +698,63 @@ class PoolIdentityTest(unittest.TestCase):
 class NativeAdmissionTest(unittest.TestCase):
     """Light argv/clock contract tests; no daemon, build or native custody claim."""
 
+    def setUp(self):
+        platform = mock.patch.object(st_test.sys, 'platform', 'linux')
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def test_darwin_runs_directly_without_native_admission(self):
+        command = ['/bin/echo', 'unchanged']
+        with mock.patch.object(st_test.sys, 'platform', 'darwin'), \
+                mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('native lookup on Darwin')), \
+                mock.patch.dict(os.environ, {'FRACTAL_RESOURCE_PARENT': 'inherited'}, clear=True):
+            self.assertEqual(st_test.governed(command, 'linux-gate'), command)
+            self.assertFalse(st_test.is_native_exec(command))
+
+    def test_crash_after_journaling_preserves_old_unlocked_scratch_until_recovery(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            scratch = Path(home, 'st-test.crashed')
+            scratch.mkdir()
+            tree = Path(home, 'tree')
+            tree.mkdir()
+            with mock.patch.object(st_test, 'TEMP_DIRS', {scratch}):
+                phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()), {'cwd': tree})
+            self.assertTrue(st_test.native_journal(tree).exists())
+            self.assertTrue((scratch / '.native-requests.json').exists())
+            old = time.time() - st_test.RUN_TMP_FRESH - 1
+            os.utime(scratch, (old, old))
+            st_test.sweep_run_tmp(Path(home))
+            self.assertTrue(scratch.exists(), 'a dead supervisor does not prove native retirement')
+            with mock.patch.object(st_test, 'cancel_native_request', side_effect=st_test.NativeRetirementFailure('unconfirmed')) as cancel:
+                with self.assertRaises(st_test.NativeRetirementFailure):
+                    st_test.recover_native_tree(tree)
+                cancel.assert_called_once()
+            st_test.sweep_run_tmp(Path(home))
+            self.assertTrue(scratch.exists())
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.recover_native_tree(tree)
+                cancel.assert_called_once()
+            self.assertFalse(scratch.exists())
+
+    def test_caller_target_is_fenced_before_reuse_even_when_kept_targets_are_off(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            target = Path(home, 'caller-target')
+            phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()),
+                                        {'cwd': home, 'env': {'CARGO_TARGET_DIR': str(target)}})
+            with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(target), 'ST_EVIDENCE_TARGET': 'off'}), \
+                    mock.patch.object(st_test, 'cancel_native_request', side_effect=st_test.NativeRetirementFailure('still live')) as cancel:
+                with self.assertRaises(st_test.NativeRetirementFailure):
+                    st_test.shared_target()
+                cancel.assert_called_once_with(phase.command, mock.ANY)
+            self.assertTrue(st_test.native_journal(target).exists())
+            with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(target)}), \
+                    mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                self.assertEqual(st_test.shared_target(), (None, None))
+                cancel.assert_called_once()
+            self.assertFalse(st_test.native_journal(target).exists())
+
     def test_each_phase_names_one_profile_lane_and_durable_receipt(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
                 mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
