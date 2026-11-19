@@ -216,6 +216,25 @@ mod tests {
     }
 
     #[test]
+    fn archive_candidates_contract_has_no_actor_or_configured_person() {
+        let value = generate(super::super::command_graph());
+        let command = &value["contract"]["commands"]["st replication archive-candidates"];
+        assert_eq!(
+            command,
+            &json!({
+                "actor": "none",
+                "accepts_person": false,
+                "can_carry_person": false,
+                "as_role": "none",
+                "alternate_actor_option": null,
+                "actor_environment": null,
+                "ignores_actor": false,
+            }),
+            "offline analysis neither accepts an actor nor inherits configured-person authority"
+        );
+    }
+
+    #[test]
     fn harness_question_contract_requires_an_explicit_person_for_every_command() {
         let value = generate(super::super::command_graph());
         for path in [

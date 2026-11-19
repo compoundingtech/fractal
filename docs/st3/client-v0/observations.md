@@ -3,16 +3,17 @@
 `observations.report` posts `ObservationReport` to `POST /v1/client/observations`.
 Any current authenticated paired session may report, including a read-only pairing.
 Unpaired local Unix sessions, anonymous callers, expired and revoked pairings are refused.
-These are optional local diagnostics, outside graph actions, SQLite mutation and replication.
-The phone records and reports these samples from `apps/ios/observations.ts`; the command itself
-only admits them.
+Reports become immutable `custom.client.observation-minute` claims in the replicated graph.
+The phone records and durably queues these samples in `apps/ios/observations.ts`.
+The existing command and wire shape are unchanged.
 
 The generated methods are Rust `observations_report`, Swift `observationsReport` and
 TypeScript `observationsReport`. The response is `ObservationResponse`:
 `{api_version:"st3.client.v0",request_id:"request/…",value:{accepted:true}}`.
-It has no snapshot, fence, action receipt or replicated ACK. Acceptance means a local OS
-file write and process-memory admission completed; it does not fsync or promise survival of
-power loss. Retry after lost responses with the identical payload and UUID on the same member.
+It has no snapshot, fence or action receipt in the response. Acceptance means all minute
+claims and their native admission receipts committed together; it does not mean every peer
+has already replicated them. Retry a lost response with the identical payload and UUID,
+including after restart or on another member that has received the claims.
 
 A report has a canonical lowercase nonzero UUID `report_id` and 1–32 samples.
 Each sample uses one of two discriminators:
@@ -41,7 +42,7 @@ Each sample uses one of two discriminators:
 Carrier is `fabric`, `tailscale` or `lan`; optional `path` is `direct` or `relay`.
 Intervals must be exactly one closed minute with minute-aligned UTC `Z` timestamps.
 The oldest permitted start is seven days before admission; end may be at most 120 seconds
-in the future for clock skew. Future-skewed intervals are retained as history only at admission.
+in the future for clock skew. Future-skewed intervals enter live evaluation only after closing.
 Reports must contain disjoint intervals, never cumulative summaries. One report can batch disjoint minutes of the same population, with at
 most one sample per target/carrier/path/minute. Unknown fields, targets or enum values are refused;
 there are no content, addresses, node identities or credential fields.
@@ -65,9 +66,9 @@ Neither background nor unreported/disconnected phone time is inferred.
 The six latency objectives in `slo/objectives.kdl` are `ios-open-to-live` (3000 ms),
 `ios-connect` (1500), `ios-message-ack` (500), `ios-conversation-open` (1000),
 `ios-terminal-open` (1500) and `ios-recover` (10000). `ios-live-share` is a separate share
-objective at 99%. Client paths are `client/ios/NAME`, with carrier/path populations reported
-separately from daemon response envelopes. The existing request-latency reader and
-`slo/NAME` doctor lines show them; no new reader is required.
+objective at 99%. These remain client-observed populations, separate from daemon response
+envelopes. Native objective rows and doctor lines fold the replicated summary claims rather
+than process-memory admission. Unreported minutes never imply successful phone operation.
 
 Live 1m/5m/1h windows include only whole reported intervals wholly inside the sliding UTC
 window. Boundary-straddling intervals are excluded and counted; minute resolution and
@@ -78,33 +79,45 @@ original observation time. Older-than-hour reports are history only. An empty po
 is unknown coverage, and doctor presents it as info. These windows do not establish a
 full-day SLO. Share rows contain foreground/live milliseconds and live share, never p99.
 
-Memory is bounded to 63 target/carrier/path combinations, each with 60 minute slots and a
-finite histogram vocabulary (at most 304 bins under the 3,600,000 ms limit), plus 4096
-accepted IDs and at most 32 interval keys per ID. Each population-minute admits at most
-one billion observations or foreground milliseconds. Intervals from different sessions
-merge into the reported population. Repeating a minute from the same pairing is refused
-while its accepted report is retained; identical ID/payload retries do not add a line or
-sample. Conflicting ID reuse returns HTTP 409. IDs/overlap proofs expire after seven days,
-on oldest-first capacity eviction or restart. Deduplication is member/process local;
-retrying after eviction, restart or on a different member can count again. A buggy or
-malicious paired session can also repeat a live minute after its overlap proof is evicted. Clients must
-keep stable IDs and drop intervals only after local acceptance.
+Each immutable minute is keyed by stable source, target, carrier, path and UTC minute.
+The source is derived from the authenticated pairing's person and device public-key identity,
+not the receiving member, its state directory or the destination-specific grant. The exact
+pairing grant is retained separately as admission provenance. Re-pairing the same phone and
+person to another destination therefore preserves report/minute identity. A pairing without
+a stable device identity must be renewed before reporting.
 
-History is one JSONL line `{accepted_at:<unix_ms>,report:<original report>}` per newly
-accepted report in `state-dir/client-observations.jsonl`. Append, rotation and expiry run
-in a bounded blocking worker, outside async workers and the Store handler/SQLite writer.
-Only one admission runs at a time; concurrent/busy admission returns HTTP 503 and should
-retry the identical report with jitter to avoid lockstep retries. There is no outbox or retry store. Files rotate at 4 MiB or on
-a UTC-day change into `.1` through `.7`, for at most eight segments / 32 MiB. Segments
-older than seven days since their last append are removed on the next admission. There
-is no idle cleanup thread; inactive expired files can remain until the next report.
-Size rotation can reduce retained coverage; seven days is an upper retention bound,
-not guaranteed coverage. Files are never replicated. Retained JSONL survives daemon
-restart, but deduplication and live windows start empty and are not rebuilt from history.
-Retried reports after dedup eviction or restart may also append duplicate report IDs to
-history; history consumers should deduplicate by report_id. Admission mutex poisoning
-fails closed with 503 until restart rather than resuming a potentially partial admission.
-A torn last line is repaired from a bounded tail before append. A failed append is
-truncated to its original length; any history failure returns 503 before memory admission.
-Rotation can have removed old history before a subsequent append fails. No historical
-content is imported as newly observed live phone time.
+The phone persists each report's UUID and exact payload until acknowledgement. An exact
+source/report retry appends no graph claims, including after store reopen, replication or a new
+destination pairing. Reusing a report ID with changed content or reporting the same minute
+under a different report ID returns HTTP 409. All samples validate and commit atomically.
+Conflicting minute claims admitted concurrently on disconnected members are excluded from the
+native population after replication rather than selecting a winner or counting both.
+Equal concurrent claims collapse to one minute. Admission requires a current grant;
+already accepted evidence remains readable after that grant expires or is revoked.
+Only minutes with valid native phone-admission receipts occupy report replay, minute replay
+or once-only cardinality keys. Merely replicated claims, including signed claims without
+matching phone/person provenance, cannot block authentic admission or enter native evidence.
+
+The graph is the only authority for native objective rows and doctor lines. Native reads seek
+a numeric minute-time index for the last hour; report replay seeks the source/report index
+and minute replay seeks the subject. Folds retain 60 minute slots per target and merge exact
+foreground/disconnected counts and canonical sparse latency histograms. The one-billion
+aggregate slot bound fails closed, never truncating evidence or presenting overflow as good.
+
+## Frozen member-local diagnostic compatibility
+
+The existing `GET /v1/client/request-latency` diagnostic remains under the client-v0 freeze.
+Its original process-local phone window accumulator, bounded Admission cache and rotating
+`state-dir/client-observations.jsonl` history remain unchanged. The endpoint commits durable
+claims first, then runs that legacy diagnostic admission before acknowledging the report.
+Those local files and counters are never read by native objective or doctor evaluation.
+The legacy diagnostic can still be empty after restart or on another receiving member; that
+does not erase durable native evidence. Its cache scope uses the old local directory/grant
+key only for diagnostic compatibility, never for durable source identity.
+Its grant-specific local deduplication can still refuse the same UUID after a grant change
+on the same process even when durable graph admission correctly recognizes an exact retry.
+
+Removing this legacy diagnostic path and switching its held reader to the graph requires a
+separate client-v0 freeze exemption. Legacy JSONL is not imported as fleet evidence because
+it lacks stable authenticated source provenance. Missing historical minutes remain unknown;
+neither local history nor delayed phone reports are re-timestamped as current phone time.

@@ -384,7 +384,7 @@ impl DeliveryStore for Store {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
         ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.append_claim_fenced_outcome(input, Some(fence))
+        self.append_native_mailbox_receipt_outcome(input, fence, None)
     }
 
     fn record_mail_input_acceptance(
@@ -471,6 +471,9 @@ impl DeliveryStore for Store {
                 "native proof needs a read receipt",
             ));
         }
+        let mailbox_intake_frontier = if matches!(input.kind.as_str(), "message.staged" | "message.delivered") {
+            Some(fractal_store::suspension::mailbox_intake_frontier(self, &fence.subject)?)
+        } else { None };
         append_claim_with_commit_context(
             &self.graph,
             input,
@@ -480,6 +483,7 @@ impl DeliveryStore for Store {
             None,
             ClaimCommitContext {
                 native_receipt: native,
+                mailbox_intake_frontier,
                 ..Default::default()
             },
         )

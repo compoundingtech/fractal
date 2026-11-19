@@ -70,6 +70,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
 
     fn checkpoint_manifest(
@@ -229,11 +230,13 @@ where
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
         let backend = self.clone();
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let exchange = exchange.clone();
+        let authenticated_member_key = authenticated_member_key.map(str::to_owned);
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
             if let Some(round_trip) = round_trip {
@@ -246,6 +249,7 @@ where
                     &exchange,
                     round_trip.is_some(),
                     carrier,
+                    authenticated_member_key.as_deref(),
                 )
                 .map_err(anyhow::Error::msg)?;
             store.record_transport_observation(&peer, "up", None, None)?;

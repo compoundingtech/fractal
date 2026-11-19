@@ -49,6 +49,26 @@ objective "ops/change-rollout" {
 A missing, unknown, repeated or nonsensical child is refused, never defaulted. An objective is a root
 declaration; it cannot sit inside a mission.
 
+Fault owners can be declared without a harness or command. Their declared `host` selects the
+single member that appends the durable `message.sent`; delivery does not require a running
+agent. Host-block placement, default placement and `host "local"` are resolved when the
+declaration is published. Reapply older no-launch declarations that omitted an explicit host
+to persist that resolved placement. Repeated reconciliation retains one message per episode;
+a recovered objective that burns again opens a new episode and message.
+
+```kdl
+agent "ops/budget-owner" {
+  host "monitor"
+  name "Budget owner"
+  description "Own service budget episodes without starting a runtime"
+}
+```
+
+This inert top-level agent needs no task children. A run-owned agent still needs a launch;
+invalid or conflicting explicitly declared launches are rejected as before.
+Its agent card has no runtime or current session. Changing a previously launched root to an
+inert declaration does not reuse historical runtime or harness observations as current state.
+
 ## Indicators
 
 ### Native telemetry
@@ -425,6 +445,76 @@ Native episode failures persist the exact declaring objective name. Cleanup read
 from the claims, so changing the bound native family or restarting the member still recovers
 obsolete children without prefix-matching an independent nested declaration. A wholly unavailable
 source keeps its previously open owned rows unknown, including after restart.
+
+### GO-to-merged completion ratios
+
+[`slo/dotfiles-merge-latency.kdl`](../../slo/dotfiles-merge-latency.kdl) declares
+`landing/merge-latency/dotfiles/p50` and `landing/merge-latency/dotfiles/p95` through
+the existing native `ratio` evaluator. These are ratio row IDs, not diagnostic percentile
+estimates: at least 50% of qualifying completions must take at most 600 seconds, and at
+least 95% at most 1800 seconds. Both use the half-open merged-completion cohort
+`[now - 30d, now)`. Admission or GO before that horizon does not exclude a merge inside it.
+Equality at either duration is good; equality at the bad-event allowance satisfies the
+rendered `≤` target with zero remaining budget. Exhaustion requires exceeding that
+allowance. This inclusive boundary applies to the shared native budget classifier;
+unknown evidence and paired-burn decisions are unchanged.
+
+The source is an explicitly published declaration, not an automatically activated observer
+or a second configuration reader. Include it in the owning fleet's governed declaration
+source and publish through that source's existing `fractal apply --set` lane. Preview with
+`fractal apply --as "$FRACTAL_AGENT" --dry-run slo/dotfiles-merge-latency.kdl`.
+This file neither starts acquisition nor changes the merge queue. It declares no breach
+owner; fleet policy may author `on-breach` through its normal ownership lane.
+
+The queue-derived producer ingests existing custom claims through `fractal claim` /
+`POST /v1/claims`, not a new API or schema kind:
+
+- Kind: `custom.landing.dotfiles-merged`.
+- Subject: `custom/landing/dotfiles/merged/DIGEST`, where `DIGEST` is SHA-256 of the
+  UTF-8 compact JSON array `[repo,pr,head,admission,merge]`. Preserve producer-normalized
+  tuple values on retries; do not derive identity from ingestion time.
+- Fields: `schema: "fractal.merge-latency/v1"`, `repo`, `pr`, `head`, `admission`,
+  `merge`, `admittedAt`, `mergedAt`, `goAt`, `goSource`, `goEvidence`, `durationSeconds`.
+  `head` is the admitted full head; `merge` is the completed merge commit. Times are
+  RFC 3339 or Unix milliseconds. `durationSeconds = (mergedAt - goAt) / 1000`
+  must be finite and nonnegative, without rounding at the threshold.
+- `goSource: "route-a-exact-head"` requires an unedited exact-full-head
+  `q19-go v1 head=<40hex> verdict=GO` comment with one valid v3 footer identifying
+  a reviewer different from the PR body's owner; `goEvidence` is its durable URL.
+  These are self-asserted footer semantics, not independent authentication.
+  Preparation/candidate timestamps and free-form review prose are not promoted to GO.
+  Without qualifying evidence, `goSource: "admission-proxy"` uses admission time and
+  `goEvidence` holds the admission ID; both objectives explicitly exclude it.
+- Pass each field as `--field KEY=JSON`, plus `--actor "$FRACTAL_AGENT"` and a stable
+  `--idempotency-key`. The command parses JSON before its raw-string fallback, so encode
+  strings as JSON too. Retry the identical accepted fact, including its original
+  completion time and provenance, rather than inventing a new event timestamp.
+
+The producer owns validating durable completed admission/merge pairs and GO evidence;
+custom fields are not a new registered claim schema. The native reader incrementally
+reconstructs rows from replicated claims after restart or declaration revision and
+deduplicates repeated claims by subject and event timestamp. A missing or malformed
+duration is unknown, never good. Producer output/journal remains the replay source.
+No new schema registry, generated schema, projection, reconstruction kind, route,
+or acquisition cost probe is introduced.
+The integration tests compile this exact KDL source rather than duplicating its policy.
+It is therefore an explicit `fractal-api-core` extra in `.st/rust-test-inputs.json`
+and an input to both `linux-clippy` and `linux-fleet-compat` in the evidence policy
+and lane manifest, alongside the other compile-time SLO sources.
+The included KDL is also registered as source site `lv-ha5695af111aa` in the existing
+SQLite source inventory, with its adjacent owner/action marker. This accounts for
+test-source provenance only; it does not assert a SQLite value-size proof or add a
+runtime database path.
+
+Only exact-GO completions form the denominator. A proxy-only cohort reads
+`no-qualifying-events`, not met; unobserved or proxy merges cannot prove fleet-wide
+compliance. One qualifying completion makes the 30d budget eligible, but recent paired
+burn windows retain their independent evidence gates: an eligible historical cohort
+without recent evidence can read `not-eligible`, not an invented healthy burn verdict.
+Inspect `fractal slo explain landing/merge-latency/dotfiles/p50` (and `/p95`) for
+qualifying/excluded/unknown counts and remaining budget; use
+`fractal claims ls --kind custom.landing.dotfiles-merged` for provenance and producer
+coverage. These native ratios do not assert that the producer has observed every merge.
 
 ### Interval over claims
 

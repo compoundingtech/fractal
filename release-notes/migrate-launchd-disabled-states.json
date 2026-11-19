@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recognize current macOS launchd disabled states during host migration and installer rollback",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Migration still requires staged targets to be disabled and stopped; unknown launchd states now produce an error."},
+  "compatibility": {"status": "none", "detail": "Accept both true/false and disabled/enabled launchctl print-disabled formats. Installer backups retain effective enablement in either format."},
+  "downtime": {"status": "none", "detail": "No additional downtime; the existing explicit host cutover procedure is unchanged."},
+  "manual": {"status": "none", "detail": "No new manual step. Previously refused host migrations can be retried using the updated CLI."},
+  "recovery": {"status": "none", "detail": "Existing migration recovery and installer rollback remain available. Revert the change to restore the previous parsers."}
+}

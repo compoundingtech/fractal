@@ -76,3 +76,73 @@ fn cold_membership_status_never_seals_pending_batches_or_writes() {
     assert_eq!(pending_batches(), pending);
     assert!(*store.sealing_recovery.try_lock().unwrap(), "status entered sealing recovery");
 }
+
+#[test]
+fn worker_diagnostics_preserve_the_failed_phase_without_walking_history() {
+    use crate::store::checkpoint_agreement::CheckpointPhase;
+    let store = store();
+    store.checkpoint_worker_phase(CheckpointPhase::Disabled);
+    SEALED_IDENTITY_WALKS.with(|walks| walks.set(0));
+    let status = store.checkpoint_status(NOW, &["absent-writer".into()]).unwrap();
+    let summary = status.blocking_summary().unwrap();
+    assert!(summary.contains("status-node phase=Disabled"));
+    assert!(summary.contains("absent-writer phase=seal (no seal)"));
+    assert!(summary.contains("disabled by config on 1 node (local); peer config unknown"));
+    assert!(summary.contains("newest stable none"));
+    store.checkpoint_worker_phase(CheckpointPhase::Capture);
+    store.checkpoint_worker_error("scratch space refused".into());
+    let status = store.checkpoint_status(NOW, &[]).unwrap();
+    let worker = status.worker.as_ref().unwrap();
+    assert_eq!(worker.phase, CheckpointPhase::Capture);
+    assert_eq!(worker.error.as_deref(), Some("scratch space refused"));
+    assert!(status.blocking_summary().unwrap().contains("phase=Capture failed: scratch space refused"));
+    assert_eq!(serde_json::from_value::<crate::store::CheckpointStatusView>(
+        serde_json::to_value(&status).unwrap()).unwrap(), status);
+    store.checkpoint_worker_phase(CheckpointPhase::Seal);
+    assert!(store.checkpoint_status(NOW, &[]).unwrap().worker.unwrap().error.is_none());
+    SEALED_IDENTITY_WALKS.with(|walks| assert_eq!(walks.get(), 0));
+}
+
+#[test]
+fn blockers_distinguish_seals_from_verifications_and_accept_older_status() {
+    let store = store();
+    let mut status = store.checkpoint_status(NOW, &[]).unwrap();
+    let pending = status.pending.as_mut().unwrap();
+    pending.unsealed.clear();
+    assert!(status.blocking_summary().unwrap().contains("status-node phase=verify"));
+    status.pending.as_mut().unwrap().verified.insert("status-node".into());
+    assert!(!status.blocking_summary().unwrap().contains("phase=verify"));
+    let mut json = serde_json::to_value(&status).unwrap();
+    json.as_object_mut().unwrap().remove("worker");
+    let old: crate::store::CheckpointStatusView = serde_json::from_value(json).unwrap();
+    assert!(old.worker.is_none());
+}
+
+#[test]
+fn worker_failures_and_halted_trims_remain_visible_without_pending_work() {
+    use crate::store::checkpoint_agreement::CheckpointPhase;
+    let store = store();
+    store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = store.checkpoint_status(NOW, &[]).unwrap();
+    status.pending = None;
+    assert!(status.blocking_summary().unwrap().contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker.as_mut().unwrap().error = None;
+    status.halted = true;
+    assert!(status.blocking_summary().unwrap().contains("phase=trim (halted"));
+    status.halted = false;
+    assert!(status.blocking_summary().is_none());
+}
+
+#[test]
+fn verification_disagreements_name_participants_and_reasons() {
+    let store = store();
+    let mut status = store.checkpoint_status(NOW, &[]).unwrap();
+    let pending = status.pending.as_mut().unwrap();
+    pending.unsealed.clear();
+    pending.verified.insert("status-node".into());
+    pending.verifications_agree = false;
+    pending.verifications_differ.insert("status-node".into(), "readers, retained claims".into());
+    assert!(status.blocking_summary().unwrap().contains(
+        "status-node phase=verify (different readers, retained claims)"));
+}

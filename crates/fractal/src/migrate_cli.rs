@@ -72,6 +72,7 @@ struct Receipt {
     manager: &'static str,
     launchd_domain: Option<String>,
     local_api: &'static str,
+    checkpoint_gate: &'static str,
     effective: Protection,
     gap_ms: u128,
 }
@@ -275,6 +276,7 @@ struct Journal {
 trait Manager {
     fn kind(&self) -> &'static str;
     fn domain(&self) -> Option<&str> { None }
+    fn checkpoint_gate(&self) -> &'static str { "pending-null" }
     fn bind_domain(&mut self, _recorded: Option<&str>, _recovery: bool) -> Result<()> { Ok(()) }
     fn inspect(&mut self) -> Result<Services>;
     fn stop(&mut self, unit: &Unit) -> Result<()>;
@@ -312,18 +314,24 @@ fn queried_launchd_domain(layout: &Layout, uid: u32, inspect: impl FnMut(&str) -
 }
 
 
+fn load_daemon_config(path: Option<&Path>) -> Result<Config> {
+    let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
+    // Unlike ordinary client discovery, moving state requires a readable daemon config.
+    Config::load_unvalidated(Some(&selected))
+}
+
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
     ensure!(endpoint.unix_socket().is_some(), "host migration requires the local Unix API, not a remote endpoint");
     let mut layout = Layout::discover()?;
-    let mut config = Config::load_unvalidated(args.config.as_deref())?;
+    let mut config = load_daemon_config(args.config.as_deref())?;
     if let Some(state) = &args.state_dir { config.state_dir = state.clone(); }
     if let Some(store) = &args.store_dir { config.store_dir = Some(store.clone()); }
     layout.configure_state(&config.state_dir)?;
     layout.configure_store(&config);
     config.apply_fleet_file()?;
     fractal_daemon::node_identity::resolve(&mut config)?;
-    let mut manager = native::Native::new(endpoint.clone(), config.node.clone());
+    let mut manager = native::Native::new(endpoint.clone(), config.node.clone(), &config);
     let receipt = cutover(&layout, &mut manager, &config.node, &args).await?;
     if json {
         super::print_value(&receipt, true)
@@ -333,6 +341,7 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
             receipt.effective.memory_swap_max.as_deref().unwrap_or("not-applicable (launchd)"),
             receipt.effective.memory_low.as_deref().unwrap_or("not-applicable (launchd)"), receipt.gap_ms, receipt.manager);
         if let Some(domain) = &receipt.launchd_domain { fractal_daemon::cli_println!("launchd_domain={domain}"); }
+        fractal_daemon::cli_println!("checkpoint_gate={}", receipt.checkpoint_gate);
         Ok(())
     }
 }
@@ -563,7 +572,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
 }
 
 fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: &'static str, effective: Protection, gap_ms: u128) -> Receipt {
-    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), launchd_domain: manager.domain().map(str::to_owned), local_api, effective, gap_ms }
+    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), launchd_domain: manager.domain().map(str::to_owned), local_api, checkpoint_gate: manager.checkpoint_gate(), effective, gap_ms }
 }
 
 fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {

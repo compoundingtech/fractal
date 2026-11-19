@@ -987,6 +987,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 status.node
             );
             println!("TRANSPORTS  {}", status.transports.join(","));
+            println!(
+                "REPLICATION  {}  {}",
+                status.replication_health.status(),
+                status.replication_health.message(),
+            );
             if let Some(protocol) = &status.fabric_protocol {
                 println!("FABRIC-PROTOCOL  {protocol}");
             }
