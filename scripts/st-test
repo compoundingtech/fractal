@@ -998,7 +998,6 @@ RESOURCE_EXEC = None  # resolved before check PATH normalization; never a candid
 ADMISSION_RECEIPTS = []
 QUARANTINED = False
 TEMP_DIRS = set()
-NATIVE_JOURNAL_LOCK = threading.Lock()
 
 
 def native_command(executable, environment=None):
@@ -1034,27 +1033,59 @@ def temporary_directory(**options):
             shutil.rmtree(path, ignore_errors=True)
 
 
-def native_journal(directory):
-    path = Path(directory).resolve()
-    return path.with_name(path.name + '.native-execs.json')
+def native_record_root():
+    return Path.home() / '.cache/st-test/native-requests'
 
 
-def write_native_journal(path, entries):
-    if not entries:
-        path.unlink(missing_ok=True)
-        return
-    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex)
-    with temporary.open('w') as output:
-        os.fchmod(output.fileno(), 0o600)
-        json.dump(entries, output)
-        output.flush()
-        os.fsync(output.fileno())
-    temporary.replace(path)
-    descriptor = os.open(path.parent, os.O_RDONLY)
+def write_native_record(path, record):
+    """Publish the sole authority before launch; incomplete writes are never records."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f'.{path.stem}.{os.getpid()}.tmp')
     try:
-        os.fsync(descriptor)
+        with temporary.open('w') as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(record, output)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def native_records(directory=None, scratch=None):
+    """Exact resource pins scope recovery; other checkouts' work is observational only."""
+    directory = str(Path(directory).resolve()) if directory is not None else None
+    scratch = str(Path(scratch).resolve()) if scratch is not None else None
+    records = []
+    for path in native_record_root().glob('*.json'):
+        try:
+            record = json.loads(path.read_text())
+        except FileNotFoundError:
+            continue  # another owner already completed recovery
+        if record.get('version') != 1 or record.get('request_id') != path.stem:
+            raise NativeRetirementFailure(f'unrecognized native request record: {path}')
+        if directory is not None and directory not in record['pins']:
+            continue
+        if scratch is not None and scratch not in record['scratch']:
+            continue
+        records.append((path, record))
+    return records
+
+
+def native_cancel_command(record, executable=None):
+    executable = executable or RESOURCE_EXEC or shutil.which('fractal')
+    if not executable:
+        raise NativeRetirementFailure(f'native admission unavailable; request={record["request_id"]}')
+    command = native_command(executable, record['endpoints']) + ['resources', 'cancel']
+    if record['owner']:
+        command += ['--as', record['owner']]
+    return command + ['--request-id', record['request_id'], '--wait']
 
 
 class NativeRetirementFailure(Failure):
@@ -1101,32 +1132,21 @@ class NativePhase:
             raise NativeRetirementFailure('this run is quarantined; no further native phase may start')
         self.request = argv[argv.index('--request-id') + 1]
         self.environment = dict(options.get('env') or os.environ)
-        self.command = native_command(argv[0], self.environment) + ['resources', 'cancel']
-        owner = native_owner(self.environment)
-        if owner:
-            self.command += ['--as', owner]
-        self.command += ['--request-id', self.request, '--wait']
-        self.path = native_journal(options.get('cwd') or Path.cwd())
-        self.paths = {self.path}
+        tree = Path(options.get('cwd') or Path.cwd()).resolve()
+        pins = {str(tree)}
         target = self.environment.get('CARGO_TARGET_DIR')
         if target:
-            self.paths.add(native_journal(target))
+            pins.add(str((tree / target).resolve()))
+        self.path = native_record_root() / f'{self.request}.json'
+        self.entry = {
+            'version': 1, 'request_id': self.request, 'owner': native_owner(self.environment),
+            'endpoints': {key: self.environment[key] for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT') if key in self.environment},
+            'pins': sorted(pins), 'scratch': sorted(str(path.resolve()) for path in TEMP_DIRS),
+            'checkout': str(Path.cwd().resolve()),
+        }
+        self.command = native_cancel_command(self.entry, argv[0])
         self.lock, self.retired, self.failure = threading.Lock(), False, None
-        endpoints = {key: self.environment[key] for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT') if key in self.environment}
-        self.entry = {'command': self.command, 'endpoints': endpoints,
-                      'scratch': [str(path) for path in tuple(TEMP_DIRS)]}
-        with NATIVE_JOURNAL_LOCK:
-            # Fence scratch before publishing a request journal: SIGKILL can
-            # leave admitted work alive without reaching the failure handler.
-            for scratch in self.entry['scratch']:
-                marker = Path(scratch) / '.native-requests.json'
-                owners = json.loads(marker.read_text()) if marker.exists() else {}
-                owners[str(self.path)] = True
-                write_native_journal(marker, owners)
-            for path in self.paths:
-                entries = json.loads(path.read_text()) if path.exists() else {}
-                entries[self.request] = self.entry
-                write_native_journal(path, entries)
+        write_native_record(self.path, self.entry)
 
     def retire(self):
         global QUARANTINED
@@ -1139,45 +1159,36 @@ class NativePhase:
                 cancel_native_request(self.command, self.environment)
             except (OSError, NativeRetirementFailure) as error:
                 QUARANTINED = True
-                for path in tuple(TEMP_DIRS):
-                    (path / '.native-quarantine').write_text(str(self.path))
-                self.failure = NativeRetirementFailure(f'{error}; journal={self.path}; '
+                self.failure = NativeRetirementFailure(f'{error}; record={self.path}; '
                     f'request={self.request}; resume cleanup: {shlex.join(self.command)}')
                 print(f'fractal-test: {self.failure}', file=sys.stderr, flush=True)
                 raise self.failure from error
-            with NATIVE_JOURNAL_LOCK:
-                for path in self.paths:
-                    entries = json.loads(path.read_text())
-                    entries.pop(self.request)
-                    write_native_journal(path, entries)
-                if not self.path.exists():
-                    release_native_scratch(self.path, self.entry['scratch'])
+            # The live supervisor still needs its scratch for later phases.
+            # Its directory lock owns cleanup once this record is retired.
+            self.path.unlink(missing_ok=True)
             self.retired = True
 
 
+def recover_native_records(records):
+    """Cancel once per record, remove unshared scratch, delete authority last."""
+    for path, record in records:
+        if not path.exists():
+            continue
+        command = native_cancel_command(record)
+        cancel_native_request(command, dict(os.environ, **record['endpoints']))
+        for scratch in record['scratch']:
+            retained = Path(scratch)
+            if (retained / 'KEPT').exists():
+                continue
+            if any(other != path for other, _ in native_records(scratch=retained)):
+                continue  # the last request sharing scratch owns its removal
+            with contextlib.suppress(FileNotFoundError):
+                shutil.rmtree(retained)
+        path.unlink(missing_ok=True)
+
+
 def recover_native_tree(directory):
-    path = native_journal(directory)
-    if not path.exists():
-        return
-    entries = json.loads(path.read_text())
-    for entry in entries.values():
-        cancel_native_request(entry['command'], dict(os.environ, **entry['endpoints']))
-    path.unlink()
-    release_native_scratch(path, {value for entry in entries.values() for value in entry['scratch']}, cleanup=True)
-
-
-def release_native_scratch(journal, scratches, cleanup=False):
-    for scratch in scratches:
-        retained = Path(scratch)
-        marker = retained / '.native-requests.json'
-        owners = json.loads(marker.read_text()) if marker.exists() else {}
-        owners.pop(str(journal), None)
-        write_native_journal(marker, owners)
-        quarantine = retained / '.native-quarantine'
-        if quarantine.exists() and quarantine.read_text() == str(journal):
-            quarantine.unlink()
-        if cleanup and not owners and not quarantine.exists() and not (retained / 'KEPT').exists():
-            shutil.rmtree(retained)
+    recover_native_records(native_records(directory=directory))
 
 
 @contextlib.contextmanager
@@ -1469,7 +1480,6 @@ def sweep_run_tmp(root):
         try:
             status = entry.lstat()
             if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid() or (entry / KEPT).exists()
-                    or (entry / '.native-quarantine').exists() or (entry / '.native-requests.json').exists()
                     or time.time() - status.st_mtime < RUN_TMP_FRESH):
                 continue  # another account's, or kept, or too new to judge
             fd = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -1480,8 +1490,16 @@ def sweep_run_tmp(root):
         except OSError:
             os.close(fd)
             continue  # its run is still going
-        remove_tree(entry)
-        os.close(fd)
+        try:
+            records = native_records(scratch=entry)
+            # Shared scratch roots may contain other checkouts' work. Never recover
+            # those requests merely because their supervisor directory is old.
+            if any(record['checkout'] != str(Path.cwd().resolve()) for _, record in records):
+                continue
+            recover_native_records(records)
+            remove_tree(entry)
+        finally:
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -2129,8 +2147,7 @@ def reap_stale():
         if not match:
             continue
         scratch = Path(match.group(1))
-        if ((scratch / '.native-quarantine').exists() or (scratch / '.native-requests.json').exists()
-                or native_journal(scratch / 'tree').exists()):
+        if native_records(scratch=scratch):
             continue
         try:
             os.kill(int((scratch / 'pid').read_text()), 0)

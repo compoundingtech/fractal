@@ -711,6 +711,111 @@ class NativeAdmissionTest(unittest.TestCase):
             self.assertEqual(st_test.governed(command, 'linux-gate'), command)
             self.assertFalse(st_test.is_native_exec(command))
 
+    @contextlib.contextmanager
+    def crash_fixture(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            scratch, tree, target = (Path(home, name) for name in ('st-test.crash', 'tree', 'target'))
+            scratch.mkdir()
+            tree.mkdir()
+            old = time.time() - st_test.RUN_TMP_FRESH - 1
+            os.utime(scratch, (old, old))
+            command = st_test.governed(['true'], 'linux-gate', output=io.StringIO())
+            options = {'cwd': tree, 'env': {'CARGO_TARGET_DIR': str(target)}}
+            with mock.patch.object(st_test, 'TEMP_DIRS', {scratch}):
+                yield Path(home), scratch, tree, target, command, options
+
+    def test_crash_before_record_leaves_no_pins_and_sweep_reclaims_scratch(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            with mock.patch.object(st_test, 'write_native_record', side_effect=SystemExit('crash before record')):
+                with self.assertRaises(SystemExit):
+                    st_test.NativePhase(command, options)
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.recover_native_tree(tree)
+                st_test.recover_native_tree(target)
+                st_test.sweep_run_tmp(home)
+                cancel.assert_not_called()
+            self.assertFalse(scratch.exists())
+            self.assertEqual(st_test.native_records(), [])
+
+    def test_crash_after_record_before_launch_converges_through_both_pins(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            phase = st_test.NativePhase(command, options)
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.recover_native_tree(tree)
+                st_test.recover_native_tree(target)
+                st_test.sweep_run_tmp(home)
+                cancel.assert_called_once_with(phase.command, mock.ANY)
+            self.assertFalse(scratch.exists())
+            self.assertEqual(st_test.native_records(), [])
+
+    def test_crash_while_running_requires_retirement_before_removing_scratch(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            phase = st_test.NativePhase(command, options)
+            def retire(argv, environment):
+                self.assertTrue(scratch.exists())
+                self.assertTrue(phase.path.exists())
+            with mock.patch.object(st_test, 'cancel_native_request', side_effect=retire) as cancel:
+                st_test.recover_native_tree(target)
+                st_test.recover_native_tree(tree)
+                cancel.assert_called_once()
+            self.assertFalse(scratch.exists())
+            self.assertEqual(st_test.native_records(), [])
+
+    def test_crash_after_retirement_before_scratch_removal_repeats_safely(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            phase = st_test.NativePhase(command, options)
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                with mock.patch.object(st_test.shutil, 'rmtree', side_effect=SystemExit('crash before scratch removal')):
+                    with self.assertRaises(SystemExit):
+                        st_test.recover_native_tree(tree)
+                self.assertTrue(phase.path.exists())
+                self.assertTrue(scratch.exists())
+                st_test.recover_native_tree(target)
+                st_test.recover_native_tree(tree)
+                self.assertEqual(cancel.call_count, 2, 'a new recovery repeats the owner-scoped idempotent cancel')
+            self.assertFalse(scratch.exists())
+            self.assertEqual(st_test.native_records(), [])
+
+    def test_crash_after_scratch_removal_before_record_deletion_repeats_safely(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            phase = st_test.NativePhase(command, options)
+            unlink = Path.unlink
+            def crash_at_record(path, **kwargs):
+                if path == phase.path:
+                    raise SystemExit('crash before record deletion')
+                return unlink(path, **kwargs)
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                with mock.patch.object(Path, 'unlink', autospec=True, side_effect=crash_at_record):
+                    with self.assertRaises(SystemExit):
+                        st_test.recover_native_tree(tree)
+                self.assertTrue(phase.path.exists())
+                self.assertFalse(scratch.exists())
+                st_test.recover_native_tree(target)
+                st_test.recover_native_tree(tree)
+                self.assertEqual(cancel.call_count, 2)
+            self.assertEqual(st_test.native_records(), [])
+
+    def test_recovery_rebuilds_argv_and_does_not_touch_another_checkouts_pins(self):
+        with self.crash_fixture() as (home, scratch, tree, target, command, options):
+            phase = st_test.NativePhase(command, options)
+            other = dict(phase.entry, request_id=str(st_test.uuid.uuid4()), pins=[str(home / 'other-tree')],
+                         scratch=[str(home / 'st-test.other')], checkout=str(home / 'other-checkout'),
+                         command=['/malicious/shell', '-c', 'never execute'])
+            other_scratch = Path(other['scratch'][0])
+            other_scratch.mkdir()
+            old = time.time() - st_test.RUN_TMP_FRESH - 1
+            os.utime(other_scratch, (old, old))
+            other_path = st_test.native_record_root() / f'{other["request_id"]}.json'
+            st_test.write_native_record(other_path, other)
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.recover_native_tree(tree)
+                st_test.sweep_run_tmp(home)
+                cancel.assert_called_once_with(phase.command, mock.ANY)
+            self.assertTrue(other_path.exists())
+            self.assertTrue(other_scratch.exists())
+            self.assertNotIn('/malicious/shell', st_test.native_cancel_command(other))
+
     def test_crash_after_journaling_preserves_old_unlocked_scratch_until_recovery(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
                 mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
@@ -720,17 +825,14 @@ class NativeAdmissionTest(unittest.TestCase):
             tree.mkdir()
             with mock.patch.object(st_test, 'TEMP_DIRS', {scratch}):
                 phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()), {'cwd': tree})
-            self.assertTrue(st_test.native_journal(tree).exists())
-            self.assertTrue((scratch / '.native-requests.json').exists())
+            self.assertEqual(st_test.native_records(directory=tree), [(phase.path, phase.entry)])
+            self.assertEqual(st_test.native_records(scratch=scratch), [(phase.path, phase.entry)])
             old = time.time() - st_test.RUN_TMP_FRESH - 1
             os.utime(scratch, (old, old))
-            st_test.sweep_run_tmp(Path(home))
-            self.assertTrue(scratch.exists(), 'a dead supervisor does not prove native retirement')
             with mock.patch.object(st_test, 'cancel_native_request', side_effect=st_test.NativeRetirementFailure('unconfirmed')) as cancel:
                 with self.assertRaises(st_test.NativeRetirementFailure):
-                    st_test.recover_native_tree(tree)
+                    st_test.sweep_run_tmp(Path(home))
                 cancel.assert_called_once()
-            st_test.sweep_run_tmp(Path(home))
             self.assertTrue(scratch.exists())
             with mock.patch.object(st_test, 'cancel_native_request') as cancel:
                 st_test.recover_native_tree(tree)
@@ -748,12 +850,12 @@ class NativeAdmissionTest(unittest.TestCase):
                 with self.assertRaises(st_test.NativeRetirementFailure):
                     st_test.shared_target()
                 cancel.assert_called_once_with(phase.command, mock.ANY)
-            self.assertTrue(st_test.native_journal(target).exists())
+            self.assertEqual(st_test.native_records(directory=target), [(phase.path, phase.entry)])
             with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(target)}), \
                     mock.patch.object(st_test, 'cancel_native_request') as cancel:
                 self.assertEqual(st_test.shared_target(), (None, None))
                 cancel.assert_called_once()
-            self.assertFalse(st_test.native_journal(target).exists())
+            self.assertEqual(st_test.native_records(directory=target), [])
 
     def test_each_phase_names_one_profile_lane_and_durable_receipt(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
@@ -835,13 +937,13 @@ class NativeAdmissionTest(unittest.TestCase):
                     with self.assertRaises(st_test.NativeRetirementFailure):
                         st_test.recover_native_tree(tree)
                     self.assertEqual(cancel.call_count, 2, 'reuse makes one new cancellation attempt, not a retry loop')
-                self.assertTrue(st_test.native_journal(tree).exists())
+                self.assertTrue(phase.path.exists())
             self.assertTrue(Path(scratch).exists(), 'unconfirmed custody preserves scratch after unwinding')
-            self.assertTrue((Path(scratch) / '.native-quarantine').exists())
+            self.assertEqual(st_test.native_records(scratch=scratch), [(phase.path, phase.entry)])
             with mock.patch.object(st_test, 'cancel_native_request') as cancel:
                 st_test.recover_native_tree(tree)
                 cancel.assert_called_once()
-            self.assertFalse(st_test.native_journal(tree).exists())
+            self.assertFalse(phase.path.exists())
             self.assertFalse(Path(scratch).exists())
 
     def test_cancel_request_uses_absent_submit_tombstone_as_confirmed_nonlaunch(self):
@@ -898,16 +1000,20 @@ class NativeAdmissionTest(unittest.TestCase):
             process = mock.Mock(stdin=None, stdout=None, stderr=None)
             process.poll.return_value = 0
             def launch(argv, **options):
-                journal = json.loads(st_test.native_journal(home).read_text())
-                self.assertIn(request, journal)
-                self.assertEqual(journal[request]['command'][-3:], ['--request-id', request, '--wait'])
+                records = st_test.native_records(directory=home)
+                self.assertEqual(len(records), 1)
+                path, record = records[0]
+                self.assertEqual(record['request_id'], request)
+                self.assertNotIn('command', record)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
                 return process
             with mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch), \
                     mock.patch.object(st_test, 'cancel_native_request') as cancel:
                 with st_test.managed_process(command, {'cwd': home}):
                     pass
                 cancel.assert_called_once()
-            self.assertFalse(st_test.native_journal(home).exists())
+            self.assertEqual(st_test.native_records(directory=home), [])
 
     def test_shared_target_has_its_own_durable_retirement_fence(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
@@ -917,12 +1023,12 @@ class NativeAdmissionTest(unittest.TestCase):
             tree.mkdir()
             phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()),
                                         {'cwd': tree, 'env': {'CARGO_TARGET_DIR': str(target)}})
-            self.assertTrue(st_test.native_journal(tree).exists())
-            self.assertTrue(st_test.native_journal(target).exists())
+            self.assertEqual(st_test.native_records(directory=tree), [(phase.path, phase.entry)])
+            self.assertEqual(st_test.native_records(directory=target), [(phase.path, phase.entry)])
             with mock.patch.object(st_test, 'cancel_native_request'):
                 phase.retire()
-            self.assertFalse(st_test.native_journal(tree).exists())
-            self.assertFalse(st_test.native_journal(target).exists())
+            self.assertEqual(st_test.native_records(directory=tree), [])
+            self.assertEqual(st_test.native_records(directory=target), [])
 
     def test_inherited_custody_cannot_create_phase_receipts(self):
         with mock.patch.dict(os.environ, {'FRACTAL_RESOURCE_PARENT': 'host-grant'}, clear=True):

@@ -2083,11 +2083,15 @@ Receipt `queue_wait_ms` and `wall_duration_ms` are the host's terminal measureme
 Before cleanup, st-test calls `fractal --json --endpoint SOCKET resources cancel --as ACTOR --request-id ID --wait` once: only terminal whole-tree retirement or a
 nonlaunch tombstone authorizes client termination and scratch cleanup. Transport failure, nonzero exit or an unconfirmed response
 quarantines the pool tree, target and scratch instead of releasing them for reuse. The error prints the request ID and exact resume
-command; the adjacent `.native-execs.json` journal survives process exit. A later owner must complete that same cancellation once
-before reusing the tree or any shared target, including a caller's `CARGO_TARGET_DIR`; another failure refuses reuse.
-Scratch gets a durable `.native-requests.json` preservation marker before the request journal is published, so a killed supervisor
-cannot leave sweepable scratch beneath still-live native work. Tree/target recovery precedes the run's scratch sweep.
-Confirmed retirement removes the corresponding scratch ownership marker. There is no cancellation retry loop.
+command. One atomic `~/.cache/st-test/native-requests/UUID.json` record per request survives supervisor exit.
+It contains the request ID, owner, endpoints, scratch paths and exact tree/target pins, not an executable command.
+The record directory is 0700; records are 0600 and published with file fsync, rename and directory fsync before launch.
+That record is also the scratch preservation authority: there is no second scratch-marker or tree/target journal to reconcile.
+A later owner matches the exact tree/target pins (including caller `CARGO_TARGET_DIR`) and rebuilds cancel argv from trusted code.
+Recovery cancels/confirms retirement once per record, removes unshared scratch (already missing is success), then deletes the
+record last. Every step is safe to repeat across a crash. Other checkouts' requests are not recovered by the scratch sweep.
+Tree/target recovery precedes sweeping; an old scratch directory with its own record is recovered rather than leaked.
+There is no cancellation retry loop.
 Phase receipt files are root-only: the orchestrator must start outside native custody, and refuses inherited parent grants rather than
 double-admitting or stripping them. The heavy phases are sibling roots; their native `FRACTAL_RESOURCE_PARENT`,
 `FRACTAL_RESOURCE_EXEC_ID`, `ST3_ENDPOINT` and `FRACTAL_ENDPOINT` context survives control-plane and local-runner scrubbing.
