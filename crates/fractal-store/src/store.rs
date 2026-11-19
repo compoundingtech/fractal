@@ -2381,42 +2381,54 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 
 /// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
+/// CPU eligibility evidence: source incarnation, quiet state and source observation timestamp.
+pub type LocalHarnessEvidence = (Option<String>, bool, Option<u64>);
+
 /// What one minute's check of this member's seats carries into the next (`local_seats_busy`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalSeats {
-    /// Each seat's newest harness observation: the incarnation it names and whether it was quiet.
-    pub harness: BTreeMap<String, (Option<String>, bool)>,
+    /// Each seat's newest harness incarnation, quiet state and source observation timestamp.
+    pub harness: BTreeMap<String, LocalHarnessEvidence>,
     /// Each seat this member observed a runtime for: whether it is live, and its incarnation.
     pub runtimes: BTreeMap<String, (bool, Option<String>)>,
 }
 
 impl LocalSeats {
-    /// Fold one runtime observation's fields; true when it says the seat is live, which in a
-    /// checked span is a start or a seat still running.
+    /// Fold one runtime observation's fields; true only for a start/new incarnation, not a
+    /// heartbeat from an already-live session. Productive activity comes from the harness.
     fn fold_runtime(&mut self, subject: String, fields: &str) -> Result<bool> {
         let fields: Value = serde_json::from_str(fields)?;
         let status = fields["status"].as_str();
         let live = !matches!(status, Some("absent" | "exited" | "vanished" | "stopped"));
         let runtime = self.runtimes.entry(subject).or_default();
+        let changed = fields.get("incarnation_id").is_some_and(|incarnation| incarnation.as_str() != runtime.1.as_deref());
+        let started = live && (!runtime.0 || changed);
         runtime.0 = live;
         match fields.get("incarnation_id") {
-            Some(Value::String(incarnation)) => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(incarnation)) if changed => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(_)) => {}
             Some(_) => runtime.1 = None,
             None => {}
         }
-        Ok(live)
+        Ok(started)
     }
 
     /// Whether, as folded so far, a seat is working or not known not to be.
-    fn busy(&self) -> bool {
+    fn busy(&self, at_ms: u64) -> bool {
         let live = self.runtimes.iter().any(|(subject, (live, incarnation))| {
             *live
-                && !self.harness.get(subject).is_some_and(|(observed, quiet)| {
+                && !self.harness.get(subject).is_some_and(|(observed, quiet, source_at)| {
                     *quiet && incarnation.is_some() && observed == incarnation
+                        && source_at.is_some_and(|source_at| {
+                            u128::from(at_ms.saturating_sub(source_at))
+                                < fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis()
+                                && u128::from(source_at.saturating_sub(at_ms))
+                                    <= fractal_drivers::harness_state::HARNESS_STATE_FUTURE_SKEW.as_millis()
+                        })
                 })
         });
         let quiet = |subject: &String| self.runtimes.get(subject).is_some_and(|(live, _)| !live);
-        live || self.harness.iter().any(|(subject, (_, q))| !q && !quiet(subject))
+        live || self.harness.iter().any(|(subject, (_, q, _))| !q && !quiet(subject))
     }
 }
 
@@ -7498,9 +7510,9 @@ impl Store {
     /// - This member's runtime observations, the `runtime.observed` claims its reconciler
     ///   authors. A seat whose newest one is not `absent`, `exited`, `vanished` or `stopped` is
     ///   live here, and is busy unless its newest harness observation names the same incarnation
-    ///   and is quiet. So a live seat with no harness observation, as when harness observations
-    ///   stop reaching the store, is never quiet. A seat that starts inside the span is busy; a
-    ///   seat this member ended no longer counts its last harness state.
+    ///   and is quiet with fresh source evidence under the harness stale/future-skew bounds.
+    ///   A live seat whose harness publisher stops is never confirmed quiet after that evidence expires.
+    ///   A seat this member ended no longer counts its last harness state.
     ///
     /// Returns that, and both sources as of `until_ms` for the next check.
     pub fn local_seats_busy(
@@ -7509,11 +7521,11 @@ impl Store {
         until_ms: u64,
         carried: Option<LocalSeats>,
     ) -> Result<(bool, LocalSeats)> {
-        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, (Option<String>, bool))> {
+        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, LocalHarnessEvidence)> {
             let state: Option<String> = row.get(1)?;
             let jobs: Option<i64> = row.get(2)?;
             let quiet = matches!(state.as_deref(), Some("ready" | "idle" | "blocked" | "ended"));
-            Ok((row.get(0)?, (row.get(3)?, quiet && jobs.unwrap_or(0) <= 0)))
+            Ok((row.get(0)?, (row.get(3)?, quiet && jobs.unwrap_or(0) <= 0, row.get(4)?)))
         }
         fn runtime(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
             Ok((row.get(0)?, row.get(1)?))
@@ -7530,7 +7542,8 @@ impl Store {
                             "SELECT seats.subject,
                                 COALESCE(json_extract(o.body, '$.fields.state'), json_extract(o.body, '$.state')),
                                 json_extract(o.body, '$.fields.background_jobs'),
-                                json_extract(o.body, '$.fields.incarnation_id')
+                                json_extract(o.body, '$.fields.incarnation_id'),
+                                json_extract(o.body, '$.fields.observed_at_ms')
                              FROM (SELECT DISTINCT subject FROM local_observations
                                    WHERE kind='harness.observed') AS seats
                              JOIN local_observations AS o ON o.id=(
@@ -7562,13 +7575,14 @@ impl Store {
                 seats
             }
         };
-        let mut busy = seats.busy();
+        let mut busy = seats.busy(from_ms);
         let within = connection
             .prepare_cached(
                 "SELECT subject,
                     COALESCE(json_extract(body, '$.fields.state'), json_extract(body, '$.state')),
                     json_extract(body, '$.fields.background_jobs'),
-                    json_extract(body, '$.fields.incarnation_id')
+                    json_extract(body, '$.fields.incarnation_id'),
+                    json_extract(body, '$.fields.observed_at_ms')
                  FROM local_observations
                  WHERE observed_at_unix_ms>=?1 AND observed_at_unix_ms<?2 AND kind='harness.observed'
                  ORDER BY id",
@@ -7593,7 +7607,7 @@ impl Store {
         for (subject, fields) in started {
             busy |= seats.fold_runtime(subject, &fields)?;
         }
-        busy |= seats.busy();
+        busy |= seats.busy(until_ms);
         Ok((busy, seats))
     }
 

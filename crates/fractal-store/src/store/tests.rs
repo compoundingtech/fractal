@@ -12942,6 +12942,60 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
 }
 
 #[test]
+fn runtime_heartbeats_do_not_make_a_quiet_live_session_productive() {
+    let subject = "agent/node.quiet".to_owned();
+    let mut seats = LocalSeats::default();
+    assert!(seats.fold_runtime(subject.clone(), r#"{"status":"running","incarnation_id":"one"}"#).unwrap());
+    seats.harness.insert(subject.clone(), (Some("one".into()), true, Some(0)));
+    assert!(!seats.busy(0));
+    for fields in [
+        r#"{"status":"running","incarnation_id":"one"}"#,
+        r#"{"status":"running"}"#,
+    ] {
+        assert!(!seats.fold_runtime(subject.clone(), fields).unwrap(), "{fields}");
+        assert!(!seats.busy(0), "{fields}");
+    }
+    seats.harness.insert(subject.clone(), (Some("one".into()), false, Some(0)));
+    assert!(seats.busy(0), "productive work still excludes idle eligibility");
+    seats.harness.insert(subject.clone(), (Some("one".into()), true, Some(0)));
+    assert!(seats.fold_runtime(subject, r#"{"status":"running","incarnation_id":"two"}"#).unwrap());
+    assert!(seats.busy(0), "a new incarnation needs its own quiet evidence");
+}
+
+#[test]
+fn local_seats_busy_expires_quiet_evidence_after_harness_publisher_loss() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let at = now_ms() as u64;
+    let runtime = ClaimInput {
+        subject: "agent/node.e".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("inc-1")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    store.append_claim(&runtime).unwrap();
+    let quiet = harness_state("agent/node.e", "idle", at);
+    store.append_latest_observation(&quiet, u128::from(at)).unwrap();
+    let from = (at / MINUTE + 1) * MINUTE;
+    let (busy, carried) = store.local_seats_busy(from, from + MINUTE, None).unwrap();
+    assert!(!busy, "fresh matching quiet evidence allows idle eligibility");
+    // The runtime remains alive, but its work-state publisher has stopped.
+    store.append_claim(&runtime).unwrap();
+    let stale = at + fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64;
+    assert!(store.local_seats_busy(stale, stale + MINUTE, Some(carried)).unwrap().0);
+    assert!(store.local_seats_busy(stale, stale + MINUTE, None).unwrap().0, "reconstruction must also expire source evidence");
+    // Receiving an old quiet report again cannot renew its source freshness.
+    store.append_latest_observation(&quiet, u128::from(stale)).unwrap();
+    assert!(store.local_seats_busy(stale + MINUTE, stale + 2 * MINUTE, None).unwrap().0);
+}
+
+#[test]
 fn a_claims_acceptance_time_is_read_from_the_store_once() {
     let store = Store::open_memory("node").unwrap();
     let observe = |n: usize| {
