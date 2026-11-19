@@ -83,8 +83,10 @@ mod schedule_standby_selection_tests;
 mod schedule_admission_tests;
 mod schedule_replication_block;
 pub mod member_admission;
+mod idle_residency_evidence;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
+pub use crate::config::{IdleResidencyPolicy, IdleResidencySettings};
 
 /// Register the reconciler's daemon metrics with the meter provider `otel` installed.
 pub fn init_metrics() {
@@ -1521,6 +1523,9 @@ pub struct Reconciler<R = NativeRuntime> {
     start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
+    /// Owner-fenced residency stop and wake policy; see `idle_nudge` and `store::idle_residency`.
+    idle_residency: Mutex<IdleResidencyPolicy>,
+    idle_residency_evidence: Mutex<idle_residency_evidence::RuntimeEvidence>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
     /// `run_report`.
     default_stall_reports_since: Mutex<Option<u128>>,
@@ -1800,6 +1805,8 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -2034,6 +2041,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -3336,6 +3345,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
+        self.reconcile_item("residency", "residency:host", true, || {
+            smallclaims::touched::note_read(|| "policy:idle-residency".into());
+            let enabled = self.idle_residency.lock()
+                .unwrap_or_else(PoisonError::into_inner).settings.after_ms.is_some();
+            self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                .evaluate_host(&self.store, enabled, now_ms())
+        })?;
         // Recovery is readback-only; use per-effect changes and lease deadlines,
         // never a full durable-history walk on unrelated daemon wakes.
         self.reconcile_effects()?;
@@ -3915,6 +3931,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             // Continue using the original desired subject, runtime ID and
                             // incarnation for every native/PTY operation below.
                             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                            let mut evidence = self.idle_residency_evidence.lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            evidence.evaluate_subject(&self.store, &subject.subject, now_ms())?;
                         }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
@@ -6510,6 +6529,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 smallclaims::touched::note_due(due);
             }
         }
+        self.evaluate_idle_residency(agent, now)?;
 
         if !harness.as_ref().is_some_and(CurrentHarnessView::is_ready) {
             return Ok(());
@@ -7080,6 +7100,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(Some(caught(|| -> Result<()> {
                     self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
+                    if subject.kind == "stop"
+                        && let Some(token) = self.store.selected_desired_token(&subject.subject)?
+                        && let Some(declaration) = self.store.claim_by_id(&token)?
+                        && let Some(hold) = crate::suspension::current_at(&self.store, &subject.subject,
+                            Some(declaration.store_index.saturating_sub(1)))?
+                            .filter(|hold| hold.cause() == "idle" && hold.suspended_at_unix_ms.is_some())
+                    {
+                        let end_class = if declaration.body.get("owned_set").is_some() { "retire" } else { "stop" };
+                        self.idle_residency_evidence.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .end_sleep(&self.store, &subject.subject, &hold, declaration.accepted_at_unix_ms, end_class)?;
+                    }
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
             })
@@ -8903,6 +8935,36 @@ impl<R: RuntimeControl> Reconciler<R> {
             ]),
         )
     }
+    /// Read the driver's channel fence for this incarnation, never process liveness.
+    fn idle_channel_ready(&self, agent: &str, incarnation: &str) -> Result<bool> {
+        Ok(self.store.newest_claim_where(agent, "harness.diagnostic", |claim| {
+            claim_incarnation(claim) == Some(incarnation)
+                && matches!(claim.body.pointer("/fields/code").and_then(Value::as_str),
+                    Some("omp-channel-ready" | "omp-channel-unready"))
+        })?.is_some_and(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str) == Some("omp-channel-ready")
+        }))
+    }
+
+    /// A demand observed before the stop boundary cancels the idle operation. A missing
+    /// projection frontier is not proof of silence and must cancel it as well.
+    fn idle_stop_refusal(&self, agent: &str, incarnation: &str, operation: &str) -> Result<Option<&'static str>> {
+        let demand = self.store.wake_demand(agent)?;
+        if demand.oldest.is_some() || !demand.frontier.caught_up {
+            return Ok(Some("wake-pending"));
+        }
+        if !self.idle_channel_ready(agent, incarnation)? {
+            return Ok(Some("channel-unready"));
+        }
+        let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.store.recheck_idle_suspend(agent, operation, policy.settings.after_ms,
+            policy.enabled_at_unix_ms)?
+        {
+            return Ok(Some("eligibility-changed"));
+        }
+        Ok(None)
+    }
+
 
     /// Drive a seat's suspend or resume one step. A suspended seat has no process, and nothing
     /// but its resume starts one: not its restart policy, not a restart request.
@@ -8948,6 +9010,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 self.record_member_as(subject, member, observation, true)?;
                 let incarnation = observation.incarnation_id.as_deref().unwrap_or_default();
+                if suspension.cause() == "idle"
+                    && let Some(code) = self.idle_stop_refusal(agent, incarnation, &suspension.operation_id)?
+                {
+                    return self.fail_suspension(agent, suspension, code,
+                        "idle suspension cancelled before the stop boundary".into(), Vec::new());
+                }
                 let blocking = suspended::blockers(&self.store, agent, incarnation)?;
                 if !blocking.is_empty() {
                     return self.fail_suspension(
@@ -8974,12 +9042,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !blocking.is_empty() {
                     return self.fail_suspension(agent, suspension, "not-quiescent", "the seat became active while its workspace was captured".into(), blocking);
                 }
-                self.record_suspension_phase(
-                    agent,
-                    suspension,
-                    "runtime.action.succeeded",
-                    suspended::suspend_snapshot_key(&suspension.operation_id),
-                    BTreeMap::from([
+                if suspension.cause() == "idle"
+                    && let Some(code) = self.idle_stop_refusal(agent, incarnation, &suspension.operation_id)?
+                {
+                    return self.fail_suspension(agent, suspension, code,
+                        "idle suspension cancelled while capturing the workspace".into(), Vec::new());
+                }
+                let fields = BTreeMap::from([
                         (
                             "operation_status".into(),
                             Value::String("snapshotting".into()),
@@ -8994,14 +9063,36 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                     ]).into_iter().chain(
                         (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
-                    ).collect(),
-                )?;
+                    ).collect();
+                if suspension.cause() == "idle" {
+                    let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !self.store.commit_idle_stop_boundary(agent, &suspension.operation_id,
+                        policy.settings.after_ms, policy.enabled_at_unix_ms, fields)?
+                    {
+                        return self.fail_suspension(agent, suspension, "wake-pending",
+                            "idle suspension lost its final owner or demand fence".into(), Vec::new());
+                    }
+                } else {
+                    self.record_suspension_phase(agent, suspension, "runtime.action.succeeded",
+                        suspended::suspend_snapshot_key(&suspension.operation_id), fields)?;
+                }
+                if suspension.cause() == "idle" {
+                    let root = self.runtime.start_process_identity(member, incarnation).ok().flatten();
+                    self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                        .before_suspend(&suspension.operation_id, root);
+                }
                 stop(observation)?;
                 Ok(())
             }
             "snapshotting" => {
                 if let Some(observation) = running {
                     self.record_member_as(subject, member, observation, true)?;
+                    if suspension.cause() == "idle" {
+                        let root = observation.incarnation_id.as_deref().and_then(|incarnation|
+                            self.runtime.start_process_identity(member, incarnation).ok().flatten());
+                        self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                            .before_suspend(&suspension.operation_id, root);
+                    }
                     stop(observation)?;
                     return Ok(());
                 }
@@ -9072,6 +9163,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                         member.shutdown_timeout_ms,
                         None,
                     )?;
+                    if suspension.cause() == "idle" && suspension.phase == "suspended" {
+                        let concurrency = self.idle_residency.lock()
+                            .unwrap_or_else(PoisonError::into_inner).settings.resume_concurrency;
+                        let admission = self.store.admit_idle_wake(agent, concurrency, now_ms())?;
+                        if let Some(due) = admission.retry_at_unix_ms {
+                            smallclaims::touched::note_due(due);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -9191,6 +9290,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let incarnation = observation.incarnation_id.as_deref().unwrap_or_default();
                     match suspended::bound_session(&self.store, agent, incarnation)? {
                         Some((_, live)) if Some(&live) == suspension.native_session_id.as_ref() => {
+                            if suspension.cause() == "idle" && !self.idle_channel_ready(agent, incarnation)? {
+                                if overdue {
+                                    return self.fail_suspension(agent, suspension, "channel-unready",
+                                        "the resumed native session did not establish its channel".into(), Vec::new());
+                                }
+                                self.arm_deadline_at(agent, due,
+                                    crate::reconcile_telemetry::WakeCause::TimerResumeVerification);
+                                return Ok(());
+                            }
                             self.record_suspension_phase(
                                 agent,
                                 suspension,

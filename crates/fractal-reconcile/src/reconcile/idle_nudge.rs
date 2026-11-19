@@ -108,6 +108,43 @@ enum NudgeReason<'a> {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Reload residency policy alongside the idle-holder policy.
+    /// As specified by idle residency's "Eligibility and the idle clock", enabling a policy
+    /// starts a local epoch. A fresh daemon waits a full threshold after loading config.
+    pub fn set_idle_residency(&self, settings: IdleResidencySettings) {
+        let policy = {
+            let mut current = self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+            if current.settings == settings {
+                return;
+            }
+            current.update(settings, now_ms());
+            *current
+        };
+        crate::config::set_idle_residency_policy(policy);
+        // A threshold change must replace existing per-seat deadlines, including off -> on.
+        self.incremental.touch("policy:idle-residency");
+        self.store.fractal.request_roster_refresh();
+        self.signal_changed();
+    }
+
+    /// Evaluate even seats holding no work, inside their existing reactive wake item.
+    pub(super) fn evaluate_idle_residency(&self, agent: &str, now: u128) -> Result<()> {
+        smallclaims::touched::note_read(|| "policy:idle-residency".into());
+        let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+        let residency = crate::residency::evaluate_at(
+            &self.store, agent, None, policy.settings.after_ms,
+        )?.not_before(policy.enabled_at_unix_ms, policy.settings.after_ms);
+        if let Some(due) = residency.due_at_unix_ms
+            && due > now
+        {
+            smallclaims::touched::note_due(due);
+        } else if residency.due_at_unix_ms.is_some() {
+            self.store.admit_idle_suspend(agent, policy.settings.after_ms,
+                policy.enabled_at_unix_ms, now)?;
+        }
+        Ok(())
+    }
+
     pub fn set_idle_nudge(&self, settings: IdleNudgeSettings) {
         *self
             .idle_nudge
