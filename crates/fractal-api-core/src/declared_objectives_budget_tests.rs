@@ -231,7 +231,8 @@ objective "example/quality" {
 }
 
 fn merge_latency_store() -> Store {
-    let source = include_str!("../../../slo/dotfiles-merge-latency.kdl");
+    let source = /* sqlite-large-value: allow-for-now lv-ha5695af111aa owner=fractal_api_core::declared_objectives_budget_tests TODO=trace-statement-and-value-representation */
+        include_str!("../../../slo/dotfiles-merge-latency.kdl");
     let store = Store::open_memory("node").unwrap();
     let intent = crate::graph::parse_intent(source, "node").unwrap();
     let preview = store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();

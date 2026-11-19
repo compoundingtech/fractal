@@ -381,12 +381,16 @@ custom fields are not a new registered claim schema. The native reader increment
 reconstructs rows from replicated claims after restart or declaration revision and
 deduplicates repeated claims by subject and event timestamp. A missing or malformed
 duration is unknown, never good. Producer output/journal remains the replay source.
-No new schema registry, generated schema, projection, reconstruction kind, inventory
-entry, route, or acquisition cost probe is introduced.
+No new schema registry, generated schema, projection, reconstruction kind, route,
+or acquisition cost probe is introduced.
 The integration tests compile this exact KDL source rather than duplicating its policy.
 It is therefore an explicit `fractal-api-core` extra in `.st/rust-test-inputs.json`
 and an input to both `linux-clippy` and `linux-fleet-compat` in the evidence policy
 and lane manifest, alongside the other compile-time SLO sources.
+The included KDL is also registered as source site `lv-ha5695af111aa` in the existing
+SQLite source inventory, with its adjacent owner/action marker. This accounts for
+test-source provenance only; it does not assert a SQLite value-size proof or add a
+runtime database path.
 
 Only exact-GO completions form the denominator. A proxy-only cohort reads
 `no-qualifying-events`, not met; unobserved or proxy merges cannot prove fleet-wide
