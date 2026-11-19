@@ -5744,6 +5744,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
             slow: Arc::new(AtomicBool::new(true)),
             fail_next: Arc::new(AtomicBool::new(false)),
             receives: received.clone(),
+            pause_after_receipt: None,
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(
