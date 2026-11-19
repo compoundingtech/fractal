@@ -83,14 +83,19 @@ impl EventObserver {
     /// Restore an authenticated native ID; durable confirmation alone consumes the cold fence.
     pub fn with_native_session(mut self, native_session: Option<String>) -> Result<Self> {
         if self.driver == "omp" && native_session.is_some() {
-            self.channel_ready = harness_state::with_current_ownership(
+            let (channel_ready, cold_fence_consumed) = harness_state::with_current_ownership(
                 &self.agent_dir, &self.owner, self.ownership_seq, || {
-                    Ok(crate::omp_session::bound_native_session(
+                    let channel_ready = crate::omp_session::bound_native_session(
                         &self.session_dir, &self.identity, &self.runtime, &self.owner,
-                    )?.as_deref() == native_session.as_deref())
+                    )?.as_deref() == native_session.as_deref();
+                    let cold_fence_consumed = crate::omp_session::has_confirmed_channel_binding(
+                        &self.session_dir, &self.identity, &self.runtime, &self.owner,
+                    )?;
+                    Ok((channel_ready, cold_fence_consumed))
                 },
             )?;
-            if self.channel_ready {
+            self.channel_ready = channel_ready;
+            if cold_fence_consumed {
                 self.resume_generation = None;
                 self.expected_native_session = None;
             }
@@ -493,6 +498,17 @@ mod tests {
 
     #[test]
     fn omp_reexec_restores_readiness_only_for_the_confirmed_native_session() {
+        const CHILD: &str = "FRACTAL_REEXEC_READINESS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pi_channel::tests::omp_reexec_restores_readiness_only_for_the_confirmed_native_session", "--nocapture"])
+                .env(CHILD, "1")
+                .env(crate::omp_session::CHANNEL_EXPECTED_NATIVE_SESSION, "native-a")
+                .env(crate::omp_session::CHANNEL_RESUME_GENERATION, "2")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let sessions = root.path().join("sessions");
         crate::harness_events::enable(root.path(), "runtime-a").unwrap();
@@ -504,11 +520,17 @@ mod tests {
         let state_path = harness_state::harness_state_path(root.path());
         let mut original = observer();
         original.observe(&serde_json::json!({"type":"session","sessionId":"native-a"})).unwrap();
+        drop(original);
+        let mut original = observer().with_native_session(Some("native-a".into())).unwrap();
+        assert_eq!(original.resume_generation, Some(crate::residency::Generation(2)));
+        assert_eq!(original.expected_native_session.as_deref(), Some("native-a"));
         original.observe(&serde_json::json!({"type":"ready","sessionId":"native-a"})).unwrap();
         drop(original);
 
         // Binary replacement restores the authenticated native ID without another hello/ready.
         let mut restored = observer().with_native_session(Some("native-a".into())).unwrap();
+        assert_eq!(restored.resume_generation, None);
+        assert_eq!(restored.expected_native_session, None);
         restored.observe(&idle).unwrap();
         assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(true));
         drop(restored);
@@ -519,12 +541,17 @@ mod tests {
         drop(mismatched);
 
         // A pending handshake must not acquire readiness from the old durable binding.
-        let mut pending = observer();
+        let mut pending = observer().with_native_session(Some("native-a".into())).unwrap();
         pending.observe(&serde_json::json!({"type":"session","sessionId":"native-b"})).unwrap();
         drop(pending);
         let mut pending = observer().with_native_session(Some("native-b".into())).unwrap();
         pending.observe(&idle).unwrap();
         assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(false));
+        assert_eq!(pending.resume_generation, None, "the prior confirmed session consumed the cold fence");
+        assert_eq!(pending.expected_native_session, None);
+        pending.observe(&serde_json::json!({"type":"ready","sessionId":"native-b"})).unwrap();
+        pending.observe(&idle).unwrap();
+        assert_eq!(harness_state::read(&state_path, None).unwrap().channel_ready, Some(true));
     }
 
     #[test]
