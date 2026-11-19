@@ -8,7 +8,7 @@ use super::text::{self, run};
 use super::theme;
 use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 /// What Home says when nothing needs the person; setup's first-run test waits for it.
 pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
