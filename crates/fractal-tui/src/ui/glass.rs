@@ -10403,7 +10403,7 @@ mod tests {
         assert!(
             ui.flash
                 .as_ref()
-                .is_some_and(|(text, _)| text == "Copied 1 line"),
+                .is_some_and(|(text, _)| text.starts_with("Clipboard request sent (OSC 52)")),
             "{:?}",
             ui.flash
         );

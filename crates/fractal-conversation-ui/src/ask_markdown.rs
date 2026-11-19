@@ -57,7 +57,8 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
                 consumed = 1 + label_end + 2 + end + 1;
                 if url.starts_with("https://") || url.starts_with("http://") {
                     let style = base.fg(theme.blue).add_modifier(Modifier::UNDERLINED);
-                    runs.extend(inline_ask(&after[..label_end], style, theme).into_iter().map(|run| link(run.text, url, run.style)));
+                    let target: Arc<str> = Arc::from(url);
+                    runs.extend(inline_ask(&after[..label_end], style, theme).into_iter().map(|run| link(run.text, Arc::clone(&target), run.style)));
                 } else {
                     runs.push(run(&text[..consumed], base));
                 }
@@ -191,6 +192,35 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn styled_link_label_copies_one_target_across_styles_and_wrapping() {
+        let theme = Theme::default();
+        for width in [4, 100] {
+            let lines = markdown("[plain **bold** `code`](https://example.com)", width, Style::default(), &theme);
+            let selection = crate::Selection { pane: "test".into(), anchor: (0, 0), head: (lines.len() - 1, u16::MAX) };
+            assert_eq!(selection.text(&lines), "plain bold code");
+            assert_eq!(selection.text_with_link_targets(&lines), "plain bold code (https://example.com)");
+            let spans = lines.iter().flat_map(|line| &line.spans).filter(|span| span.link.is_some()).collect::<Vec<_>>();
+            let target = spans[0].link.as_ref().unwrap();
+            assert!(spans.iter().all(|span| Arc::ptr_eq(target, span.link.as_ref().unwrap())));
+            assert!(spans.iter().any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+            assert!(spans.iter().any(|span| span.style.fg == Some(theme.teal)));
+        }
+    }
+
+    #[test]
+    fn adjacent_styled_links_keep_separate_occurrences_even_with_equal_targets() {
+        for target in ["https://same", "https://other"] {
+            for width in [4, 100] {
+                let source = format!("[first **bold**](https://same)[second `code`]({target})");
+                let lines = markdown(&source, width, Style::default(), &Theme::default());
+                let selection = crate::Selection { pane: "test".into(), anchor: (0, 0), head: (lines.len() - 1, u16::MAX) };
+                assert_eq!(selection.text(&lines), "first boldsecond code");
+                assert_eq!(selection.text_with_link_targets(&lines), format!("first bold (https://same)second code ({target})"));
+            }
+        }
+    }
+
     #[test]
     fn ask_profile_literals_emphasis_and_code() {
         let theme = Theme::default();

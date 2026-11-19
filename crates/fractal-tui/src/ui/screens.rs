@@ -570,13 +570,12 @@ pub fn link(doc: &mut Doc, prefix: &str, label: &str, subject: &str) {
         width: text::width(label) as u16,
         hit: Hit::Peek(subject.to_owned()),
     });
-    doc.line(Line::from(vec![
-        span(prefix.to_owned(), theme::dim()),
-        span(
-            label.to_owned(),
-            theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED),
-        ),
-    ]));
+    let (first, _) = text::field_prefixes(prefix.trim_end(), text::width(prefix), theme::dim());
+    doc.lines(text::wrap(
+        &[text::run(label, theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED))],
+        text::width(prefix) + text::width(label),
+        &first, &[], None,
+    ));
 }
 
 fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, width: usize) {
@@ -1311,6 +1310,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     // The step that waits on this ask, and what it is for: what answering lets go on.
     if let Some(blocked) = &item.blocked {
+        let (first, rest) = text::field_prefixes("waits", 9, theme::dim());
         card.lines(text::wrap(
             &[
                 text::run(blocked.step.clone(), theme::soft()),
@@ -1325,8 +1325,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 text::run(" — it continues once you answer", theme::dim()),
             ],
             inner,
-            &[text::run("waits    ", theme::dim())],
-            &[text::decoration("         ", theme::dim())],
+            &first,
+            &rest,
             None,
         ));
     }
