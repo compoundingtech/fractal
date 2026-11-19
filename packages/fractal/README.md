@@ -255,9 +255,11 @@ treating subject content as untrusted data rather than judge instructions.
 
 The product is `ReviewResult`: `{ verdict: 'GO' | 'NO-GO', findings, head, commentId? }`.
 Each finding has `message`, `blocking`, and optional `path`/`line`; GO must agree with the absence
-of blocking findings. The parent requires claim-backed executions from that run-owned reviewer
-and a completed, nonempty harness incarnation. A standing seat, known author, mixed reviewer
-actors/incarnations, missing evidence, or mismatched binding fails with typed `ReviewError`.
+of blocking findings. The parent requires a completed child and claim-backed `submitted` or
+`completed` reviewer invocations with a nonempty harness incarnation. Native submission ends the
+invocation before step verification finishes; child completion supplies that final fence.
+A standing seat, known author, mixed actors/incarnations, missing evidence, or mismatched binding
+fails with typed `ReviewError`.
 Program steps act as mission runs, not agent claimants; the exclusion set includes the native
 requester and assignee. The native child envelope binds executions to its generation, whose step
 namespace is distinct from the stable mission-run ID.
@@ -267,12 +269,15 @@ An explicit mission `error` schema must admit `ReviewError`, native `ChildFailed
 For a PR, the **child publishes its own comment from its own active seat**, using
 `Fractal.reviewComment({ subject, rubric, verdict, reviewer, publication })` with its actual
 `ST_AGENT` and the publication marker supplied in `review_request`. It uses `gh pr comment
---body-file` and returns the numeric `commentId`. Before posting it must adopt an identical,
-immutable existing comment with that marker, refusing conflicts rather than editing a review.
+--body-file` and returns the numeric `commentId`. Before posting it must adopt only one
+immutable existing comment with that marker that passes `Fractal.reviewCommentMatches` against
+its rendered assessment, refusing conflicts or duplicates rather than editing a review.
 The parent never posts on its behalf or changes actor environment variables.
 
-The parent reads the comment and verifies its exact body, PR, head, immutable timestamps, and v3
-reviewer footer against native execution evidence. The `q19` format emits exactly one
+The parent verifies the exact canonical assessment, PR, head, immutable timestamps, and a single
+v3 reviewer identity against native execution evidence. Managed publishers may enrich the footer
+with other metadata, but cannot change the assessment, identity, or admission lines.
+The `q19` format emits exactly one
 `q19-go v1 head=FULL_SHA verdict=GO` line for GO; NO-GO emits none. The `fractal` format renders
 the native verdict as JSON, not the older `scripts/review` artifact schema. A proof receipt and
 any human authority/direction gate remain separate requirements.

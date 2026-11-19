@@ -149,3 +149,33 @@ export const reviewComment = (options: {
     `| \`agent_identity\` | ${options.reviewer} |`, '<!-- agent-footer:end -->')
   return lines.join('\n')
 }
+
+/**
+ * Managed publishers may enrich the v3 footer, but never the assessment or reviewer identity.
+ * Admission lines remain renderer-owned even inside that metadata block.
+ */
+export const reviewCommentMatches = (actual: string, expected: string): boolean => {
+  const begin = '<!-- agent-footer:begin v=3 -->'
+  const end = '<!-- agent-footer:end -->'
+  const start = actual.indexOf(begin)
+  const finish = actual.indexOf(end)
+  const expectedStart = expected.indexOf(begin)
+  if (actual.includes('\r') || start < 0 || expectedStart < 0 || finish < start ||
+    actual.lastIndexOf(begin) !== start || actual.lastIndexOf(end) !== finish ||
+    actual.slice(0, start) !== expected.slice(0, expectedStart))
+    return false
+  const tail = actual.slice(finish + end.length)
+  if (tail !== '' && tail !== '\n') return false
+  const identityRow = /^\|[ \t]*`agent_identity`[ \t]*\|[^\r\n]*$/gm
+  const identities = actual.slice(start, finish).match(identityRow) ?? []
+  const expectedIdentities = expected.slice(expectedStart).match(identityRow) ?? []
+  if (identities.length !== 1 || expectedIdentities.length !== 1 ||
+    identities[0] !== expectedIdentities[0])
+    return false
+  // Match the consumer's literal LF splitting, not JavaScript's broader multiline anchors.
+  const admissions = actual.match(/(?:^|\n)q19-go[^\n]*/g) ?? []
+  const expectedAdmissions = expected.match(/(?:^|\n)q19-go[^\n]*/g) ?? []
+  return expectedAdmissions.length <= 1 && admissions.length === expectedAdmissions.length &&
+    admissions.every((line, index) => line === expectedAdmissions[index]) &&
+    (expectedAdmissions.length === 0 || !/NO-GO/i.test(actual))
+}

@@ -635,7 +635,7 @@ describe('native review lifecycle', () => {
     id: 'claim/review', step_subject: 'step-run/review-generation/review', attempt: 1,
     agent: reviewer, incarnation_id: 'runtime-review', declared_model: 'requested',
     observed_models: ['actual'], fallback: null, started_at_unix_ms: 10,
-    ended_at_unix_ms: 30, duration_ms: 20, status: 'completed',
+    ended_at_unix_ms: 30, duration_ms: 20, status: 'submitted',
     trace_id: null, exit_evidence: null, usage: null,
   }
   const completed = (value: unknown = verdict, executions: unknown = [execution]): ProgramExit => ({
@@ -747,6 +747,13 @@ describe('native review lifecycle', () => {
     }),
   )
 
+  it.effect('also admits a natively completed invocation inside a completed child', () =>
+    Effect.gen(function* () {
+      const host = setup({ childExit: completed(verdict, [{ ...execution, status: 'completed' }]) })
+      expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: verdict })
+    }),
+  )
+
   it.effect('adopts the durable child result on replay but re-reads publication and head', () =>
     Effect.gen(function* () {
       const live = setup()
@@ -796,14 +803,20 @@ describe('native review lifecycle', () => {
     }),
   )
 
-  it.effect('rejects absent, edited, wrong-PR, forged-actor and wrong-head comments', () =>
+  it.effect('accepts managed metadata but rejects missing, edited, wrong-PR, actor and head receipts', () =>
     Effect.gen(function* () {
       const publication = reviewKey({ ...options, id: JSON.stringify([
         'mission-run/run-1', 'step-run/gen-1/program', 1, options.id,
       ]) })
       const body = reviewComment({ subject, rubric: options.rubric, verdict, reviewer, publication })
+      const managed = body
+        .replace('<!-- agent-footer:begin v=3 -->', '<!-- agent-footer:begin v=3 -->\n<details>')
+        .replace('<!-- agent-footer:end -->', '| `session` | review-session |\n</details>\n<!-- agent-footer:end -->')
+      const accepted = setup({ comment: { body: managed } })
+      expect(yield* start(accepted.program, accepted)).toEqual({ _tag: 'Success', value: verdict })
       for (const comment of [
         { updated_at: '2026-11-19T00:00:01Z' },
+        { created_at: '', updated_at: '' },
         { issue_url: 'https://api.github.com/repos/owner/repo/issues/20' },
         { id: 72 }, { body: `${body}\nextra` },
         { body: body.replace(reviewer, 'agent/standing/reviewer') },
@@ -831,7 +844,7 @@ describe('native review lifecycle', () => {
       for (const executions of [
         [], [{ ...execution, agent: 'agent/standing/reviewer' }],
         [{ ...execution, incarnation_id: null }], [{ ...execution, incarnation_id: '' }],
-        [{ ...execution, status: 'failed' }],
+        ...['claimed', 'failed', 'released', 'replaced', 'cancelled'].map((status) => [{ ...execution, status }]),
         [execution, { ...execution, incarnation_id: 'another-runtime' }],
       ]) {
         const host = setup({ childExit: completed(verdict, executions) })

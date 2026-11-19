@@ -16,5 +16,6 @@ export {
   ReviewVerdict,
   ReviewerSeat,
   reviewComment,
+  reviewCommentMatches,
   type ReviewOptions,
 } from './review.ts'
