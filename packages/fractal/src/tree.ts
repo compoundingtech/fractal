@@ -351,6 +351,8 @@ const programDeclaration = Effect.fnUntraced(function* ({
     state: 'ready',
     reportTo: intent.reportTo,
     goal: intent.goal,
+    ...(intent.resources === undefined ? {} : { resources: intent.resources }),
+    ...(intent.docs === undefined ? {} : { docs: intent.docs }),
     ...('budget' in intent ? { budget: intent.budget } : {}),
     ...('declaredPriority' in intent ? { declaredPriority: intent.declaredPriority } : {}),
     ...('declaredLane' in intent ? { declaredLane: intent.declaredLane } : {}),

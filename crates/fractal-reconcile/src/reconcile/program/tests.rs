@@ -422,8 +422,8 @@ fn unrelated_workers_and_effect_groups_do_not_hold_or_receive_a_scoped_fence() {
 fn scope_includes_superseded_ancestors_and_descendants_of_historical_generations() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
-    // Publish both candidates before starting the pinned run: the test exercises
-    // deliberate generation adoption, not publication's default run supersession.
+    // Publish both candidates before admission, then adopt the older one explicitly.
+    // The root follows head so later publications can exercise supersession ancestry.
     crate::reconcile::tests::apply_source(&engine.store, r#"version 2
 mission "worker-scope" state="ready" {
   goal "Keep the original generation."
@@ -442,16 +442,14 @@ mission "worker-scope" state="ready" {
         workspace: "/tmp".into(), requester: Some("person/operator".into()),
         mode: None, inputs: BTreeMap::new(), idempotency_key: key.into(),
     };
-    let original = engine.store.create_mission_run(&crate::model::MissionRunRequest {
-        revision: Some(first.revision), ..child_request("historical-root")
-    }).unwrap();
+    let original = engine.store.create_mission_run(&child_request("historical-root")).unwrap();
     let child = engine.store.create_child_mission_run(
         &child_request("historical-child"), &original, &original.steps[0].subject, None,
     ).unwrap();
     let grandchild = engine.store.create_child_mission_run(
         &child_request("historical-grandchild"), &child, &child.steps[0].subject, None,
     ).unwrap();
-    let next = engine.store.mission_spec("worker-scope", None).unwrap().unwrap();
+    let next = first;
     let adopted = engine.store.adopt_mission_revision(&original.id, &next,
         "person/operator", "replace the generation", "historical-adoption").unwrap();
     assert_ne!(original.generation, adopted.generation);

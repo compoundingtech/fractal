@@ -36,6 +36,8 @@ export const maxGoalsMission = { ...mission, goals: ['one', 'two', 'three'], ste
 export const maxGoalsStep = { ...externalStep, goals: ['one', 'two', 'three'] } as const satisfies Step
 export const dottedAgent = { ...editor, id: 'remote.editor' } as const satisfies Agent
 export const dottedReference = 'agent/remote.editor' satisfies AgentReference
+export const neverIdleSuspend = { ...editor, idleSuspend: 'never' } as const satisfies Agent
+export const inheritIdleSuspend = { ...editor, idleSuspend: 'member' } as const satisfies Agent
 
 // Negative contracts fail compilation if an unsupported form becomes assignable.
 // Type-level assertions avoid suppressing diagnostics on invalid runtime examples.
@@ -45,7 +47,9 @@ type Equal<TLeft, TRight> = [TLeft] extends [TRight] ? [TRight] extends [TLeft] 
 export type InvalidPrincipal = Assert<Rejects<'agent/docs/editor', NonNullable<Agent['principal']>>>
 export type EmptyStepCapacity = Assert<Rejects<{}, NonNullable<Step['capacity']>>>
 
-export type AgentFields = Assert<Equal<keyof Agent, 'id' | 'workspace' | 'launch' | 'under' | 'principal'>>
+export type AgentFields = Assert<Equal<keyof Agent, 'id' | 'workspace' | 'launch' | 'under' | 'principal' | 'idleSuspend'>>
+export type OnlyIdleSuspendPolicies = Assert<Equal<NonNullable<Agent['idleSuspend']>, 'never' | 'member'>>
+export type NoUnknownIdleSuspend = Assert<Rejects<'always', NonNullable<Agent['idleSuspend']>>>
 export type MissionFields = Assert<Equal<keyof Mission, 'id' | 'state' | 'reportTo' | 'goals' | 'completion' | 'steps' | 'capacity'>>
 export type StepFields = Assert<Equal<keyof Step, 'id' | 'assignedTo' | 'goals' | 'capacity'>>
 export type ScheduleFields = Assert<Equal<keyof Schedule, 'id' | 'host' | 'every' | 'anchor' | 'catchUp' | 'maxCatchUp' | 'work'>>

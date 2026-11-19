@@ -157,10 +157,8 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         if let Some(profile) = &lane.profile {
             property(&mut lane_node, "profile", profile.as_str());
         }
-        if lane.disk.is_none() {
-            if let Some(path) = &lane.disk_path {
-                property(&mut lane_node, "disk-path", path.as_str());
-            }
+        if lane.disk.is_none() && let Some(path) = &lane.disk_path {
+            property(&mut lane_node, "disk-path", path.as_str());
         }
         property(&mut lane_node, "max-members", i128::from(lane.max_members));
         property(&mut lane_node, "class", match lane.class {

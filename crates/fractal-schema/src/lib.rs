@@ -25,6 +25,7 @@ pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
+pub mod residency;
 pub mod review;
 pub mod task_grants;
 pub mod usage_limits;
@@ -790,6 +791,7 @@ impl Registry {
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
+        residency::validate(subject, kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -1290,6 +1292,12 @@ fn build_registry() -> Registry {
             github_plugin::WORKFLOW_RUN_FAMILY,
             "github-workflow-run/OWNER/REPO/RUN_ID",
             "One completed CI run of a GitHub repository, written once by its repository's poller.",
+            false,
+        ),
+        (
+            "residency",
+            "residency/HOST/EPISODE/ID",
+            "Durable residency evidence, scoped to an owner host and logical episode.",
             false,
         ),
         (
@@ -3407,6 +3415,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             },
         );
     }
+    residency::register(&mut claims);
     claims
 }
 
@@ -4324,6 +4333,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "runtime.action.requested" => &[
             ("action", string()),
+            ("cause", string()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -4342,6 +4352,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         | "runtime.action.failed"
         | "runtime.action.deadline-reached" => &[
             ("action", string()),
+            ("cause", string()),
+            ("mode", string()),
+            ("request_key", string()),
+            ("operation_id", string()),
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
@@ -5477,6 +5491,10 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in residency::KINDS {
+            current.claims.remove(*kind).unwrap();
+        }
+        current.subjects.remove("residency").unwrap();
         for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
             github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
             current.claims.remove(kind).unwrap();
@@ -5538,6 +5556,12 @@ mod tests {
         current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
+            for field in ["cause", "mode", "request_key", "operation_id"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
         current.claims.get_mut("runtime.observed").unwrap()
             .fields.remove("exit_evidence").unwrap();
         for field in ["host", "dispatch"] {

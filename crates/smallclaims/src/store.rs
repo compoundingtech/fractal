@@ -848,6 +848,7 @@ const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
+pub use fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION as MAX_SUPPORTED_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -1243,7 +1244,7 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != CURRENT_SCHEMA_VERSION {
+        if version < CURRENT_SCHEMA_VERSION {
             connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
@@ -2122,12 +2123,12 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
+        table_count == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
-        version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
+        version == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     Ok(())
 }
@@ -4865,6 +4866,9 @@ pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
 /// Maximum repairs applied per writer transaction. On a populated store each repair costs a few
 /// milliseconds even when it is already applied, so a page stays near 50 ms.
 pub const REPAIR_CHUNK_CLAIMS: usize = 16;
+/// Cooperative repair-page allowance. One repair, operation reconciliation and COMMIT
+/// remain indivisible; this is not a hard deadline on an individual writer hold.
+const REPAIR_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 /// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
 /// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
 /// so the set holds roughly twice this plus its structures, and one envelope larger than this is
@@ -9465,7 +9469,8 @@ impl Store {
     /// Apply each recorded repair on its own. A repair that cannot be applied is recorded as an
     /// unhealthy projection that names it, so one bad repair never stops replication or startup.
     ///
-    /// Repairs are applied in id order, `REPAIR_CHUNK_CLAIMS` to a writer hold. Every call applies
+    /// Repairs are applied in id order, at most `REPAIR_CHUNK_CLAIMS` and 20ms of new steps
+    /// to a writer hold. Every call applies
     /// every recorded repair again, and one already applied changes nothing, so a call stopped
     /// between pages resumes by starting over. A repair recorded after the list is read is applied
     /// by the next call; whoever records one calls this after it.
@@ -9478,8 +9483,12 @@ impl Store {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         let mut changed = 0;
-        for page in repairs.chunks(REPAIR_CHUNK_CLAIMS) {
-            changed += self.apply_replication_repair_page(page)?;
+        let mut next = 0;
+        while next < repairs.len() {
+            let end = (next + REPAIR_CHUNK_CLAIMS).min(repairs.len());
+            let (applied, examined) = self.apply_replication_repair_page(&repairs[next..end])?;
+            changed += applied;
+            next += examined;
             #[cfg(test)]
             if STOP_BETWEEN_REPAIR_PAGES.with(std::cell::Cell::take) {
                 anyhow::bail!("stopped between repair pages");
@@ -9489,12 +9498,26 @@ impl Store {
     }
 
     /// One writer hold of `apply_replication_repairs`: these repairs, in this order.
-    fn apply_replication_repair_page(&self, page: &[String]) -> Result<usize> {
+    fn apply_replication_repair_page(&self, page: &[String]) -> Result<(usize, usize)> {
         let mut connection = self.connection.write();
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let started = if EXPIRE_REPAIR_PAGE_BUDGET.with(std::cell::Cell::take) {
+            started - REPAIR_WRITER_BUDGET
+        } else {
+            started
+        };
         let transaction = connection.transaction()?;
         let mut changed = 0;
+        let mut examined = 0;
         let mut operation_ids = BTreeSet::new();
         for repair_claim in page {
+            // A repair and its operation reconciliation commit together. Do not start
+            // another repair after the 20ms cooperative writer allowance.
+            if examined != 0 && started.elapsed() >= REPAIR_WRITER_BUDGET {
+                break;
+            }
+            examined += 1;
             let Some(body) = transaction
                 .query_row(
                     "SELECT body FROM claims WHERE id=?1 AND kind='record.repaired'",
@@ -9540,12 +9563,12 @@ impl Store {
             repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
-        crate::windows::holds::covered("applied repairs", page.len());
+        crate::windows::holds::covered("applied repairs", examined);
         drop(connection);
         if changed != 0 {
             self.runtime.forget_views();
         }
-        Ok(changed)
+        Ok((changed, examined))
     }
 
     pub fn repair_replica_record(
@@ -11332,6 +11355,8 @@ thread_local! {
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
     static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// One-shot deterministic elapsed-budget exhaustion after the first repair step.
+    static EXPIRE_REPAIR_PAGE_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A store that holds no claims, and has held none a checkpoint dropped, has projected every
