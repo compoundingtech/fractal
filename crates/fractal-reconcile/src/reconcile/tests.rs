@@ -1757,7 +1757,7 @@ mission "shell-owner" state="ready" {{
         execution.state = "running".into();
         store.update_shell_resource(&execution).unwrap();
         // Model daemon loss after generic membership retirement but before shell
-        // finalization: recovery still reads the exclusive generation slice.
+        // finalization: recovery still reads the execution's generation slice.
         assert!(runtime.retire_resource_lane(&store, &request).unwrap());
         reconciler.prepare_shell_resource_recovery().unwrap();
         execution = store.shell_resource(&id).unwrap();

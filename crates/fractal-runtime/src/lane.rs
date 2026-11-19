@@ -410,9 +410,9 @@ fn finite_slices(
     (parent, member, child)
 }
 
-/// The generation slice contains exactly one uniquely named payload scope; sibling/nested
-/// executions have different generation slices. Its hierarchical counter survives scope GC.
-/// Read before lane retirement: a missing slice means unknown, never a measured zero.
+/// OOM kills in the execution's generation slice, including units the payload starts there.
+/// This cooperative accounting is not authenticated against deliberate same-user interference.
+/// The hierarchical counter survives scope GC; a missing slice means unknown, not zero.
 pub(crate) fn finite_oom_kills(
     name: &str,
     binding: &crate::process::ResourceExecutionBinding,

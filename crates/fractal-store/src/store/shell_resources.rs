@@ -57,7 +57,8 @@ pub struct Execution {
     /// Daemon-measured generation OOM outcome; None means unknown, never false.
     #[serde(default)]
     pub oom_killed: Option<bool>,
-    /// Cumulative kernel memory.events oom_kill count of this exclusive generation.
+    /// Kernel OOM kills in the execution's generation slice, including units the payload
+    /// starts there. Not authenticated against deliberate same-user interference.
     #[serde(default)]
     pub oom_kills: Option<u64>,
     pub stdout: String,

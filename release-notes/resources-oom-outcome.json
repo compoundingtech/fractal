@@ -3,11 +3,11 @@
   "summary": "Resource execution receipts distinguish confirmed memory OOM kills from external signals without changing CLI exit-code mapping.",
   "schema": {
     "status": "changed",
-    "detail": "Execution adds optional oomKilled and oomKills. The daemon reads the exact cumulative kernel memory.events oom_kill count from the exclusive per-generation slice; a positive count selects reason payload-oom-killed. A missing slice or historical record is typed unknown (oomKilled=null, oomKills=null), never false or measured zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason; show includes the execution fields. Payload result files are not an OOM authority."
+    "detail": "Execution adds optional oomKilled and oomKills. The daemon reads cumulative kernel memory.events oom_kill counts in the execution's generation slice, including units the payload starts there; this is not authenticated against deliberate same-user interference. A positive measured count selects reason payload-oom-killed. A missing slice or historical record is typed unknown (oomKilled=null, oomKills=null), never false or measured zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason; show includes the execution fields. Payload result files are not an OOM authority."
   },
   "recovery": {
     "status": "changed",
-    "detail": "The existing finite generation slice contains only its uniquely named payload scope, while nested and sibling executions have separate generation slices. Its hierarchical kernel counter survives automatic scope collection. The daemon validates persisted generation, membership binding and scope identity, then snapshots this slice before retirement and again after scope retirement, before any lane teardown. Startup recovery reads it even when membership retirement already finished. If the slice is gone, the outcome stays unknown rather than guessing from signals or stale samples."
+    "detail": "Each execution gets its own generation slice; nested and sibling executions normally use separate slices. Units the payload starts in its own slice are charged to the same workload budget and included in its OOM count. This is cooperative owner-UID accounting, not protection against deliberate same-user interference. The hierarchical kernel counter survives automatic payload-scope collection. The daemon checks persisted generation, membership binding and scope identity, then snapshots the generation slice before retirement and again after scope retirement, before lane teardown. Startup recovery reads it even when membership retirement already finished. If the slice is gone, the outcome stays unknown."
   },
   "compatibility": {
     "status": "changed",

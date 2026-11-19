@@ -100,7 +100,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else if execution.oom_killed.is_none() && execution.reason == "payload-oom-killed" {
             execution.reason = "payload OOM outcome unknown; generation slice unavailable".into();
         }
-        // Snapshot the exclusive generation slice before retirement can remove it.
+        // Snapshot the generation slice before retirement can remove it.
         // A missing slice remains typed unknown; it must never become false/zero.
         if self.store.update_shell_resource(execution)? { self.signal_changed(); }
         Ok(())

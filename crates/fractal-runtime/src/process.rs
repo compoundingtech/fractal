@@ -1016,7 +1016,7 @@ impl ExecRuntime {
         Ok(current)
     }
 
-    /// Read the kernel counter of the exclusive finite generation slice, which outlives
+    /// Read the kernel counter of this execution's generation slice, which outlives
     /// its collected payload scope. None means the slice is gone, not a measured zero.
     pub fn resource_oom_kills(&self, id: &str, expected_generation: &str, lane_name: &str) -> Result<Option<u64>> {
         let generation = match self.observe(id)?.context("resource OOM generation missing")? {
