@@ -176,7 +176,10 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
         .await;
         assert_refusal(&output, 0);
         for path in [RUN_PATH, TREE_PATH] {
-            let mut script = vec![(RUN_PATH.into(), Reply::Value(run("running", "normal")))];
+            let mut script = vec![
+                ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+                (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            ];
             if path == RUN_PATH {
                 script.push((
                     TREE_PATH.into(),
@@ -187,10 +190,67 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
                         "frontier": 0,
                     })),
                 ));
+                script.push((
+                    "/v1/events/page?after=10&wait=true&timeout_ms=30000".into(),
+                    Reply::Value(json!({
+                        "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                        "next_after":11,
+                    })),
+                ));
             }
             script.push((path.into(), Reply::Error(status)));
             let output = scripted_cli(&["missions", "show", RUN, "--follow"], script).await;
             assert_refusal(&output, 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn mission_follow_preserves_terminal_exit_codes_and_json_output() {
+    for status in ["completed", "standing", "failed", "cancelled"] {
+        for json_output in [false, true] {
+            let running = run("running", "normal");
+            let terminal = run(status, "normal");
+            let mut script = vec![
+                ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+                (RUN_PATH.into(), Reply::Value(running.clone())),
+            ];
+            if !json_output {
+                script.push((TREE_PATH.into(), Reply::Value(json!({
+                    "runs":[running], "has_more":false, "next_cursor":null, "frontier":10,
+                }))));
+            }
+            script.extend([
+                (
+                    "/v1/events/page?after=10&wait=true&timeout_ms=30000".into(),
+                    Reply::Value(json!({
+                        "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                        "next_after":11,
+                    })),
+                ),
+                (RUN_PATH.into(), Reply::Value(terminal.clone())),
+            ]);
+            if !json_output {
+                script.push((TREE_PATH.into(), Reply::Value(json!({
+                    "runs":[terminal], "has_more":false, "next_cursor":null, "frontier":11,
+                }))));
+            }
+            let args = if json_output {
+                vec!["--json", "missions", "show", RUN, "--follow"]
+            } else {
+                vec!["missions", "show", RUN, "--follow"]
+            };
+            let output = scripted_cli(&args, script).await;
+            let success = matches!(status, "completed" | "standing");
+            assert_eq!(output.status.code(), Some(if success { 0 } else { 2 }), "{}", stderr(&output));
+            if json_output && success {
+                assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), terminal);
+            } else if json_output {
+                assert!(output.stdout.is_empty());
+            }
+            if !success {
+                assert!(stderr(&output).contains(&format!("mission run {RUN} is {status}")));
+            }
         }
     }
 }
