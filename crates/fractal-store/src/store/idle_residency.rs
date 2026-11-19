@@ -16,6 +16,7 @@ const WAKE_QUEUE_RECHECK_MS: u128 = 1_000;
 
 #[cfg(test)]
 thread_local! {
+    static AFTER_WAKE_DEMAND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_WAKE_RANKING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_WAKE_WRITER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -335,9 +336,10 @@ impl Store {
         smallclaims::touched::note_read(|| "kind:runtime.action.succeeded".to_owned());
         smallclaims::touched::note_read(|| "kind:runtime.action.failed".to_owned());
         let initial = self.wake_demand(subject)?;
-        if !initial.frontier.caught_up || initial.oldest.is_none() {
-            return Ok(IdleWakeAdmission::default());
-        }
+        if initial.oldest.is_none() { return Ok(IdleWakeAdmission::default()); }
+        let mut frontier_raced = !initial.frontier.caught_up;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_WAKE_DEMAND.with(|hook| hook.borrow_mut().take()) { hook(); }
         let before = initial.frontier;
         let mut own_pending = initial.oldest;
         let mut active = 0usize;
@@ -362,7 +364,11 @@ impl Store {
                 own_pending.take()
             } else {
                 let demand = self.wake_demand_untracked(&desired.subject)?;
-                if !demand.frontier.caught_up { return Ok(IdleWakeAdmission::default()); }
+                if !demand.frontier.caught_up {
+                    // Finish the active-slot census before deciding whether a retry may poll.
+                    frontier_raced = true;
+                    continue;
+                }
                 demand.oldest
             };
             let Some(pending) = pending else { continue; };
@@ -398,6 +404,7 @@ impl Store {
                 retry_at.map_or(recheck, |due| due.min(recheck))
             }),
         };
+        if frontier_raced { return Ok(frontier_race_retry()); }
         #[cfg(test)]
         if let Some(hook) = AFTER_WAKE_RANKING.with(|hook| hook.borrow_mut().take()) { hook(); }
         let demand = self.wake_demand(subject)?;
@@ -691,7 +698,7 @@ mod tests {
 
     #[test]
     fn wake_frontier_races_retry_with_spare_capacity_and_follow_full_slot_release() {
-        for before_writer in [false, true] {
+        for stage in 0..4 {
             for queue in 0..3 {
                 let root = tempfile::tempdir().unwrap();
                 let store = fixture(&root.path().join("graph.sqlite"), root.path());
@@ -721,14 +728,26 @@ mod tests {
                 incremental.observe(&store).unwrap();
                 let concurrent = store.clone();
                 let inject: Box<dyn FnOnce()> = Box::new(move || {
-                    std::thread::spawn(move || claim(&concurrent, "message/unrelated", "message.sent", Some("person/avery"),
-                        json!({"from":"person/avery","to":"person/avery","content":"Unrelated frontier write.","status":"sent","tags":[]})))
-                        .join().unwrap();
+                    std::thread::spawn(move || {
+                        let input = ClaimInput {
+                            subject: "message/unrelated".into(), kind: "message.sent".into(),
+                            actor: Some("person/avery".into()),
+                            fields: serde_json::from_value(json!({"from":"person/avery","to":"person/avery",
+                                "content":"Unrelated frontier write.","status":"sent","tags":[]})).unwrap(),
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        };
+                        if stage >= 2 {
+                            messages_shard::shard(&concurrent).unwrap().append_claim_outcome(&input).unwrap();
+                        } else {
+                            concurrent.append_claim(&input).unwrap();
+                        }
+                    }).join().unwrap();
                 });
-                if before_writer {
-                    BEFORE_WAKE_WRITER.with(|hook| *hook.borrow_mut() = Some(inject));
-                } else {
-                    AFTER_WAKE_RANKING.with(|hook| *hook.borrow_mut() = Some(inject));
+                match stage {
+                    0 => AFTER_WAKE_RANKING.with(|hook| *hook.borrow_mut() = Some(inject)),
+                    1 => BEFORE_WAKE_WRITER.with(|hook| *hook.borrow_mut() = Some(inject)),
+                    2 => AFTER_WAKE_DEMAND.with(|hook| *hook.borrow_mut() = Some(inject)),
+                    _ => inject(),
                 }
                 let (admission, reads) = smallclaims::touched::record(|| store.admit_idle_wake(SEAT, 1, now).unwrap());
                 assert!(admission.operation_id.is_none(), "a raced frontier must never admit stale ranking");
@@ -741,11 +760,13 @@ mod tests {
                     now + WAKE_QUEUE_RECHECK_MS
                 };
                 incremental.evaluated("member:garden", reads, admission.retry_at_unix_ms);
+                if stage >= 2 { stream_mirror::mirror(&store).unwrap(); }
                 if queue == 1 {
                     claim(&store, "message/orchard", "message.closed", Some("daemon/runtime"), json!({"status":"closed"}));
                 }
                 incremental.observe(&store).unwrap();
-                assert!(!incremental.needs("member:garden", due - 1), "unrelated writes must not dirty this seat");
+                assert!(!incremental.needs("member:garden", due - 1),
+                    "unrelated writes must not dirty this seat: stage={stage}, queue={queue}");
                 if let Some(resume) = active_resume {
                     assert!(!incremental.needs("member:garden", due));
                     store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
