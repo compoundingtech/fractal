@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-: "${FRACTAL_BIN-${ST3_BIN:?set ST3_BIN to the installed st3 executable on this host}}"
+: "${FRACTAL_BIN-${ST3_BIN:?set FRACTAL_BIN to the installed Fractal executable on this host}}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 JQ_BIN=${FRACTAL_SOAK_JQ_BIN-${ST3_SOAK_JQ_BIN:-$(command -v jq)}}
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -15,9 +15,9 @@ else
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   pid=$(/usr/bin/pgrep -f "^${FRACTAL_BIN-${ST3_BIN}} up" | /usr/bin/head -n 1)
 fi
-[[ $pid =~ ^[1-9][0-9]*$ ]] || { echo 'st3 daemon PID is unavailable' >&2; exit 1; }
+[[ $pid =~ ^[1-9][0-9]*$ ]] || { echo 'Fractal daemon PID is unavailable' >&2; exit 1; }
 read -r cpu_text rss_kib <<<"$(/bin/ps -p "$pid" -o time=,rss=)"
-[[ $rss_kib =~ ^[0-9]+$ ]] || { echo 'st3 daemon RSS is unavailable' >&2; exit 1; }
+[[ $rss_kib =~ ^[0-9]+$ ]] || { echo 'Fractal daemon RSS is unavailable' >&2; exit 1; }
 cpu_seconds=$(/usr/bin/awk -v time="$cpu_text" 'BEGIN {
   gsub(/-/, ":", time); n=split(time, p, ":");
   if (n==2) printf "%.2f", p[1]*60+p[2];

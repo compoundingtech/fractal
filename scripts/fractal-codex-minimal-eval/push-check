@@ -61,7 +61,7 @@ done
 [[ -S "$root/st3.sock" ]] || { echo "the daemon did not open its socket" >&2; exit 1; }
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
-st="$root/bin/st3"
+fractal="$root/bin/st3"
 cat >"$root/m.kdl" <<KDL
 version 2
 
@@ -89,12 +89,12 @@ ${env_block}
   }
 }
 KDL
-"$st" apply "$root/m.kdl" --as person/eval-operator >"$out/apply.txt" 2>&1
-"$st" missions start eval/push-check --id run1 --workspace "$root" --as person/eval-operator >"$out/start.txt" 2>&1
+"$fractal" apply "$root/m.kdl" --as person/eval-operator >"$out/apply.txt" 2>&1
+"$fractal" missions start eval/push-check --id run1 --workspace "$root" --as person/eval-operator >"$out/start.txt" 2>&1
 line=""
 for _ in $(seq 1 90); do
   sleep 8
-  line="$("$st" missions show mission-run/eval/push-check/run1 2>&1 | grep -E ' push ' | head -1 || true)"
+  line="$("$fractal" missions show mission-run/eval/push-check/run1 2>&1 | grep -E ' push ' | head -1 || true)"
   grep -qE 'completed|failed' <<<"$line" && break
 done
 pushed="$(git ls-remote "$remote" "refs/heads/$branch" | cut -c1-12)"
