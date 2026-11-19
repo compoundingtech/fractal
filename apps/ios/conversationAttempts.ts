@@ -32,14 +32,6 @@ export class ConversationAttempts<TDraft, TResult extends AttemptOutcome> {
     this.publish([...this.rows, initial]);
     return this.run(initial, operation, onSettled);
   }
-  /** Explicit ordinary-chat Send as new. Refusing it does not settle the earlier unknown. */
-  async sendAsNew(id: string, operation: () => Promise<TResult>): Promise<TResult> {
-    const previous = this.rows.find(row => row.id === id);
-    if (!previous || previous.phase === 'sending') throw new Error('The original attempt is unavailable.');
-    const result = await this.run(previous, operation);
-    if (result.how === 'failed') this.publish(this.rows.map(row => row.id === id ? previous : row));
-    return result;
-  }
   private async run(previous: ConversationAttempt<TDraft, TResult>, operation: () => Promise<TResult>, onSettled?: (result: TResult) => void): Promise<TResult> {
     const running: ConversationAttempt<TDraft, TResult> = { ...previous, phase: 'sending', retry: undefined };
     this.publish(this.rows.map(row => row.id === previous.id ? running : row));

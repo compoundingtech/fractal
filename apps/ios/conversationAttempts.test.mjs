@@ -76,12 +76,12 @@ test('independent attempts do not steal draft snapshots; removed ownership canno
   assert.deepEqual(attempts.getSnapshot().map(attempt => attempt.id), ['attempt/two']);
 });
 
-test('refused explicit Send as new leaves the earlier unknown and its original recovery intact', async () => {
+test('a separately submitted copy leaves the earlier unknown and its original recovery intact', async () => {
   const attempts = new ConversationAttempts(result => result.retry, error => ({ how: 'failed', error }));
   const retry = async () => ({ how: 'sent' });
   await attempts.send('attempt/original', { text: 'kept' }, async () => ({ how: 'unconfirmed', retry }));
   const original = attempts.getSnapshot()[0];
-  assert.equal((await attempts.sendAsNew(original.id, async () => ({ how: 'failed', error: 'refused' }))).how, 'failed');
+  assert.equal((await attempts.send('attempt/copy', { text: 'kept' }, async () => ({ how: 'failed', error: 'refused' }))).how, 'failed');
   assert.equal(attempts.getSnapshot()[0], original);
   assert.equal(original.retry, undefined, 'unknown delivery remains retained without replay');
 });

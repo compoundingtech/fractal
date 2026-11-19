@@ -80,6 +80,12 @@ member. Dispatched work restores unknown and is never automatically replayed.
 Recovery offers Check status, Open conversation, Copy and warned local Discard;
 damaged entries expose only status and Discard. Check status uses exact authoritative
 timeline identities only; absent/unsupported lookup remains unknown, not not-applied.
+Ordinary in-memory unconfirmed recovery offers Copy to composer, never Send as new:
+copying restores text without sending, retains the unknown attempt, and says
+“Sending this copy may duplicate it”. As in the TUI copy action, attachments are
+not copied; the original recovery and current composer images stay untouched.
+A later explicit normal composer send creates a separate attempt. Start/reply
+recovery keeps its non-sending Copy message action and unknown-send guards.
 Only proven not-applied recovery offers Retry as new attempt: an explicit user action
 commits a fresh child id with the original draft, attachments and binding, retaining
 the parent id. It never resends the parent's signed packet. Unknown has no Retry,

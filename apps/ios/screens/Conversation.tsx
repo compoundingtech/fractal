@@ -63,10 +63,6 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, saveDrafts, actions, simpleOn } = useStore();
-  // Native alert callbacks outlive the render that opened them. A new send must
-  // use the selection at confirmation time, not the alert's captured client.
-  const actionsRef = useRef(actions);
-  actionsRef.current = actions;
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session Fractal manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -354,14 +350,19 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   function sendAgain(item: Pending) {
     const bound = item.unconfirmed;
     if (!bound || item.resending) return;
-    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. The original attempt cannot be resent. Sending as new uses the current member and a new key, and may create a duplicate.`, [
+    const owner = draftsOwner.current, generation = draftGeneration.current;
+    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. The original attempt cannot be resent. Copying only restores the text; sending this copy may duplicate it.`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Send as new', style: 'destructive', onPress: async () => {
-        const parameters = bound.request.parameters;
-        const sent = await attempts.sendAsNew(item.id, () => actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages));
-        if (sent.how === 'failed') {
-          setSendIssue(`Not sent: ${sent.error}`);
-        } else settle(item.id, sent);
+      { text: 'Copy to composer', onPress: () => {
+        if (draftsOwner.current !== owner || draftGeneration.current !== generation || !attempts.has(item.id)) return;
+        const text = restoreDraft(draftCache.current.get(target) ?? '', bound.request.parameters.content);
+        draftTouched.current = true;
+        draftCache.current.set(target, text); setDraft(text); saveDrafts();
+        setSendIssue('Sending this copy may duplicate it');
+        box.current?.focus();
+      } },
+      { text: 'Discard', style: 'destructive', onPress: () => {
+        if (draftsOwner.current === owner && draftGeneration.current === generation) attempts.remove(item.id);
       } },
     ]);
   }
