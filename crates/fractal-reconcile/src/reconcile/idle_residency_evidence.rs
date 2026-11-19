@@ -110,7 +110,7 @@ impl RuntimeEvidence {
                     if success.is_some() { self.reclaimed = Some(MemoryDelta::after_completed_stop(before, sensor::memory(&[]))); }
                 }
                 if let Some(completed) = success {
-                    self.sleep_end(store, host, seat, request, completed, &requests, &succeeded)?;
+                    self.sleep_end(store, seat, request, completed, &requests, &succeeded)?;
                 }
                 continue;
             }
@@ -141,7 +141,7 @@ impl RuntimeEvidence {
             let first_at = if let Some(first) = first {
                 fields(&first)["first_turn_at"].as_u64().map(u128::from)
             } else {
-                self.first_turn(store, host, seat, &wake, resumed, native, incarnation)?
+                self.first_turn(store, seat, &wake, resumed, native, incarnation)?
             };
             if let Some(turn) = outcome(now, resumed.accepted_at_unix_ms, first_at) {
                 let due = resumed.accepted_at_unix_ms.saturating_add(OUTCOME_MS);
@@ -159,7 +159,8 @@ impl RuntimeEvidence {
         Ok(())
     }
 
-    fn first_turn(&mut self, store: &Store, host: &str, seat: &str, wake: &str, resumed: &ClaimRecord, native: &str, incarnation: &str) -> Result<Option<u128>> {
+    fn first_turn(&mut self, store: &Store, seat: &str, wake: &str, resumed: &ClaimRecord, native: &str, incarnation: &str) -> Result<Option<u128>> {
+        let host = store.origin();
         // A native working observation identifies a turn, unlike PTY output, delivery, or process liveness.
         // Bind it to both the verified resume incarnation and the exact durable native session.
         let bound = store.claims_for(seat, Some("harness.session-file"))?.iter().any(|claim|
@@ -180,7 +181,8 @@ impl RuntimeEvidence {
         Ok(Some(at))
     }
 
-    fn sleep_end(&mut self, store: &Store, host: &str, seat: &str, request: &ClaimRecord, suspended: &ClaimRecord, requests: &[ClaimRecord], succeeded: &[ClaimRecord]) -> Result<()> {
+    fn sleep_end(&mut self, store: &Store, seat: &str, request: &ClaimRecord, suspended: &ClaimRecord, requests: &[ClaimRecord], succeeded: &[ClaimRecord]) -> Result<()> {
+        let host = store.origin();
         let subject = episode(host, "sleep", &request.id);
         if store.latest_claim(&subject, Some("residency.sleep-ended"))?.is_some() {
             return Ok(());
@@ -426,7 +428,7 @@ mod tests {
             let store = Store::open(&path, "amber").unwrap();
             let requests = store.claims_for("agent/amber.worker", Some("runtime.action.requested")).unwrap();
             let succeeded = store.claims_for("agent/amber.worker", Some("runtime.action.succeeded")).unwrap();
-            RuntimeEvidence::default().sleep_end(&store, "amber", "agent/amber.worker",
+            RuntimeEvidence::default().sleep_end(&store, "agent/amber.worker",
                 &request, &suspended, &requests, &succeeded).unwrap();
             let hold = crate::suspension::Suspension {
                 action: "resume".into(), cause: Some("idle".into()), phase: "resumed".into(),
