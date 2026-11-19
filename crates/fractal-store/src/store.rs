@@ -2381,11 +2381,14 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 
 /// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
+/// CPU eligibility evidence: source incarnation, quiet state and source observation timestamp.
+pub type LocalHarnessEvidence = (Option<String>, bool, Option<u64>);
+
 /// What one minute's check of this member's seats carries into the next (`local_seats_busy`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalSeats {
     /// Each seat's newest harness incarnation, quiet state and source observation timestamp.
-    pub harness: BTreeMap<String, (Option<String>, bool, Option<u64>)>,
+    pub harness: BTreeMap<String, LocalHarnessEvidence>,
     /// Each seat this member observed a runtime for: whether it is live, and its incarnation.
     pub runtimes: BTreeMap<String, (bool, Option<String>)>,
 }
@@ -7518,7 +7521,7 @@ impl Store {
         until_ms: u64,
         carried: Option<LocalSeats>,
     ) -> Result<(bool, LocalSeats)> {
-        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, (Option<String>, bool, Option<u64>))> {
+        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, LocalHarnessEvidence)> {
             let state: Option<String> = row.get(1)?;
             let jobs: Option<i64> = row.get(2)?;
             let quiet = matches!(state.as_deref(), Some("ready" | "idle" | "blocked" | "ended"));
