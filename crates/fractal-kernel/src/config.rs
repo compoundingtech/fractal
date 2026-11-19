@@ -531,7 +531,7 @@ pub struct ReconcileConfig {
     /// wake the seat.
     pub idle_nudge_quiet_watch: String,
     /// Idle-residency threshold: `off` by default, or a duration of at least one minute.
-    /// Currently evaluated for diagnostics only; it does not suspend seats.
+    /// Enables automatic suspension only through the signed fleet writer barrier.
     pub idle_suspend_after: String,
     /// Maximum concurrent idle-residency resumes. Must be positive.
     pub idle_resume_concurrency: usize,

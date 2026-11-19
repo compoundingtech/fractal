@@ -2306,6 +2306,7 @@ dependencies = [
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-telemetry",
  "futures-util",
  "hex",
  "libc",
