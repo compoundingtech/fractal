@@ -162,6 +162,8 @@ pub struct AgentResourcesEntry {
     pub index: u64,
     pub local: u64,
     pub history: bool,
+    /// Effective local policy used when folding cards, independent of graph/local claim cuts.
+    pub idle_residency: crate::config::IdleResidencyPolicy,
     /// None certifies the whole roster; Some records the lazily materialized page subjects.
     pub covered: Option<BTreeSet<String>>,
     /// Earliest wall-clock boundary in queue metadata; absent means no expiring work lease.
