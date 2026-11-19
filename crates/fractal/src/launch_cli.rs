@@ -655,6 +655,16 @@ pub(super) async fn run_mission_view(
                 client.clone()
             };
             let client = &client;
+            // Capture the cursor before reading the selected run, so a transition
+            // during that read remains visible to the event wait.
+            let cursor = if args.follow {
+                let health: Value = client.get("/v1/health").await?;
+                health["store_index"]
+                    .as_u64()
+                    .context("the daemon health response has no store index")?
+            } else {
+                0
+            };
             let mut selected = args.mission_or_run;
             if !selected.starts_with("mission-run/") {
                 let overview: Value = client
@@ -686,7 +696,7 @@ pub(super) async fn run_mission_view(
                 ))
                 .await?;
             if args.follow {
-                return follow_mission_run(client, run, 0, json_output, args.limit).await;
+                return follow_mission_run(client, run, cursor, json_output, args.limit).await;
             }
             if json_output {
                 return print_value(&run, true);
