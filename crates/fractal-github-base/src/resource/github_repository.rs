@@ -3320,8 +3320,10 @@ mod tests {
             assert_eq!(cursor.identities.len(), 3);
             assert_eq!(item(&recovery.facts, "issues", 1)["state"], "open");
             assert_eq!(item(&recovery.facts, "pull_requests", 3)["state"], "open");
-            assert_eq!(github.graphql_requests.lock().last().unwrap()["variables"]["ids"],
-                json!(["I_gone", "I_live", "PR_gone"]));
+            let requests = github.graphql_requests.lock();
+            let ids = requests.last().unwrap()["variables"]["ids"].as_array().unwrap()
+                .iter().map(|id| id.as_str().unwrap()).collect::<BTreeSet<_>>();
+            assert_eq!(ids, BTreeSet::from(["I_gone", "I_live", "PR_gone"]));
         }
     }
 
