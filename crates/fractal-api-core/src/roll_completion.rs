@@ -63,7 +63,7 @@ pub enum Adoption { Verified, NotAdopted, Unknown }
 pub enum Receipt {
     RollDeclared { version: u32, roll_id: String, declared_at_ms: u64, targets: BTreeMap<String, Identity> },
     HostObserved { version: u32, roll_id: String, declared_at_ms: u64, host: String,
-        observed_at_ms: u64, target: Identity, adoption: Adoption, evidence: Option<Verification> },
+        observed_at_ms: u64, target: Identity, adoption: Adoption, evidence: Option<Box<Verification>> },
 }
 
 #[derive(Default)]
@@ -74,7 +74,7 @@ struct Registry {
 struct Roll {
     declared_at_ms: u64,
     targets: BTreeMap<String, Identity>,
-    observations: BTreeMap<String, BTreeMap<u64, (Adoption, Option<Verification>)>>,
+    observations: BTreeMap<String, BTreeMap<u64, (Adoption, Option<Box<Verification>>)>>,
     first_verified: BTreeMap<String, u64>,
     completed_at_ms: Option<u64>,
     first_miss_at_ms: Option<u64>,
