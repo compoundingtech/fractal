@@ -2771,6 +2771,11 @@ enum BackupCommand {
 
 #[derive(Subcommand)]
 enum ReplicationCommand {
+    /// Build both 30-day and 14-day wire archive candidates from an explicit offline copy.
+    ///
+    /// Analysis only: never activates a candidate or contacts the daemon. Candidate stores
+    /// are incomplete for default hot readers and must not be used by a daemon or deployment.
+    ArchiveCandidates(replication_cli::ArchiveCandidatesArgs),
     /// Show fleet receipt, validation, projection, and peer health.
     Status,
     /// Estimate a local graph replay; --confirm runs it while holding the daemon writer.
@@ -6354,6 +6359,12 @@ async fn run(cli: Cli) -> Result<()> {
         command: StoreCommand::PrepareIndexes { ref store },
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
+    }
+    // Archive construction uses only explicit offline paths, before config or client discovery.
+    if let Command::Replication {
+        command: ReplicationCommand::ArchiveCandidates(args),
+    } = cli.command {
+        return replication_cli::run_archive_candidates(args).await;
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
