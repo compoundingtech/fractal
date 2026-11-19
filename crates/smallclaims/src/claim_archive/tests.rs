@@ -59,3 +59,21 @@ fn window_boundary_and_unknown_times_never_establish_old_age() {
     }
     assert!(!directory.path().join("must-not-exist").exists());
 }
+
+#[test]
+fn contradictory_hot_evidence_is_not_hidden_by_the_archive() {
+    let store = crate::Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    store.set_write_clock_at(100).unwrap();
+    let claim = store.append_claim(&crate::ClaimInput {
+        subject: "note/history".into(), kind: "example.note".into(), actor: None,
+        fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut cold = ClaimEvidence::capture(&store.readers.get(), &claim.id).unwrap().unwrap();
+    cold.body.push(' ');
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("different");
+    let seal = write_selected(vec![cold], "rules".into(), 40 * 86_400_000, HotWindow::Days30, &path).unwrap();
+    let archive = ClaimArchive::open(&path, &seal).unwrap();
+    assert!(store.claim_by_id_with_archive(&claim.id, &[archive]).is_err());
+    assert!(store.claim_by_id(&claim.id).unwrap().is_some());
+}

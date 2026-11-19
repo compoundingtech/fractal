@@ -12,12 +12,11 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ClaimRecord, store::{claim_from_row, operation_parts}};
+use crate::{ClaimRecord, store::operation_parts};
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_CLAIMS: usize = 512;
 const FORMAT: &str = "fractal-claim-evidence-v1";
-const COLUMNS: &str = "id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms";
 
 /// Supported hot windows; selection between them requires offline measured capacity evidence.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -47,7 +46,7 @@ pub struct ClaimEvidence {
 
 impl ClaimEvidence {
     pub(crate) fn capture(connection: &Connection, id: &str) -> Result<Option<Self>> {
-        Ok(connection.query_row(&format!("SELECT {COLUMNS} FROM claims WHERE id=?1"), [id], |row| {
+        Ok(connection.query_row("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1", [id], |row| {
             Ok(Self { id: row.get(0)?, store_index: row.get(1)?, batch_id: row.get(2)?,
                 subject: row.get(3)?, kind: row.get(4)?, origin: row.get(5)?, actor: row.get(6)?,
                 body: row.get(7)?, predecessors: row.get(8)?, accepted_at_unix_ms: row.get(9)? })
@@ -78,6 +77,26 @@ struct Segment {
     claims: Vec<ClaimEvidence>,
 }
 
+struct SealedWriter {
+    file: std::io::BufWriter<File>,
+    hash: Sha256,
+    bytes: u64,
+}
+
+impl Write for SealedWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if buffer.len() as u64 > MAX_BYTES - self.bytes {
+            return Err(std::io::Error::other("claim segment exceeds byte limit"));
+        }
+        let written = self.file.write(buffer)?;
+        self.hash.update(&buffer[..written]);
+        self.bytes += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { self.file.flush() }
+}
+
 pub(crate) fn write_selected(claims: Vec<ClaimEvidence>, rules_digest: String, as_of_unix_ms: u128,
     window: HotWindow, destination: &Path) -> Result<ClaimSeal> {
     ensure!(!claims.is_empty() && claims.len() <= MAX_CLAIMS, "invalid claim segment count");
@@ -98,13 +117,14 @@ pub(crate) fn write_selected(claims: Vec<ClaimEvidence>, rules_digest: String, a
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temporary)?;
-        // Bound encoded output before publication; no partial segment receives a public name.
-        let bytes = serde_json::to_vec(&segment)?;
-        ensure!(bytes.len() as u64 <= MAX_BYTES, "claim segment exceeds byte limit");
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        let seal = ClaimSeal { sha256: hex::encode(Sha256::digest(&bytes)), bytes: bytes.len() as u64, claims: count };
+        let file = options.open(&temporary)?;
+        // Stream bounded output and its seal without allocating another copy of all bodies.
+        let mut output = SealedWriter { file: std::io::BufWriter::new(file), hash: Sha256::new(), bytes: 0 };
+        serde_json::to_writer(&mut output, &segment)?;
+        output.flush()?;
+        output.file.get_ref().sync_all()?;
+        let seal = ClaimSeal { sha256: hex::encode(output.hash.finalize()), bytes: output.bytes, claims: count };
+        let file = output.file.into_inner()?;
         let mut permissions = file.metadata()?.permissions();
         permissions.set_readonly(true);
         file.set_permissions(permissions)?;
@@ -151,11 +171,7 @@ impl crate::Store {
                 selected = Some(cold);
             }
         }
-        // Decode the hot row through its existing contract; the raw comparison above is stricter
-        // than parsed JSON equality (whitespace and acceptance-time spelling are evidence).
-        if hot.is_some() {
-            return Ok(connection.query_row(&format!("SELECT {COLUMNS} FROM claims WHERE id=?1"), [id], claim_from_row).optional()?);
-        }
+        crate::read_budget::check()?;
         Ok(selected.map(ClaimEvidence::record))
     }
 }
