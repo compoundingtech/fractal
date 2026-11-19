@@ -5708,12 +5708,12 @@ fn a_persons_answer_takes_each_approval_methods_own_decision_words() {
         (
             "execCommandApproval",
             json!({"decision": "approved"}),
-            json!({"decision": {"denied": {"rejection": "The person denied this from Fractal."}}}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
         ),
         (
             "applyPatchApproval",
             json!({"decision": "approved"}),
-            json!({"decision": {"denied": {"rejection": "The person denied this from Fractal."}}}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
         ),
     ] {
         assert_eq!(

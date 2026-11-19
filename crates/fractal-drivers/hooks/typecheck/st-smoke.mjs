@@ -11,7 +11,7 @@ import { mock } from "node:test";
 const driver = process.argv[2];
 const asset = process.argv[3];
 assert.ok(["pi", "omp"].includes(driver));
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fractal-channel-smoke-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "st-channel-smoke-"));
 const frames = path.join(dir, "frames.jsonl");
 const outgoing = path.join(dir, "outgoing.jsonl");
 const label = path.join(dir, "label.json");

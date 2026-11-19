@@ -132,7 +132,7 @@ fn early_instance_failures_preserve_native_driver_stderr() {
         let output = run(root.path(), &arguments);
         assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.starts_with("fractal: --instance bad/name:"), "{arguments:?}: {stderr}");
+        assert!(stderr.starts_with("st: --instance bad/name:"), "{arguments:?}: {stderr}");
     }
 }
 

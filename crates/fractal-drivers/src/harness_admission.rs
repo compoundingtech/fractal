@@ -1084,7 +1084,7 @@ pub(crate) struct Scratch {
 impl Scratch {
     pub(crate) fn new() -> Result<Self> {
         let root = tempfile::Builder::new()
-            .prefix("fractal-harness-admission-")
+            .prefix("st-harness-admission-")
             .tempdir()?;
         for dir in [
             "home",

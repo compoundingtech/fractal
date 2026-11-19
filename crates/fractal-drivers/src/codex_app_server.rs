@@ -4887,7 +4887,7 @@ fn initialize_control(stream: UnixStream) -> Result<Option<WebSocket<UnixStream>
             "params": {
                 "clientInfo": {
                     "name": "st",
-                    "title": "Fractal",
+                    "title": "st",
                     "version": env!("CARGO_PKG_VERSION")
                 },
                 "capabilities": { "experimentalApi": true }
@@ -5084,7 +5084,7 @@ fn resume_permission_overrides_applied(
 
 /// How often a waiting approval request asks Fractal whether the seat's person answered it.
 const APPROVAL_ANSWER_POLL: Duration = Duration::from_secs(1);
-const APPROVAL_DENIED_FROM_FRACTAL: &str = "The person denied this from Fractal.";
+const APPROVAL_DENIED_FROM_FRACTAL: &str = "The person denied this from st.";
 
 /// An approval request Codex waits on for this seat's thread.
 #[derive(Debug, Clone, PartialEq)]

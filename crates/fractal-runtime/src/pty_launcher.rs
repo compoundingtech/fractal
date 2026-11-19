@@ -63,7 +63,7 @@ fn probe(candidate: &Path) -> bool {
     let Ok(mut child) = Command::new(candidate)
         .args(["run", "--env", "ST_LAUNCHER_PROBE"])
         .env_clear()
-        .env("PTY_ROOT", "/nonexistent/fractal-launcher-probe")
+        .env("PTY_ROOT", "/nonexistent/st-launcher-probe")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

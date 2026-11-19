@@ -141,7 +141,7 @@ impl TerminalSocket {
             .build()
             .context("build the terminal socket runtime")?;
         std::thread::Builder::new()
-            .name("fractal-terminal-socket".into())
+            .name("st3-terminal-socket".into())
             .spawn(move || {
                 runtime.block_on(crate::task_cpu::account("terminal.socket", async move {
                     match tokio::net::UnixListener::from_std(listener) {

@@ -489,7 +489,7 @@ pub fn restore(
     let parent = workspace.parent().context("workspace has no parent")?;
     fs::create_dir_all(parent)?;
     let checkout = tempfile::Builder::new()
-        .prefix(".fractal-restore-")
+        .prefix(".st-restore-")
         .tempdir_in(parent)?;
     git(checkout.path(), &["init", "--quiet"], None, None)?;
     let bundle = staging.path().join("workspace.bundle");

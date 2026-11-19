@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn retained_heap_returns_resident_pages() {
-        const CHILD: &str = "FRACTAL_MALLOC_TRIM_TEST_CHILD";
+        const CHILD: &str = "ST3_MALLOC_TRIM_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Isolate allocator state from parallel tests and limit arena noise.
             let output = std::process::Command::new(std::env::current_exe().unwrap())

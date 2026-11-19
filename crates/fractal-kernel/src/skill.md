@@ -9,7 +9,7 @@ This applies only to a session Fractal started: `printenv ST_AGENT` prints this 
 
 ## Messages
 
-An Fractal message arrives as `[PING from st3] message/ID from SENDER: TITLE` or inside `<smalltalk-message>`, followed by a bounded preview. The message ID identifies it:
+A Fractal message arrives as `[PING from st3] message/ID from SENDER: TITLE` or inside `<smalltalk-message>`, followed by a bounded preview. The message ID identifies it:
 
 - `"$ST3_BIN" conversations read message/ID --as "$ST_AGENT"` shows the whole message.
 - `"$ST3_BIN" conversations reply message/ID --from "$ST_AGENT" --body TEXT` answers an agent in its thread, and `"$ST3_BIN" conversations archive message/ID --as "$ST_AGENT"` closes it.
