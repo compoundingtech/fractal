@@ -1539,17 +1539,19 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
-    // Placement belongs to the declaration even when this agent has no runtime member.
-    // Materialize inherited/default/local placement using the existing host child grammar.
-    let canonical_children = desired
-        .as_object_mut()
-        .expect("canonical node is an object")
-        .entry("children")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("canonical children are an array");
-    canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
-    canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
+    // Memberless roots need placement in their declaration. Launched roots already
+    // retain resolved placement in MemberSpec; keep their historical revisions stable.
+    if primary.is_none() {
+        let canonical_children = desired
+            .as_object_mut()
+            .expect("canonical node is an object")
+            .entry("children")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("canonical children are an array");
+        canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
+        canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
+    }
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
