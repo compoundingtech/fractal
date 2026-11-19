@@ -54,7 +54,7 @@ fn runs_since(store: &Store, config: &SourceConfig, after: Option<u64>) -> Resul
     let prefix = config.mission_prefix.strip_prefix("mission/").unwrap_or(&config.mission_prefix);
     ensure!(!prefix.is_empty(), "source mission prefix is empty");
     let connection = store.readers.get();
-    let mut query = connection.prepare_cached(if after.is_some() { &DELTA_SQL } else { &SQL })?;
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h465d993a66cb owner=fractal_api_core::roll_source TODO=trace-statement-and-value-representation */ if after.is_some() { &DELTA_SQL } else { &SQL })?;
     let decode = |row: &rusqlite::Row<'_>| Ok(Run {
         id: row.get(0)?, created: row.get(1)?, inputs: row.get(2)?, creation: row.get(3)?,
     });
@@ -96,7 +96,7 @@ pub(crate) fn validate_intent_with_config(
         let creation = store.claim_by_id(intent_id)?.context("native intent receipt is unavailable")?;
         ensure!(creation.kind == "mission-run.created" && creation.origin == host,
             "intent must name the original observing host's native creation");
-        let selected: String = store.readers.get().query_row(&CREATION_SQL, [&creation.subject], |row| row.get(0))
+        let selected: String = store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-h0a0a9ff62f14 owner=fractal_api_core::roll_source TODO=trace-statement-and-value-representation */ &CREATION_SQL, [&creation.subject], |row| row.get(0))
             .optional()?.context("canonical native creation is unavailable")?;
         ensure!(selected == intent_id && store.claim_has_authenticated_writer(intent_id, host)?,
             "intent receipt lacks canonical authenticated original writer provenance");
@@ -133,7 +133,7 @@ pub fn intent_context(store: &Store, run_subject: &str) -> Result<Value> {
     store.seal_local_batches()?;
     store.judge_claims(true)?;
     store.read_snapshot(|_| {
-        let creation_id: String = store.readers.get().query_row(&CREATION_SQL, [run_subject], |row| row.get(0))
+        let creation_id: String = store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-hc76357e25b55 owner=fractal_api_core::roll_source TODO=trace-statement-and-value-representation */ &CREATION_SQL, [run_subject], |row| row.get(0))
             .optional()?.context("canonical run creation receipt is unavailable")?;
         let creation = store.claim_by_id(&creation_id)?.context("canonical run creation receipt disappeared")?;
         ensure!(store.claim_has_authenticated_writer(&creation_id, &creation.origin)?,
@@ -181,7 +181,7 @@ fn census_pending(store: &Store, config: &SourceConfig, now: u64, pending: Vec<R
     let mut visible = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?;
     let mut declared = BTreeMap::new();
     for (roll, id, _) in declarations {
-        if visible.query_row([&id], |row| row.get::<_, bool>(0))? {
+        if visible.query_row(/* sqlite-large-value: allow-for-now lv-hc9ae27e75a8c owner=fractal_api_core::roll_source TODO=trace-statement-and-value-representation */ [&id], |row| row.get::<_, bool>(0))? {
             declared.insert(roll, id);
         }
     }
@@ -370,6 +370,7 @@ impl Heartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_missions::MissionsStore;
 
     #[test]
     fn heartbeat_starts_without_a_wall_clock_frontier_or_timer() {

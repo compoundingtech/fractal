@@ -476,7 +476,7 @@ pub fn install(store: &Store, state_dir: &Path) -> Result<()> {
     let mut writer = source.writer.lock().unwrap_or_else(PoisonError::into_inner);
     ensure!(writer.is_none(), "roll receipt registry already installed");
     let connection = Connection::open(state_dir.join("roll-signed-receipts.sqlite3"))?;
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h854866002229 owner=fractal_api_core::roll_completion TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS receipts (sequence INTEGER PRIMARY KEY, receipt_key TEXT NOT NULL UNIQUE, claim_id TEXT NOT NULL, accepted_at_ms INTEGER NOT NULL);")?;
     let mut registry = Registry::default();
     registry.membership = membership(store)?;
@@ -532,9 +532,9 @@ pub fn ingest(store: &Store, signed: SignedReceipt, now: u64) -> Result<Value> {
             // not strand coverage behind a revoked operation replay; while an
             // earlier candidate is valid, healthy republishing never resets it.
             if existing.is_some() {
-                transaction.execute("DELETE FROM receipts WHERE receipt_key=?1", [&key])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h781e5c867fe7 owner=fractal_api_core::roll_completion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM receipts WHERE receipt_key=?1", [&key])?;
             }
-            transaction.execute("INSERT INTO receipts(receipt_key,claim_id,accepted_at_ms) VALUES (?1,?2,?3)", params![key, signed.claim_id, now])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h84af57247816 owner=fractal_api_core::roll_completion TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO receipts(receipt_key,claim_id,accepted_at_ms) VALUES (?1,?2,?3)", params![key, signed.claim_id, now])?;
             transaction.commit()?;
             record_source(&mut source.registry.write().unwrap_or_else(PoisonError::into_inner), receipt, &signed.claim_id, &signer, now);
         }
