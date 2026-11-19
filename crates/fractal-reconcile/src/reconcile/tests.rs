@@ -13848,6 +13848,41 @@ schedule "{name}" {{
     }
 
     #[tokio::test]
+    async fn scheduled_work_rejects_checkout_scratch_before_creating_a_directory() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(checkout.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+        let workspace_root = checkout.path().join("cycles");
+        let at = (Utc::now() + chrono::Duration::milliseconds(50))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nschedule \"cycle\" {{ at \"{at}\"; work {{ mission \"scheduled-cycle@{revision}\"; workspace {:?} }} }}",
+                workspace_root.display().to_string()
+            ),
+            "schedule-unsafe-workspace",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        reconciler.reconcile_once().unwrap();
+        assert!(!workspace_root.exists(), "admission must not dirty the checkout");
+        assert!(store.claims_for("schedule/cycle", Some("schedule.work-started")).unwrap().is_empty());
+        assert!(!store.claims_for("schedule/cycle", Some("schedule.work-failed")).unwrap().is_empty());
+        assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str)
+                == Some("mission-workspace-in-worktree")
+        }));
+    }
+
+    #[tokio::test]
     async fn a_recurring_schedule_starts_distinct_ordered_occurrences() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let revision = scheduled_mission_revision(&store);

@@ -17881,7 +17881,27 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Store::scheduled_mission_run_subject(&schedule.subject, occurrence);
             let suffix = &occurrence_subject.trim_start_matches("mission-run/")[..16];
             let workspace = Path::new(root).join(suffix);
-            if let Err(error) = fs::create_dir_all(&workspace) {
+            let workspace_check = Store::validate_mission_run_workspace(&workspace);
+            if let Err(error) = &workspace_check
+                && error.code == "mission-workspace-in-worktree"
+            {
+                self.record_diagnostic_once(
+                    &schedule.subject,
+                    BTreeMap::from([
+                        ("severity".into(), Value::String("error".into())),
+                        ("status".into(), Value::String("unavailable".into())),
+                        ("code".into(), Value::String(error.code.into())),
+                        ("reason".into(), Value::String(error.to_string())),
+                    ]),
+                )?;
+                self.fail_schedule_work(
+                    schedule, &request.id, "unsafe-workspace", &error.to_string(),
+                )?;
+                continue;
+            }
+            if let Err(error) = workspace_check.map_err(anyhow::Error::from)
+                .and_then(|()| fs::create_dir_all(&workspace).map_err(anyhow::Error::from))
+            {
                 if on_standby {
                     self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
                         &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
