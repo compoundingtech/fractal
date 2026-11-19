@@ -479,12 +479,12 @@ mod tests {
         request.lane.owner.run = "person/operator".into();
         request.request_id = Some(key.to_string());
         let mut execution = store.submit_shell_resource(request, 1).unwrap();
-        execution.command.lane.class = RequestClass::Unknown("recovery".into());
+        execution.command.lane.class = RequestClass::Unknown("future-class".into());
         store.update_shell_resource(&execution).unwrap();
         let before = store.shell_resource(&id).unwrap();
-        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
-        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
         let after = store.shell_resource(&id).unwrap();
         assert_eq!(after, before);

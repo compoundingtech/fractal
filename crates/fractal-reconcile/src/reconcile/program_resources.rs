@@ -804,10 +804,10 @@ mission "resource-child" state="ready" {
         }).unwrap();
         let record = store.resource_membership_for_grant(&grant).unwrap();
         let mut future = record.clone();
-        future.request.class = fractal_runtime::RequestClass::Unknown("recovery".into());
+        future.request.class = fractal_runtime::RequestClass::Unknown("future-class".into());
         let child_status = store.mission_run_status(&child).unwrap();
         let index = store.index().unwrap();
-        assert!(reconciler.retire_program_membership(&future).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(reconciler.retire_program_membership(&future).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert_eq!(store.mission_run_status(&child).unwrap(), child_status);
         assert_eq!(store.index().unwrap(), index, "unsupported-class retirement must append no child cancellation claims");
         let (result, reads) = smallclaims::touched::record(|| reconciler.retire_program_membership(&record));
