@@ -6458,6 +6458,38 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    const HOSTED_SUBJECTS_SQL: &str =
+        "SELECT subject, member FROM desired
+         WHERE subject IN (SELECT value FROM json_each(?1)) AND member IS NOT NULL";
+
+    /// Requested subjects whose current member is readable by this build and belongs to
+    /// `host`. Do not read declaration bodies: freshness authorization needs only membership.
+    pub fn hosted_subjects(&self, subjects: &[&str], host: &str) -> Result<BTreeSet<String>> {
+        if subjects.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        for subject in subjects {
+            smallclaims::touched::note_read(|| (*subject).to_owned());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h88521c22b258 owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::HOSTED_SUBJECTS_SQL)?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut hosted = BTreeSet::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row, including unreadable or forward-version members.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                hosted.insert(subject);
+            }
+        }
+        Ok(hosted)
+    }
+
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
