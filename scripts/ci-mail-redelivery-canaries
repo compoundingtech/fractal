@@ -23,7 +23,7 @@ REQUIRED = {
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--package-only", action="store_true", help="local compatibility: build only st3 and the st3-daemon library")
+    parser.add_argument("--package-only", action="store_true", help="local compatibility: build only fractal and the fractal-daemon library")
     args = parser.parse_args()
     selection = ["-p", "fractal", "-p", "fractal-daemon"] if args.package_only else ["--workspace"]
     filters = " or ".join(f"test(={name})" for name in sorted(REQUIRED))
