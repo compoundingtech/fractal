@@ -33,6 +33,7 @@ pub(crate) use retirement::observe_closed_scope;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {
     Scope,
+    DarwinSlot { slot: &'static str },
     Detached,
     DegradedDetached,
 }
@@ -114,7 +115,9 @@ pub fn warn_if_degraded(product: &str) {
         let available = *DARWIN_HELPER_AVAILABLE.get_or_init(|| {
             darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some()
         });
-        eprintln!("{product}: WARN {}", darwin_slot::degradation_report(available));
+        if !available {
+            eprintln!("{product}: WARN {}", darwin_slot::HELPER_UNAVAILABLE);
+        }
     }
 }
 
@@ -253,7 +256,9 @@ fn wrap_for_mode(
             command.arg("--").arg(program).args(arguments);
             command
         }
+        Isolation::DarwinSlot { .. } => unreachable!("Darwin slots require explicit finite authorization"),
         Isolation::Detached | Isolation::DegradedDetached => {
+            // Darwin slots are selected per finite launch, never by ambient `mode()`.
             let mut command = Command::new(program);
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
@@ -458,6 +463,9 @@ pub(crate) fn mark_ended(unit: &str) {
     )
 )]
 pub fn end_scope(unit: &str, grace: Duration) -> Result<bool> {
+    if darwin_slot::slot_for_unit(unit).is_some() {
+        return Ok(end_scope_with_proof(unit, &|| Ok(()))?.is_some());
+    }
     if mode() != Isolation::Scope || !is_work_scope(unit) {
         tracing::debug!(guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope teardown skipped");
         return Ok(false);
@@ -560,6 +568,9 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
     )
 )]
 pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
+    if darwin_slot::slot_for_unit(unit).is_some() {
+        return end_scope(unit, Duration::ZERO);
+    }
     if mode() != Isolation::Scope || !is_work_scope(unit) || has_ended(unit) {
         tracing::debug!(recorded_scope = unit, signal, caller = "signal_scope", guard_decision = "skip", reason = "scope_mode_work_scope_or_ended_guard", "scope signal skipped");
         return Ok(false);
@@ -990,6 +1001,7 @@ mod tests {
                     *SCOPE_EXPANSION_FLAG.get().unwrap()
                 );
             }
+            Isolation::DarwinSlot { .. } => panic!("Darwin slots must not become ambient isolation"),
             Isolation::Detached | Isolation::DegradedDetached => {
                 assert_eq!(command.get_program(), OsStr::new("sh"));
                 assert_eq!(arguments, ["-c", "true"]);
