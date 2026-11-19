@@ -858,6 +858,7 @@ fn nonce_inventory_transition(online: bool, snapshot_overlap: bool, remove_earli
             remove_candidate_schema(&connection);
             old_roots = principal_physical_roots(&connection, false);
         } else {
+            inline_signature_facade_for_old_fixture(&connection);
             connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
         }
         let cached: String = connection
@@ -1079,6 +1080,7 @@ fn first_open_untrusted_carrier_cannot_displace_verified_person() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1434,6 +1436,7 @@ fn opening_an_old_store_recovers_signatures_resumes_and_exposes_corruption() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1956,7 +1959,9 @@ fn migration_commits_claim_offsets_inside_a_large_authenticated_envelope() {
         target.bind_fleet(FLEET).unwrap();
         target.pin_fleet_anchor(anchor.public()).unwrap();
         receive_carriers(&target, &exchange);
-        target.connection.write().execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
+        let connection = target.connection.write();
+        inline_signature_facade_for_old_fixture(&connection);
+        connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
     }
     let target = Store::open(&path, "birch", Arc::new(Plain)).unwrap();
     while target.signature_migration().unwrap().phase == "legacy" {
@@ -2565,10 +2570,16 @@ fn candidate_judging_never_rewrites_the_whole_dependency_set_in_one_commit() {
     }
 }
 
+/// An older store's facade contains inline text, not new-format references to
+/// candidates that these fixtures are about to remove.
+fn inline_signature_facade_for_old_fixture(connection: &rusqlite::Connection) {
+    connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+}
+
 /// Reconstruct the actual pre-upgrade schema, not only a missing migration control row.
 /// Immutable claims and authenticated carriers and the first-carried cache remain intact.
 fn remove_candidate_schema(connection: &rusqlite::Connection) {
-    connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+    inline_signature_facade_for_old_fixture(connection);
     connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
