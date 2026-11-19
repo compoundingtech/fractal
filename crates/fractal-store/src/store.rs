@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod launch_freeze;
 pub mod resource_membership;
+pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
 mod device_renewal;
@@ -320,6 +321,8 @@ pub mod subagents;
 pub mod idle_mail;
 pub mod wake_demand;
 pub mod message_marks;
+pub mod mail_input_acceptance;
+pub mod mail_delivery_source;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;

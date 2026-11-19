@@ -169,7 +169,7 @@ type Stash = {
    */
   lastCostUsd?: number;
   label?: string;
-  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean; acceptedAtUnixMs?: number }>;
   /** Todo observation state is fenced by the channel binding, not the extension instance. */
   todoFingerprint?: string;
   todoBranchKey?: string;
@@ -777,10 +777,10 @@ export default function (pi: ExtensionAPI) {
           state.reconnectAttempt = 0;
           await applyLabel(ctx);
           for (const accepted of state.accepted?.values() ?? []) {
-            send({ type: "delivered", meta: accepted.meta });
+            send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
-          send({ type: "ready", ...sessionBinding });
+          send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
           observeModelSelection(ctx, undefined, true);
           // The driver requires ready before accepting observations. Replay before other
           // producers; each retained close follows its original open with the same identity.
@@ -832,7 +832,7 @@ export default function (pi: ExtensionAPI) {
         const messageId = frame.meta?.messageId;
         if (typeof messageId === "string" && state.accepted?.has(messageId)) {
           const accepted = state.accepted.get(messageId)!;
-          send({ type: "delivered", meta: accepted.meta });
+          send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
           if (accepted.read) send({ type: "read", meta: accepted.meta });
           return;
         }
@@ -964,7 +964,7 @@ export default function (pi: ExtensionAPI) {
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       sendFrame({ type: "session", sessionId: nativeSession,
         ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
-      sendFrame({ type: "ready", sessionId: nativeSession });
+      sendFrame({ type: "ready", inputAcceptanceClock: true, sessionId: nativeSession });
       state.todoSession = nativeSession;
       state.todoFingerprint = undefined;
       state.todoBranchKey = undefined;
@@ -1157,8 +1157,14 @@ export default function (pi: ExtensionAPI) {
       } else {
         await pi.sendUserMessage(content, { deliverAs: first.deliverAs });
       }
+      const acceptedAtUnixMs = Date.now();
       for (const message of messages) {
-        message.reply({ type: "delivered", meta: message.meta });
+        const messageId = message.meta?.messageId;
+        if (typeof messageId === "string") {
+          const accepted = state.accepted?.get(messageId);
+          if (accepted) accepted.acceptedAtUnixMs ??= acceptedAtUnixMs;
+        }
+        message.reply({ type: "delivered", meta: message.meta, acceptedAtUnixMs });
       }
     } catch (error) {
       for (const message of messages) {

@@ -472,7 +472,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           state.reconnectAttempt = 0;
-          send({ type: "ready", ...sessionBinding });
+          send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
           observeModelSelection(ctx, undefined, true);
           // Every fresh channel needs the provider's idle proof, including reconnects
           // during an idle session where no further turn boundary will arrive.
@@ -689,7 +689,8 @@ export default function (pi: ExtensionAPI) {
       } else {
         await pi.sendUserMessage(content, { deliverAs: first.deliverAs });
       }
-      for (const message of messages) message.reply({ type: "delivered", meta: message.meta });
+      const acceptedAtUnixMs = Date.now();
+      for (const message of messages) message.reply({ type: "delivered", meta: message.meta, acceptedAtUnixMs });
     } catch (error) {
       for (const message of messages) {
         message.reply({ type: "failed", meta: message.meta, error: String(error) });

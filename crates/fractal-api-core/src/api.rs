@@ -7282,6 +7282,8 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 /// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
 /// publication and refolds only the cards whose claims changed, when it can tell which.
 pub fn start_agent_roster(state: &AppState) {
+    crate::mail_delivery_objectives::start(state);
+    crate::admission_objectives::start(state);
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
@@ -11825,6 +11827,12 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    let admission = crate::admission_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, admission));
+    let mail = crate::mail_delivery_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     let declared = crate::declared_objectives::rows(store, now, &rows)?;
     drop(rows.splice(budgets..budgets, declared));
