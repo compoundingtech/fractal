@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add fractal doctor --storage with connection-lifetime per-kind append counts and UTF-8 body bytes, cached observation-trim counters and pin freshness, configured retention modes, and metadata-only sizes for open SQLite stores and sidecars",
+  "replay": {"status": "none", "detail": "No replay or claim admission changes."},
+  "schema": {"status": "none", "detail": "No persistent schema migration or startup history/index scan. Session counters use temporary SQLite state and reuse existing graph write-time counters."},
+  "rules": {"status": "none", "detail": "No retention eligibility, checkpoint agreement or trim policy changes."},
+  "compatibility": {"status": "changed", "detail": "Adds GET /v1/storage/status and doctor --storage. Client-v0 schemas and generated clients are unchanged. Append bytes exclude envelopes, indexes and physical amplification. Counters reset on reopen; absent sidecars have null size. Driver-owned harness spools are explicitly reported as not covered."},
+  "downtime": {"status": "none", "detail": "No additional downtime."},
+  "manual": {"status": "none", "detail": "No activation or maintenance action required. Pin samples remain unavailable until the first successful existing trim pass, then describe protected observations older than that pass's retention cutoff with an explicit sample timestamp."},
+  "recovery": {"status": "none", "detail": "Session counters and cached trim observations are disposable diagnostics; restarting resets them without changing stored authority."}
+}
