@@ -14,7 +14,8 @@ mod tests;
 /// a view that stopped publishing must not stay served.
 pub const WITHDRAW_AFTER_MS: u64 = 30_000;
 
-/// More claims than this between two publications fold again rather than read them all.
+/// More potentially relevant claims than this between publications fold again. Unread
+/// telemetry and message traffic must not turn a bounded delta into a fleet-wide refold.
 const DELTA_LIMIT: usize = 10_000;
 
 /// Claim kinds that no attention source reads, whatever their subject: harness timelines and
@@ -42,6 +43,10 @@ const UNREAD_KINDS: &[&str] = &[
     fractal_schema::availability::INTERRUPTIONS_KIND,
     fractal_schema::availability::PRESENCE_KIND,
 ];
+
+static UNREAD_JSON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    serde_json::to_string(UNREAD_KINDS).expect("attention unread kinds serialize")
+});
 
 /// Runtime observations a seat writes over and over that attention reads only as the actual
 /// state of a retiring requester (`rollouts::retiring_ask_live`) or as a seat's runtime epoch
@@ -216,8 +221,9 @@ pub trait AttentionListStore {
     /// was evaluated, or sooner when a claim it read becomes eligible. `None` before the first.
     fn attention_list_due_at(&self, period_ms: u128) -> Option<u128>;
     /// The earliest acceptance time after `now` among the claims in `(after, through]`: a
-    /// fold at `now` left them out as not yet eligible. More claims than a delta reads are
-    /// left to the clock period.
+    /// fold at `now` left them out as not yet eligible. More potentially relevant claims
+    /// than a delta reads are left to the clock period; unread traffic does not consume
+    /// that limit, but its future acceptance times still contribute to the fence.
     fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>>;
     /// The graph projection's health row, read in the snapshot that folds or compares.
     fn attention_projection_frontier(&self) -> Result<Option<(String, u64)>>;
@@ -422,7 +428,20 @@ impl AttentionListStore for Store {
 
     fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>> {
         if through.saturating_sub(after) > DELTA_LIMIT as u64 {
-            return Ok(None);
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT COUNT(*) FROM (
+                     SELECT 1 FROM claims WHERE store_index>?1 AND store_index<=?2
+                       AND kind NOT IN (SELECT value FROM json_each(?4)) LIMIT ?3
+                 )",
+            )?;
+            let relevant: u64 = statement.query_row(
+                /* sqlite-large-value: allow-for-now lv-h19b85b4d1a3f owner=fractal_attention::store::attention_list TODO=trace-statement-and-value-representation */ params![after, through, DELTA_LIMIT as u64 + 1, UNREAD_JSON.as_str()],
+                |row| row.get(0),
+            )?;
+            if relevant > DELTA_LIMIT as u64 {
+                return Ok(None);
+            }
         }
         let earliest: Option<i64> = self.readers.get().prepare_cached(
             "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
@@ -492,14 +511,22 @@ impl AttentionListStore for Store {
             now: u128,
             due: &mut Option<u128>,
         ) -> Result<Option<String>> {
+        // Keep the future-acceptance fence for *all* claims, including the unread kinds
+        // filtered below. Their arrival used to contribute to this fence before filtering.
+        if let Some(earliest) = self.attention_future_since(after, through, now)? {
+            *due = Some(due.map_or(earliest, |due| due.min(earliest)));
+        }
+        let unread = UNREAD_JSON.as_str();
         let claims = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(
                 "SELECT id, subject, kind, actor, CAST(accepted_at_unix_ms AS TEXT) FROM claims
-                 WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
+                 WHERE store_index>?1 AND store_index<=?2
+                   AND kind NOT IN (SELECT value FROM json_each(?4))
+                 ORDER BY store_index LIMIT ?3",
             )?;
             statement
-                .query_map(params![after, through, DELTA_LIMIT as u64 + 1], |row| {
+                .query_map(params![after, through, DELTA_LIMIT as u64 + 1, unread], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -517,9 +544,6 @@ impl AttentionListStore for Store {
             let accepted = accepted.parse::<u128>().unwrap_or(0);
             if accepted > now {
                 *due = Some(due.map_or(accepted, |due: u128| due.min(accepted)));
-            }
-            if UNREAD_KINDS.contains(&kind.as_str()) {
-                continue;
             }
             let matters = if kind == "work.progress" {
                 // Work by a seat counts as its activity in the login fold: it can only clear a
