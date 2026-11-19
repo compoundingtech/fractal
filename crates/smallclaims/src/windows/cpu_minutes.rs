@@ -8,6 +8,10 @@
 //! only when the workers the member runs each had a reading at both its boundaries, no older than
 //! [`WORKER_FRESH`], from the same process: a worker that restarted, went quiet or whose counter
 //! went backwards leaves the minute's CPU unproven.
+//! In the production singleton-worker topology, a newer reported process birth supersedes older
+//! births. Its first changed minute remains unproven; the next stable minute uses only the new
+//! process, even if the superseded report has not aged out yet. Equal-birth competing identities
+//! remain ambiguous. Multi-worker topologies require the entire exact cohort.
 //!
 //! A minute is idle only when that is known: its CPU is known, its seats were checked and none was
 //! working, and nothing else was noted in it (the daemon starting, a deploy, a replication
@@ -61,8 +65,9 @@ struct Open {
     minute: u64,
     at: Instant,
     daemon_ns: u64,
-    /// `None` when a worker the member runs had no fresh reading.
-    workers: Option<BTreeMap<Worker, u64>>,
+    /// Exact, fresh cohort, or the bounded reason it could not be established.
+    workers: Result<BTreeMap<Worker, u64>, &'static str>,
+    expected_workers: usize,
     busy: u8,
 }
 
@@ -74,6 +79,8 @@ struct Closed {
     busy: u8,
     /// Whether a seat was working, or not known not to be; `None` until the seats are checked.
     seats_busy: Option<bool>,
+    expected_workers: usize,
+    missing: Option<&'static str>,
 }
 
 impl Closed {
@@ -88,12 +95,15 @@ pub struct CpuMinutes {
     closed: VecDeque<Closed>,
     /// Each worker's newest reading and when it arrived.
     workers: BTreeMap<Worker, (u64, Instant)>,
+    /// Fence the singleton worker's newest observed birth even after older reports expire.
+    newest_worker_birth: u64,
     started: bool,
 }
 
 impl CpuMinutes {
     /// A worker's cumulative process CPU, as it reported it at `at`.
     pub fn note_worker(&mut self, worker: Worker, cpu_ns: u64, at: Instant) {
+        self.newest_worker_birth = self.newest_worker_birth.max(worker.1);
         self.workers.insert(worker, (cpu_ns, at));
         // A worker that stopped reporting is no longer fresh; past a minute it is forgotten.
         self.workers
@@ -107,14 +117,27 @@ impl CpuMinutes {
         }
     }
 
-    fn fresh_workers(&self, at: Instant, expected: usize) -> Option<BTreeMap<Worker, u64>> {
+    fn fresh_workers(&self, at: Instant, expected: usize) -> Result<BTreeMap<Worker, u64>, &'static str> {
         let fresh = self
             .workers
             .iter()
+            // Production has one replication-worker role, not one role per process ever
+            // reported. A newer birth supersedes the old process for that role. Comparing
+            // boundary identities still rejects the changed minute, without poisoning the
+            // next stable minute with a superseded process's still-fresh report.
+            .filter(|(worker, _)| expected != 1 || worker.1 == self.newest_worker_birth)
             .filter(|(_, (_, seen))| at.saturating_duration_since(*seen) <= WORKER_FRESH)
             .map(|(worker, (cpu, _))| (*worker, *cpu))
             .collect::<BTreeMap<_, _>>();
-        (fresh.len() >= expected).then_some(fresh)
+        // A count is not process identity. An extra fresh incarnation must not stand in for a
+        // missing required worker, nor enter the numerator as though it were the declared cohort.
+        if fresh.len() > expected {
+            Err("worker-cohort-extra")
+        } else if fresh.len() < expected {
+            Err(if self.workers.len() < expected { "worker-missing" } else { "worker-stale" })
+        } else {
+            Ok(fresh)
+        }
     }
 
     /// The boundary that starts UTC `minute`, read at `at` with the daemon's CPU `daemon_ns`:
@@ -137,15 +160,24 @@ impl CpuMinutes {
         // A skipped boundary (a late tick, a machine asleep) leaves its minutes out.
         if let Some(open) = self.open.take().filter(|open| open.minute + 1 == minute) {
             let workers_ns = match (&open.workers, &workers) {
-                (Some(from), Some(to)) if from.keys().eq(to.keys()) => from
+                (Err(reason), _) | (_, Err(reason)) => Err(*reason),
+                (Ok(_), Ok(_)) if open.expected_workers != expected_workers => Err("worker-topology-changed"),
+                (Ok(from), Ok(to)) if from.keys().eq(to.keys()) => from
                     .values()
                     .zip(to.values())
-                    .try_fold(0_u64, |sum, (from, to)| to.checked_sub(*from).map(|ns| sum.saturating_add(ns))),
-                _ => None,
+                    .try_fold(0_u64, |sum, (from, to)| {
+                        to.checked_sub(*from).map(|ns| sum.saturating_add(ns)).ok_or("worker-counter-regressed")
+                    }),
+                _ => Err("worker-incarnation-changed"),
             };
+            let cpu_ns = workers_ns.and_then(|w| {
+                daemon_ns.checked_sub(open.daemon_ns).map(|d| w.saturating_add(d)).ok_or("daemon-counter-regressed")
+            });
             self.closed.push_back(Closed {
                 minute: open.minute,
-                cpu_ns: workers_ns.zip(daemon_ns.checked_sub(open.daemon_ns)).map(|(w, d)| w.saturating_add(d)),
+                cpu_ns: cpu_ns.ok(),
+                missing: cpu_ns.err(),
+                expected_workers: open.expected_workers,
                 wall_ns: u64::try_from(at.saturating_duration_since(open.at).as_nanos()).unwrap_or(u64::MAX),
                 busy: open.busy,
                 seats_busy: None,
@@ -157,6 +189,7 @@ impl CpuMinutes {
             at,
             daemon_ns,
             workers,
+            expected_workers,
             busy: if first { Busy::Start.bit() } else { 0 },
         });
         while self.closed.front().is_some_and(|old| old.minute + MINUTES < minute) {
@@ -213,10 +246,24 @@ impl CpuMinutes {
             "unknown".into(),
             json!(count(&|closed| closed.cpu_ns.is_none() || closed.seats_busy.is_none())),
         );
+        // At most one closed hour; no unbounded process identities or error prose. This is
+        // diagnostic evidence, not a second objective or a replacement denominator.
+        let evidence = hour.iter().map(|closed| json!({
+            "minute": closed.minute,
+            "cpu_ns": closed.cpu_ns,
+            "wall_ns": closed.wall_ns,
+            "expected_workers": closed.expected_workers,
+            "idle": closed.idle(),
+            "seats_busy": closed.seats_busy,
+            "missing_reason": closed.missing,
+            "busy": Busy::ALL.into_iter().filter(|busy| closed.busy & busy.bit() != 0)
+                .map(Busy::name).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>();
         json!({
             "windows": windows,
             "minutes": hour.len(),
             "idle": {"minutes": idle.len(), "cores": cores(&idle), "not_idle": not_idle},
+            "minute_evidence": evidence,
         })
     }
 }
@@ -288,25 +335,52 @@ mod tests {
         close(&mut ledger, &[(WORKER, 30)], Some(false), None); // 108: its end has no fresh reading
         close(&mut ledger, &[(WORKER, 0)], Some(false), None); // 109: nor its start
         close(&mut ledger, &[(WORKER, 0)], Some(false), None); // 110: idle
-        // The worker restarts 10 seconds before 112's boundary: two processes at that boundary.
+        // The worker restarts 10 seconds before 112's boundary; the old report is still fresh.
         close(&mut ledger, &[(WORKER, 20), (restarted, 10)], Some(false), None); // 111
-        close(&mut ledger, &[(restarted, 0)], Some(false), None); // 112
-        close(&mut ledger, &[(restarted, 0)], Some(false), None); // 113: idle again
+        close(&mut ledger, &[(restarted, 0)], Some(false), None); // 112: stable new worker, idle
+        close(&mut ledger, &[(restarted, 0)], Some(false), None); // 113: idle
         let report = report(&ledger, 114);
         let not_idle = &report["idle"]["not_idle"];
         assert_eq!(report["minutes"], 14);
-        // Minutes 101, 102, 103, 110 and 113; 100 is the daemon's start.
-        assert_eq!(report["idle"]["minutes"], 5, "{report}");
+        // Minutes 101, 102, 103, 110, 112 and 113; 100 is the daemon's start.
+        assert_eq!(report["idle"]["minutes"], 6, "{report}");
         assert_eq!(not_idle["start"], 1);
         assert_eq!(not_idle["seat"], 1);
         assert_eq!(not_idle["catch-up"], 1);
         assert_eq!(not_idle["deploy"], 1);
-        // 105's seats, 108 and 109 around the stale reading, and 111 and 112 across the restart.
-        assert_eq!(not_idle["unknown"], 5, "{report}");
+        // 105's seats, 108 and 109 around the stale reading, and only 111 across the restart.
+        assert_eq!(not_idle["unknown"], 4, "{report}");
+        assert_eq!(report["minute_evidence"][11]["missing_reason"], "worker-incarnation-changed");
+        assert!(report["minute_evidence"][12]["missing_reason"].is_null());
+        assert_eq!(report["minute_evidence"][12]["idle"], true, "the next stable minute recovers");
         // A window over a minute whose CPU is not known has no cores.
         assert_eq!(report["windows"]["5m"]["cores"], Value::Null);
-        assert_eq!(report["windows"]["5m"]["minutes"], 2);
+        assert_eq!(report["windows"]["5m"]["minutes"], 3);
         assert_eq!(report["windows"]["1m"]["cores"], 0.2);
+    }
+
+    #[test]
+    fn a_superseded_report_cannot_poison_recovery_or_replace_a_stale_successor() {
+        let (mut ledger, start) = quiet(2);
+        let successor = (42, 2_000);
+        for k in 3..=6 {
+            let at = start + Duration::from_secs(k * 60);
+            ledger.note_worker(WORKER, k * 6 * SECOND, at);
+            if k <= 4 {
+                ledger.note_worker(successor, (k - 2) * 6 * SECOND, at);
+            }
+            let closed = ledger.boundary(100 + k, at, k * 6 * SECOND, 1).unwrap();
+            ledger.settle(closed, Some(false));
+            let report = report(&ledger, 100 + k);
+            if k == 3 {
+                assert_eq!(report["minute_evidence"][2]["missing_reason"], "worker-incarnation-changed");
+            } else if k == 4 {
+                assert_eq!(report["windows"]["1m"]["cores"], 0.2, "only the changed minute is unknown");
+            } else {
+                assert!(report["windows"]["1m"]["cores"].is_null(), "old process cannot revive: {report}");
+                assert_eq!(report["minute_evidence"][k as usize - 1]["missing_reason"], "worker-stale");
+            }
+        }
     }
 
     #[test]
@@ -319,6 +393,43 @@ mod tests {
         let report = report(&ledger, 103);
         assert_eq!(report["idle"]["minutes"], 1, "{report}");
         assert_eq!(report["idle"]["not_idle"]["unknown"], 1);
+    }
+
+    #[test]
+    fn an_extra_fresh_process_cannot_satisfy_the_declared_cohort() {
+        let start = Instant::now();
+        let mut ledger = CpuMinutes::default();
+        for k in 0..=2 {
+            let at = start + Duration::from_secs(60 * k);
+            ledger.note_worker(WORKER, k * SECOND, at);
+            ledger.note_worker((42, 1_000), k * SECOND, at);
+            if let Some(closed) = ledger.boundary(100 + k, at, k * SECOND, 1) {
+                ledger.settle(closed, Some(false));
+            }
+        }
+        let report = report(&ledger, 102);
+        assert!(report["windows"]["1m"]["cores"].is_null(), "{report}");
+        assert_eq!(report["minute_evidence"][1]["missing_reason"], "worker-cohort-extra");
+        assert_eq!(report["idle"]["minutes"], 0);
+    }
+
+    #[test]
+    fn stale_worker_evidence_is_retained_and_fresh_sampling_recovers() {
+        let (mut ledger, start) = quiet(2);
+        for k in 3..=5 {
+            let at = start + Duration::from_secs(60 * k);
+            if k != 3 {
+                ledger.note_worker(WORKER, k * 6 * SECOND, at);
+            }
+            let closed = ledger.boundary(100 + k, at, k * 6 * SECOND, 1).unwrap();
+            ledger.settle(closed, Some(false));
+        }
+        let report = report(&ledger, 105);
+        assert_eq!(report["minute_evidence"][2]["missing_reason"], "worker-stale");
+        assert_eq!(report["minute_evidence"][3]["missing_reason"], "worker-stale");
+        assert!(report["minute_evidence"][4]["missing_reason"].is_null());
+        assert_eq!(report["windows"]["1m"]["cores"], 0.2);
+        assert!(report["windows"]["1h"]["cores"].is_null(), "missing minutes cannot shrink the hour");
     }
 
     #[test]
