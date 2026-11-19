@@ -70,6 +70,10 @@ pub use pty::{
     PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };
 
+/// Control-plane launch identity, never derived from a payload environment.
+#[derive(Clone, Debug)]
+pub struct LaunchOperation(pub String);
+
 #[cfg(test)]
 mod resource_profile_tests {
     use super::{ParseMemoryError, parse_lane_memory};

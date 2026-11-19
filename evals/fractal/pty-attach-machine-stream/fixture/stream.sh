@@ -2,7 +2,7 @@
 set -euo pipefail
 
 assets="$PWD"
-root="$(mktemp -d "${TMPDIR:-/tmp}/st3-machine-stream.XXXXXX")"
+root="$(mktemp -d "${TMPDIR:-/tmp}/fractal-machine-stream.XXXXXX")"
 pty_root="$root/machine-pty"
 remote_socket="$root/remote.sock"
 proxy_socket="$root/proxy.sock"

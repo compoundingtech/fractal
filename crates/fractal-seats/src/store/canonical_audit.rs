@@ -224,6 +224,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_lane_policies_v1",
         "resource_memberships_v1",
         "shell_resources_v1",
+        // Host-local physical-erasure completion, not replicated or rebuildable from claims.
+        "shell_environment_scrub_v1",
         // Settled teardown receipts belong only to this host's runtime cleanup.
         "local_runtime_cleanup_settled",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
@@ -251,6 +253,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",
+        "claim_verdict_dependency_keys",
+        "claim_verdict_dependency_edges",
         "claim_verdict_queue",
         "claim_verdict_fresh",
         "expected_claim_signatures",

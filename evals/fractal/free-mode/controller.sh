@@ -28,7 +28,7 @@ fractal work complete "$PRODUCE" --as "$PLANNER" --summary "the mission was publ
 fractal apply produced.kdl --as "$PLANNER" > direct.out
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st3 --json missions start eval/free-mode/produced \
+fractal --json missions start eval/free-mode/produced \
   --id "eval/free-mode/produced/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --as "$PLANNER" > started.json
@@ -50,7 +50,7 @@ jq -e '
 fractal trace wait "$produced_run" --for standing --timeout 1m >/dev/null
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st3 --json missions start eval/free-mode/produced \
+fractal --json missions start eval/free-mode/produced \
   --id "eval/free-mode/second/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --as "$REVISER" > second.json

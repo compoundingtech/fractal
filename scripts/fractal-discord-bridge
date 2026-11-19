@@ -223,7 +223,7 @@ class UnixConnection(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-class St:
+class Fractal:
     """Same trusted-local message endpoints used by Fractal conversations; never an HTTP listener."""
     def __init__(self, path, actor=None):
         self.path = path
@@ -399,9 +399,9 @@ def chunks(text):
 
 
 class Bridge:
-    def __init__(self, route, agent, state, discord, st, log=print, allowed_users=(), legacy_text=False):
+    def __init__(self, route, agent, state, discord, fractal, log=print, allowed_users=(), legacy_text=False):
         self.route, self.agent, self.state = route, agent, state
-        self.discord, self.st, self.log = discord, st, log
+        self.discord, self.fractal, self.log = discord, fractal, log
         self.legacy_text = legacy_text
         self.allowed_users = {route['user_id'], *allowed_users}
         self.sender = self.account_sender(route['user_id'])
@@ -505,7 +505,7 @@ class Bridge:
                     if current is None or current.get('size') != attachment['size'] or current.get('content_type') != attachment['content_type']:
                         raise Stop('A queued source image was removed or changed; import was retained.')
                     data = self.discord.image({**attachment, 'url': current.get('url')}, self.route['channel_id'])
-                    native_images.append(self.st.upload(data, attachment['content_type'], self.st.actor))
+                    native_images.append(self.fractal.upload(data, attachment['content_type'], self.fractal.actor))
                 self.state.db.execute('UPDATE inbox SET native_images=? WHERE discord_id=?', (json.dumps(native_images), row['discord_id']))
                 self.state.db.commit()
             # Retry exactly the same immutable payload after an unconfirmed native send.
@@ -513,15 +513,15 @@ class Bridge:
                     'from': row['sender'], 'to': self.agent, 'in_reply_to': self.native_parent(row['parent']),
                     'content': '[Discord origin: server ' + self.route['guild_id'] + ', channel ' + self.route['channel_id'] + ', message ' + row['discord_id'] + '. Sender has no native-person link.]\n\n' + row['content'],
                     'title': 'Discord message', 'tags': ['discord-bridge', 'discord-origin'], 'attachments': native_images}
-            st_id = self.st.send(body)
-            self.state.db.execute('UPDATE inbox SET st_id=? WHERE discord_id=?', (st_id, row['discord_id']))
+            fractal_id = self.fractal.send(body)
+            self.state.db.execute('UPDATE inbox SET st_id=? WHERE discord_id=?', (fractal_id, row['discord_id']))
             self.state.db.commit()
-            self.log('Imported Discord ' + row['discord_id'] + ' as ' + row['sender'] + ' -> ' + st_id)
+            self.log('Imported Discord ' + row['discord_id'] + ' as ' + row['sender'] + ' -> ' + fractal_id)
 
     def queue_replies(self, messages=None):
         import itertools
         if messages is None:
-            messages = itertools.chain.from_iterable(self.st.replies(sender) for sender in sorted(self.senders))
+            messages = itertools.chain.from_iterable(self.fractal.replies(sender) for sender in sorted(self.senders))
         for message in messages:
             if not isinstance(message, dict) or message.get('from') != self.agent or message.get('to') not in self.senders or not isinstance(message.get('subject'), str) or not SUBJECT.fullmatch(message['subject']):
                 continue
@@ -555,7 +555,7 @@ class Bridge:
 
     def watch_replies(self, wait_ms=5000):
         after = int(self.state.get('outbound_cursor') or '0')
-        page = self.st.deliveries(after, wait_ms)
+        page = self.fractal.deliveries(after, wait_ms)
         # TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receiver alias; sunset 60 days after first shipping release.
         if (not isinstance(page, dict) or page.get('contract') not in ('st3.adapter.delivery.v0', 'fractal.adapter.delivery.v0')
                 or not isinstance(page.get('items'), list) or len(page['items']) > 200
@@ -626,7 +626,7 @@ class Bridge:
             return
         for row in self.state.db.execute("SELECT * FROM outbox WHERE status='pending' ORDER BY rowid LIMIT 5").fetchall():
             images = json.loads(row['images'])
-            files = [self.st.image(image, row['st_id'], self.st.actor) for image in images]
+            files = [self.fractal.image(image, row['st_id'], self.fractal.actor) for image in images]
             if any(self.discord.token.encode() in data for _, _, data in files):
                 raise Stop('An outgoing image contained the bot credential; it was not sent.')
             self.state.db.execute("UPDATE outbox SET status='sending' WHERE st_id=? AND part=?", (row['st_id'], row['part']))
@@ -730,7 +730,7 @@ def main():
         token = None
         print('Checking bot application and channel...', flush=True)
         discord.validate(route)
-        bridge = Bridge(route, args.agent, state, discord, St(args.socket), allowed_users=args.allow_user, legacy_text=args.legacy_text)
+        bridge = Bridge(route, args.agent, state, discord, Fractal(args.socket), allowed_users=args.allow_user, legacy_text=args.legacy_text)
         if args.action == 'resolve':
             if not args.fractal_message or not SUBJECT.fullmatch(args.fractal_message) or not args.discord_message or not ID.fullmatch(args.discord_message):
                 raise Stop('resolve needs --fractal-message message/ID and --discord-message ID.')

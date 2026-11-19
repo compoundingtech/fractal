@@ -28,11 +28,11 @@ use crate::provider_session::{
 };
 use crate::{driver_diagnostic, harness_state, message};
 
-/// Set on every st3-managed interactive Claude: a seat has no person to accept an in-place
+/// Set on every Fractal-managed interactive Claude: a seat has no person to accept an in-place
 /// update, so the provider must not update itself under a running seat.
 pub(crate) const CONTROLLED_DISABLE_AUTOUPDATER: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
 
-/// The provider argv an st3-managed Claude launches with. The install access mode's permission
+/// The provider argv a Fractal-managed Claude launches with. The install access mode's permission
 /// defaults go first unless the declaration authored its own permission flags before any `--`; a
 /// hand-run driver (`mode` is `None`) keeps its complete authored argv.
 pub(crate) fn managed_claude_argv(
@@ -51,7 +51,7 @@ pub(crate) fn managed_claude_argv(
     claude_argv
 }
 
-/// Run one interactive Claude provider for an st3-owned agent directory.
+/// Run one interactive Claude provider for a Fractal-owned agent directory.
 ///
 /// The host supplies resolved observation and session paths. This path is deliberately interactive: it
 /// preserves capabilities such as Claude Remote Control that are incompatible with `--print`.
@@ -100,7 +100,7 @@ pub fn run_controlled_paths_with_primary_ownership(
         ("ST_CLAUDE_IDENTITY".to_string(), identity.clone()),
     ];
     env.extend(paths.environment(&identity));
-    // An st3 seat never carries an st2 residency fence, so an inherited one must not reach hooks.
+    // A Fractal seat never carries an st2 residency fence, so an inherited one must not reach hooks.
     crate::claude_usage::supervise(paths, &identity, &runtime_id, observer.session(), || {
         run_provider_with_env_removals(
             "Claude",
@@ -242,11 +242,11 @@ fn prepare_fractal_channel_argv(
                 launch.plugin_check_ms = plugin_check_ms;
             });
             eprintln!(
-                "warning: the approved st3 Claude channel plugin is unavailable: {error:#}\n\
-                 warning: using Claude's interactive st3 development channel"
+                "warning: the approved Fractal Claude channel plugin is unavailable: {error:#}\n\
+                 warning: using Claude's interactive Fractal development channel"
             );
             let executable = std::env::current_exe()
-                .context("resolving the st3 executable for the Claude development channel")?;
+                .context("resolving the Fractal executable for the Claude development channel")?;
             let argv = select_fractal_channel_plugin(argv, false)?;
             development_fractal_channel_argv(argv, &executable, catalog_root, identity)
         }
@@ -267,7 +267,7 @@ fn fractal_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<S
 
 
 /// Only the selected channel may own this seat's mailbox fence. User/project settings and
-/// older fleet declarations can still enable the previous st3 plugins after an upgrade.
+/// older fleet declarations can still enable the previous Fractal plugins after an upgrade.
 fn select_fractal_channel_plugin(mut argv: Vec<String>, packaged: bool) -> Result<Vec<String>> {
     argv.extend([
         "--settings".into(),
@@ -373,14 +373,14 @@ fn development_fractal_channel_argv(
 ) -> Result<Vec<String>> {
     let argv = bind_fractal_mcp_config_values(argv)?;
     let subject = format!("agent/{identity}");
-    let st3_server = serde_json::json!({
+    let fractal_server = serde_json::json!({
         "type": "stdio",
         "command": executable,
         "args": ["driver", "claude-mcp", "--subject", subject]
     });
 
     // Claude accepts one effective MCP configuration. Preserve an authored configuration (for
-    // example Typecase's Xcode bridge) by adding st3 to it instead of appending a second flag,
+    // example Typecase's Xcode bridge) by adding Fractal to it instead of appending a second flag,
     // whose precedence differs across Claude releases and can make the provider reject startup.
     let mut existing_mcp = None;
     let mut index = 0;
@@ -429,14 +429,14 @@ fn development_fractal_channel_argv(
     // LIVE-MIGRATION END
     if let Some(authored) = servers.get(server_name) {
         anyhow::ensure!(
-            authored == &st3_server,
-            "the authored Claude --mcp-config already defines a different st3 server"
+            authored == &fractal_server,
+            "the authored Claude --mcp-config already defines a different Fractal server"
         );
     } else {
-        servers.insert("st3".to_string(), st3_server);
+        servers.insert("st3".to_string(), fractal_server);
     }
     let mcp =
-        serde_json::to_string(&mcp).context("serializing the Claude st3 development channel")?;
+        serde_json::to_string(&mcp).context("serializing the Claude Fractal development channel")?;
 
     let channel_count = argv
         .windows(2)
@@ -444,7 +444,7 @@ fn development_fractal_channel_argv(
         .count();
     anyhow::ensure!(
         channel_count == 1,
-        "the Claude arguments must contain exactly one st3 plugin channel selector"
+        "the Claude arguments must contain exactly one Fractal plugin channel selector"
     );
 
     let mut output = Vec::with_capacity(argv.len() + 1);
@@ -1138,7 +1138,7 @@ pub fn residency_ready(
     Ok(true)
 }
 
-/// Apply one Claude hook event whose payload the caller already read. st3 answers its seats'
+/// Apply one Claude hook event whose payload the caller already read. Fractal answers its seats'
 /// hooks through this, so a hook process never needs an `st2` program. `var` reads the hook's
 /// environment: the wrapper-session variables ([`SESSION_ENV`] and its siblings) and `HOME`.
 pub fn run_observe_payload(
@@ -1260,9 +1260,9 @@ fn observe_payload_owned(
             if mandatory_resume {
                 return Err(error);
             }
-            tracing::warn!("st claude-observe: native session binding write failed: {error:#}");
+            tracing::warn!("fractal claude-observe: native session binding write failed: {error:#}");
         }
-        // st3 reads this record to bind a managed chat to the wrapper's current native session.
+        // Fractal reads this record to bind a managed chat to the wrapper's current native session.
         if let (Some(incarnation), Some(native_id)) = (
             exported_session.as_deref(),
             payload
@@ -1276,7 +1276,7 @@ fn observe_payload_owned(
             if let Err(error) =
                 write_native_session_binding(agent_dir, incarnation, native_id, transcript_path)
             {
-                tracing::warn!("st claude-observe: native session binding write failed: {error:#}");
+                tracing::warn!("fractal claude-observe: native session binding write failed: {error:#}");
             }
         }
     }
@@ -1289,11 +1289,11 @@ fn observe_payload_owned(
     if let Err(error) = crate::harness_timeline::observe_claude(&mut timeline, event, &payload) {
         // Timeline observability is fail-open just like state/context publication: a record fault
         // must not hold up the hook process Claude is waiting on.
-        tracing::warn!("st claude-observe: harness-timeline write failed: {error:#}");
+        tracing::warn!("fractal claude-observe: harness-timeline write failed: {error:#}");
     }
     // The seat's driver records each subagent from this ledger. Fail-open like the timeline.
     if let Err(error) = crate::subagents::observe_claude(agent_dir, event, &payload) {
-        tracing::warn!("st claude-observe: subagent ledger write failed: {error:#}");
+        tracing::warn!("fractal claude-observe: subagent ledger write failed: {error:#}");
     }
     if event == "Stop" {
         // Responses are read from the transcript at Stop, so the account is read here too: the
@@ -1311,7 +1311,7 @@ fn observe_payload_owned(
                 &payload,
                 &claude_config,
             ) {
-                tracing::warn!("st claude-observe: native answer publication failed: {error:#}");
+                tracing::warn!("fractal claude-observe: native answer publication failed: {error:#}");
             }
         }
     }
@@ -1320,7 +1320,7 @@ fn observe_payload_owned(
     // otherwise return below. Fail-open: a context record that cannot be written must never stop
     // a hook the harness is waiting on, and the numbers authorize nothing (HC-A02).
     if let Err(error) = observe_compaction(agent_dir, identity, event, &payload, native) {
-        tracing::warn!("st claude-observe: harness-context compaction write failed: {error:#}");
+        tracing::warn!("fractal claude-observe: harness-context compaction write failed: {error:#}");
     }
     // The credential axis is independent of both the numbers and the categorical state, and is
     // applied before the observation guard below for the same reason the compaction write is:
@@ -1384,7 +1384,7 @@ fn observe_payload_owned(
 }
 
 /// `transcript_path` is the file Claude says holds the session, which follows the seat's own
-/// `CLAUDE_CONFIG_DIR`; st3 reads it so a seat on any account is found without guessing.
+/// `CLAUDE_CONFIG_DIR`; Fractal reads it so a seat on any account is found without guessing.
 fn write_native_session_binding(
     agent_dir: &Path,
     incarnation: &str,
@@ -1443,7 +1443,7 @@ fn observe_writer(
                 Ok(None) => writer.with_session(token),
                 Err(error) => {
                     tracing::warn!(
-                        "st claude-observe: observed-state claim failed; degrading to token-only: {error:#}"
+                        "fractal claude-observe: observed-state claim failed; degrading to token-only: {error:#}"
                     );
                     writer.with_session(token)
                 }
@@ -1681,9 +1681,9 @@ pub fn run_statusline(catalog_root: &Path, identity: &str) -> Result<()> {
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline(catalog_root, identity, &raw) {
         if crate::claude_process::failure_kind(&error).is_some() {
-            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+            eprintln!("fractal: {}", crate::claude_process::diagnostic(&error));
         } else {
-            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+            tracing::warn!("fractal claude-statusline: recording failed; chaining anyway: {error:#}");
         }
     }
     chain_statusline(&raw)
@@ -1701,9 +1701,9 @@ pub fn run_statusline_paths(agent_dir: &Path, identity: &str) -> Result<()> {
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline_paths(agent_dir, identity, &raw, true) {
         if crate::claude_process::failure_kind(&error).is_some() {
-            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+            eprintln!("fractal: {}", crate::claude_process::diagnostic(&error));
         } else {
-            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+            tracing::warn!("fractal claude-statusline: recording failed; chaining anyway: {error:#}");
         }
     }
     chain_statusline(&raw)
@@ -1799,7 +1799,7 @@ fn chain_statusline(raw: &[u8]) -> Result<()> {
             format!("~/{STATUSLINE_RENDERER_FILE}")
         };
         tracing::warn!(
-            "st claude-statusline: no downstream renderer resolved from \
+            "fractal claude-statusline: no downstream renderer resolved from \
              ${STATUSLINE_RENDERER_ENV} or {file}; \
              rendering an empty status line"
         );
@@ -1816,7 +1816,7 @@ fn chain_statusline(raw: &[u8]) -> Result<()> {
         Ok(child) => child,
         Err(error) => {
             tracing::warn!(
-                "st claude-statusline: downstream renderer `{command}` could not start: {error}"
+                "fractal claude-statusline: downstream renderer `{command}` could not start: {error}"
             );
             return Ok(());
         }
@@ -2352,7 +2352,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            format!("{error:#}").contains("already defines a different st3 server"),
+            format!("{error:#}").contains("already defines a different Fractal server"),
             "{error:#}"
         );
     }
@@ -2820,7 +2820,7 @@ mod tests {
         assert_eq!(
             failure.support,
             driver_diagnostic::Support::Unknown,
-            "st gates no Claude version, so support is not knowable from a hook"
+            "fractal gates no Claude version, so support is not knowable from a hook"
         );
 
         // A later quota failure carries no credential edge, so the rejection stands.

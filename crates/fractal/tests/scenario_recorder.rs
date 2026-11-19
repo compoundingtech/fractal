@@ -127,7 +127,7 @@ fn owned_destinations(root: &Path, state: &Path, endpoint: &Path) -> Result<()> 
 struct Scratch { root: tempfile::TempDir, env: BTreeMap<String, String>, daemon: Option<Child> }
 impl Scratch {
     fn new(script: &[u8], host: &str, person: &str) -> Result<Self> {
-        let root = tempfile::Builder::new().prefix("st3-scenario-").tempdir()?;
+        let root = tempfile::Builder::new().prefix("fractal-scenario-").tempdir()?;
         owned_destinations(root.path(), &root.path().join("state"), &root.path().join("run/st.sock"))?;
         for name in ["home", "run", "ws", "bin"] { fs::create_dir(root.path().join(name))?; }
         fs::write(root.path().join("script.json"), script)?;

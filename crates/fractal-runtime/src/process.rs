@@ -162,6 +162,7 @@ pub struct ExecRuntime {
     scope_join_limit: Duration,
     finite_lane: Option<FiniteLane>,
     resource_membership: Option<ResourceExecutionBinding>,
+    launch_operation: Option<crate::LaunchOperation>,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -252,6 +253,7 @@ impl ExecRuntime {
             scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
             finite_lane: None,
             resource_membership: None,
+            launch_operation: None,
         }
     }
 
@@ -270,6 +272,11 @@ impl ExecRuntime {
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.
     pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
         self.unlaned_seat = policy;
+        self
+    }
+
+    pub fn with_launch_operation(mut self, operation: Option<crate::LaunchOperation>) -> Self {
+        self.launch_operation = operation;
         self
     }
 
@@ -347,7 +354,7 @@ impl ExecRuntime {
                     error
                 } else {
                     error.context(StartRejected {
-                        operation: env.get("ST3_START_OPERATION").cloned(),
+                        operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
                     })
                 }
             })
@@ -384,7 +391,7 @@ impl ExecRuntime {
             if self.finite_lane.is_some() {
                 return Err(error.context("finite execution replacement retains previous containment custody"));
             }
-            eprintln!("st3: WARN what the last generation of {id} left running did not end: {error:#}");
+            eprintln!("fractal: WARN what the last generation of {id} left running did not end: {error:#}");
         }
         self.rotate_generation(id)?;
         let log_path = self.log_path(id, false);
@@ -490,7 +497,7 @@ impl ExecRuntime {
                 tracing::debug!(
                     caller = "spawn_inner",
                     runtime_id = id,
-                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    operation_id = self.launch_operation.as_ref().map_or("unavailable", |operation| operation.0.as_str()),
                     guard_decision = "skip",
                     reason = "spawn_guard_rejected",
                     %error,
@@ -530,7 +537,7 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
-            start_operation: env.get("ST3_START_OPERATION").cloned(),
+            start_operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
         };
@@ -897,7 +904,7 @@ impl ExecRuntime {
                     tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
                 }
                 Err(error) => eprintln!(
-                    "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
+                    "fractal: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
             }
         }
@@ -2166,9 +2173,10 @@ mod tests {
     #[test]
     fn launch_operation_is_bound_to_the_persisted_exec_generation() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_launch_operation(Some(crate::LaunchOperation("operation-one".into())));
         let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        environment.insert("ST3_START_OPERATION".into(), "untrusted-payload-value".into());
         let launched = runtime
             .spawn(
                 "operation-proof",
@@ -2186,6 +2194,8 @@ mod tests {
             reopened.observe("operation-proof").unwrap(),
             Some(ExecObservation::Exited(exited))
         );
+        let bytes = fs::read(root.path().join("exec").join("operation-proof.json")).unwrap();
+        assert!(!bytes.windows(b"untrusted-payload-value".len()).any(|bytes| bytes == b"untrusted-payload-value"));
     }
 
     fn wait_for_exit(runtime: &ExecRuntime, id: &str) -> ExecGeneration {

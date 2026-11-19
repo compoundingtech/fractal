@@ -1,11 +1,11 @@
 //! Launching a tile: root starts a systemd unit in the tile's slice, and the unit's process
 //! builds the tile's namespaces, drops to the tile's Unix user and runs the command.
 //!
-//! `st tiles run` (root) starts `st-tile-NAME-tools.service` in `st_tiles-NAME.slice` with the
+//! `fractal tiles run` (root) starts `st-tile-NAME-tools.service` in `st_tiles-NAME.slice` with the
 //! tile's resource ceilings. systemd owns the cgroup: a tile cannot write to it, stopping the
 //! unit ends every process in it, and so does the unit's main process ending for any reason.
 //!
-//! `st tiles enter` is that main process. Still root, it checks it runs in the tile's unit,
+//! `fractal tiles enter` is that main process. Still root, it checks it runs in the tile's unit,
 //! makes new mount, PID, IPC, network, UTS and cgroup namespaces, and forks the tile's first
 //! process, PID 1 of the new PID namespace. PID 1 builds the tile's file system from an empty
 //! tmpfs: the registry's read-only paths, the tile's own home and workspace, a private /tmp, a
@@ -38,7 +38,7 @@ pub const TILE_SEKRETS_SOCKET: &str = crate::sekrets::gateway::DEFAULT_SOCKET;
 /// The tile's user name inside the tile.
 const TILE_USER: &str = "tile";
 
-/// What `st tiles run` asks systemd for.
+/// What `fractal tiles run` asks systemd for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunPlan {
     pub program: PathBuf,
@@ -53,7 +53,7 @@ pub fn run_plan(
     registry_path: &Path,
     name: &str,
     tile: &Tile,
-    st: &Path,
+    fractal: &Path,
     terminal: bool,
     command: &[OsString],
 ) -> RunPlan {
@@ -79,7 +79,7 @@ pub fn run_plan(
         args.push(format!("--property=MemoryHigh={high}").into());
     }
     args.push("--".into());
-    args.push(st.into());
+    args.push(fractal.into());
     args.push("tiles".into());
     args.push("enter".into());
     args.push("--registry".into());
@@ -93,25 +93,25 @@ pub fn run_plan(
     }
 }
 
-/// `st tiles run`: start the tile's tools unit with `command` and wait for it.
+/// `fractal tiles run`: start the tile's tools unit with `command` and wait for it.
 pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString]) -> Result<i32> {
-    require_root("st tiles run")?;
+    require_root("fractal tiles run")?;
     let mut registry = Registry::load(registry_path)?;
     let tile = registry.tile(name)?.clone();
     root_dir(&registry.state_root, 0o755)?;
     uids::allocate(&mut registry, name)?;
-    let st = std::env::current_exe().context("find this st executable")?;
-    registry::root_controlled(&st).with_context(|| {
+    let fractal = std::env::current_exe().context("find this Fractal executable")?;
+    registry::root_controlled(&fractal).with_context(|| {
         format!(
-            "{} runs as root in the tile's unit, so root must control it; install st where only \
+            "{} runs as root in the tile's unit, so root must control it; install fractal where only \
              root can change it",
-            st.display()
+            fractal.display()
         )
     })?;
     if command.is_empty() {
         bail!("name a command to run in the tile, after `--`");
     }
-    let plan = run_plan(registry_path, name, &tile, &st, terminal, command);
+    let plan = run_plan(registry_path, name, &tile, &fractal, terminal, command);
     let status = Command::new(&plan.program)
         .args(&plan.args)
         .env_clear()
@@ -121,10 +121,10 @@ pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString
     Ok(status.code().unwrap_or(1))
 }
 
-/// `st tiles prepare`: make the tile's directories without starting it, so its supervisor can
+/// `fractal tiles prepare`: make the tile's directories without starting it, so its supervisor can
 /// serve the endpoint before the first launch.
 pub fn prepare(registry_path: &Path, name: &str) -> Result<()> {
-    require_root("st tiles prepare")?;
+    require_root("fractal tiles prepare")?;
     let mut registry = Registry::load(registry_path)?;
     let tile = registry.tile(name)?.clone();
     root_dir(&registry.state_root, 0o755)?;
@@ -132,11 +132,11 @@ pub fn prepare(registry_path: &Path, name: &str) -> Result<()> {
     prepare_directories(&registry, name, &tile, uid).map(|_| ())
 }
 
-/// `st tiles remove`: end the tile, remove its state and runtime directories, and give its user
+/// `fractal tiles remove`: end the tile, remove its state and runtime directories, and give its user
 /// ID back. Root's registry entry stays until root removes it; a later launch allocates afresh,
 /// with nothing of the old tile left to inherit.
 pub fn remove(registry_path: &Path, name: &str) -> Result<()> {
-    require_root("st tiles remove")?;
+    require_root("fractal tiles remove")?;
     registry::check_name(name)?;
     let mut registry = Registry::load(registry_path)?;
     // Stopping a unit that is not loaded fails; what matters is that none is left.
@@ -178,9 +178,9 @@ pub fn remove(registry_path: &Path, name: &str) -> Result<()> {
     })
 }
 
-/// `st tiles stop`: end every process of the tile's tools unit.
+/// `fractal tiles stop`: end every process of the tile's tools unit.
 pub fn stop(name: &str) -> Result<()> {
-    require_root("st tiles stop")?;
+    require_root("fractal tiles stop")?;
     registry::check_name(name)?;
     let status = Command::new("systemctl")
         .args([
@@ -204,14 +204,14 @@ fn require_root(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// `st tiles enter`: build the tile and run `command` in it. Runs as the main process of the
+/// `fractal tiles enter`: build the tile and run `command` in it. Runs as the main process of the
 /// tile's tools unit and never returns on success paths it controls; its exit status is the
 /// command's.
 pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i32> {
-    require_root("st tiles enter")?;
+    require_root("fractal tiles enter")?;
     let registry = Registry::load(registry_path)?;
     let tile = registry.tile(name)?.clone();
-    // `st tiles run` allocated it; `enter` never allocates, so it runs as no ID root's launcher
+    // `fractal tiles run` allocated it; `enter` never allocates, so it runs as no ID root's launcher
     // did not record.
     let uid = registry
         .uid(name)
