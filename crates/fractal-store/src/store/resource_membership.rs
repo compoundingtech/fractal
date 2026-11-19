@@ -234,7 +234,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError>
         .map_err(internal)
 }
 
-fn read(connection: &Connection, id: &str) -> Result<Membership> {
+pub(super) fn read(connection: &Connection, id: &str) -> Result<Membership> {
     let body: String = connection.query_row("SELECT body FROM resource_memberships_v1 WHERE id=?1", [id], |row| row.get(0))?;
     Ok(serde_json::from_str(&body)?)
 }
@@ -264,7 +264,7 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
     Ok(())
 }
 
-fn authorized(member: &Membership, owner: &Owner) -> Result<()> {
+pub(super) fn authorized(member: &Membership, owner: &Owner) -> Result<()> {
     anyhow::ensure!(&member.request.owner == owner, "resource membership owner mismatch");
     Ok(())
 }

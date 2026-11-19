@@ -19,7 +19,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     execution.state = "failing".into();
                     if !already_failing { self.signal_changed(); }
                 } else {
-                    execution.state = match self.retire_shell_resource(&execution) {
+                    execution.state = match self.retire_shell_resource(&mut execution) {
                         Ok(true) => "refused",
                         Ok(false) => "retiring",
                         Err(retirement) => { execution.reason.push_str(&format!("; retirement: {retirement:#}")); "retiring" }
@@ -45,13 +45,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.driver_state_dir.parent().unwrap_or(&self.driver_state_dir).join("resource-exec").join(format!("{id}.json"))
     }
 
-    fn retire_shell_resource(&self, execution: &Execution) -> Result<bool> {
-        let request = &execution.command.lane;
-        let member = self.store.resource_memberships_for_host(&self.host)?.into_iter().find(|member| member.request.id == request.id);
+    fn retire_shell_resource(&self, execution: &mut Execution) -> Result<bool> {
+        let member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
+            .find(|member| member.request.id == execution.command.lane.id);
         let Some(member) = member else { return Ok(true); };
+        let request = &member.request;
+        let generation = member.roots.iter().find(|root| root.runtime_id == execution.command.id)
+            .and_then(|root| root.execution.as_ref()).map(|generation| generation.generation_id.as_str());
+        if let Some(generation) = &generation {
+            self.commit_shell_oom(execution, generation)?;
+        }
         if execution.command.parent.is_some() {
             if member.roots.iter().any(|root| root.runtime_id == execution.command.id) {
                 self.runtime.retire_resource_exec(&self.store, request, &execution.command.id)?;
+            }
+            if let Some(generation) = &generation {
+                self.commit_shell_oom(execution, generation)?;
             }
             return Ok(true);
         }
@@ -70,11 +79,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let retired = self.runtime.retire_resource_lane(&self.store, request)?;
         if retired {
+            if let Some(generation) = &generation {
+                self.commit_shell_oom(execution, generation)?;
+            }
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
         }
         Ok(retired)
+    }
+
+    fn commit_shell_oom(&self, execution: &mut Execution, generation: &str) -> Result<()> {
+        if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
+            execution.oom_kills = self.runtime.resource_exec_oom_kills(
+                &execution.command.id, generation, &execution.command.lane.name)?;
+            execution.oom_killed = execution.oom_kills.map(|count| count > 0);
+        }
+        if execution.oom_killed == Some(true) {
+            execution.reason = "payload-oom-killed".into();
+        } else if execution.oom_killed.is_none() && execution.reason == "payload-oom-killed" {
+            execution.reason = "payload OOM outcome unknown; generation slice unavailable".into();
+        }
+        // Snapshot the generation slice before retirement can remove it.
+        // A missing slice remains typed unknown; it must never become false/zero.
+        if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+        Ok(())
     }
 
     fn shell_payload_observation(&self, execution: &Execution, generation: &str, now: u64) -> Result<PayloadResult> {
@@ -117,11 +146,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         let (exited, receiver) = std::sync::mpsc::channel();
         let mut running = Vec::new();
         for mut execution in self.store.shell_resources(&self.host, true)? {
-            let Some(root) = members.iter().flat_map(|member| &member.roots)
-                .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()) else { continue; };
+            let Some((member, root)) = members.iter().find_map(|member| member.roots.iter()
+                .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some())
+                .map(|root| (member, root))) else { continue; };
             let generation = root.execution.as_ref().context("released shell has no generation")?.generation_id.clone();
             execution.started_at = root.payload_released_at;
-            if !self.read_shell_payload_result(&mut execution)? && execution.result.is_none() {
+            if !self.read_shell_payload_result(&mut execution)? && execution.result.is_none() && member.state != "retired" {
                 if let Ok(bytes) = fs::read(self.shell_result_path(&execution.command.id).with_extension("started")) {
                     let (head, clean) = serde_json::from_slice(&bytes)?;
                     execution.head_start = head; execution.clean_start = clean;
@@ -129,6 +159,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 execution.result = Some(self.shell_payload_observation(&execution, &generation,
                     u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
             }
+            self.commit_shell_oom(&mut execution, &generation)?;
             execution.state = if matches!(execution.state.as_str(), "failing" | "finishing-refused") {
                 "finishing-refused"
             } else { "finishing" }.into();
@@ -172,6 +203,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 execution.result = Some(result);
             }
+            self.commit_shell_oom(&mut execution, &generation)?;
             if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
         }
         Ok(())
@@ -191,13 +223,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The native root is the observer, not the payload. Only its result file can
         // identify the payload's exit code/signal; missing publication means unknown.
         execution.exit_code = None; execution.exit_signal = None;
-        if !self.read_shell_payload_result(execution)? {
-            let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
-            if let Some(previous) = &execution.result {
-                result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
-                result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
-            }
-            execution.result = Some(result);
+        // Recovery captured live observations before rotating authority or retiring custody.
+        // Keep that durable capture unless the observer subsequently published its result.
+        // A retired membership with no capture retains unknown payload facts: its old grant
+        // cannot authorize a fresh elapsed/peak sample. OOM evidence is independently read
+        // from the generation slice; a missing slice remains typed unknown, never false/zero.
+        if !self.read_shell_payload_result(execution)? && execution.result.is_none() && member.state != "retired" {
+            execution.result = Some(self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
+        }
+        execution.payload_outcome_unknown = execution.result.is_none() && member.state == "retired";
+        if execution.payload_outcome_unknown && execution.oom_killed != Some(true) {
+            execution.reason = "payload-outcome-unknown".into();
         }
         Ok(())
     }

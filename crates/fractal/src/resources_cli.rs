@@ -512,6 +512,9 @@ mod tests {
         completed.state = "completed".into();
         completed.started_at = Some(2);
         completed.exit_code = Some(37);
+        completed.oom_killed = Some(true);
+        completed.oom_kills = Some(2);
+        completed.reason = "payload-oom-killed".into();
         completed.receipt_subject = Some("resource/exec/abcd/host/check/root".into());
         completed.result = Some(PayloadResult {
             head_start: Some("start-head".into()), head_end: Some("end-head".into()), clean_start: Some(true), clean_end: Some(false),
@@ -522,6 +525,9 @@ mod tests {
         assert_eq!(receipt["launched"], true);
         assert_eq!(receipt["wall_duration_ms"], 91);
         assert_eq!(receipt["exit_code"], 37);
+        assert_eq!(receipt["oom_killed"], true);
+        assert_eq!(receipt["oom_kills"], 2);
+        assert_eq!(receipt["reason"], "payload-oom-killed");
         assert_eq!(receipt["receipt_subject"], "resource/exec/abcd/host/check/root");
         assert_eq!(receipt["exit_signal"], Value::Null);
         assert_eq!(receipt["head_start"], "start-head");

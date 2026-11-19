@@ -1016,6 +1016,22 @@ impl ExecRuntime {
         Ok(current)
     }
 
+    /// Read the kernel counter of this execution's generation slice, which outlives
+    /// its collected payload scope. None means the slice is gone, not a measured zero.
+    pub fn resource_oom_kills(&self, id: &str, expected_generation: &str, lane_name: &str) -> Result<Option<u64>> {
+        let generation = match self.observe(id)?.context("resource OOM generation missing")? {
+            ExecObservation::Running(generation) | ExecObservation::Exited(generation) => generation,
+            ExecObservation::Indeterminate(reason) => anyhow::bail!("resource OOM generation indeterminate: {reason}"),
+        };
+        anyhow::ensure!(generation.generation_id == expected_generation,
+            "resource OOM observation belongs to another generation");
+        let binding = generation.resource_membership.as_ref().context("resource OOM membership missing")?;
+        let unit = generation.scope_unit.as_deref().context("resource OOM scope missing")?;
+        anyhow::ensure!(crate::isolate::scope_identity("st3", unit) == Some(crate::isolate::sanitize(id).as_str()),
+            "resource OOM scope differs from execution identity");
+        crate::lane::finite_oom_kills(lane_name, binding, unit)
+    }
+
     /// Exact-generation whole-tree retirement. A missing/replaced record is not empty evidence.
     /// Detached sessions cannot prove escaped descendant quiescence and therefore retain custody.
     pub fn retired_if(&self, id: &str, expected_generation: &str) -> Result<bool> {

@@ -410,6 +410,38 @@ fn finite_slices(
     (parent, member, child)
 }
 
+/// OOM kills in the execution's generation slice, including units the payload starts there.
+/// This cooperative accounting is not authenticated against deliberate same-user interference.
+/// The hierarchical counter survives scope GC; a missing slice means unknown, not zero.
+pub(crate) fn finite_oom_kills(
+    name: &str,
+    binding: &crate::process::ResourceExecutionBinding,
+    unit: &str,
+) -> Result<Option<u64>> {
+    let (parent, member, generation) = finite_slices(name, Some(binding), unit);
+    let group = slice_cgroup(&parent).context("finite lane cgroup root is unavailable")?
+        .join(member.context("finite OOM observation lacks membership slice")?).join(generation);
+    match std::fs::read_to_string(group.join("memory.events")) {
+        Ok(events) => parse_oom_kills(&events).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            || error.raw_os_error() == Some(libc::ENODEV) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn parse_oom_kills(events: &str) -> Result<u64> {
+    let mut count = None;
+    for line in events.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some("oom_kill") {
+            anyhow::ensure!(count.is_none(), "duplicate memory.events oom_kill counter");
+            count = Some(fields.next().context("missing oom_kill count")?.parse()?);
+            anyhow::ensure!(fields.next().is_none(), "malformed oom_kill counter");
+        }
+    }
+    count.context("memory.events has no oom_kill counter")
+}
+
 fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>) -> Result<Vec<String>> {
     let mut properties = match capacity {
         Some(capacity) => {
@@ -904,6 +936,16 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn generation_oom_counter_is_exact_and_required() {
+        assert_eq!(parse_oom_kills("low 0\noom 4\noom_kill 2\noom_group_kill 1\n").unwrap(), 2);
+        assert_eq!(parse_oom_kills("oom_kill 0\n").unwrap(), 0);
+        for events in ["oom 1\n", "oom_kill\n", "oom_kill -1\n", "oom_kill 1 2\n",
+            "oom_kill 1\noom_kill 2\n", "oom_kill 18446744073709551616\n"] {
+            assert!(parse_oom_kills(events).is_err(), "{events}");
+        }
+    }
 
     #[test]
     fn finite_generation_slices_share_only_the_aggregate_parent() {

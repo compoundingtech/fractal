@@ -1082,6 +1082,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
+        resource_oom_kills: Mutex<Option<u64>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
@@ -1674,7 +1675,156 @@ mission "shell-owner" state="ready" {{
         assert!(page.claims[0].body["fields"].get("exit_signal").is_none());
     }
 
+    #[test]
+    fn payload_reported_oom_count_cannot_confirm_oom_outcome() {
+        let (_root, store, _runtime, reconciler) = released_shell_fixture(false);
+        let path = reconciler.shell_result_path("outcome");
+        let mut result: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        result["oomKills"] = serde_json::json!(42);
+        fs::write(path, serde_json::to_vec(&result).unwrap()).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.oom_killed, None);
+        assert_ne!(execution.reason, "payload-oom-killed");
+        assert_eq!(execution.oom_kills, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "deliberate memcg OOM; requires systemd >=254 and admitted Linux host"]
+    fn native_shell_oom_retirement_publishes_typed_receipt() {
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+        use crate::store::shell_resources::Command;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.ensure_resource_authority().unwrap();
+        let now = u64::try_from(now_ms()).unwrap();
+        let id = format!("oom-{}", uuid::Uuid::new_v4().simple());
+        let capacity = fractal_runtime::Capacity { cores: 1, memory: 128 * 1024 * 1024 };
+        let request = LaneRequest {
+            id: format!("shell:{id}"), name: id.clone(), host: "node".into(), max_members: 1,
+            capacity: Some(capacity), coverage: Coverage::Enforced, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+            owner: Owner { run: "person/operator".into(), step: id.clone(), attempt: 1, invocation: None },
+            profile: None, profile_estimate: None, disk_path: None,
+        };
+        let mut execution = store.submit_shell_resource(Command {
+            id: id.clone(), request_id: None, lane: request.clone(), argv: vec!["memory-hog".into()],
+            cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+        }, now).unwrap();
+        let Admission::Admitted(grant) = store.request_resource_membership(&request,
+            Fit { room: Some(capacity), ..Fit::default() }, now).unwrap() else { panic!("OOM fixture admission refused"); };
+        store.prepare_resource_membership(&grant, &id).unwrap();
+        let was_enforced = fractal_runtime::lanes_enforced();
+        fractal_runtime::set_lanes_enforced(true);
+        struct Cleanup(Arc<NativeRuntime>, String, bool);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.exec.kill(&self.1);
+                let _ = self.0.exec.end_leftovers(&self.1);
+                fractal_runtime::end_lane(&format!("finite:{}", self.1));
+                fractal_runtime::set_lanes_enforced(self.2);
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone(), id.clone(), was_enforced);
+        let policy = fractal_runtime::FiniteLane { name: id.clone(), capacity: Some(capacity),
+            member_capacity: Some(capacity), memory_high_bytes: None, require_enforced: true };
+        let binding = fractal_runtime::ResourceExecutionBinding { membership_id: grant.membership_id.clone(),
+            generation: grant.generation.clone(), authority_epoch: grant.authority_epoch.clone() };
+        let path = reconciler.shell_result_path(&id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let binary = std::env::var("FRACTAL_RESOURCE_PAYLOAD_TEST_BINARY")
+            .expect("set FRACTAL_RESOURCE_PAYLOAD_TEST_BINARY to this revision's built fractal executable");
+        let mut environment: BTreeMap<String, String> = std::env::vars().collect();
+        environment.insert(crate::store::shell_resources::PARENT_ENV.into(),
+            serde_json::to_string(&crate::store::shell_resources::ParentContext {
+                grant: grant.clone(), request: request.clone(), root_exec_id: Some(id.clone()),
+            }).unwrap());
+        let launch = fractal_runtime::Launch::Argv(vec![binary, "resource-payload".into(),
+            path.display().to_string(), "--".into(), "/bin/sh".into(), "-c".into(),
+            "head -c 402653184 /dev/zero | tail -c 402653184 >/dev/null".into()]);
+        let generation = runtime.exec.spawn_in_lane_authorized(&id, &launch,
+            root.path(), &environment, fractal_runtime::FiniteExecutionAuthorization {
+                lane: &policy, binding: &binding, guard: &|| Ok(()),
+                authorize: &|generation, release| store.release_resource_payload(&grant, &id, generation, release),
+            }).unwrap();
+        store.launch_resource_membership(&grant, &id, &generation, now).unwrap();
+        runtime.exec.wait_for_exit(&id, &generation.generation_id).unwrap();
+        execution.started_at = generation.payload_released_at_unix_ms;
+        execution.state = "running".into();
+        store.update_shell_resource(&execution).unwrap();
+        match fs::remove_file(&path) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => panic!("remove observer publication: {error}"),
+        }
+        // Model daemon loss after generic membership retirement but before shell
+        // finalization: recovery still reads the execution's generation slice.
+        assert!(runtime.retire_resource_lane(&store, &request).unwrap());
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        execution = store.shell_resource(&id).unwrap();
+        assert_eq!(execution.state, "completed", "{}", execution.reason);
+        let fields = crate::store::resource_exec_receipts::receipt_fields(&store.shell_resource(&id).unwrap());
+        assert!(fields["oom_kills"].as_u64().unwrap() >= 1, "{fields:?}");
+        assert!(execution.result.is_none());
+        assert!(execution.payload_outcome_unknown);
+        assert_eq!(fields["outcome_known"], false);
+        assert_eq!(fields["wall_duration_ms"], serde_json::Value::Null);
+        assert_eq!(fields["oom_killed"], true);
+        assert_eq!(fields["reason"], "payload-oom-killed");
+        assert!(runtime.exec.resource_oom_kills(&id, &generation.generation_id, &request.name).unwrap().unwrap() >= 1);
+        println!("OOM receipt: {}", serde_json::to_string(&fields).unwrap());
+        let claims = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(claims.claims[0].body["fields"]["reason"], "payload-oom-killed");
+    }
+
+    #[test]
+    fn recovered_oom_without_observer_distinguishes_measured_and_unknown_outcomes() {
+        for count in [None, Some(0), Some(2)] {
+            let (root, store, runtime, reconciler) = released_shell_fixture(false);
+            fs::remove_file(reconciler.shell_result_path("outcome")).unwrap();
+            let mut execution = store.shell_resource("outcome").unwrap();
+            execution.command.lane.coverage = crate::store::resource_membership::Coverage::Enforced;
+            store.update_shell_resource(&execution).unwrap();
+            *runtime.resource_oom_kills.lock().unwrap() = count;
+            *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(move |store| {
+                let execution = store.shell_resource("outcome").unwrap();
+                assert_eq!(execution.oom_kills, count);
+                assert_eq!(execution.oom_killed, count.map(|count| count > 0));
+            }));
+            drop(reconciler);
+            let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+            recovered.driver_state_dir = root.path().join("drivers");
+            recovered.reconcile_shell_resources().unwrap();
+            let execution = store.shell_resource("outcome").unwrap();
+            assert_eq!(execution.state, "completed", "{count:?}: {}", execution.reason);
+            assert_eq!(execution.oom_kills, count);
+            assert_eq!(execution.oom_killed, count.map(|count| count > 0));
+            assert_eq!(execution.reason == "payload-oom-killed", count.is_some_and(|count| count > 0));
+            let fields = crate::store::resource_exec_receipts::receipt_fields(&execution);
+            assert_eq!(fields["oom_killed"], serde_json::json!(count.map(|count| count > 0)));
+            assert_eq!(fields.get("oom_kills"), count.map(serde_json::Value::from).as_ref());
+        }
+    }
+
     impl RuntimeControl for FakeRuntime {
+        fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
+            Ok(None)
+        }
+        fn resource_exec_oom_kills(&self, id: &str, generation: &str, _lane_name: &str) -> Result<Option<u64>> {
+            let execs = self.execs.lock().unwrap();
+            anyhow::ensure!(execs.get(id).and_then(|exec| exec.incarnation_id.as_deref()) == Some(generation),
+                "fake OOM generation changed");
+            Ok(*self.resource_oom_kills.lock().unwrap())
+        }
         fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
             if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
             for execution in store.shell_resources(host, true)? {

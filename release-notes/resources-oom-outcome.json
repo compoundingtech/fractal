@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "summary": "Resource execution receipts distinguish confirmed memory OOM kills from external signals without changing CLI exit-code mapping.",
+  "schema": {
+    "status": "changed",
+    "detail": "Execution adds optional oomKilled and oomKills. The daemon reads cumulative kernel memory.events oom_kill counts in the execution's generation slice, including units the payload starts there; this is not authenticated against deliberate same-user interference. A positive measured count selects reason payload-oom-killed. A missing slice or historical record is typed unknown (oomKilled=null, oomKills=null), never false or measured zero. Receipt claims and receipt-file JSON expose oom_killed, optional oom_kills, and reason; show includes the execution fields. Payload result files are not an OOM authority."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Each execution gets its own generation slice; nested and sibling executions normally use separate slices. Units the payload starts in its own slice are charged to the same workload budget and included in its OOM count. This is cooperative owner-UID accounting, not protection against deliberate same-user interference. The hierarchical kernel counter survives automatic payload-scope collection. The daemon checks persisted generation, membership binding and scope identity, then snapshots the generation slice before retirement and again after scope retirement, before lane teardown. Startup recovery reads it even when membership retirement already finished. If the slice is gone, the OOM outcome stays unknown. Retired executions without a payload publication or durable observation explicitly carry payloadOutcomeUnknown and outcome_known=false with null wall_duration_ms, never a fabricated result. Their reason is payload-outcome-unknown unless independent kernel OOM evidence confirms payload-oom-killed. The durable receipt transaction verifies retired custody before admitting this unknown-outcome case."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive optional fields preserve historical record decoding. Exit code, exit signal, timeout mapping, Darwin logical coverage, --collect and OOMPolicy=continue remain unchanged. There is no new cgroup or retained-unit lifecycle."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployment or host policy change is activated."
+  }
+}
