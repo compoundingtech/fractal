@@ -1604,7 +1604,7 @@ def evict_to_cap(base, limit_gb, keep=None):
         except BlockingIOError:
             lock.close()
             continue
-        if native_journal(repo / f'tree-{n}').exists():
+        if native_records(directory=repo / f'tree-{n}'):
             lock.close()
             continue  # An unretired request owns this tree even after its local runner exits.
         mine = own_line() if mine is None else mine
