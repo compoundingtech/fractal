@@ -1,5 +1,8 @@
 //! Candidate pages and their dependency accumulator commit together. A page never authorizes
 //! a partial result. Relevant authority changes dirty the cursor in queue_linked_tx.
+//! Completed, unblocked folds retain their result witness but discard their resume-only
+//! cursor and roots digest. Invalidation always restarts them from retained candidates;
+//! their global dependency links remain live regardless of when judgment completed.
 use super::*;
 
 pub(super) fn rank(verdict: &Verdict) -> u8 {
@@ -145,6 +148,11 @@ pub(super) fn advance(
                     Some(signature.as_str()),
                 )
             });
+    // Only unfinished or blocked folds can resume from this cursor. Completed
+    // judgments restart from canonical candidates when dirtied; retaining their
+    // final full signature and roots digest duplicates evidence indefinitely.
+    let cold = finished && !blocked;
+    let through = if cold { String::new() } else { through };
     let through = if through.is_empty() {
         references::SignatureValue::Text(&through)
     } else {
@@ -154,6 +162,11 @@ pub(super) fn advance(
         .map(|text| references::write_value(connection, claim_id, text, true))
         .transpose()?;
     connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec805028307d owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h070bbbc92435 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
+    if cold {
+        connection
+            .prepare_cached("UPDATE claim_signature_judging SET roots_digest='' WHERE claim_id=?1")?
+            .execute([claim_id])?;
+    }
     if !finished {
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?
