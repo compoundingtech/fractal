@@ -1,4 +1,4 @@
-// Drive st's actual extension assets through handoff, read evidence, reconnect and live labels.
+// Drive Fractal's actual extension assets through handoff, read evidence, reconnect and live labels.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,7 +11,7 @@ import { mock } from "node:test";
 const driver = process.argv[2];
 const asset = process.argv[3];
 assert.ok(["pi", "omp"].includes(driver));
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "st-channel-smoke-"));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fractal-channel-smoke-"));
 const frames = path.join(dir, "frames.jsonl");
 const outgoing = path.join(dir, "outgoing.jsonl");
 const label = path.join(dir, "label.json");
@@ -259,5 +259,5 @@ if (driver === "omp") {
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 fs.rmSync(dir,{recursive:true,force:true});
-console.log(`${driver} st channel smoke: ok`);
+console.log(`${driver} Fractal channel smoke: ok`);
 process.exit(0);

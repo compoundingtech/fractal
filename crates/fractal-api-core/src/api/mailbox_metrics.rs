@@ -124,8 +124,8 @@ pub fn start(store: &Arc<Store>) {
                         registered = true;
                     }
                 }
-                Ok(Err(error)) => eprintln!("st3: WARN mailbox metrics refresh failed: {error:#}"),
-                Err(error) => eprintln!("st3: WARN mailbox metrics refresh task failed: {error}"),
+                Ok(Err(error)) => eprintln!("fractal: WARN mailbox metrics refresh failed: {error:#}"),
+                Err(error) => eprintln!("fractal: WARN mailbox metrics refresh task failed: {error}"),
             }
             tokio::time::sleep(REFRESH_PAUSE.max(started.elapsed())).await;
         }

@@ -61,10 +61,10 @@ struct Fixture {
 impl Fixture {
     fn new() -> Option<Self> {
         let base = outside_root()?;
-        let root = tempfile::Builder::new().prefix("st-sb-").tempdir_in(&base).unwrap();
+        let root = tempfile::Builder::new().prefix("fractal-sb-").tempdir_in(&base).unwrap();
         let path = fs::canonicalize(root.path()).unwrap();
         // A short path: a socket path has a hard length limit.
-        let socket = std::env::temp_dir().join(format!("st-sb-{}.sock", std::process::id()));
+        let socket = std::env::temp_dir().join(format!("fractal-sb-{}.sock", std::process::id()));
         let _ = fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         Some(Self { _root: root, base: path, socket, _listener: listener })
@@ -115,7 +115,7 @@ fn the_profile_writes_the_workspace_and_temp_and_refuses_everything_else() {
     let elsewhere = fixture.base.join("elsewhere");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&elsewhere).unwrap();
-    let temp = std::env::temp_dir().join(format!("st-sb-temp-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("fractal-sb-temp-{}", std::process::id()));
     let _ = fs::remove_file(&temp);
 
     let written = sandboxed(&workspace, &fixture.socket, "echo ok > \"$1/inside.txt\" && echo wrote", &[workspace.to_str().unwrap()]);
@@ -134,14 +134,14 @@ fn the_profile_writes_the_workspace_and_temp_and_refuses_everything_else() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains(refusal), "{}", report(&refused));
     // The home directory is the other place a seat must not write.
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.starts_with("/home") || home.starts_with("/Users")) {
-        let marker = home.join(format!(".st-sandbox-control-{}", std::process::id()));
+        let marker = home.join(format!(".fractal-sandbox-control-{}", std::process::id()));
         let refused = sandboxed(&workspace, &fixture.socket, "echo no > \"$1\" && echo wrote", &[marker.to_str().unwrap()]);
         assert!(!says(&refused, "wrote") && !marker.exists(), "home write: {}", report(&refused));
     }
 }
 
 #[test]
-fn the_profile_reaches_the_st_socket_and_the_network() {
+fn the_profile_reaches_the_fractal_socket_and_the_network() {
     if !available() {
         return;
     }
@@ -179,7 +179,7 @@ fn the_known_limit_other_local_sockets_stay_reachable() {
     };
     let workspace = fixture.base.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
-    let other = std::env::temp_dir().join(format!("st-sb-other-{}.sock", std::process::id()));
+    let other = std::env::temp_dir().join(format!("fractal-sb-other-{}.sock", std::process::id()));
     let _ = fs::remove_file(&other);
     let _listener = UnixListener::bind(&other).unwrap();
     let reached = sandboxed(&workspace, &fixture.socket, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[other.to_str().unwrap()]);

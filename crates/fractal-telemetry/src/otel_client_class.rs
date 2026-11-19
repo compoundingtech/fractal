@@ -2,7 +2,7 @@
 //! (docs/st3/observability.md: `cli`, `stui`, `fractal`, `web`, `replication-worker`,
 //! `omp-channel`, `hook`, plus `app`, `driver`, `peer`; `other` for unrecognized values).
 //!
-//! The header is a client's own name for itself ("stui 0.1.0+a0c135e3"); st lists it as
+//! The header is a client's own name for itself ("stui 0.1.0+a0c135e3"); Fractal lists it as
 //! reported and never treats it as identity or authority (api/client_presence.rs). This
 //! classification is likewise observational only: it feeds telemetry labels, never policy.
 //!
@@ -20,7 +20,7 @@
 //! | `fractal-fabric-adapter` | `Peer` | crates/fractal-fabric-adapter |
 //! | `stui <version>` | `Stui` | crates/fractal-tui/src/version.rs:23-25 (`client_name()`), set at crates/fractal-tui/src/main.rs:663 |
 //! | `st <machine_version>`, `st agents ls`, `st alerts ls`, `st conversations read` | `Cli` | crates/fractal/src/main.rs (`st {machine_version}` and CLI subcommands) |
-//! | `st3 doctor` | `Cli` | crates/fractal/src/main.rs (CLI command family) |
+//! | `fractal doctor` | `Cli` | crates/fractal/src/main.rs (CLI command family) |
 //! | `fractal` | `Fractal` | reserved external client name; docs/st3/observability.md vocabulary |
 //! | `smalltalk-ios <version> (<build>)` | `App` | clients/swift/FractalClient/Sources/St3Client/Client.swift:11-13, apps/ios/store.tsx:112, clients/typescript/fractal-views/clientName.ts:2-4 |
 //! | `smalltalk-ide <version>` | `App` | clients/typescript/fractal-views/clientName.ts:7 (test clientName.test.mjs:7), docs/clients/build-your-own.md:98 |
