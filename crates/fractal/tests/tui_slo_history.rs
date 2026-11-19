@@ -1,4 +1,4 @@
-//! `st ui --slo` reads local summaries before client configuration or terminal setup.
+//! `fractal ui --slo` reads local summaries before client configuration or terminal setup.
 use std::{path::Path, process::Command};
 
 fn history(root: &Path) -> String {

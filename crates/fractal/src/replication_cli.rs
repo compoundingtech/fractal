@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 #[derive(Args)]

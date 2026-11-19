@@ -109,7 +109,7 @@ async fn person_facing_reads_answer_within_their_budget() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
-    // `ST3_PROFILE_DIR` profiles the daemon here as it does under `st up`.
+    // `ST3_PROFILE_DIR` profiles the daemon here as it does under `fractal up`.
     fractal_daemon::profile::init_from_env();
     let scales = std::env::var("ST_BENCH_SCALES")
         .unwrap_or_else(|_| "0.1,1".into())

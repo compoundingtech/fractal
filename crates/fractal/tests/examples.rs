@@ -123,7 +123,7 @@ fn planning_mode_eval_uses_one_dynamic_codex_planner() {
 }
 
 #[test]
-fn every_tracked_st3_example_uses_the_normative_grammar() {
+fn every_tracked_fractal_example_uses_the_normative_grammar() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("examples/fractal");
@@ -367,7 +367,7 @@ fn is_eval_document(path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn every_native_st3_eval_uses_the_normative_grammar() {
+fn every_native_fractal_eval_uses_the_normative_grammar() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("evals/fractal");
@@ -415,9 +415,9 @@ fn eval_personas_do_not_duplicate_runtime_work_instructions() {
         let source = fs::read_to_string(entry.path()).unwrap();
         for forbidden in [
             "## Boot ritual",
-            "st3 work claim",
-            "st3 conversations ls",
-            "st3 work progress",
+            "fractal work claim",
+            "fractal conversations ls",
+            "fractal work progress",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -595,7 +595,7 @@ fn native_session_import_eval_uses_raw_ptys_and_all_five_drivers() {
     assert_eq!(
         authored_harness_counts(&source, "native-session-import/eval.kdl"),
         (0, 0),
-        "the five harnesses must begin outside st3"
+        "the five harnesses must begin outside Fractal"
     );
     let controller = fs::read_to_string(root.join("controller.sh")).unwrap();
     assert!(controller.contains("env -u PTY_SESSION PTY_ROOT=\"$RAW_PTY_ROOT\" pty"));
@@ -785,36 +785,36 @@ fn every_selected_eval_uses_current_grammar_and_harness_policy() {
         "network-smoke",
         "network-isolation",
     ] {
-        let st3_file = root.join("fractal").join(name).join("eval.kdl");
-        let st3_source = fs::read_to_string(&st3_file).expect("read st3 eval");
-        let st3_document: kdl::KdlDocument = st3_source.parse().expect("parse st3 KDL");
+        let fractal_file = root.join("fractal").join(name).join("eval.kdl");
+        let fractal_source = fs::read_to_string(&fractal_file).expect("read Fractal eval");
+        let fractal_document: kdl::KdlDocument = fractal_source.parse().expect("parse Fractal KDL");
 
         assert_eq!(
-            fractal_drivers::kdl_version::document_version(&st3_document).unwrap(),
+            fractal_drivers::kdl_version::document_version(&fractal_document).unwrap(),
             2
         );
-        fractal_daemon::parse_intent(&st3_source, "local")
-            .unwrap_or_else(|error| panic!("{}: {error}", st3_file.display()));
+        fractal_daemon::parse_intent(&fractal_source, "local")
+            .unwrap_or_else(|error| panic!("{}: {error}", fractal_file.display()));
         if model_free.contains(&name) {
             assert_eq!(
-                authored_harness_counts(&st3_source, &st3_file.display().to_string()),
+                authored_harness_counts(&fractal_source, &fractal_file.display().to_string()),
                 (0, 0),
                 "{} must remain model-free",
-                st3_file.display()
+                fractal_file.display()
             );
             assert!(
-                authored_model_gates(&st3_source).is_empty(),
+                authored_model_gates(&fractal_source).is_empty(),
                 "{} must not use an LLM gate",
-                st3_file.display()
+                fractal_file.display()
             );
         } else {
             assert!(
-                authored_harness_counts(&st3_source, &st3_file.display().to_string()) != (0, 0),
+                authored_harness_counts(&fractal_source, &fractal_file.display().to_string()) != (0, 0),
                 "{} must contain native agent harnesses",
-                st3_file.display()
+                fractal_file.display()
             );
         }
-        let old_version = st3_source.replacen("version 2", "version 1", 1);
+        let old_version = fractal_source.replacen("version 2", "version 1", 1);
         assert!(fractal_daemon::parse_intent(&old_version, "local").is_err());
     }
 }
@@ -837,15 +837,15 @@ fn selected_eval_harness_counts_match_the_inventory() {
     ];
     let mut model_gates = Vec::new();
 
-    for (name, st3_expected) in expected {
-        let st3_source = fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
-        let st3_counts = authored_harness_counts(&st3_source, &format!("st3 {name}"));
-        assert_eq!(st3_counts, st3_expected, "st3 {name}");
-        model_gates.extend(authored_model_gates(&st3_source));
+    for (name, fractal_expected) in expected {
+        let fractal_source = fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
+        let fractal_counts = authored_harness_counts(&fractal_source, &format!("fractal {name}"));
+        assert_eq!(fractal_counts, fractal_expected, "fractal {name}");
+        model_gates.extend(authored_model_gates(&fractal_source));
     }
     let mission_lift = fs::read_to_string(root.join("fractal/mission-document-lift/eval.kdl")).unwrap();
     assert_eq!(
-        authored_harness_counts(&mission_lift, "st3 mission-document-lift"),
+        authored_harness_counts(&mission_lift, "fractal mission-document-lift"),
         (0, 1)
     );
     model_gates.extend(authored_model_gates(&mission_lift));
@@ -962,7 +962,7 @@ fn mission_document_lift_produces_and_uses_one_exact_mission_output() {
 }
 
 #[test]
-fn license_mit_st3_fixture_matches_its_claude_team() {
+fn license_mit_fractal_fixture_matches_its_claude_team() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("evals/fractal/license-mit");

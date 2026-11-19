@@ -95,7 +95,7 @@ fn run_case_at(case: &str, real_grace: bool) {
         .prefix("messaging-fault-scratch-")
         .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    // Double-fork out of the CI seat's ancestry. A sender is person/eval; an st harness
+    // Double-fork out of the CI seat's ancestry. A sender is person/eval; a Fractal harness
     // must never impersonate that sender. Captured pipes stay open until the eval exits.
     let mut eval = fractal_daemon::test_support::command("setsid");
     eval.args(["-f", "env", "-u", "ST_AGENT", "python3"])

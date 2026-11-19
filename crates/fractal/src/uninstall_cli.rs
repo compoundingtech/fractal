@@ -1,5 +1,5 @@
 use super::*;
-// The same print macro as main.rs: CLI output goes through st3's writer.
+// The same print macro as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::cli_println as println;
 
 fn directory_is_empty(path: &Path) -> bool {
@@ -110,8 +110,8 @@ pub(super) async fn run_uninstall(
     if !args.keep_binaries {
         paths.extend(binaries.iter().cloned());
     }
-    // What the default install writes outside its own directories: st's Claude plugin
-    // marketplace, and the copies of the st skill that seats install into harness directories.
+    // What the default install writes outside its own directories: fractal's Claude plugin
+    // marketplace, and the copies of the fractal skill that seats install into harness directories.
     let skill_copies = fractal_daemon::skill::untouched_installs();
     let plugin_files = fractal_drivers::claude_channel::fractal_marketplace_root()
         .ok()
@@ -155,14 +155,14 @@ pub(super) async fn run_uninstall(
         }
         if instance.is_none() && manifest.is_none() && !args.keep_binaries {
             println!(
-                "keep\tthe st3 executables: no release install manifest; remove them the way you installed them"
+                "keep\tthe fractal executables: no release install manifest; remove them the way you installed them"
             );
         }
         return Ok(());
     }
     anyhow::ensure!(
         args.yes,
-        "fractal uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
+        "fractal uninstall erases this machine's fractal state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
     if let Some(file) = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -220,7 +220,7 @@ pub(super) async fn run_uninstall(
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
         })
     {
-        eprintln!("could not unregister st's Claude plugin: {error:#}");
+        eprintln!("could not unregister Fractal's Claude plugin: {error:#}");
     }
     remove_uninstall_paths(&paths, &binary_aliases, &config.state_dir, stop_deadline)?;
     // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
@@ -252,7 +252,7 @@ pub(super) async fn run_uninstall(
         println!("remains\t{}", path.display());
     }
     println!("{}", uninstall_policy_hint(json_output));
-    anyhow::ensure!(remaining.is_empty(), "some st3 files remain");
+    anyhow::ensure!(remaining.is_empty(), "some fractal files remain");
     println!("uninstalled");
     Ok(())
 }
