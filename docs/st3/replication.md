@@ -20,6 +20,13 @@ of a fresh exchange. Fleet status, doctor/health and alerts report missing worke
 or stale exchange evidence as degraded, including a dial-out join whose imported
 membership and peer lists are still empty.
 
+Daemon/store startup has a bounded 60-second grace for the worker's first
+heartbeat and exchange. After that grace, missing worker evidence fails health;
+an observed heartbeat expires after 25 seconds and exchange evidence after
+60 seconds. Exchange evidence belongs to the authenticated sender incarnation,
+not whichever member key has the same name when processing finishes. Ended
+incarnations do not prevent a live sole current creator from being healthy.
+
 Before membership arrives, the worker uses the sponsor routes saved by the join.
 An empty member list therefore does not mean the node has no bootstrap target.
 If synchronization never begins, inspect the worker's supervisor state and logs,

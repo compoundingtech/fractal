@@ -132,6 +132,7 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
                 &exchange,
                 true,
                 ReplicationCarrier::Loopback,
+                None,
             )
             .unwrap();
         let status = store
@@ -176,6 +177,7 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
                 &exchange,
                 true,
                 ReplicationCarrier::Fabric,
+                None,
             )
             .unwrap();
         let outbound = store.replication_peer_transport("birch").0.unwrap();
@@ -343,7 +345,7 @@ fn a_refused_dial_does_not_flap_a_peer_that_keeps_exchanging() {
     for _ in 0..10 {
         // What a receive does: the exchange, then this member's up observation of the peer.
         store
-            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback)
+            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback, None)
             .unwrap();
         store.record_transport_observation("birch", "up", None, None).unwrap();
         // What a failed outbound dial does: the failure, then an observation only when stale.

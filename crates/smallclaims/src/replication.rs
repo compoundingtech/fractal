@@ -269,6 +269,10 @@ pub struct ReplicationReceiveRequest {
     /// Local dial evidence, never part of the signed or replicated exchange.
     #[serde(default)]
     pub carrier: ReplicationCarrier,
+    /// Sender incarnation verified by the local worker, not part of the signed exchange.
+    /// Older workers omit this; absence must not be attributed to a current member key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_member_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -381,8 +385,9 @@ impl ReplicationHealth {
         if !configured {
             return Self::Disabled;
         }
+        let grace = Duration::from_secs(60);
         let Some(heartbeat_age) = heartbeat_age else {
-            return Self::WorkerMissing;
+            return if uptime < grace { Self::Starting } else { Self::WorkerMissing };
         };
         if heartbeat_age > crate::windows::cpu_minutes::WORKER_FRESH {
             return Self::WorkerStale;
@@ -391,7 +396,6 @@ impl ReplicationHealth {
             // An anchor-only creator has nobody to exchange with; its live worker is healthy.
             return Self::NoTargets;
         }
-        let grace = Duration::from_secs(60);
         if exchange_age.is_some_and(|age| age <= grace) {
             Self::Healthy
         } else if uptime < grace {
@@ -412,7 +416,7 @@ impl ReplicationHealth {
     pub fn message(self) -> &'static str {
         match self {
             Self::Disabled => "replication is not configured",
-            Self::Starting => "replication worker is live; waiting for a successful exchange during the 60-second startup grace period",
+            Self::Starting => "replication is within its 60-second startup grace period; waiting for the first worker heartbeat or a successful exchange",
             Self::Healthy => "replication worker is live and a current peer exchanged successfully within 60 seconds",
             Self::NoTargets => "replication worker is live; this fleet has no other current member to exchange with",
             Self::WorkerMissing => "fleet replication is configured but no replication worker heartbeat has reached this daemon; start the replication-worker service",
@@ -470,6 +474,27 @@ mod replication_health_tests {
         assert_eq!(health, ReplicationHealth::WorkerMissing);
         assert_eq!(health.status(), "fail");
         assert!(health.message().contains("no replication worker heartbeat"));
+    }
+
+    #[test]
+    fn the_first_worker_heartbeat_has_a_bounded_daemon_startup_grace() {
+        for targets in [0, 1] {
+            for uptime in [Duration::ZERO, Duration::from_secs(10), GRACE - Duration::from_millis(1)] {
+                let health = ReplicationHealth::observe(true, uptime, None, targets, None);
+                assert_eq!(health, ReplicationHealth::Starting);
+                assert_eq!(health.status(), "warn");
+            }
+            for uptime in [GRACE, GRACE + Duration::from_millis(1), Duration::MAX] {
+                assert_eq!(
+                    ReplicationHealth::observe(true, uptime, None, targets, None),
+                    ReplicationHealth::WorkerMissing,
+                );
+            }
+        }
+        assert_eq!(
+            ReplicationHealth::observe(false, Duration::ZERO, None, 1, None),
+            ReplicationHealth::Disabled,
+        );
     }
 
     #[test]

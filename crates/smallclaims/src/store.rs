@@ -7936,7 +7936,7 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
     ) -> Result<ReplicationReceipt, FractalError> {
-        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())?;
+        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default(), None)?;
         // One exchange is received in one writer hold.
         crate::windows::holds::covered("received envelopes", input.envelopes.len());
         Ok(receipt)
@@ -7949,6 +7949,7 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceipt, FractalError> {
         if input.peer != relay {
             return Err(FractalError::new(
@@ -8227,10 +8228,6 @@ impl Store {
             None => None,
         };
         let now = now_ms();
-        let measured_member_key = self.fleet_view_sealed().map_err(internal)?
-            .members.into_iter()
-            .find(|member| member.name == relay && member.state == "current")
-            .map(|member| member.member_key);
         let mut sync = self
             .replication_sync
             .lock()
@@ -8246,7 +8243,9 @@ impl Store {
         };
         progress.observe_on(received, difference, basis, now);
         if difference.is_some() {
-            progress.measured_member_key = measured_member_key;
+            // This identity was authenticated before receive began. Never relabel an
+            // in-flight exchange with an incarnation admitted while it was running.
+            progress.measured_member_key = authenticated_member_key.map(str::to_owned);
         }
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
@@ -10208,10 +10207,9 @@ impl Store {
         }).filter_map(|(_, progress)| progress.measured.as_ref())
             .map(|measurement| measurement.measured_at_unix_ms).max();
         let targets = view.members.iter().filter(is_current).count() + usize::from(bootstrap.is_some());
-        // Only a proven sole-member creator may be healthy without an exchange.
-        let sole_creator = view.members.len() == 1
-            && view.members[0].name == self.origin
-            && view.members[0].state == "current"
+        // Ended incarnations remain in the view; only current membership defines a sole creator.
+        let sole_creator = targets == 0
+            && view.members.iter().any(|member| member.name == self.origin && member.state == "current")
             && first_sync.is_none();
         let age = |at: Option<u128>| at.map(|at| std::time::Duration::from_millis(
             u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX),
