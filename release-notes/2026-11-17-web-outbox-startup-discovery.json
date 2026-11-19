@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share initial capabilities discovery between browser outbox recovery and send grants",
+  "replay": {"status": "none", "detail": "No replay behavior changes; unresolved sends remain non-retryable."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Live-source startup recovery and initial grants now use one capabilities response instead of issuing duplicate reads. Reconnect still fetches current capabilities; the recovery admission barrier is unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Existing persisted attempts retain their original scope and recovery state. Identity or storage failures still withhold send grants without affecting read access."}
+}

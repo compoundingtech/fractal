@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cover retained request history across same-workstep asks and native wire decoding",
+  "replay": {"status": "none", "detail": "Test coverage only."},
+  "schema": {"status": "none", "detail": "Uses the existing generated request-history DTO."},
+  "rules": {"status": "none", "detail": "Checks original questions, independent answers and statuses, branches, repeated source episodes, unavailable payloads and page-boundary navigation."},
+  "compatibility": {"status": "none", "detail": "No production behavior changes."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "No action required."},
+  "recovery": {"status": "none", "detail": "No state changes."}
+}

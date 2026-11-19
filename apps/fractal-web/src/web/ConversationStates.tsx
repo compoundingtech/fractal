@@ -8,7 +8,7 @@ import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assista
 import { ObservedAge, useConversationLastObservedAt } from './lastObserved.tsx'
 import type { LastSeenActivity } from './conversationTranscript.ts'
 
-export { ThreadUnavailable, LastSeen, SeatAtRest }
+export { ThreadUnavailable, LastSeen, SeatAtRest, SendUnprotected }
 /**
  * The conversation read failed or was refused. Fixed copy only, inline in the reading lane: the reason (danger tone
  * only for a failure), its consequence on its own line, and Retry only where the source can re-acquire the follow.
@@ -59,6 +59,18 @@ function SeatAtRest({ status, label }: { readonly status: AgentStatus; readonly 
   </div>
 }
 
+/**
+ * A successful capabilities answer without a complete issuer pair selects unprotected sending.
+ * The notice describes that mode, never an identity-read or storage-error fallback.
+ */
+function SendUnprotected() {
+  return <div {...stylex.props(styles.lane)}>
+    <p role="status" data-send-protection="unprotected" {...stylex.props(styles.protection)}>
+      <span {...stylex.props(styles.protectionLabel)}>Unprotected:</span> messages are not saved on this device before sending.
+    </p>
+  </div>
+}
+
 const focusRing = { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   lane: { width: '100%', maxWidth: geometryVars.lane, boxSizing: 'border-box', paddingInline: spaceVars.lg, marginInline: 'auto', flexShrink: 0 },
@@ -71,5 +83,7 @@ const styles = stylex.create({
   actionButton: { flexShrink: 0, height: geometryVars.controlSm, paddingInline: spaceVars.md, borderRadius: r.sm, borderWidth: geometryVars.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.denseSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': focusRing },
   lastSeen: { display: 'flex', alignItems: 'center', gap: spaceVars.sm, minWidth: 0, height: geometryVars.toolRow, margin: 0, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden' },
   glyph: { display: 'inline-flex', flexShrink: 0 },
+  protection: { margin: 0, paddingBlock: spaceVars.xs2, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
+  protectionLabel: { color: tone.attention, fontWeight: t.weightMedium },
   code: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: t.fontMono, fontSize: t.denseSize },
 })

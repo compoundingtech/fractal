@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as ts from 'typescript'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
@@ -11,6 +11,7 @@ import type { FeedSyncObservation } from '../data/feedSync.ts'
 const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
+const defaultGrants = vi.hoisted(() => ({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }) as const)
 const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
@@ -18,6 +19,8 @@ const source = vi.hoisted(() => ({
   conversationSync: vi.fn(),
   feedInterest: vi.fn(),
   retryConversation: vi.fn(),
+  grants: defaultGrants as Record<string, string>,
+  attachments: undefined as { readonly send: () => Promise<never> } | undefined,
 }))
 vi.mock('../data/react.tsx', async () => {
   // Vitest hoists this factory before static imports are initialized.
@@ -30,20 +33,20 @@ vi.mock('../data/react.tsx', async () => {
   // Roster names for mail headers; an empty roster reads refs by their last segment.
   useFleetSelection: () => noRosterNames,
   useAgent: () => ({ _tag: 'Observed', value: undefined, freshness: 'live' }),
-  useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation, attachments: source.attachments }),
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
   useNowSnapshot: () => 1000,
   usePausedNow: () => undefined,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
+  useGrants: () => source.grants,
   useAttention: () => ({ _tag: 'Waiting' }),
   })
 })
 
 import { ConversationPane } from './ConversationPane.tsx'
 
-const render = (ref = 'agent/selected') => renderToStaticMarkup(
-  <ConversationPane agentRef={ref} agentName="Example Agent" onOpenTool={() => {}} />,
+const render = (ref = 'agent/selected', readOnly = false) => renderToStaticMarkup(
+  <ConversationPane agentRef={ref} agentName="Example Agent" onOpenTool={() => {}} readOnly={readOnly} />,
 )
 const observed = (items: readonly ConversationItem[] = [], hasOlder = false): Feed<ConversationPage> => ({
   _tag: 'Observed', freshness: 'live', value: { items, hasOlder, observation: { empty: items.length === 0 } },
@@ -279,5 +282,44 @@ describe('single unavailable state', () => {
     const unavailable = html.slice(html.indexOf('data-testid="transcript-unavailable"'))
     expect(unavailable.match(/>Retry</g)).toHaveLength(1)
     expect(html).not.toContain('role="alert"')
+  })
+})
+
+describe('unprotected send notice', () => {
+  const notice = 'messages are not saved on this device before sending.'
+  const sendable = { ...defaultGrants, messageSend: 'granted', attachmentUpload: 'granted' }
+  beforeEach(() => {
+    source.feed = observed()
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.attachments = { send: () => Promise.reject(new Error('not sent in a render test')) }
+  })
+  afterEach(() => {
+    source.grants = defaultGrants
+    source.attachments = undefined
+  })
+
+  it('names the missing on-device copy beside a composer that still sends', () => {
+    source.grants = { ...sendable, sendProtection: 'unprotected' }
+    const html = render()
+    const dock = html.slice(html.indexOf('data-testid="conversation-composer-dock"'))
+    expect(dock).toMatch(/<p role="status" data-send-protection="unprotected"[^>]*><span[^>]*>Unprotected:<\/span> messages are not saved on this device before sending\.<\/p>/)
+    expect(dock.indexOf('data-send-protection')).toBeLessThan(dock.indexOf('textarea'))
+    expect(html).not.toContain('cannot send messages')
+    expect(html).not.toContain('is not granted')
+  })
+
+  it('stays silent for durable sends, the default grants, a no-send view and a read-only thread', () => {
+    source.grants = { ...sendable, sendProtection: 'durable' }
+    expect(render()).not.toContain(notice)
+    source.grants = sendable
+    expect(render()).not.toContain(notice)
+    source.grants = { ...defaultGrants, sendProtection: 'unprotected' }
+    expect(render()).not.toContain(notice)
+    source.grants = { ...sendable, sendProtection: 'unprotected' }
+    source.attachments = undefined
+    expect(render()).toContain('This view cannot send messages.')
+    expect(render()).not.toContain(notice)
+    source.attachments = { send: () => Promise.reject(new Error('not sent in a render test')) }
+    expect(render('agent/selected', true)).not.toContain(notice)
   })
 })

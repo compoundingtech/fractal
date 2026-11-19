@@ -766,13 +766,14 @@ describe('ConversationPane composer/send binding', () => {
     expect(userRows().find(row => row.getAttribute('data-item-id') === rowId)?.getAttribute('data-send-state')).toBe('unconfirmed')
   })
 
-  it('keeps an explicitly unapplied server refusal on its row and retries it with the original key', async () => {
+  it('keeps exactly one optimistic row when a proven-unapplied retry gets a new message identity', async () => {
     await prepareSendPane()
     gateway!.failSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
     const firstAction = gateway!.actions[0]!
     const firstKey = firstAction.idempotency_key
+    const originalRow = userRows()[0]!
     const failure = container.querySelector('[data-testid="send-failure"]')!
     flushSync(() => failure.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     expect(failure.textContent).toContain('The message could not be sent. Check your connection and retry.')
@@ -781,9 +782,79 @@ describe('ConversationPane composer/send binding', () => {
     const retry = [...failure.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Retry')!
     flushSync(() => retry.click())
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
-    expect(gateway!.actions.map(action => action.idempotency_key)).toEqual([firstKey, firstKey])
-    expect(gateway!.actions[1]).toMatchObject({ id: firstAction.id, parameters: firstAction.parameters })
+    expect(gateway!.actions).toHaveLength(2)
+    expect(gateway!.actions[1]!.idempotency_key).not.toBe(firstKey)
+    expect(gateway!.actions[1]!.id).not.toBe(firstAction.id)
+    expect(gateway!.actions[1]!.parameters).toEqual(firstAction.parameters)
+    expect(userRows()[0]).toBe(originalRow)
+    const echoId = gateway!.echoId
+    if (echoId === undefined) throw new TypeError('Expected retried message identity')
+    // The gateway helper derives this suffix from the new action's idempotency key.
+    expect(echoId).toMatch(/^message\/[0-9a-f]{16}$/)
+    const pairId = `timeline-entry/retry/${echoId.slice('message/'.length)}`
+    gateway!.conversationFrame(scratchSeat, [
+      { ...entry(1, ''), id: `${pairId}-message`, type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
+      { ...entry(2, 'Retried hello'), id: `${pairId}-content`, type: 'content', role: 'user', body: { text: markdownBlock('Retried hello'), media_type: 'text/plain' } },
+    ])
+    await until(() => userRows()[0]?.textContent === 'Retried hello')
+    expect(userRows()[0]).toBe(originalRow)
     expect(userRows()).toHaveLength(1)
+  })
+
+  it('keeps the next draft sendable through a refused row Retry and a later successful Retry', async () => {
+    await prepareSendPane()
+    const send = vi.spyOn(live!.source.attachments!, 'send')
+    gateway!.failSend = true
+    await submitDraft()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
+    const originalRow = userRows()[0]!
+    const input = container.querySelector('textarea')!
+    const form = input.closest('form')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    flushSync(() => {
+      setter.call(input, 'Next draft')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await settle()
+    const assertNextDraftSendable = () => {
+      expect(input.value).toBe('Next draft')
+      expect(input.disabled).toBe(false)
+      const sendControl = [...form.querySelectorAll<HTMLButtonElement>('button')]
+        .find(button => button.getAttribute('aria-label') === 'Send' || button.textContent === 'Send')!
+      expect(sendControl.getAttribute('aria-disabled')).not.toBe('true')
+      expect(sendControl.disabled).toBe(false)
+      expect(form.textContent).not.toContain('The message could not be sent. Check your connection and retry.')
+      expect(container.querySelector('[data-testid="composer-reason"]')!.textContent).not.toContain('The message could not be sent.')
+    }
+    const retryRow = async () => {
+      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-failure"] button')]
+        .find(button => button.textContent === 'Retry')!
+      flushSync(() => retry.click())
+      await settle()
+    }
+    assertNextDraftSendable()
+    gateway!.snapshotFailure = 'Retry identity unavailable'
+    await retryRow()
+    await until(() => send.mock.calls.length === 2)
+    expect(await send.mock.results[1]!.value).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+    await settle()
+    expect(userRows()[0]).toBe(originalRow)
+    expect(userRows()[0]?.getAttribute('data-send-state')).toBe('failed')
+    expect(gateway!.actions).toHaveLength(1)
+    assertNextDraftSendable()
+    gateway!.snapshotFailure = undefined
+    gateway!.failSend = false
+    await retryRow()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
+    expect(gateway!.actions).toHaveLength(2)
+    expect(userRows()[0]).toBe(originalRow)
+    assertNextDraftSendable()
+    flushSync(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+    await until(() => gateway!.actions.length === 3)
+    const nextAction = gateway!.actions[2]!
+    if (nextAction.type !== 'message.send') throw new TypeError('Expected next draft message.send')
+    expect(nextAction.parameters.content).toBe('Next draft')
+    expect(form.textContent).not.toContain('The message could not be sent. Check your connection and retry.')
   })
 
   it('keeps an ambiguous server outage unconfirmed without offering resend or failure feedback', async () => {

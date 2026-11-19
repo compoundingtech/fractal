@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bind browser outbox recovery confirmations to the observed attempt revision",
+  "replay": {"status": "none", "detail": "No automatic send, retry or replay is introduced. Recovery commands cannot silently adopt a newer attempt revision."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes; the existing persisted revision is checked atomically."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Recovery commands carry the revision shown in the UI. Discard compares it within the IndexedDB write transaction, including readable revisions of corrupt entries. A stale confirmation cannot dismiss an attempt another tab has since dispatched."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration change is required."},
+  "recovery": {"status": "changed", "detail": "A stale Discard is refused without mutation, refreshes the saved attempt, and requires another explicit confirmation using the current delivery consequence. Discard of an unconfirmed attempt removes only the local copy and never claims to cancel a message that may have arrived."}
+}

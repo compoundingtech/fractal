@@ -1,5 +1,5 @@
 import { gatewayThreads } from '../threads/threadSource.ts'
-import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { ClientError, FractalClient, isTransient, type Capabilities, type EnvelopeOf } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
@@ -42,6 +42,7 @@ import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
+import { createScopedChatOutbox, readOutboxAccess } from './outbox/scoped.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
@@ -59,7 +60,6 @@ import {
 import {
   type ConversationPage,
   type AttachmentPort,
-  type AttachmentSendRequest,
   type ConversationPortResult,
   type DataSource,
   type NetworkReachability,
@@ -206,6 +206,9 @@ export const liveSource = ({
     fetchImpl: fetch,
     socket: options.socket ?? browserSocket,
   })
+  const outbox = createScopedChatOutbox(client)
+  // Reserve the initial SDK channel observation before any later web identity read.
+  const startupSequence = outbox.beginObservation()
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const networkLoss = Atom.keepAlive(Atom.make<FeedSyncObservation | undefined>(undefined))
@@ -227,10 +230,22 @@ export const liveSource = ({
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const followInterests = new Map<string, () => boolean>()
   const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const startupIdentity = Promise.withResolvers<EnvelopeOf<Capabilities>>()
+  // Read-only rendering must not wait for the channel probe or browser storage.
+  // Send and recovery paths join this scoped barrier and surface its failures themselves.
+  void startupIdentity.promise.then(response => outbox.initialize(response, startupSequence)).catch(() => undefined)
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
       fetch,
+      onCapabilities: response => {
+        startupIdentity.resolve(response)
+        options.onCapabilities?.(response)
+      },
+      onProbeFailure: () => {
+        startupIdentity.reject(new Error('Initial gateway identity unavailable'))
+        options.onProbeFailure?.()
+      },
       onDiagnostics: (event) => {
         switch (event._tag) {
           case 'Connection':
@@ -815,7 +830,7 @@ export const liveSource = ({
       ),
   })
   const attention = attentionRetained.atom
-  const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
+  const messageSnapshot = (fresh = false): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
         const loaded = yield* loadMutations.pipe(Effect.result)
@@ -836,7 +851,7 @@ export const liveSource = ({
           if (Option.isSome(decoded) && (freshest === undefined || decoded.value.store_index > freshest.store_index))
             freshest = decoded.value
         }
-        if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
+        if (!fresh && freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
         return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
@@ -846,20 +861,17 @@ export const liveSource = ({
         )
       }),
     )
-  const submitMessage = gatewayMessageSend(client)
+  const submitMessage = gatewayMessageSend(client, messageSnapshot, outbox)
 
   // Atom.family is weakly memoized. Keep the 24 recent snapshot controllers explicitly.
   const visibleConversations = new Map<string, boolean>()
-  const attachments = gatewayAttachments(client, messageSnapshot)
+  const attachments = gatewayAttachments(client, messageSnapshot, outbox)
   const conversationFamily = Atom.family((ref: string): RetainedConversation => {
     const timeline = new LiveTimeline()
     // A Sent row retires only when its identity-correlated server content is in the window.
     // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
-    // Fractal deduplicates a key by its whole request except the fence. Each key's first action
-    // id and parameters are what every Resend of it repeats, even after its row retires.
-    const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
     let lastSendId: string | undefined
     let painted = false
     let publishedItems: ConversationPage['items'] = []
@@ -970,60 +982,56 @@ export const liveSource = ({
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
       const id = `pending/${idempotencyKey}`
-      const action = sentActions.get(idempotencyKey) ?? { id: request.id, parameters: request.parameters }
-      sentActions.set(idempotencyKey, action)
-      const local: PendingSend = {
+      const previous = pending.get(id)
+      // A caller-supplied retry key cannot manufacture queued content or a transport permission.
+      if (request._tag === 'Resend' && previous === undefined) return submitMessage(request, idempotencyKey)
+      const action = { id: request.id, parameters: request.parameters }
+      const local: PendingSend = request._tag === 'Resend' && previous !== undefined ? previous : {
         item: {
           _tag: 'Text', id, role: 'user',
           text: action.parameters.content ?? '',
-          attachments: action.parameters.attachments.map((attachment) => ({
-            id: attachment.blob,
-            mediaType: attachment.media_type,
-            // The encoded wire side carries `name: null`; the view model has no null names.
-            ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
-          })),
+          attachments: [
+            ...action.parameters.attachments.map((attachment) => ({
+              id: attachment.blob,
+              mediaType: attachment.media_type,
+              ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
+            })),
+            ...(request.images ?? []).map((image, index) => ({
+              id: `local-image/${idempotencyKey}/${index}`, mediaType: image.mediaType, name: image.name,
+            })),
+          ],
           streaming: false, at: pending.get(id)?.item.at ?? new Date().toISOString(), sendState: { _tag: 'Pending' },
         },
       }
-      // A first send paints immediately: Enter must not wait for any await. An explicit
-      // Resend names mail the stream may already show, so its authoritative identity is
-      // reconciled before any optimistic row can duplicate it.
+      // A first send paints immediately. Packet preparation supplies the actual message
+      // identity before POST, including a new identity for a proven-unapplied retry.
       if (request._tag === 'Send') {
         lastSendId = id
         pending.set(id, local)
         publishPending()
       }
       try {
-        // The public device-signing contract names mail from the first 16 SHA-256 hex digits.
-        // Resolve this before POST so an echo that wins the HTTP race still replaces its outbox item.
-        const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
-        const messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
-        if (request._tag === 'Send') timeline.keepOwnSendId(messageIds, id)
-        const submit = async () => {
-          const current = await messageSnapshot()
-          if (current._tag === 'Refused') return current
-          return submitMessage({
-            api_version: request.api_version,
-            type: request.type,
-            id: action.id,
-            fence: { snapshot_id: current.value, subject_revisions: {} },
-            parameters: action.parameters,
-            idempotency_key: idempotencyKey,
-          })
-        }
-        if (request._tag === 'Resend' && timeline.shownMessageIds().has(messageIds[0]!)) return submit()
+        const submit = () => submitMessage(request, idempotencyKey, messageIds => {
+          timeline.keepOwnSendId(messageIds, id)
+          publishPending()
+        })
         if (request._tag === 'Resend') {
           pending.set(id, local)
-          timeline.keepOwnSendId(messageIds, id)
           publishPending()
         }
         const result = await submit()
+        if (result._tag === 'Refused' && (result.reason === 'storage' || result.reason === 'identity-unavailable')) {
+          // Failed acceptance is not a queued send; the composer restores the submitted draft.
+          pending.delete(id)
+          publishPending()
+          return result
+        }
         if (result._tag === 'Success' && result.value.status === 'rejected') {
           local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
-        } else if (result._tag === 'Refused') {
+        } else if (result._tag === 'Refused' && result.reason !== 'storage' && result.reason !== 'identity-unavailable') {
           local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
             ? { _tag: 'Unconfirmed', detail: result.detail }
-            : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
+            : { _tag: 'Failed', reason: result.reason === 'retry-refused' ? 'failed' : result.reason, detail: result.detail } }
         } else if (result._tag === 'Success' && result.value.status === 'completed') {
           const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
           if (affected.length > 0) timeline.keepOwnSendId(affected, id)
@@ -1214,10 +1222,13 @@ export const liveSource = ({
       if (!get(transportLive) && observedGrants !== undefined) return observedGrants
       const deny = () => get.setSelf(noGrants)
       deniedReaders.add(deny)
+      const abort = new AbortController()
       const fiber = runtime.runFork(
         Effect.gen(function* () {
-          const fractal = yield* Fractal
-          const discovered = yield* fractal.capabilities
+          const { capabilities: discovered, storageAvailable } = yield* Effect.tryPromise({
+            try: () => readOutboxAccess(client, outbox, abort.signal),
+            catch: cause => cause,
+          })
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1227,15 +1238,18 @@ export const liveSource = ({
           observedGrants = {
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
-            messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
+            messageSend: storageAvailable && allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
+            sendProtection: outbox.protection(),
+            ...(!storageAvailable ? { sendUnavailable: 'Saved messages are unavailable. Retry later.' } : {}),
           }
           get.setSelf(observedGrants)
         }),
       )
       get.addFinalizer(() => {
+        abort.abort()
         deniedReaders.delete(deny)
         fiber.interruptUnsafe()
       })
@@ -1248,7 +1262,7 @@ export const liveSource = ({
     ready: runtime.runPromise(Effect.gen(function* () {
       sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
-    })),
+    })).catch(cause => { if (!disposed) throw cause }),
     suspendSockets: () => sdk?.suspendSockets(),
     resumeSockets: () => {
       if (!disposed && sdk !== undefined) runtime.runFork(sdk.resumeSockets)
@@ -1277,7 +1291,7 @@ export const liveSource = ({
           }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
           return () => { runtime.runFork(Fiber.interrupt(fiber)) }
         },
-      }, transportLive),
+      }, transportLive, outbox),
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
@@ -1285,6 +1299,7 @@ export const liveSource = ({
       grants,
       contentSearch: gatewayContentSearch(client),
       attachments: { ...attachments, send: (request) => retainConversation(request.parameters.to).send(request) },
+      outboxRecovery: outbox.recovery,
       sessionTrace: (query) => runtime.runPromise(sessionTrace(query)),
       // credentialExpired is set before readRefusal, so this derived read sees both together.
       credentialRevoked: Atom.make((get) => get(readRefusal) !== undefined && credentialExpired),
@@ -1384,6 +1399,7 @@ export const liveSource = ({
     },
     dispose: async () => {
       disposed = true
+      outbox.close()
       browser?.removeEventListener('offline', onOffline)
       browser?.removeEventListener('online', onOnline)
       documentEvents?.removeEventListener('visibilitychange', onVisible)

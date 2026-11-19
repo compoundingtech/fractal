@@ -15,6 +15,10 @@ import { Effect, Layer, SubscriptionRef } from 'effect'
 import * as Option from 'effect/Option'
 import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createOutboxRecord, outboxDeploymentId, prepareOutboxRecord } from '@fractal/client/outbox'
+import { prepareMessageSendPacket } from '@fractal/client/prepared-packet'
+import { openIndexedDbOutbox } from './outbox/indexedDb.ts'
 
 /** Cold-selection admission through the real live source and SDK. */
 
@@ -81,9 +85,11 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
+  staleSendAppliedNone = false
   /** Take the send, then answer Fractal's 503 `message-send-unconfirmed` instead of its result. */
   unconfirmSend = false
   capabilityReads = 0
+  issuerPair: { readonly issuer: string; readonly issuer_key: string } | undefined
   readonly messageActions: MessageSendAction[] = []
   /** Fractal's durable answer per idempotency key, with the digest of the request that earned it. */
   private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
@@ -137,6 +143,7 @@ class Gateway {
         schemas: ['client-v0'],
         session_actor: 'person/operator',
         transport: 'fabric-loopback',
+        ...this.issuerPair,
       }
     } else if (path.startsWith('/v1/client/runtimes/')) {
       this.runtimeReads.push(decodeURIComponent(path.slice('/v1/client/runtimes/'.length)))
@@ -194,7 +201,8 @@ class Gateway {
         if (this.staleSendFence) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'stale-fence', message: 'The observed snapshot belongs to an old gateway store.',
-          retryable: false, request_id: 'request/stale-send', details: {},
+          retryable: false, request_id: 'request/stale-send',
+          ...(this.staleSendAppliedNone ? { applied: 'none', details: { applied: 'none' } } : { details: {} }),
         }, { status: 409 })
         if (this.messageGrant !== 'granted') {
           return new Response(
@@ -411,13 +419,17 @@ const settle = Effect.promise(async () => {
 
 const withGateway = <E,>(
   test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void, E>,
-  { maxFollows = 2, sessionTraceLayer }: {
+  { maxFollows = 2, sessionTraceLayer, issuerPair, capabilityFailure = false }: {
     readonly maxFollows?: number
     readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider>
+    readonly issuerPair?: { readonly issuer: string; readonly issuer_key: string }
+    readonly capabilityFailure?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
     const gateway = new Gateway()
+    gateway.issuerPair = issuerPair
+    gateway.capabilityFailure = capabilityFailure
     const live = yield* Effect.acquireRelease(
       Effect.sync(() =>
         liveSource({
@@ -435,6 +447,221 @@ const withGateway = <E,>(
     )
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
+
+describe('outbox startup admission', () => {
+  const issuerPair = { issuer: 'person/example', issuer_key: 'issuer-key/startup' }
+  it.live('restores dispatched storage before publishing send-capable grants without gating read-only readiness', () => Effect.gen(function* () {
+    const factory = new IDBFactory()
+    vi.stubGlobal('indexedDB', factory)
+    const scope = { principalId: 'person/operator', deploymentId: outboxDeploymentId(issuerPair.issuer, issuerPair.issuer_key), memberId: snapshot.host_id }
+    const saved = yield* openIndexedDbOutbox({ indexedDB: factory, scope })
+    const intent = createOutboxRecord('attempt/startup-message', { text: 'Saved content', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/startup', idempotency_key: intent.id,
+      fence: { snapshot_id: snapshot.id, subject_revisions: {} },
+      parameters: { to: agent.id, content: intent.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(intent, packet)
+    if (ready === undefined) throw new TypeError('Expected ready packet')
+    yield* Effect.promise(() => saved.commit(intent))
+    yield* Effect.promise(() => saved.compareAndSwap(intent.revision, ready))
+    yield* Effect.promise(() => saved.acquireDispatchPermit(intent.id, ready.revision))
+    saved.close()
+    yield* withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      yield* settle
+      expect(gateway.capabilityReads).toBe(1)
+      const inspected = yield* openIndexedDbOutbox({ indexedDB: factory, scope, recoverOnOpen: false })
+      try {
+        expect(gateway.messageActions).toEqual([])
+        expect(live.registry.get(live.source.grants)).toMatchObject({ unread: true, messageSend: 'ungranted' })
+        live.registry.mount(live.source.grants)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(yield* Effect.promise(() => inspected.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
+        expect(gateway.capabilityReads).toBe(2)
+        expect(gateway.messageActions).toEqual([])
+      } finally { inspected.close() }
+    }), { issuerPair })
+  }))
+
+  for (const blocked of ['probe', 'storage'] as const) {
+    it.live(`resolves read-only readiness while ${blocked} readiness is still pending`, () => {
+      const probe = Promise.withResolvers<void>()
+      const storage = Promise.withResolvers<boolean>()
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      vi.stubGlobal('navigator', { onLine: true, storage: { persist: () => storage.promise } })
+      return withGateway((live, gateway) => Effect.gen(function* () {
+        if (blocked === 'probe') gateway.capabilityGate = probe.promise
+        try {
+          yield* Effect.promise(() => live.ready)
+          expect(live.registry.get(live.source.grants)).toMatchObject({ unread: true, messageSend: 'ungranted' })
+          expect(gateway.messageActions).toEqual([])
+        } finally { probe.resolve(); storage.resolve(false) }
+      }), { issuerPair })
+    })
+  }
+
+  it.live('reads fresh capabilities for mounted grants independently of the in-flight startup probe', () => {
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    return withGateway((live, gateway) => Effect.gen(function* () {
+      const answer = Promise.withResolvers<void>()
+      gateway.capabilityGate = answer.promise
+      const release = live.registry.mount(live.source.grants)
+      try {
+        yield* settle
+        expect(gateway.capabilityReads).toBe(2)
+        expect(live.registry.get(live.source.grants)).toHaveProperty('unread', true)
+        answer.resolve()
+        yield* Effect.promise(() => live.ready)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(gateway.capabilityReads).toBe(2)
+        expect(gateway.messageActions).toEqual([])
+      } finally { answer.resolve(); release() }
+    }), { issuerPair })
+  })
+
+  for (const change of ['same', 'different', 'dispose'] as const) {
+    it.live(`settles chat grants after a ${change} recovery observation during storage initialization`, () => {
+      const entered = Promise.withResolvers<void>()
+      const storage = Promise.withResolvers<boolean>()
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      vi.stubGlobal('navigator', { onLine: true, storage: { persist: () => { entered.resolve(); return storage.promise } } })
+      return withGateway((live, gateway) => Effect.gen(function* () {
+        yield* Effect.promise(() => live.ready)
+        gateway.issuerPair = issuerPair
+        let publications = 0
+        const unmount = live.registry.mount(live.source.grants)
+        const stop = live.registry.subscribe(live.source.grants, () => { publications++ })
+        try {
+          yield* Effect.promise(() => entered.promise)
+          if (change !== 'same') {
+            gateway.issuerPair = { issuer: 'person/other', issuer_key: 'issuer-key/b' }
+            gateway.messageGrant = 'ungranted'
+          }
+          const recovery = live.source.outboxRecovery!.list().catch(() => [])
+          yield* settle
+          expect(gateway.capabilityReads).toBe(3) // Startup, grants and recovery.
+          if (change === 'dispose') {
+            yield* Effect.promise(() => live.dispose())
+            const before = publications
+            storage.resolve(false)
+            yield* Effect.promise(() => recovery)
+            yield* settle
+            expect(publications).toBe(before)
+            expect(gateway.capabilityReads).toBe(3)
+          } else {
+            storage.resolve(false)
+            yield* Effect.promise(() => recovery)
+            yield* settle
+            expect(live.registry.get(live.source.grants)).not.toHaveProperty('unread')
+            expect(live.registry.get(live.source.grants).messageSend).toBe(change === 'same' ? 'granted' : 'ungranted')
+            expect(gateway.capabilityReads).toBe(change === 'same' ? 3 : 4)
+          }
+        } finally { storage.resolve(false); stop(); unmount() }
+      }))
+    })
+  }
+
+  it.live('does not let delayed startup A replace composer B after B grants initialize', () => Effect.gen(function* () {
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const gateway = new Gateway()
+    gateway.issuerPair = issuerPair
+    const captured = Promise.withResolvers<void>()
+    const releaseProbe = Promise.withResolvers<void>()
+    let first = true
+    const live = yield* Effect.acquireRelease(Effect.sync(() => liveSource({ options: {
+      baseUrl: 'http://gateway.test', maxFollows: 2, socket: gateway.factory,
+      fetch: async (input, init) => {
+        const response = await gateway.fetch(input, init)
+        if (first && new URL(String(input)).pathname === '/v1/client/capabilities') {
+          first = false
+          captured.resolve()
+          await releaseProbe.promise
+        }
+        return response
+      },
+    } })), live => Effect.promise(() => live.dispose()))
+    try {
+      yield* Effect.promise(() => captured.promise)
+      gateway.issuerPair = undefined // B explicitly opts out of protected storage.
+      const release = live.registry.mount(live.source.grants)
+      try {
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
+        releaseProbe.resolve()
+        yield* Effect.promise(() => live.ready)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
+        // A cached protected repository here would refuse B's unprotected send.
+        yield* Effect.promise(() => live.source.attachments!.send({
+          _tag: 'Send', api_version: 'st3.client.v0', type: 'message.send', id: 'action/late-startup',
+          parameters: { to: agent.id, content: 'Fresh B message', tags: [], attachments: [] },
+        }))
+        expect(gateway.messageActions).toHaveLength(1)
+      } finally { release() }
+    } finally { releaseProbe.resolve() }
+  }).pipe(Effect.scoped))
+
+  for (const observation of ['reconnect probe', 'recovery discovery'] as const) {
+  it.live(`uses the new identity when the first composer mounts after ${observation}`, () => Effect.gen(function* () {
+    const factory = new IDBFactory()
+    vi.stubGlobal('indexedDB', factory)
+    const nextIssuer = { issuer: 'person/other', issuer_key: 'issuer-key/next' }
+    const nextScope = { principalId: 'person/operator', deploymentId: outboxDeploymentId(nextIssuer.issuer, nextIssuer.issuer_key), memberId: snapshot.host_id }
+    const saved = yield* openIndexedDbOutbox({ indexedDB: factory, scope: nextScope })
+    const intent = createOutboxRecord('attempt/next-identity', { text: 'Saved for the next identity', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/next-identity', idempotency_key: intent.id,
+      fence: { snapshot_id: snapshot.id, subject_revisions: {} },
+      parameters: { to: agent.id, content: intent.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(intent, packet)
+    if (ready === undefined) throw new TypeError('Expected ready packet')
+    yield* Effect.promise(() => saved.commit(intent))
+    yield* Effect.promise(() => saved.compareAndSwap(intent.revision, ready))
+    const dispatched = yield* Effect.promise(() => saved.acquireDispatchPermit(intent.id, ready.revision))
+    try {
+      yield* withGateway((live, gateway) => Effect.gen(function* () {
+        yield* Effect.promise(() => live.ready)
+        yield* settle
+        expect(gateway.capabilityReads).toBe(1)
+        expect(yield* Effect.promise(() => saved.read(intent.id))).toEqual(dispatched)
+        gateway.issuerPair = nextIssuer
+        gateway.messageGrant = 'ungranted'
+        if (observation === 'reconnect probe') {
+          live.source.reconnect?.()
+          yield* settle
+          expect(gateway.capabilityReads).toBe(2)
+        } else {
+          yield* Effect.promise(() => live.source.outboxRecovery!.list())
+        }
+        const readsBeforeMount = gateway.capabilityReads
+        const release = live.registry.mount(live.source.grants)
+        try {
+          yield* settle
+          expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'ungranted', sendProtection: 'durable' })
+          expect(gateway.capabilityReads).toBe(readsBeforeMount + 1)
+          // Recovering B's dispatch marker proves startup did not reinitialize A's scope.
+          expect(yield* Effect.promise(() => saved.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
+          expect(gateway.messageActions).toEqual([])
+        } finally { release() }
+      }), { issuerPair })
+    } finally { saved.close() }
+  }))
+  }
+
+  it.live('keeps protected startup storage unavailable without granting sends or inventing corrupt entries', () => {
+    vi.stubGlobal('indexedDB', { open: () => { throw new DOMException('Storage disabled', 'SecurityError') } })
+    return withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      live.registry.mount(live.source.grants)
+      yield* settle
+      expect(live.registry.get(live.source.grants)).toMatchObject({
+        messageSend: 'ungranted', sendUnavailable: 'Saved messages are unavailable. Retry later.',
+      })
+      yield* Effect.promise(() => expect(live.source.outboxRecovery!.list()).rejects.toBeDefined())
+      expect(gateway.messageActions).toEqual([])
+    }), { issuerPair })
+  })
+})
 
 describe('session inventory independence', () => {
   it.live('reads selected threads before the roster and reconnects without listing sessions', () =>
@@ -1672,6 +1899,35 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
+  it.live('reprepares a proven stale-fence retry from a fresh HTTP snapshot instead of held window evidence', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        gateway.staleSendFence = true
+        gateway.staleSendAppliedNone = true
+        expect(yield* Effect.promise(() => live.source.attachments!.send(request))).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+        const first = gateway.messageActions[0]!
+        gateway.staleSendFence = false
+        gateway.currentSnapshot = { ...snapshot, id: 'snapshot/retry-current', store_index: 8 }
+        expect(yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, _tag: 'Resend', idempotencyKey: first.idempotency_key,
+        }))).toMatchObject({ _tag: 'Success' })
+        const next = gateway.messageActions[1]!
+        expect(next.fence.snapshot_id).toBe(gateway.currentSnapshot.id)
+        expect(next.id).not.toBe(first.id)
+        expect(next.idempotency_key).not.toBe(first.idempotency_key)
+        expect(next.parameters).toEqual(first.parameters)
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', text: 'hello', sendState: { _tag: 'Sent' } }] },
+        })
+      }),
+    ),
+  )
+
   it.live('publishes Pending in the same tick while an unheld snapshot is being read', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
@@ -1783,6 +2039,7 @@ describe('optimistic conversation sends', () => {
         live.registry.mount(live.source.conversationInterest!(agent.id))
         const conversation = live.source.conversation(agent.id)
         live.registry.mount(conversation)
+        live.registry.mount(live.source.grants)
         yield* settle
         gateway.currentSnapshot = undefined
         const result = yield* Effect.promise(() => live.source.attachments!.send(request))
@@ -1797,6 +2054,25 @@ describe('optimistic conversation sends', () => {
           }] },
         })
       }),
+    ),
+  )
+
+  it.live('refuses unavailable identity before accepting a send or retaining an optimistic row', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        gateway.capabilityFailure = true
+        const result = yield* Effect.promise(() => live.source.attachments!.send(request))
+        expect(result).toMatchObject({
+          _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.',
+        })
+        expect(gateway.messageActions).toHaveLength(0)
+        expect(live.registry.get(conversation)).toMatchObject({ _tag: 'Observed', value: { items: [] } })
+      }),
+      { capabilityFailure: true },
     ),
   )
 
@@ -2104,7 +2380,7 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
-  it.live('never duplicates mail an idempotent resubmission already shows', () =>
+  it.live('never reposts or duplicates mail when a missing original retry key already appears in the timeline', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         const key = 'resend-stable-key'
@@ -2128,10 +2404,9 @@ describe('optimistic conversation sends', () => {
           ],
         })
         yield* settle
-        let resolvePost!: () => void
-        gateway.sendGate = new Promise<void>((resolve) => { resolvePost = resolve })
-        const sending = live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: key })
-        yield* Effect.promise(() => gateway.nextAction())
+        const result = yield* Effect.promise(() => live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: key }))
+        expect(result).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(0)
         yield* settle
         // The authoritative copy is already in the window: no second, pending copy.
         const feed = live.registry.get(conversation)
@@ -2139,8 +2414,6 @@ describe('optimistic conversation sends', () => {
         if (feed._tag !== 'Observed') return
         // A person's mail reads as the person's one row; its header joins its body.
         expect(feed.value.items.map((item) => item._tag)).toEqual(['Text'])
-        resolvePost()
-        expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
         yield* settle
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [
@@ -2151,24 +2424,19 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
-  it.live('publishes an unseen idempotent resubmission as pending before the POST resolves', () =>
+  it.live('refuses an unseen retry key without creating an optimistic send or making a POST', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         live.registry.mount(live.source.conversationInterest!(agent.id))
         live.registry.mount(live.source.conversation(agent.id))
         yield* settle
-        let resolvePost!: () => void
-        gateway.sendGate = new Promise<void>((resolve) => { resolvePost = resolve })
-        const sending = live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: 'unseen-resend-key' })
-        yield* Effect.promise(() => gateway.nextAction())
-        yield* settle
-        expect(live.registry.get(live.source.conversation(agent.id))).toMatchObject({
-          _tag: 'Observed', value: { items: [
-            { _tag: 'Text', text: 'hello', sendState: { _tag: 'Pending' } },
-          ] },
-        })
-        resolvePost()
-        expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
+        const before = live.registry.get(live.source.conversation(agent.id))
+        const result = yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, _tag: 'Resend', idempotencyKey: 'unseen-resend-key',
+        }))
+        expect(result).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(0)
+        expect(live.registry.get(live.source.conversation(agent.id))).toEqual(before)
       }),
     ),
   )

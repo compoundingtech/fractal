@@ -558,6 +558,7 @@ print("passed: license coverage and manifest guards are wired into the generated
 assert 'lane "SDK typecheck" pnpm --filter @fractal/sdk typecheck' in lanes
 assert 'lane "SDK unit tests" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.config.ts' in lanes
 assert 'lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts' in lanes
+assert 'lane "App durable outbox crash e2e" node --test --test-concurrency=1 --test-timeout=180000 apps/fractal-web/scripts/outbox-crash.browser-test.mjs' in lanes
 sdk = root / "packages/fractal-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
@@ -608,6 +609,7 @@ for required in (False, True):
         for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook and module graph", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
         assert result.stdout.count("App replay browser e2e") == 1, result.stdout
+        assert result.stdout.count("App durable outbox crash e2e") == 1, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
         print(f"passed: kit lanes {'run' if required else 'skip explicitly'}")
@@ -617,7 +619,7 @@ for required in (False, True):
 fake_lane = r"""lane() {
   printf '%s\n' "$1"
   case "$1" in
-    "App replay browser e2e"|"UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
+    "App replay browser e2e"|"App durable outbox crash e2e"|"UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
       [ "${TEST_STREAMS_ACTIVE:-0}" -eq 0 ] || { echo "exclusive kit lane overlapped test streams" >&2; return 17; } ;;
   esac
   case "$1" in
@@ -655,6 +657,7 @@ for shard, app, kit, build, index, expected in (
             assert (name in result.stdout) == (shard == 0), (name, result.stdout)
         assert ("UI kit context isolation controls" in result.stdout) == (shard == 0 and not app and not index), result.stdout
         assert result.stdout.count("App replay browser e2e") == int(shard == 0 and not (app or build or index)), result.stdout
+        assert result.stdout.count("App durable outbox crash e2e") == int(shard == 0 and not (app or build or index)), result.stdout
         assert ("SDK frame CPU budgets" in result.stdout) == (shard == 0 and not (app or build or index)), result.stdout
         assert ("UI kit Storybook and module graph" in result.stdout) == (not app and not index), result.stdout
         assert ("UI kit strict plays" in result.stdout) == (not app and not build and not index), result.stdout

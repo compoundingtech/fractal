@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Persist protected browser chat sends before dispatch and retain uncertain delivery without replay",
+  "replay": {"status": "changed", "detail": "Protected chat commits intent and attachment bytes before send work and grants dispatch through a durable compare-and-swap permit. Unknown delivery is never resent; reopening an in-flight attempt preserves delivery uncertainty."},
+  "schema": {"status": "changed", "detail": "Adds the browser-local IndexedDB database fractal-web-outbox-v1 for immutable intents, prepared packets, attachment bytes and delivery evidence. This is client-side storage only; no server database schema or server schema version changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes or coordinated member upgrade is required."},
+  "compatibility": {"status": "changed", "detail": "Browser chat sends use the durable outbox when capabilities provide an issuer pair. Without that pair, sends remain visibly unprotected as before. Protected operations require the original account, issuer identity and member scope; existing records are never retargeted."},
+  "downtime": {"status": "none", "detail": "No server interruption or restart is required. Unavailable browser storage refuses protected acceptance rather than falling back to an unprotected send."},
+  "manual": {"status": "none", "detail": "No operator actions, client re-pairing or configuration changes are required."},
+  "recovery": {"status": "changed", "detail": "Retained, foreign-scope and damaged browser attempts remain visible as discard-only recovery entries. Discard does not claim cancellation or nonapplication. Unresolved delivery is not automatically expired or replayed."}
+}

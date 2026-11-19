@@ -1,8 +1,11 @@
 import * as Native from '@fractal/client/schema/read'
+import * as Write from '@fractal/client/schema'
 import { FractalClient } from '@fractal/client'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi, type MockInstance } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createScopedChatOutbox } from '../data/outbox/scoped.ts'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { gatewayThreads, unreachableSend, type ThreadSource, type ThreadWatches } from './threadSource.ts'
@@ -693,4 +696,224 @@ it('keeps the connection sentence, without Fractal\'s words, when it refuses the
       _tag: 'Unavailable', reason: 'ungranted', detail: 'This connection has no access to threads.',
     }))
   } finally { view.dispose() }
+})
+
+it.each([
+  ['thread.start', false], ['thread.reply', false], ['thread.start', true], ['thread.reply', true],
+] as const)('revalidates and reprepares %s after explicit applied:none (refuse revalidation: %s)', async (kind, refuseRevalidation) => {
+  const bodies: string[] = []
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base,
+      snapshot: bodies.length === 0 ? base.snapshot : { ...base.snapshot, id: 'snapshot/retry-fresh', store_index: 2 }, value: {
+      ...base.value, transport: 'local-web', capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 3, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+        { id: kind, version: 0, state: 'granted' },
+      ],
+    } })
+    if (String(input).includes('/start-context')) return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: 'source/retry', episode: 'episode/original',
+      start_recipient: { agent_id: refuseRevalidation ? 'agent/changed' : agent, basis: { _tag: 'original' } },
+    } })
+    if (!String(input).endsWith('/actions')) return Response.json({ ...base, value: {
+      ...summary, state: refuseRevalidation ? 'closed' : 'open',
+    } })
+    const body = String(init?.body)
+    bodies.push(body)
+    const action = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(body))
+    if (action.type !== 'thread.start' && action.type !== 'thread.reply') throw new TypeError('Expected thread message')
+    if (bodies.length === 1) return Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refusal',
+      code: 'forbidden', message: 'Nothing applied.', retryable: false, applied: 'none', details: { applied: 'none' },
+    }, { status: 403 })
+    return Response.json({ ...base, value: {
+      kind: 'action-result', action_id: action.id, operation_id: 'operation/retried', status: 'completed',
+      affected_ids: [action.parameters.target_id, 'message/retried'], snapshot_id: base.snapshot.id,
+    } })
+  } })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  const parameters = { agent_id: agent, origin: { source_id: 'source/retry', episode: 'episode/original' }, title: 'Original title', content: 'Original content' }
+  try {
+    const destination = kind === 'thread.start' ? 'draft/retry' : id
+    const draft = { content: parameters.content }
+    registry.set(source.draft(destination), draft)
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has(kind)).toBe(true))
+    const send = () => kind === 'thread.start' ? source.start('draft/retry', parameters) : source.reply({ target_id: id, content: parameters.content })
+    expect(await send()).toMatchObject({ _tag: 'Refused', explanation: 'Nothing applied.' })
+    if (kind === 'thread.start') expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    const retried = await (kind === 'thread.start' ? source.retryStart!('draft/retry') : send())
+    if (refuseRevalidation) {
+      expect(retried).toMatchObject({ _tag: 'Refused', detail: kind === 'thread.start'
+        ? 'Review the current recipient before sending this saved thread. Nothing was sent.'
+        : 'This thread is closed. Nothing was sent.' })
+      expect(bodies).toHaveLength(1)
+      expect(registry.get(source.draft(destination))).toBe(draft)
+      if (kind === 'thread.start') expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    } else {
+      expect(retried).toMatchObject({ _tag: 'Sent' })
+      expect(bodies).toHaveLength(2)
+      const first = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(bodies[0]!))
+      const next = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(bodies[1]!))
+      expect(next.id).not.toBe(first.id)
+      expect(next.idempotency_key).not.toBe(first.idempotency_key)
+      expect(next.fence.snapshot_id).toBe('snapshot/retry-fresh')
+      expect(next.parameters).toEqual(first.parameters)
+      expect(registry.get(source.pendingStarts!())).toEqual([])
+    }
+  } finally { stop(); registry.dispose() }
+})
+
+it('retains a protected Start retry and its accepted child when fresh capabilities fail after recipient revalidation', async () => {
+  const bodies: string[] = []
+  let failAfterRevalidation = false
+  let revalidated = false
+  const capabilities = { ...base, value: { ...base.value, issuer: 'person/example', issuer_key: 'issuer-key/a',
+    transport: 'local-web', capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' }],
+  } }
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) {
+      if (failAfterRevalidation && revalidated) throw new TypeError('Capabilities unavailable')
+      return Response.json(capabilities)
+    }
+    if (String(input).includes('/start-context')) {
+      revalidated = true
+      return Response.json({ ...base, value: { kind: 'thread-start-context', source_id: 'source/retry',
+        episode: 'episode/original', start_recipient: { agent_id: agent, basis: { _tag: 'original' } } } })
+    }
+    const body = String(init?.body)
+    bodies.push(body)
+    const action = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(body))
+    if (action.type !== 'thread.start') throw new TypeError('Expected Start')
+    if (bodies.length === 1) return Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refusal',
+      code: 'forbidden', message: 'Nothing applied.', retryable: false, applied: 'none', details: { applied: 'none' },
+    }, { status: 403 })
+    return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id,
+      operation_id: 'operation/retried', status: 'completed',
+      affected_ids: [action.parameters.target_id, 'message/retried'], snapshot_id: base.snapshot.id } })
+  } })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory() })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  const stop = registry.mount(source.access)
+  const parameters = { agent_id: agent, origin: { source_id: 'source/retry', episode: 'episode/original' },
+    title: 'Original title', content: 'Original content' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect(await source.start('draft/retry', parameters)).toMatchObject({ _tag: 'Refused', explanation: 'Nothing applied.' })
+    failAfterRevalidation = true
+    expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Refused' })
+    expect(revalidated).toBe(true)
+    expect(bodies).toHaveLength(1)
+    expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    const repository = await outbox.repository()
+    const accepted = await repository!.list()
+    expect(accepted).toHaveLength(2)
+    const child = accepted.flatMap(entry => entry._tag === 'record' && entry.record.id.endsWith('/retry') ? [entry.record] : [])[0]!
+    expect(child).toMatchObject({ state: 'pending', phase: 'preparing', mayHaveDispatched: false })
+    failAfterRevalidation = false
+    // The access observer may have seen the same outage; retry refreshes grants without replacing the owner.
+    source.reload?.()
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Sent' })
+    expect(bodies).toHaveLength(2)
+    expect(await repository!.list()).toHaveLength(2)
+    expect(await repository!.read(child.id)).toMatchObject({ state: 'delivered' })
+    expect(registry.get(source.pendingStarts!())).toEqual([])
+  } finally { stop(); registry.dispose(); outbox.close() }
+})
+
+it.each([false, true])('waits for protected startup before granting thread sends and preserves a newer draft (unavailable: %s)', async unavailable => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const initializing = new Promise<void>(resolve => { entered = resolve })
+  const fetchImpl = vi.fn(async (_input: RequestInfo | URL) => Response.json({ ...base, value: { ...base.value,
+    issuer: 'person/example', issuer_key: 'issuer-key/startup', transport: 'local-web',
+    capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' }],
+  } }))
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory(), storage: { persist: async () => {
+    entered()
+    await gate
+    if (unavailable) throw new DOMException('Storage disabled', 'SecurityError')
+    return false
+  } } })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  registry.set(source.draft('draft/startup'), { content: 'Earlier draft' })
+  const stop = registry.mount(source.access)
+  try {
+    await initializing
+    expect(registry.get(source.access).actions.size).toBe(0)
+    const newer = { content: 'New typing while startup waits' }
+    registry.set(source.draft('draft/startup'), newer)
+    release()
+    if (unavailable) {
+      await vi.waitFor(() => expect(registry.get(source.access).sendUnavailable).toBe('Saved messages are unavailable. Retry later.'))
+      expect(registry.get(source.access).read).toBe(true)
+      expect(registry.get(source.access).failure).toBeUndefined()
+      expect(registry.get(source.access).actions.size).toBe(0)
+    } else {
+      await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    }
+    expect(registry.get(source.draft('draft/startup'))).toBe(newer)
+    expect(fetchImpl.mock.calls.every(([input]) => String(input).endsWith('/capabilities'))).toBe(true)
+  } finally { release(); stop(); registry.dispose(); outbox.close() }
+})
+
+it.each(['same', 'different', 'dispose'] as const)('settles thread access after a %s recovery observation during initialization', async change => {
+  const entered = Promise.withResolvers<void>()
+  const storage = Promise.withResolvers<boolean>()
+  let changed = false
+  const fetchImpl = vi.fn(async () => Response.json({ ...base, value: { ...base.value,
+    session_actor: changed ? 'person/other' : base.value.session_actor,
+    issuer: 'person/example', issuer_key: changed ? 'issuer-key/b' : 'issuer-key/a', transport: 'local-web',
+    capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: changed ? 'ungranted' : 'granted' }],
+  } }))
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory(), storage: { persist: () => {
+    entered.resolve()
+    return storage.promise
+  } } })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  let publications = 0
+  const stop = registry.subscribe(source.access, () => { publications++ })
+  const unmount = registry.mount(source.access)
+  try {
+    await entered.promise
+    changed = change !== 'same'
+    const recovery = outbox.recovery.list().catch(() => [])
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    if (change === 'dispose') {
+      registry.dispose()
+      const before = publications
+      storage.resolve(false)
+      await recovery
+      expect(publications).toBe(before)
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } else {
+      storage.resolve(false)
+      await recovery
+      await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({
+        read: true, actor: changed ? 'person/other' : base.value.session_actor,
+      }))
+      expect(registry.get(source.access)).not.toHaveProperty('unknown')
+      expect(registry.get(source.access).actions.has('thread.start')).toBe(!changed)
+      expect(fetchImpl).toHaveBeenCalledTimes(changed ? 3 : 2)
+    }
+  } finally { storage.resolve(false); stop(); unmount(); registry.dispose(); outbox.close() }
 })

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep thread browsing available when browser-local send storage cannot open",
+  "replay": {"status": "none", "detail": "No saved action is submitted or retried by this change."},
+  "schema": {"status": "none", "detail": "No browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Successful thread read and inbox grants remain available when protected outbox startup fails. Only thread Start and reply sends are withheld; the reply composer displays the saved-message storage failure separately from thread read failures."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration change is required."},
+  "recovery": {"status": "changed", "detail": "Blocked database upgrades and disabled storage no longer prevent thread list, detail or timeline reads. Protected sends remain refused without an unprotected fallback, and drafts are preserved."}
+}

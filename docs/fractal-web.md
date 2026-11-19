@@ -578,12 +578,12 @@ History range, earlier-message and search navigation stay in the transcript view
 ## Fractal web composer
 
 The conversation pane mounts the kit's `EmbraceComposer`. Its app-side binding lives in
-`apps/fractal-web/src/web/composerSend.ts`; sending, idempotency, the in-memory outbox and
-echo reconciliation remain owned by `source.attachments.send`. New submissions use `Send`;
-a failed outbox row's Retry uses `Resend` with the exact original source-owned key.
-Outbox rows keep their original send time on Retry and stay after earlier or equal-time
-transcript rows, before later replies. Multiple own sends retain submission order; only an
-authoritative message-identity echo replaces the matching outbox row.
+`apps/fractal-web/src/web/composerSend.ts`; sending, idempotency and echo reconciliation remain
+owned by `source.attachments.send`. Runtime rows are presentation, not delivery authority.
+New submissions use `Send`; the legacy-named `Resend` reads the original durable attempt and
+never posts an unknown/dispatched attempt again. Rows retain their submission time and stay
+after earlier or equal-time transcript rows, before later replies. Multiple own sends retain
+submission order; only an authoritative message-identity echo replaces the matching row.
 Merging visits transcript and retained outbox timestamps at most once each per projection,
 using monotone insertion boundaries to preserve that order even if send times move backward.
 The source retains the newest new Send's identity as `lastSendId`, which the pane passes
@@ -597,11 +597,155 @@ Each pane retains its mapped runtime items and transcript turns across clock/syn
 and semantically unchanged frames, including a replacement decode with new object references.
 The cache uses the conversation model's schema equivalence and retains only the latest projection.
 A confirmed Sent row stays visible until its authoritative in-window echo, even if a later
-read omits remotely owned mail. Neither drafts nor the outbox are persisted in the browser.
+read omits remotely owned mail.
+
+Both chat entry paths share `data/attachmentPort.ts` and the client-core outbox transitions.
+The generated capabilities envelope supplies the scope: `session_actor`, the core
+`outboxDeploymentId(issuer, issuer_key)`, and `Snapshot.host_id`. Immutable intent and
+content-hashed image bytes commit to IndexedDB before send work (upload, snapshot or POST).
+The grants observer caches identity; an uncached first send may read capabilities to identify
+its scope before acceptance. That same answer supplies this send's permission checks, without
+a duplicate read; cached identity does not reuse stale grants. Failed identity discovery refuses
+acceptance and restores the draft.
+The complete authorized unsigned packet is prepared once and committed by revision CAS;
+only the winner of the durable dispatch permit may POST it. A validated completed receipt
+settles delivered, explicit uncontradicted `applied:none` settles not-applied, and every other
+post-dispatch outcome remains unknown. The IndexedDB CAS invokes the core transition validator
+inside its transaction rather than maintaining another delivery state machine.
+
+Successful capability answers without a complete issuer pair explicitly select unprotected
+send mode and show “Unprotected: messages are not saved on this device before sending.”
+Storage or identity-read failure never selects that mode. No URL, loopback port, member ID
+or telemetry deployment label substitutes for issuer identity. Before protected recovery,
+status checks, dispatch and outcome retention, current capabilities must match the original
+fixed tuple exactly. Missing, partial or changed identity blocks protected operations; the
+original retained records remain visible for recovery without being rebound or rewritten.
+Recovery enumerates persisted scopes independently of this page's open repositories, including
+after a reload into another identity or an answer without an issuer. Foreign-scope attempts
+offer status and explicit Discard only; enumeration never recovers their state, rebinds them
+to the current identity, or makes them dispatchable. Discard resolves the original persisted
+scope even when that scope has never been opened in the current page.
+Storage refusal in protected mode makes no message request and restores text and images.
+Only explicit `applied: none` allows a deliberate Retry. It creates a new attempt from
+the same immutable intent with a fresh snapshot, action ID and idempotency key, rather
+than replaying the old packet. Protected retries atomically require an undismissed
+not-applied predecessor and converge on one deterministic child permit across tabs.
+Each explicit Retry pins the predecessor observed when the action starts, before
+asynchronous identity reads. A concurrent retry can converge on that predecessor's
+single child but cannot advance again if the child has already been refused; a further
+generation requires another explicit Retry after observing that child's nonapplication.
+If retry preparation or current-identity checks fail before dispatch, the refusal retains
+the existing row and retry owner; a later Retry continues its already accepted child.
+Unprotected retry intent is retained only in-session and provides no crash recovery.
+Unknown outcomes never offer Retry and are never replayed.
+After identity discovery, both modes preserve send preparation order: text acquires its snapshot
+before permission checks; local images check capabilities and upload before acquiring their snapshot.
+Snapshot-acquisition failures retain their distinct `snapshot-unavailable` classification.
+The readwrite permit CAS guarantees one dispatcher across tabs, including after a crash.
+If another tab recovers an in-flight marker as unknown, a receipt CAS conflict re-reads the
+current record and reapplies the core observation, allowing validated delivery to settle.
+Only genuine revision conflicts reread and reapply an observation. Discarding an in-flight
+attempt makes outcome retention non-writable; a later receipt settles unconfirmed without
+retrying the CAS.
+
+`src/data/outbox/` implements the core fixed-scope repository with versioned storage envelopes
+and an attachment spool. Transaction completion is the acknowledgement barrier, with strict
+durability requested where supported. Recovery classifies unresolved dispatch markers as
+unknown only after verifying the current scope; unsupported or corrupt records remain
+quarantined and cannot send. The recovery list retains readable damage as
+“storage damaged; delivery unknown”, with Discard as its only
+action and no expiry. Discard removes damaged bytes without claiming nonapplication.
+Storage that cannot be opened or read is instead unavailable, retry later; it is never
+manufactured into a corrupt entry. Storage failures are typed, without a memory fallback,
+and persistent-storage permission is reported as granted, denied or unsupported. Browser
+eviction, site-data deletion and device loss are not covered by this durability guarantee.
+
+Read-only page readiness does not wait for the channel capabilities probe or browser
+storage: the shell and roster can render while identity or storage is pending. Chat
+and thread send grants still await authenticated outbox initialization. Each scoped
+connection shares one initialization barrier: later capability refreshes and recovery inspection do not demote
+that connection's own in-flight sends. A new tab independently restores unresolved
+dispatch markers as unknown; the original dispatcher can still retain a correlated receipt.
+Live-source startup recovery reuses the SDK channel's initial capabilities probe asynchronously,
+so startup without a composer needs only one identity read. Send grants always read capabilities
+fresh, including the first composer mount, and initialize the outbox from that response.
+Recovery discovery or reconnect cannot make a late composer restore an old startup scope.
+Identity reads are ordered by a monotonic sequence reserved when they start, not when responses
+arrive. A late older startup response cannot replace a newer protected or unprotected scope,
+open its old repository, or recover its old records. After initialization, grants may publish if
+newer observations retain the same principal, deployment, member and protection mode. A different
+identity starts another fresh read and initialization instead of leaving access checking forever;
+disposal aborts this evaluation without publication.
+Never-dispatched preparing and ready records remain pending without automatic submission.
+Restored Start and reply packets require explicit original-target revalidation before
+their one-shot dispatch permit can be consumed. Failed startup leaves sending unavailable
+with a retry-later explanation, not an unprotected fallback or a fabricated corrupt entry.
+Initialization never edits composer drafts; late delivery still settles by attempt/message identity.
+The client currently exposes no correlated outcome-read capability for the original member:
+operation reads are not action receipt lookup. Startup therefore performs no outcome
+reconciliation, no speculative status requests, and no replay of unknown attempts.
+
+Recovery on this device is keyed by the original attempt identity, not its position in
+the transcript. Unknown attempts warn that Fractal has not confirmed the message or
+thread and that it must not be sent again. They offer Copy into a separate composer,
+with an explicit warning that the original may have arrived, and confirmed Discard;
+they never offer Retry or Check status. Copy does not replace an existing draft or
+change the original attempt's delivery state. A deliberate send from that separate
+composer creates an independent attempt.
+
+Explicitly not-applied attempts offer Retry through fresh-child preparation. Saved
+never-dispatched attempts offer Revalidate and send: the original recipient and current
+authorization must be revalidated before acquiring the durable dispatch permit.
+Readable damaged entries and foreign-identity entries remain discard-only. Unavailable
+storage displays a notice without actions. Cross-tab notifications only wake a persisted
+re-read; they never authorize sending or supply authoritative delivery state.
+
+Every recovery command carries the revision actually shown to the person. Discard
+compares that revision inside its IndexedDB write transaction before changing local
+retention metadata or deleting unreadable content. A changed revision refuses the
+command without mutation, refreshes the entry, and requires another explicit confirmation
+with the current delivery consequence. In particular, a confirmation opened before
+another tab dispatches cannot discard the now-dispatched attempt using a promise that
+it will not be sent. Discard never cancels an action already sent.
+
+Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
+content additionally waits for exact timeline observation), then minimal identity/evidence
+tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;
+it does not cancel an action. Quota exhaustion refuses new acceptance without evicting old work.
+The storage adapter itself performs no upload, signing, dispatch or retry.
+
+The real-browser outbox crash proof is
+`apps/fractal-web/scripts/outbox-crash.browser-test.mjs`. It follows the app replay
+e2e infrastructure: a Vite development server, Playwright, actual browser IndexedDB
+and the production sender/recovery modules. Hosted web CI runs it serially on shard 0
+after the lightweight streams, independently of the kit-input decision. Run it with
+`node --test --test-concurrency=1 --test-timeout=180000 apps/fractal-web/scripts/outbox-crash.browser-test.mjs`;
+the existing `PLAYWRIGHT_MODULE` and optional `CHROMIUM_PATH` overrides select an
+already installed browser without downloading one.
+
+The harness closes the page at deterministic fixture-only transaction or HTTP
+boundaries, then opens a new page in the same browser context. Chat and thread Start
+prove that prepared packet bytes, keys and fingerprints survive, never-dispatched
+attempts need explicit recipient revalidation, and two tabs consume only one dispatch
+permit. Browser producers are unsigned: nonce/signature absence is asserted unchanged,
+not represented as a signature-generation test. Network-level action POST counts
+distinguish a committed permit before fetch from an actual request on the wire.
+
+The HTTP peer is a schema-checked canonical protocol fixture, not a real daemon.
+The storage transactions, page-owner loss, sender, receipt validation and recovery UI
+are real browser code; server-side effects and daemon restart are not proved here.
+After a request leaves, or a valid receipt arrives before the local outcome commits,
+startup must retain unknown without another POST. The missing original-member
+correlated outcome-read capability means the receipt-before-local-commit case cannot
+reconcile to delivered: this is an expected limitation, not a passing reconciliation
+test. Page close does not simulate browser eviction, site-data clearing, power loss,
+or an operating-system process kill.
 
 Only `grants.messageSend` authorizes the composer. An absent send port shows Unknown, and
 non-retryable refusals disable new submissions with their classified human-readable reason. Retryable send failures
 belong only to the failed row; they neither disable the next draft nor replace its footer help.
+This includes a pre-dispatch `retry-refused`: a row Retry may fail and later succeed
+without blocking another draft or adding a generic composer refusal.
 The data source owns the action
 fence and the idempotency key; the composer passes only `Send` or `Resend`. Cancel remains Unknown and disabled; no runtime signal is wired.
 The kit's optional `onRetrySend` prop is a callback seam, not regeneration or a send implementation.
@@ -619,7 +763,7 @@ The live proof requires a send-granted gateway through the existing `WF_ST_GATEW
 `WF_ST_AUTHORIZATION` environment variables and a disposable seat in `WF_E2E_SCRATCH_SEAT`. It
 starts its own loopback server on an ephemeral port and permits message actions only to that seat.
 It gates real HTTP/echo delivery to observe Pending→Sent→echo, injects one explicit refusal,
-checks Retry reuses the key, and prints build revision, seat and timings. The negative control
+checks Retry uses a fresh action identity without a duplicate row, and prints build revision, seat and timings. The negative control
 removes the submit binding and proves the send criterion rejects it without issuing mail.
 Both commands skip all live activity when the one-minute `/proc/loadavg` value is 32 or higher.
 
@@ -660,17 +804,34 @@ setup state: no responsible agent is configured. It offers no recipient,
 Start or Retry and does not loop refreshing the preview. No message matching
 or internal store error code determines this state. Other failed reads offer Retry.
 
-A signed Start is definitive only with explicit `applied: none` under the shared
-application-certainty interpreter; absent metadata is NOT proof. Unknown in either
-metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`,
-`recipient-unassigned` or recipient-mismatch 404 visibly re-reads the exact preview.
-The draft stays; a changed recipient needs a NEW explicit Send and a refused preview
-stays refused. The canonical unassigned golden carries none in both metadata locations.
-Without positive evidence (including bare golden stale-fence), retain the original signed packet, recipient, identities and retry key
-for explicit receipt recovery, even if the displayed preview changes. Never
-silently resend or retarget. Replies use the existing thread's stored
-participants, regardless of later routing policy. Storybook's
-`Fractal/App/Threads/Start recipient` covers every state.
+A Start or reply is definitively not applied only with explicit `applied: none` under
+the shared application-certainty interpreter; absent metadata is NOT proof. Unknown
+in either metadata location dominates none. A definitive `409 stale-fence`,
+`recipient-retired`, `recipient-unassigned` or recipient-mismatch 404 visibly re-reads
+the exact preview. The draft stays; a changed recipient needs a NEW explicit Send and
+a refused preview stays refused. The canonical unassigned golden carries none in both
+metadata locations. Other proven-unapplied sends allow an explicit Retry of the same
+immutable intent, prepared as a new attempt with a fresh snapshot and action identity.
+Before Retry, Start revalidates the exact original recipient and reply rechecks that the
+original thread exists and is open. A failure before dispatch, including fresh capabilities
+after successful recipient revalidation, keeps the draft, card and accepted child with
+the refusal reason; no recipient or thread is silently changed. Unknown retains its
+original packet, recipient and identities without a Retry or automatic replay.
+
+Start and reply share chat's issuer-scoped IndexedDB owner, dispatch permit and
+outcome-retention path. The immutable intent includes every Start parameter (including
+the allocated thread target and origin) or the full reply text/quote before any send
+network work. Preparation uses the core packet builders and a real snapshot exactly
+once; only the winning durable permit submits those bytes. Missing issuer identity is
+visibly unprotected; storage errors in protected mode never select that fallback.
+Restored never-dispatched Starts cannot dispatch without revalidating the original
+recipient through the exact canonical preview. Recovery continues a saved send only
+after an explicit Revalidate and send action; startup never submits it automatically.
+Thread entries share chat's recovery list, including foreign-identity and damaged entries.
+Discard during an in-flight request settles unconfirmed without an outcome-retention loop.
+
+Replies use the existing thread's stored participants, regardless of later routing
+policy. Storybook's `Fractal/App/Threads/Start recipient` covers the recipient states.
 
 While a first send is pending, the draft remains visible and read-only with a
 `Sending…` status. Send is focusable but announced as disabled using

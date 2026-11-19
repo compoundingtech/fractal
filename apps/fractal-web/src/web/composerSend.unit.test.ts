@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import type { AttachmentPort, ConversationPortResult, Grants } from '../data/source.ts'
+import type { AttachmentPort, Grants } from '../data/source.ts'
 import { composerSendBinding, imageUploadAdapter, sendFailureDetail } from './composerSend.ts'
-import { ActionResult, decodeUnknownSync, type BlobUpload } from '@fractal/client/schema'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
+import * as React from 'react'
+import { createRoot } from 'react-dom/client'
+import { MessageNotSentError, type AssistantRuntime } from '@assistant-ui/react'
+import { useConversationRuntime } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
 import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
 
@@ -36,7 +40,7 @@ describe('composer send contract', () => {
     expect(store.read(seat)?.text).toBe(status === 'completed' ? '' : 'hello')
     adapter.close()
     if (status === 'failed') {
-      // The in-memory outbox does not survive reload; the browser-local text does.
+      // A failed submission must not erase the browser-local draft.
       const reloaded = createComposerDraftSession({
         store: createLocalComposerDraftStore({ storage: localStorage, events: window }), conversationId: seat,
       })
@@ -133,36 +137,102 @@ describe('composer send contract', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
-  it('uploads composer images at send and names their blob references in the message action', async () => {
+  it('keeps the composer unavailable with its startup storage reason instead of claiming authorization was denied', async () => {
+    const send = vi.fn<AttachmentPort['send']>()
+    const binding = composerSendBinding({
+      source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } },
+      agentRef: seat, grants: { ...grants, messageSend: 'ungranted', sendUnavailable: 'Saved messages are unavailable. Retry later.' },
+      readable: true, items: [], onRefused: vi.fn(),
+    })
+    expect(binding.disabledReason).toBe('Saved messages are unavailable. Retry later.')
+    expect(binding.runtime.isDisabled).toBe(true)
+    await binding.runtime.onNew(message)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('stages local images without uploads and passes their original bytes alongside existing blob references', async () => {
     const blob = `blob/${'a'.repeat(64)}`
-    const upload = vi.fn<AttachmentPort['upload']>().mockResolvedValue({ _tag: 'Success', value: { blob, sha256: 'a'.repeat(64), size: 3, media_type: 'image/png' } })
+    const upload = vi.fn<AttachmentPort['upload']>()
     const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Actual refusal' })
-    const adapter = imageUploadAdapter(upload)
+    const adapter = imageUploadAdapter()
     await expect(adapter.add({ file: new File(['<svg/>'], 'vector.svg', { type: 'image/svg+xml' }) })).rejects.toThrow('Only PNG, JPEG, GIF and WebP images can be attached.')
     const file = new File([new Uint8Array([1, 2, 3])], 'screen.png', { type: 'image/png' })
     const pending = await adapter.add({ file })
-    // Drafting never uploads; only the send does.
     expect(upload).not.toHaveBeenCalled()
-    const controller = new AbortController()
-    const complete = await adapter.send(pending, { signal: controller.signal })
-    expect(upload).toHaveBeenCalledWith({ bytes: file, mediaType: 'image/png', signal: controller.signal })
+    const complete = await adapter.send(pending)
+    expect(complete.file).toBe(file)
+    expect(complete.content).toEqual([])
+    expect(upload).not.toHaveBeenCalled()
     const binding = composerSendBinding({ source: { attachments: { capabilities: vi.fn(), upload, chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
     expect(binding.runtime.adapters?.attachments).toBe(adapter)
     expect(binding.imageAttachments).toEqual({ max: 4 })
-    await binding.runtime.onNew({ ...message, attachments: [complete] })
-    expect(send.mock.calls[0]![0]).toMatchObject({ _tag: 'Send', parameters: { content: 'hello', attachments: [{ blob, media_type: 'image/png', name: 'screen.png' }] } })
+    await binding.runtime.onNew({ ...message, attachments: [complete, { ...complete, id: 'existing', content: [{ type: 'file', data: blob, mimeType: 'image/png', sourceType: 'id' }] }] })
+    expect(send.mock.calls[0]![0]).toMatchObject({
+      _tag: 'Send', images: [{ bytes: file, mediaType: 'image/png', name: 'screen.png' }],
+      parameters: { content: 'hello', attachments: [{ blob, media_type: 'image/png', name: 'screen.png' }] },
+    })
+    expect(send.mock.calls[0]![0].images?.[0]?.bytes).toBe(file)
+    expect(upload).not.toHaveBeenCalled()
   })
 
-  it('fails a refused upload with its reason and sends nothing', async () => {
-    const upload = vi.fn<AttachmentPort['upload']>().mockResolvedValue({ _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' })
-    const adapter = imageUploadAdapter(upload)
-    const pending = await adapter.add({ file: new File([new Uint8Array([1])], 'screen.webp', { type: 'image/webp' }) })
-    await expect(adapter.send(pending)).rejects.toThrow('This device is not granted attachment upload.')
+  it('rejects storage refusal with the runtime not-sent contract and safe actionable copy', async () => {
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'storage', detail: 'raw-diagnostic-sentinel' })
+    const onRefused = vi.fn()
+    const options = { source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused }
+    const binding = composerSendBinding(options)
+    await expect(binding.runtime.onNew(message)).rejects.toBeInstanceOf(MessageNotSentError)
+    expect(onRefused).toHaveBeenCalledWith({ reason: 'storage' })
+    const refused = composerSendBinding({ ...options, refusal: { reason: 'storage' } })
+    expect(refused.disabledReason).toBe(sendFailureDetail('storage'))
+    expect(refused.disabledReason).toContain('Nothing was sent.')
+    expect(refused.disabledReason).toContain('Free browser storage and try again.')
+    expect(refused.disabledReason).not.toContain('raw-diagnostic-sentinel')
+  })
+
+  it('restores an identity-unavailable submission with visible retry-later copy', async () => {
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'identity-unavailable', detail: 'raw-diagnostic-sentinel' })
+    const onRefused = vi.fn()
+    const options = { source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused }
+    await expect(composerSendBinding(options).runtime.onNew(message)).rejects.toBeInstanceOf(MessageNotSentError)
+    expect(onRefused).toHaveBeenCalledWith({ reason: 'identity-unavailable' })
+    expect(sendFailureDetail('identity-unavailable')).toContain('Identity unavailable, retry later.')
+    expect(sendFailureDetail('identity-unavailable')).toContain('draft and images have been restored')
+  })
+
+  it('restores the submitted draft and original image through the actual assistant-ui runtime on storage refusal', async () => {
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'storage', detail: 'Storage unavailable' })
+    const binding = composerSendBinding({
+      source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } },
+      agentRef: seat, grants, readable: true, items: [], onRefused: vi.fn(), attachmentAdapter: imageUploadAdapter(),
+    })
+    let runtime: AssistantRuntime | undefined
+    const Probe = () => { runtime = useConversationRuntime(binding.runtime); return null }
+    const host = document.createElement('div')
+    const root = createRoot(host)
+    const file = new File(['image'], 'retained.png', { type: 'image/png' })
+    try {
+      await React.act(async () => { root.render(React.createElement(Probe)) })
+      const composer = runtime!.thread.composer
+      await React.act(async () => {
+        composer.setText('keep this draft')
+        await composer.addAttachment(file)
+        composer.send()
+      })
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledTimes(1)
+        expect(composer.getState().text).toBe('keep this draft')
+        expect(composer.getState().attachments).toHaveLength(1)
+      })
+      expect(composer.getState().attachments[0]?.file).toBe(file)
+      expect(send.mock.calls[0]?.[0].images?.[0]?.bytes).toBe(file)
+    } finally {
+      await React.act(async () => root.unmount())
+    }
   })
 
   it('does not start an upload when composer send is already canceled', async () => {
     const upload = vi.fn<AttachmentPort['upload']>()
-    const adapter = imageUploadAdapter(upload)
+    const adapter = imageUploadAdapter()
     const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
     const controller = new AbortController()
     controller.abort()
@@ -170,40 +240,15 @@ describe('composer send contract', () => {
     expect(upload).not.toHaveBeenCalled()
   })
 
-  it('preserves a pending upload abort as cancellation instead of an upload failure', async () => {
-    const started = Promise.withResolvers<void>()
-    const result = Promise.withResolvers<ConversationPortResult<BlobUpload>>()
-    const upload = vi.fn<AttachmentPort['upload']>(({ signal }) => {
-      signal?.addEventListener('abort', () => result.reject(signal.reason), { once: true })
-      started.resolve()
-      return result.promise
-    })
-    const adapter = imageUploadAdapter(upload)
+  it('revalidates image format at finalization without network I/O', async () => {
+    const adapter = imageUploadAdapter()
     const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
-    const controller = new AbortController()
-    const sending = adapter.send(pending, { signal: controller.signal })
-    await started.promise
-    controller.abort()
-    await expect(sending).rejects.toBe(controller.signal.reason)
+    await expect(adapter.send({ ...pending, contentType: 'image/svg+xml' })).rejects.toThrow('Only PNG, JPEG, GIF and WebP images can be attached.')
   })
 
-  it.each(['Success', 'Refused'] as const)('does not attach or report a late %s upload result after cancellation', async (tag) => {
-    const result = Promise.withResolvers<ConversationPortResult<BlobUpload>>()
-    const upload = vi.fn<AttachmentPort['upload']>(() => result.promise)
-    const adapter = imageUploadAdapter(upload)
-    const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
-    const controller = new AbortController()
-    const sending = adapter.send(pending, { signal: controller.signal })
-    controller.abort()
-    result.resolve(tag === 'Success'
-      ? { _tag: 'Success', value: { blob: `blob/${'a'.repeat(64)}`, sha256: 'a'.repeat(64), size: 5, media_type: 'image/png' } }
-      : { _tag: 'Refused', reason: 'failed', detail: 'Late failure must not replace cancellation' })
-    await expect(sending).rejects.toBe(controller.signal.reason)
-  })
-
-  it('refuses images over 10 MiB before upload, including drafts staged before validation', async () => {
+  it('refuses images over 10 MiB before staging, including drafts staged before validation', async () => {
     const upload = vi.fn<AttachmentPort['upload']>()
-    const adapter = imageUploadAdapter(upload)
+    const adapter = imageUploadAdapter()
     const oversized = new File([new Uint8Array(12 * 1024 * 1024)], 'large.png', { type: 'image/png' })
     await expect(adapter.add({ file: oversized })).rejects.toThrow('Images must be 10 MiB or smaller. Choose a smaller image and try again.')
     const pending = await adapter.add({ file: new File(['image'], 'small.png', { type: 'image/png' }) })
@@ -215,7 +260,7 @@ describe('composer send contract', () => {
 
   it('retains attachment presentation but offers uploads only while both grants are present', async () => {
     const attachments = { capabilities: vi.fn(), upload: vi.fn<AttachmentPort['upload']>(), chunk: vi.fn(), send: vi.fn<AttachmentPort['send']>() }
-    const adapter = imageUploadAdapter(attachments.upload)
+    const adapter = imageUploadAdapter()
     const bind = (overrides: Partial<Grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
     const pending = await adapter.add({ file: new File(['image'], 'staged.png', { type: 'image/png' }) })
     // The upload grant names a permission loss; other losses are temporary. The composer appends the way out.

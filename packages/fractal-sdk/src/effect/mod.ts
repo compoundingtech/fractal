@@ -34,6 +34,8 @@ import {
   type CollectionSocketFactory,
   type CollectionStream,
   type Resource as ResourceWire,
+  type Capabilities as CapabilitiesWire,
+  type EnvelopeOf,
   isTransientCode,
   isTransient,
   FractalClient,
@@ -376,6 +378,10 @@ export interface FractalOptions {
   readonly fetch?: typeof fetch
   /** Authoritative transitions and frame work, without coupling the SDK to a metrics library. */
   readonly onDiagnostics?: (event: FractalDiagnostic) => void
+  /** Observe the channel's canonical discovery response without issuing another identity read. */
+  readonly onCapabilities?: (response: EnvelopeOf<CapabilitiesWire>) => void
+  /** A channel discovery attempt failed; consumers must not wait indefinitely for its identity. */
+  readonly onProbeFailure?: () => void
   /** Called with the wire id after a follow's subscribe command is sent on an open WebSocket; includes resubscribe sends. */
   readonly onSubscribeSent?: (id: string) => void
   /** Actual-send callback with the canonical followKey; includes queued-open and resubscribe sends. */
@@ -593,16 +599,19 @@ const make = (options: FractalOptions) =>
       parentSpan: options.parentSpan,
       commandTraceContext: () => outbound,
       ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
-      onCapabilities: (envelope: AdvertisedEnvelope) => {
+      onCapabilities: (envelope) => {
         attentionThreadHintsGranted = envelope.value.capabilities.some(capability =>
           capability.id === 'collection.attention.thread-hints' && capability.state === 'granted' && capability.version >= 1,
         )
         Effect.runFork(Deferred.succeed(firstProbe, undefined))
+        // Observers must not interrupt connection or admission state handling.
+        try { options.onCapabilities?.(envelope) } catch {}
         if (options.conversationSlots === 'advertised')
           acceptBudget(advertisedSubscriptionLimit(envelope))
       },
       onProbeFailure: () => {
         attentionThreadHintsGranted = false
+        try { options.onProbeFailure?.() } catch {}
         Effect.runFork(Deferred.fail(firstProbe, new AttachFailure({ message: 'Roster discovery is unavailable.' })))
         // A refused or unavailable first probe still releases every admission waiter.
         // Permanent rejection is reported by the channel to each follow, not hidden

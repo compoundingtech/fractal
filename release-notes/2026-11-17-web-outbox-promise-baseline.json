@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep browser outbox IndexedDB operations within the supported Promise baseline",
+  "replay": {"status": "none", "detail": "Dispatch permits, retry policy and outcome retention are unchanged."},
+  "schema": {"status": "none", "detail": "No browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "IndexedDB opening and transactions use standard Promise constructors instead of Promise.withResolvers, preserving the existing ES2023 kit and browser baseline without raising the configured library target. A synthetic test field is renamed without changing its recovery assertions."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required."},
+  "recovery": {"status": "none", "detail": "Existing corrupt-record quarantine, discard and transaction-completion durability behavior are unchanged."}
+}

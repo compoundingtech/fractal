@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recover each browser outbox scope once before exposing its send repository",
+  "replay": {"status": "none", "detail": "Startup recovery never submits saved actions. Unknown attempts remain non-retryable; explicit applied:none retains the existing deliberate fresh-child retry policy."},
+  "schema": {"status": "none", "detail": "Reuses existing browser-local IndexedDB envelopes and storage namespace without migration."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Scoped repositories wait for one shared initialization barrier with a current identity check. Restored never-dispatched thread Start and reply require original-target revalidation before acquiring a dispatch permit. Missing issuer remains explicitly unprotected."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required."},
+  "recovery": {"status": "changed", "detail": "Initialization preserves pending preparation/ready work, demotes unresolved dispatch markers to unknown, and retains corruption as discard-only recovery. Repeated initialization and recovery inspection do not demote the same connection's live dispatch. Foreign-scope records remain unchanged. A new tab may demote an in-flight marker while a later identity-correlated receipt can still settle it. Storage failures remain unavailable, not corrupt."}
+}

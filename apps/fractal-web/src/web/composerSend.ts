@@ -1,8 +1,12 @@
+import { MessageNotSentError } from '@assistant-ui/react'
 import type { ConversationRuntimeOptions } from '@fractal/ui/assistant-ui'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
-import type { AttachmentPort, AttachmentSendRequest, DataSource, Grants } from '../data/source.ts'
+import type { AttachmentSendRequest, DataSource, Grants, SendImage } from '../data/source.ts'
 
 export type SendRefusal = { readonly reason: string }
+
+// Only these connection/acceptance refusals block new drafts; all delivery failures stay on their row.
+const composerRefusalReasons = ['ungranted', 'invalid', 'storage', 'identity-unavailable'] as const
 
 type AttachmentAdapter = NonNullable<NonNullable<ConversationRuntimeOptions['adapters']>['attachments']>
 type PendingAttachment = Parameters<AttachmentAdapter['send']>[0]
@@ -17,11 +21,8 @@ const maxImageBytes = 10 * 1024 * 1024
 const imageSizeRefusal = 'Images must be 10 MiB or smaller. Choose a smaller image and try again.'
 const isImageMediaType = (value: string | undefined): value is ImageMediaType => imageMediaTypes.some(type => type === value)
 
-/**
- * Composer images upload when the message is sent, never while drafting. A refused upload rejects, so the
- * runtime returns the draft with the attachment marked failed and its reason; nothing is sent.
- */
-export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<AttachmentAdapter, 'add'> & { readonly add: (state: { readonly file: File }) => Promise<PendingAttachment> } => ({
+/** Finalize local images without network I/O; the source spools their bytes before uploading. */
+export const imageUploadAdapter = (): Omit<AttachmentAdapter, 'add'> & { readonly add: (state: { readonly file: File }) => Promise<PendingAttachment> } => ({
   accept: imageMediaTypes.join(','),
   add: async ({ file }) => {
     if (!isImageMediaType(file.type)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
@@ -35,11 +36,7 @@ export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<Attac
     const mediaType = attachment.contentType
     if (!isImageMediaType(mediaType)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
     if (attachment.file.size > maxImageBytes) throw new Error(imageSizeRefusal)
-    const uploaded = await upload({ bytes: attachment.file, mediaType, signal })
-    signal?.throwIfAborted()
-    if (uploaded._tag === 'Refused') throw new Error(uploaded.detail)
-    // The upload's blob reference is the attachment; message.send names it, the bytes stay with Fractal.
-    return { ...attachment, status: { type: 'complete' }, content: [{ type: 'file', data: uploaded.value.blob, mimeType: uploaded.value.media_type, filename: attachment.name, sourceType: 'id' }] }
+    return { ...attachment, status: { type: 'complete' }, content: [] }
   },
 })
 
@@ -48,15 +45,21 @@ const sendAttachment = ({ blob, mediaType, name }: { readonly blob: string; read
   isImageMediaType(mediaType) ? { blob, media_type: mediaType, name } : undefined
 
 type ComposerAttachments = Parameters<ConversationRuntimeOptions['onNew']>[0]['attachments']
-const uploadedAttachments = (attachments: NonNullable<ComposerAttachments>): SendAttachment[] | undefined => {
-  const sendable: SendAttachment[] = []
+const stagedAttachments = (attachments: NonNullable<ComposerAttachments>): { readonly references: SendAttachment[]; readonly images: SendImage[] } | undefined => {
+  const references: SendAttachment[] = []
+  const images: SendImage[] = []
   for (const attachment of attachments) {
     const part = attachment.content.find(part => part.type === 'file' && part.sourceType === 'id')
-    const reference = part?.type === 'file' ? sendAttachment({ blob: part.data, mediaType: part.mimeType, name: attachment.name }) : undefined
-    if (reference === undefined) return undefined
-    sendable.push(reference)
+    if (part?.type === 'file') {
+      const reference = sendAttachment({ blob: part.data, mediaType: part.mimeType, name: attachment.name })
+      if (reference === undefined) return undefined
+      references.push(reference)
+    } else {
+      if (attachment.file === undefined || !isImageMediaType(attachment.contentType) || attachment.file.size > maxImageBytes) return undefined
+      images.push({ bytes: attachment.file, mediaType: attachment.contentType, name: attachment.name })
+    }
   }
-  return sendable
+  return { references, images }
 }
 
 const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>['reason'], string>>
@@ -68,6 +71,8 @@ const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>
     'stale-fence': 'The conversation changed before this message could be sent. Retry to use its current state.',
     'snapshot-unavailable': 'The conversation could not be loaded for sending. Nothing was sent. Retry when it is available.',
     unconfirmed: 'Fractal may have taken this message and has not confirmed it yet. Do not send it again.',
+    storage: 'This browser could not save the message safely. Nothing was sent. Your draft and images have been restored. Free browser storage and try again.',
+    'identity-unavailable': 'Identity unavailable, retry later. Nothing was sent. Your draft and images have been restored.',
   }
 
 /** Send diagnostics are not display copy, including for unclassified failure reasons. */
@@ -99,6 +104,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : source.attachments === undefined ? 'This view cannot send messages.'
     // Before Fractal has answered which operations this browser holds, the default grants are not a refusal.
     : grants.unread === true ? 'Checking whether this browser can send messages…'
+    : grants.sendUnavailable !== undefined ? grants.sendUnavailable
     : grants.messageSend !== 'granted' ? 'Message send is not granted for this device.'
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const uploads = attachmentAdapter !== undefined && disabledReason === undefined && grants.attachmentUpload === 'granted' ? attachmentAdapter : undefined
@@ -111,7 +117,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     add: async () => { throw new Error(imageDisabledReason) },
     send: async () => { throw new Error(imageDisabledReason) },
   })
-  const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string) => {
+  const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string, images?: readonly SendImage[]) => {
     if (source.attachments === undefined || grants.messageSend !== 'granted') return
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     const request = {
@@ -124,11 +130,12 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     let confirmed = false
     try {
       const result = await source.attachments.send(retryKey === undefined
-        ? { ...request, _tag: 'Send' }
+        ? { ...request, _tag: 'Send', ...(images === undefined || images.length === 0 ? {} : { images }) }
         : { ...request, _tag: 'Resend', idempotencyKey: retryKey })
       // Retryable send failures belong to the outbox row, not the next draft's availability.
-      if (result._tag === 'Refused' && result.reason !== 'failed' && result.reason !== 'unconfirmed'
-        && result.reason !== 'stale-fence' && result.reason !== 'snapshot-unavailable') onRefused({ reason: result.reason })
+      if (result._tag === 'Refused' && composerRefusalReasons.some(reason => reason === result.reason)) onRefused({ reason: result.reason })
+      // assistant-ui restores the submitted text AND complete local attachments only for this rejection.
+      if (result._tag === 'Refused' && (result.reason === 'storage' || result.reason === 'identity-unavailable')) throw new MessageNotSentError(sendFailureDetail(result.reason))
       confirmed = result._tag === 'Success' && result.value.status === 'completed'
     } finally {
       settled?.({ _tag: confirmed ? 'Confirmed' : 'Unconfirmed' })
@@ -145,12 +152,12 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
       ...(runtimeAttachments === undefined ? {} : { adapters: { attachments: runtimeAttachments } }),
       onNew: async (message) => {
         if (disabledReason !== undefined) return
-        const sendable = uploadedAttachments(message.attachments ?? [])
+        const sendable = stagedAttachments(message.attachments ?? [])
         if (sendable === undefined) {
           onRefused({ reason: 'invalid' })
-          return
+          throw new MessageNotSentError(sendFailureDetail('invalid'))
         }
-        await dispatch(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), sendable)
+        await dispatch(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), sendable.references, undefined, sendable.images)
       },
       // Deliberately no onCancel: runtime.signal is not a send-cancel contract. The pane wires Stop to the agent's interrupt.
     },

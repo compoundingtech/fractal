@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Invalidate the shared browser startup identity after reconnect",
+  "replay": {"status": "none", "detail": "Unknown attempts remain non-retryable; no automatic replay is added."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Initial discovery reuse is limited to the current startup observation. Reconnect, failed probes and newer identity observations require a fresh capabilities read, including when the first composer mounts late."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Late composer startup recovers the current authenticated scope instead of switching back to a previous identity. Persisted scope tuples are never rewritten."}
+}

@@ -9,13 +9,15 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createScopedChatOutbox, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { credentialExpiredMessage, type ConversationPage } from '../data/source.ts'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { LiveAgentThreads, LiveInboxThreads, LiveMissionThreads, LiveThreadPane } from './LiveThreads.tsx'
-import { gatewayThreads } from './threadSource.ts'
+import { gatewayThreads, type RetainedThreadStart, type ThreadSendResult, type ThreadSource } from './threadSource.ts'
 import { ConversationPane } from '../web/ConversationPane.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -43,10 +45,12 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
-/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, `unreachable` fails every request, capabilities included, and `agents` is the roster. */
-async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [] }: {
+/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, `unreachable` fails every request, capabilities included, `agents` is the roster, and `adapt` may replace parts of the mounted thread source. */
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [], adapt, outbox }: {
   readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean; readonly conversation?: ConversationPage
   readonly agents?: readonly AgentRow[]
+  readonly adapt?: (threads: ThreadSource) => ThreadSource
+  readonly outbox?: (client: FractalClient) => ScopedChatOutbox
 }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -74,11 +78,12 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
   } })
   const registry = AtomRegistry.make()
   const gateway = Atom.make<FeedSyncObservation>(live).pipe(Atom.keepAlive)
-  const threads = gatewayThreads(client, registry)
+  const owner = outbox?.(client)
+  const threads = gatewayThreads(client, registry, undefined, undefined, owner)
   const source = { ...fixtureSource({ world: {
     now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents, missions: [], attention: [ask],
     conversations: conversation === undefined ? {} : { [agent]: conversation }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
-  } }), threads, sync: {
+  } }), threads: adapt?.(threads) ?? threads, sync: {
     gateway,
     agents: Atom.make(initialFeedSync<readonly DecodedAgent[]>(0)),
     missions: Atom.make(initialFeedSync<readonly Mission[]>(0)),
@@ -97,6 +102,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
     dispose: async () => {
       await act(async () => root.unmount())
       registry.dispose()
+      owner?.close()
       host.remove()
       vi.unstubAllGlobals()
     },
@@ -659,4 +665,126 @@ it.each(['empty', 'unavailable'] as const)('keeps agent threads in the main read
     expect(dock?.querySelector('textarea')).toBe(ordinaryInput)
     expect(panel?.querySelector('textarea')).not.toBe(ordinaryInput)
   } finally { await view.dispose() }
+})
+
+it('offers Retry thread start only for a start Fractal proved it did not apply, and retries that original draft', async () => {
+  const origin = { source_id: 'custom/garden/review/origin', episode: 'claim/episode' }
+  const starts = Atom.make<readonly RetainedThreadStart[]>([
+    { draftKey: 'draft/unknown', targetId: 'thread/unknown', state: 'unconfirmed', parameters: { agent_id: agent, origin, title: 'Unconfirmed start', content: 'This may have landed.' } },
+    { draftKey: 'draft/refused', targetId: 'thread/refused', state: 'not-applied', parameters: { agent_id: agent, origin, title: 'Not applied start', content: 'This never landed.' } },
+  ])
+  const retryStart = vi.fn(async (_draftKey: string): Promise<ThreadSendResult> => ({ _tag: 'Refused', detail: 'The recipient is retired, so no thread can start here.' }))
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    actions: ['thread.start'], reply: () => page([]),
+    adapt: threads => ({ ...threads, pendingStarts: () => starts, retryStart }),
+  })
+  const panel = (title: string) => view.host.querySelector<HTMLElement>(`[data-thread-panel][aria-label="${title}"]`)
+  const buttons = (title: string) => [...panel(title)?.querySelectorAll('button') ?? []].map(button => button.textContent)
+  try {
+    await vi.waitFor(() => expect(panel('Not applied start')).not.toBeNull())
+    // An unconfirmed start may have landed: it keeps its neutral copy and never offers to send again.
+    expect(panel('Unconfirmed start')?.textContent).toContain('Fractal has not confirmed this action. Do not send it again.')
+    expect(buttons('Unconfirmed start')).not.toContain('Retry thread start')
+    expect(panel('Unconfirmed start')?.querySelector('[data-thread-start-not-applied]')).toBeNull()
+    expect(panel('Not applied start')?.textContent).toContain('Fractal did not apply this thread start.')
+    expect(panel('Not applied start')?.textContent).not.toContain('Do not send it again.')
+    expect(buttons('Not applied start').filter(name => name === 'Retry thread start')).toHaveLength(1)
+    // A retained start stands in for the editor; no recovery actions beyond Retry are offered.
+    expect(view.button('Start thread')).toBeUndefined()
+    expect(view.button('Resume')).toBeUndefined()
+    const retry = [...panel('Not applied start')!.querySelectorAll('button')].find(button => button.textContent === 'Retry thread start')
+    await act(async () => retry?.click())
+    expect(retryStart).toHaveBeenCalledExactlyOnceWith('draft/refused')
+    // The source's refusal lands beside the retained start, which stays for another explicit Retry.
+    await vi.waitFor(() => expect(panel('Not applied start')?.querySelector('[data-thread-refusal]')?.textContent).toContain('The recipient is retired'))
+    expect(buttons('Not applied start')).toContain('Retry thread start')
+  } finally { await view.dispose() }
+})
+
+it.each([['unprotected', true], ['absent', false]] as const)('marks start and reply composers when send protection is %s', async (protection, shown) => {
+  const notice = 'Unprotected: messages are not saved on this device before sending.'
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    actions: ['thread.start', 'thread.reply'],
+    reply: url => url.pathname.endsWith('/threads') ? page(url.searchParams.get('recently_closed') === 'true' ? [] : [row('thread/one', 'Rollout notes')])
+      : url.pathname.endsWith('/timeline') ? page([])
+      : Response.json({ ...base, value: row('thread/one', 'Rollout notes') }),
+    // Both cases pin the access answer: an explicit unprotected claim, or a fixture that omits the optional property.
+    adapt: threads => ({ ...threads, access: Atom.make(get => {
+      const { protection: _observed, ...access } = get(threads.access)
+      return { ...access, ...(protection === 'unprotected' ? { protection } : {}) }
+    }) }),
+  })
+  const panel = (title: string) => view.host.querySelector<HTMLElement>(`[data-thread-panel][aria-label="${title}"]`)
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    expect(view.host.querySelector('[data-thread-unprotected]')).toBeNull()
+    await act(async () => view.button('Start thread')?.click())
+    await vi.waitFor(() => expect(panel('Release checklist')?.querySelector('textarea')).not.toBeNull())
+    const header = panel('Rollout notes')?.querySelector<HTMLButtonElement>('button[aria-expanded]')
+    if (header?.getAttribute('aria-expanded') !== 'true') await act(async () => header?.click())
+    await vi.waitFor(() => expect(panel('Rollout notes')?.querySelector('textarea')).not.toBeNull())
+    for (const title of ['Release checklist', 'Rollout notes']) {
+      expect(panel(title)?.querySelector('[data-thread-unprotected]')?.textContent).toBe(shown ? notice : undefined)
+    }
+    expect(view.host.textContent?.includes(notice)).toBe(shown)
+  } finally { await view.dispose() }
+})
+
+it.each(['SecurityError', 'blocked upgrade'] as const)('keeps thread list and timeline readable when send storage fails with %s', async failure => {
+  const factory = new IDBFactory()
+  const databaseName = 'thread-read-storage-failure'
+  let held: IDBDatabase | undefined
+  let opening: IDBOpenDBRequest | undefined
+  if (failure === 'blocked upgrade') {
+    held = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open(databaseName, 1)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+  }
+  const view = await mount(<LiveAgentThreads agentId={agent} />, {
+    capabilities: () => Response.json({ ...base, value: { ...base.value,
+      issuer: 'person/example', issuer_key: 'issuer-key/storage-read', transport: 'local-web',
+      capabilities: [...base.value.capabilities,
+        { id: 'threads-v1', version: 3, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+        { id: 'thread.reply', version: 0, state: 'granted' },
+        { id: 'thread.read', version: 0, state: 'granted' }],
+    } }),
+    outbox: client => createScopedChatOutbox(client, { databaseName, indexedDB: {
+      open: name => {
+        if (failure === 'SecurityError') throw new DOMException('Storage disabled', 'SecurityError')
+        opening = factory.open(name, 2)
+        return opening
+      },
+    } }),
+    reply: url => url.pathname.endsWith('/threads') ? page([row('thread/readable', 'Readable thread')])
+      : url.pathname.endsWith('/timeline') ? page([{ kind: 'message', id: 'message/readable', actor_id: agent,
+        content: 'The existing timeline still loads.', accepted_at_unix_ms: 1, thread_quote_id: null }])
+      : Response.json({ ...base, value: row('thread/readable', 'Readable thread') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 1'))
+    await act(async () => view.host.querySelector('summary')?.click())
+    await act(async () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel] button[aria-expanded]')?.click())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The existing timeline still loads.'))
+    expect(view.host.querySelector('[role="status"]')?.textContent).toContain('Saved messages are unavailable. Retry later.')
+    expect(view.host.querySelector('textarea')).toBeNull()
+    await expect(view.threads.reply({ target_id: 'thread/readable', content: 'Do not submit' })).resolves.toMatchObject({
+      _tag: 'Refused', detail: 'Saved messages are unavailable. Retry later.',
+    })
+    expect(view.requests.some(url => url.pathname.endsWith('/actions'))).toBe(false)
+    expect(view.host.textContent).not.toContain('Fractal could not load threads.')
+  } finally {
+    await view.dispose()
+    if (held !== undefined) {
+      const finished = new Promise<void>((resolve, reject) => {
+        if (opening === undefined) return resolve()
+        opening.addEventListener('success', () => resolve(), { once: true })
+        opening.addEventListener('error', () => reject(opening?.error), { once: true })
+      })
+      held.close()
+      await finished
+    }
+  }
 })

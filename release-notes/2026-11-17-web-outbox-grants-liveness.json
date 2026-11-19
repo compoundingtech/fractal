@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish browser send-grant evaluation after concurrent recovery discovery",
+  "replay": {"status": "none", "detail": "Unknown attempts remain non-retryable; no automatic action replay is added."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Chat and thread access publish after initialization when newer observations retain the same identity. A different identity triggers a fresh capabilities read and initialization rather than leaving the composer checking forever. Evaluation stops on abort or disposal."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Recovery identity reads can advance the monotonic scope cache without starving send-grant evaluation. Loops advance only after newer different observations; no timer or fixed retry limit is introduced."}
+}

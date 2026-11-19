@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep browser shell readiness independent of outbox identity and storage initialization",
+  "replay": {"status": "none", "detail": "No packet replay or delivery-certainty changes. Unknown attempts remain non-retryable."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "The read-only shell and roster no longer wait for the channel capabilities probe or browser storage. Send grants and recovery still await scoped outbox initialization and current identity checks."},
+  "downtime": {"status": "none", "detail": "No server interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required."},
+  "recovery": {"status": "none", "detail": "Outbox recovery remains asynchronous and scope-checked; initialization failures keep sending unavailable without blocking read-only page rendering."}
+}
