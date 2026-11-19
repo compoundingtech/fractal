@@ -67,6 +67,11 @@ threshold does not suspend seats or automatically resume suspended seats. The
 threshold and concurrency limit configure the policy without activating an
 automatic suspension producer.
 
+Enabling the threshold starts a new local policy epoch: prior idle time does not
+count toward it. An enabled threshold edit retains that epoch; turning the
+threshold off clears it. A replacement daemon starts a fresh epoch when loading
+an enabled policy, so every seat waits the full threshold again.
+
 Both settings reload with the daemon policies on the existing two-minute loop;
 no daemon restart is needed. Missing, unreadable, malformed, or invalid
 configuration keeps the last valid policies. Removing these settings restores

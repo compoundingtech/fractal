@@ -721,17 +721,34 @@ impl Default for IdleResidencySettings {
     }
 }
 
-static IDLE_RESIDENCY_SETTINGS: std::sync::LazyLock<std::sync::Mutex<IdleResidencySettings>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(IdleResidencySettings::default()));
-
-/// The last idle-residency policy applied by the daemon, not an unvalidated config-file read.
-pub fn idle_residency_settings() -> IdleResidencySettings {
-    *IDLE_RESIDENCY_SETTINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IdleResidencyPolicy {
+    pub settings: IdleResidencySettings,
+    pub enabled_at_unix_ms: Option<u128>,
 }
 
-/// Publish the effective policy for owner-local residency diagnostics.
-pub fn set_idle_residency_settings(settings: IdleResidencySettings) {
-    *IDLE_RESIDENCY_SETTINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+impl IdleResidencyPolicy {
+    pub fn update(&mut self, settings: IdleResidencySettings, now: u128) {
+        self.enabled_at_unix_ms = match (self.settings.after_ms, settings.after_ms) {
+            (_, None) => None,
+            (None, Some(_)) => Some(now),
+            (Some(_), Some(_)) => self.enabled_at_unix_ms,
+        };
+        self.settings = settings;
+    }
+}
+
+static IDLE_RESIDENCY_POLICY: std::sync::LazyLock<std::sync::Mutex<IdleResidencyPolicy>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(IdleResidencyPolicy::default()));
+
+/// Effective policy and its process-local activation epoch. Restarting never inherits idle age.
+pub fn idle_residency_policy() -> IdleResidencyPolicy {
+    *IDLE_RESIDENCY_POLICY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish the daemon's locally owned policy for API diagnostics and card-cache identity.
+pub fn set_idle_residency_policy(policy: IdleResidencyPolicy) {
+    *IDLE_RESIDENCY_POLICY.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
 }
 
 /// The config file the running daemon was started with, so its `[limits]` can be read again.
@@ -2182,6 +2199,37 @@ sekrets_profile = "nathan/daemon-gh"
                 toml::from_str(&format!("[reconcile]\n{field} = \"{value}\"\n")).unwrap();
             assert!(parsed.validate().is_err(), "{field} = {value}");
         }
+    }
+
+    #[test]
+    fn idle_residency_activation_epoch_is_local_and_survives_only_enabled_edits() {
+        let mut policy = IdleResidencyPolicy::default();
+        assert_eq!(policy.settings, IdleResidencySettings::default());
+        assert_eq!(policy.enabled_at_unix_ms, None);
+        let enabled = IdleResidencySettings {
+            after_ms: Some(15 * 60_000),
+            resume_concurrency: 2,
+        };
+        policy.update(enabled, 1_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        let edited = IdleResidencySettings {
+            after_ms: Some(30 * 60_000),
+            resume_concurrency: 4,
+        };
+        policy.update(edited, 2_000);
+        assert_eq!(policy.settings, edited);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        policy.update(edited, 3_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(1_000));
+        policy.update(IdleResidencySettings::default(), 4_000);
+        assert_eq!(policy.enabled_at_unix_ms, None);
+        policy.update(enabled, 5_000);
+        assert_eq!(policy.enabled_at_unix_ms, Some(5_000));
+        // A replacement daemon loads the same enabled settings into fresh process-local state.
+        let mut restarted = IdleResidencyPolicy::default();
+        restarted.update(enabled, 6_000);
+        assert_eq!(restarted.settings, enabled);
+        assert_eq!(restarted.enabled_at_unix_ms, Some(6_000));
     }
 
     #[test]
