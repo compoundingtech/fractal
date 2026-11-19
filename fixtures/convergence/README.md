@@ -525,3 +525,10 @@ replicates every resulting claim to the oracle. Full registry-kind coverage rema
 New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
 old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
 must come from actual v38 outcomes rather than assuming historical results still apply.
+
+In [hosted run 44486252490, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44486252490/job/135438980421),
+seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
+`after excuse and cut=None`), so its v37 non-trimming expectation no longer applies.
+The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
+The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
+the three-seed cap and majority trim coverage remain enforced.
