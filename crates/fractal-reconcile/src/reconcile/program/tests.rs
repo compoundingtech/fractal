@@ -601,6 +601,7 @@ fn frozen_resource_exec(timed_out_drain: bool) {
         max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }),
         coverage: Coverage::Logical, admission_timeout_ms: None,
         class: Default::default(), disk: None, io: None,
+        profile: None, profile_estimate: None, disk_path: None,
         owner: Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
             attempt: 1, invocation: Some("program:checks".into()) },
     };
