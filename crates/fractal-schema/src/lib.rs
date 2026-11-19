@@ -4409,6 +4409,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "runtime.action.requested" => &[
             ("action", string()),
             ("cause", string()),
+            ("idle_declaration", string()),
+            ("idle_after_ms", integer()),
+            ("idle_enabled_at_unix_ms", integer()),
+            ("idle_eligible_since_unix_ms", integer()),
+            ("idle_frontier", object()),
+            ("suspend_operation_id", string()),
+            ("idle_wake_lineage", string()),
+            ("idle_wake_attempt", integer()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -5639,6 +5647,11 @@ mod tests {
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
+            "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
+            "idle_wake_lineage", "idle_wake_attempt"] {
+            current.claims.get_mut("runtime.action.requested").unwrap().fields.remove(field).unwrap();
+        }
         for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
             for field in ["cause", "mode", "request_key", "operation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();

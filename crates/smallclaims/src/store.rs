@@ -969,6 +969,7 @@ pub struct Store {
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
+    pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1338,6 +1339,7 @@ impl Store {
             connection,
             admitted: None,
             checkpoint_verify_latest: Default::default(),
+            checkpoint_worker: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -7367,6 +7369,17 @@ impl Store {
 
     /// Seal the next chunk, keeping its payload within `budget` bytes but for one larger batch.
     fn seal_local_batch_chunk_within(&self, target: i64, budget: usize) -> Result<bool> {
+        self.seal_local_batch_chunk_with_loan_budget(
+            target, budget, std::time::Duration::from_millis(10),
+        )
+    }
+
+    fn seal_local_batch_chunk_with_loan_budget(
+        &self,
+        target: i64,
+        budget: usize,
+        loan_budget: std::time::Duration,
+    ) -> Result<bool> {
         let prepared = {
             let _timing = time_stage(&self.replication_timers.snapshot);
             self.prepare_seal(target, budget)?
@@ -7379,6 +7392,7 @@ impl Store {
             change(self);
         }
         let mut connection = self.connection.write();
+        let loan_started = std::time::Instant::now();
         let _timing = time_stage(&self.replication_timers.snapshot);
         let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
         if seeded_through >= target {
@@ -7387,14 +7401,19 @@ impl Store {
         if seeded_through == prepared.seeded_through {
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if self.seal_prepared_tx(&transaction, &prepared)? {
+            if let Some(through) =
+                self.seal_prepared_tx(&transaction, &prepared, loan_started, loan_budget)?
+            {
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h0497b81f01fb owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    [prepared.through.to_string()],
+                    [through.to_string()],
                 )?;
                 transaction.commit()?;
-                self.seeded_batch_rowid.store(prepared.through, Ordering::Release);
-                crate::windows::holds::covered("sealed batches", prepared.batches.len());
+                self.seeded_batch_rowid.store(through, Ordering::Release);
+                crate::windows::holds::covered(
+                    "sealed batches",
+                    prepared.batches.iter().take_while(|batch| batch.batch.rowid <= through).count(),
+                );
                 // The FIFO writer services already queued requests before the next bounded loan.
                 return Ok(true);
             }
