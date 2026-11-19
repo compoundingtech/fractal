@@ -232,7 +232,7 @@ impl ProofOwnership {
         }
         if !failures.is_empty() {
             eprintln!(
-                "st3: checkpoint proof orphan cleanup refused: {}",
+                "fractal: checkpoint proof orphan cleanup refused: {}",
                 failures.join("; ")
             );
             bail!("checkpoint proof cleanup refused: {}", failures.join("; "));
@@ -254,7 +254,7 @@ impl ProofOwnership {
             remove_if_present(&marker_path, &mut cleanup);
             if !cleanup.is_empty() {
                 eprintln!(
-                    "st3: checkpoint proof owner cleanup failed: {}",
+                    "fractal: checkpoint proof owner cleanup failed: {}",
                     cleanup.join("; ")
                 );
             }
@@ -289,7 +289,7 @@ impl ProofOwnership {
         self.remove_set(proof, &mut failures);
         if !failures.is_empty() {
             eprintln!(
-                "st3: checkpoint proof cleanup failed: {}",
+                "fractal: checkpoint proof cleanup failed: {}",
                 failures.join("; ")
             );
             bail!("checkpoint proof cleanup failed: {}", failures.join("; "));
@@ -899,7 +899,7 @@ impl SpaceGuard {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             eprintln!(
-                "st3: checkpoint proof copy exceeds admission snapshot: source_snapshot_logical={} source_pre_vacuum_logical={} copied_logical={} copy_bound={} Delta_tree_pages={} Delta_pointer_pages={} G_w_pages={} E_d_copy_excess={} source_grew_before_vacuum={} structural_or_concurrent_extra={}",
+                "fractal: checkpoint proof copy exceeds admission snapshot: source_snapshot_logical={} source_pre_vacuum_logical={} copied_logical={} copy_bound={} Delta_tree_pages={} Delta_pointer_pages={} G_w_pages={} E_d_copy_excess={} source_grew_before_vacuum={} structural_or_concurrent_extra={}",
                 self.snapshot_logical,
                 source_before_vacuum,
                 logical,

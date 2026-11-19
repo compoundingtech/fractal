@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the built TUI (spaces) in a real PTY, with or without a local st daemon.
 
-Run with ST3_PERSON=person/<you> python3 crates/fractal-tui/tests/pty_smoke.py.
+Run with FRACTAL_PERSON=person/<you> python3 crates/fractal-tui/tests/pty_smoke.py.
 The script reports only checks and byte counts; it never prints terminal contents.
 """
 

@@ -859,7 +859,7 @@ impl SeatsStore for Store {
         if requested != 0 && waited > AGENT_ROSTER_OVERDUE_MS
             && !self.fractal.agent_roster_overdue_warned.swap(true, std::sync::atomic::Ordering::AcqRel)
         {
-            eprintln!("st3: WARN an agents roster refresh asked for {} s ago is still unanswered; \
+            eprintln!("fractal: WARN an agents roster refresh asked for {} s ago is still unanswered; \
                 serving the newest published roster", waited / 1000);
         }
     }

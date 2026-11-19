@@ -1,4 +1,4 @@
-//! Bake this checkout's build identity, per the shared build-versioning contract. Only the final binaries (st2, st3) depend
+//! Bake this checkout's build identity, per the shared build-versioning contract. Only the final Fractal binaries depend
 //! on this crate and hand the identity to the libraries at startup (`fractal_drivers::version::set_build_stamps`), so a new commit
 //! rebuilds those binaries and none of the libraries most of the workspace depends on.
 //!
@@ -87,7 +87,7 @@ fn main() {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
         // Reject an invalid release identity during the build, before emitting a stamp.
-        // This is the same local machine-version grammar as st-drivers::version.
+        // This is the same local machine-version grammar as fractal-drivers::version.
         let version = std::env::var("CARGO_PKG_VERSION")
             .expect("Cargo must supply the package version to the build stamp generator");
         let suffix = if dirty { ".dirty" } else { "" };

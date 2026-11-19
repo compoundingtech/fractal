@@ -37,7 +37,7 @@ fn without_a_profiled_task_there_is_no_span_and_the_trim_is_unchanged() {
 fn a_profiled_resume_records_the_resume_delete_and_final_mark_phases_once() {
     // Profiling is process-global. A child gives this test its own enabled profiler without
     // changing the accounting of other tests running in parallel.
-    const CHILD: &str = "ST3_PROFILE_TRIM_PHASE_TEST_CHILD";
+    const CHILD: &str = "FRACTAL_PROFILE_TRIM_PHASE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())

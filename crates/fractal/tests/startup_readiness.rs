@@ -283,7 +283,7 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     assert_eq!(readiness.total, Some(0));
     let early_log = std::fs::read_to_string(&log_path).unwrap();
     assert!(early_log.contains("fractal: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
-    assert!(!early_log.contains("st3: startup phases "), "{early_log}");
+    assert!(!early_log.contains("fractal: startup phases "), "{early_log}");
     // Both addresses exist early, but neither is listening or queueing a request
     // while projection is uncommitted. Keep the main refusal/phase contract.
     for path in [
@@ -404,7 +404,7 @@ esac
     let log = std::fs::read_to_string(&log_path).unwrap();
     let timing_lines = log
         .lines()
-        .filter_map(|line| line.strip_prefix("st3: startup phases "))
+        .filter_map(|line| line.strip_prefix("fractal: startup phases "))
         .collect::<Vec<_>>();
     assert_eq!(timing_lines.len(), 1, "{log}");
     let timings: Value = serde_json::from_str(timing_lines[0]).unwrap();
@@ -427,7 +427,7 @@ esac
         }
     }
     assert!((phase_sum_ms - total_ms).abs() < 0.001, "{timings}");
-    eprintln!("st3: startup phases {}", timing_lines[0]);
+    eprintln!("fractal: startup phases {}", timing_lines[0]);
     let fallbacks = log
         .lines()
         .filter(|line| line.starts_with("fractal: projection full replay"))

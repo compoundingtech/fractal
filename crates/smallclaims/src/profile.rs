@@ -1,6 +1,6 @@
 //! Opt-in accounting of where the daemon's time goes.
 //!
-//! Set `ST3_PROFILE_DIR` to a directory before `st3 up` and the daemon records, for each request
+//! Set `ST3_PROFILE_DIR` to a directory before `fractal up` and the daemon records, for each request
 //! route and background task: how long it queued before a thread ran it, how long it waited for
 //! the store's writer and read connections and which operation held the writer meanwhile, how
 //! long its SQLite statements ran and which ones, and how much CPU its threads used. Every minute
@@ -140,7 +140,7 @@ pub fn init_from_env() {
         return;
     };
     if let Err(error) = fs::create_dir_all(&dir) {
-        eprintln!("st3: profiling is off: create {}: {error}", dir.display());
+        eprintln!("fractal: profiling is off: create {}: {error}", dir.display());
         return;
     }
     let slow_after = std::env::var("ST3_PROFILE_SLOW_MS")
@@ -182,10 +182,10 @@ pub fn init_from_env() {
     }
     ENABLED.store(true, Ordering::Relaxed);
     let _ = std::thread::Builder::new()
-        .name("st3-profile".into())
+        .name("fractal-profile".into())
         .spawn(flush_loop);
     eprintln!(
-        "st3: profiling into {} (slow after {} ms)",
+        "fractal: profiling into {} (slow after {} ms)",
         STATE.get().expect("just set").dir.display(),
         STATE.get().expect("just set").slow_after.as_millis()
     );
@@ -1406,7 +1406,7 @@ impl ProfileLog {
         match fs::remove_file(path) {
             Ok(()) => {
                 eprintln!(
-                    "st3: profile retention dropped {bytes} bytes from {}",
+                    "fractal: profile retention dropped {bytes} bytes from {}",
                     path.display()
                 );
                 Ok(())
@@ -1433,7 +1433,7 @@ impl ProfileLog {
         let bytes = line.len() as u64;
         if bytes > self.limit {
             eprintln!(
-                "st3: profile retention dropped oversized record ({bytes} bytes, limit {}) for {}",
+                "fractal: profile retention dropped oversized record ({bytes} bytes, limit {}) for {}",
                 self.limit,
                 self.path.display()
             );
@@ -1556,7 +1556,7 @@ mod tests {
     fn canceled_operation_records_blocking_writer_work_when_last_worker_exits() {
         // Profiling is process-global. A child gives this test its own enabled profiler without
         // changing the accounting of other tests running in parallel.
-        const CHILD: &str = "ST3_PROFILE_CANCELLATION_TEST_CHILD";
+        const CHILD: &str = "FRACTAL_PROFILE_CANCELLATION_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1846,7 +1846,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn a_stage_span_counts_its_reads_and_an_item_span_does_not() {
         // Profiling is process-global, so this runs in a child with its own enabled profiler.
-        const CHILD: &str = "ST3_PROFILE_STAGE_IO_TEST_CHILD";
+        const CHILD: &str = "FRACTAL_PROFILE_STAGE_IO_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not() {
         // Profiling is process-global, so this runs in a child with its own enabled profiler.
-        const CHILD: &str = "ST3_PROFILE_STATEMENT_TAG_TEST_CHILD";
+        const CHILD: &str = "FRACTAL_PROFILE_STATEMENT_TAG_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())

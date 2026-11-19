@@ -239,7 +239,7 @@ pub fn snapshot_ready() -> Option<Result<Environment>> {
     if stale && !REFRESHING.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
             if let Err(error) = snapshot() {
-                eprintln!("st3: capturing the daemon environment: {error:#}");
+                eprintln!("fractal: capturing the daemon environment: {error:#}");
             }
             REFRESHING.store(false, Ordering::Release);
         });
@@ -320,7 +320,7 @@ fn link_small_crate(environment: &Environment, timeout: Duration) -> Result<(), 
     // The empty workspace keeps cargo from adopting a workspace above a temporary directory.
     write(
         "Cargo.toml",
-        "[package]\nname = \"st-doctor-link\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        "[package]\nname = \"fractal-doctor-link\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )?;
     write("src/main.rs", "fn main() {}\n")?;
     write(
