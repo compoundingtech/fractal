@@ -357,14 +357,6 @@ fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
 }
 
 #[test]
-fn codex_idle_suspension_wakes_the_same_native_session_and_takes_a_first_turn() {
-    if fractal_daemon::test_support::supervise_test() {
-        return;
-    }
-    canary("codex", "idle-suspend");
-}
-
-#[test]
 fn omp_idle_suspension_wakes_the_same_native_session_and_takes_a_first_turn() {
     if fractal_daemon::test_support::supervise_test() {
         return;

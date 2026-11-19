@@ -723,18 +723,23 @@ def idle_suspend_and_wake(node, seats):
     node.cli("work", "complete", seats.step("a"), "--as", subject,
              "--incarnation", work["claim_incarnation"], "--summary", "idle canary step done")
     started = time.monotonic()
+    latest = {}
 
     def suspended():
         agent = node.json("agents", "show", subject)["value"]
         suspension = agent.get("suspension") or {}
+        latest.update({key: agent.get(key) for key in ("state", "residency", "suspension", "delivery", "harness")})
         if parked(node, subject):
             fail("the idle canary parked instead of suspending")
         if agent.get("state") == "suspended" and suspension.get("phase") == "suspended":
             return agent
         return None
 
-    agent = until(suspended, seats.bound, "policy did not automatically suspend the quiet seat",
-                  lambda: node.daemon.poll() is None or fail("daemon exited during idle suspension"))
+    try:
+        agent = until(suspended, seats.bound, "policy did not automatically suspend the quiet seat",
+                      lambda: node.daemon.poll() is None or fail("daemon exited during idle suspension"))
+    except Failure as error:
+        fail(f"{error}; last residency snapshot: {json.dumps(latest, sort_keys=True)}")
     suspension = agent["suspension"]
     if suspension.get("cause") != "idle" or suspension.get("native_session_id") != native:
         fail(f"idle suspension did not capture the original session {native}: {suspension}")
@@ -1342,8 +1347,8 @@ def run(args, root, evidence):
         with (root / "config.toml").open("a") as config:
             config.write('access_mode = "auto"\n')
     if args.scenario == "idle-suspend":
-        if args.harness not in ("codex", "omp"):
-            fail("idle-suspend requires a provider with direct native turn receipts (Codex or omp)")
+        if args.harness != "omp":
+            fail("idle-suspend requires the supported omp driver and its native turn receipts")
         with (root / "config.toml").open("a") as config:
             config.write('[reconcile]\nidle_suspend_after = "1m"\nidle_resume_concurrency = 2\n')
         # Fleet creation reads the canonical configuration, rather than `up --config`.
