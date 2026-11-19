@@ -117,7 +117,7 @@ fn remove_private_database(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn quote(identifier: &str) -> String { format!("\"{}\"", identifier.replace('"', "\"")) }
+fn quote(identifier: &str) -> String { format!("\"{}\"", identifier.replace('"', "\"\"")) }
 
 /// Hash exact SQLite types and bytes in deterministic primary-key order, one row at a time.
 /// Tables without a primary key use rowid. Schema is hashed separately by the caller.
@@ -342,7 +342,9 @@ pub fn construct(source_copy: &Path, output: &Path, as_of_unix_ms: u128) -> Resu
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
         Err(error) => return Err(error.into()),
     }
-    ensure!(!source.starts_with(&output), "output overlaps source");
+    for protected in siblings(&source).into_iter().chain(std::iter::once(PathBuf::from(journal))) {
+        ensure!(!protected.starts_with(&output), "output overlaps source database or SQLite sidecar");
+    }
     let source_files_before = input_files(&source)?;
     directory(&output).context("create exclusive output directory")?;
     let result = (|| -> Result<Value> {
