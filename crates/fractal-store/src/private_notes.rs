@@ -251,6 +251,7 @@ fn ledger(state_dir: &Path) -> Result<Connection, FractalError> {
     fs::owner(&file).map_err(io)?;
     if !file.metadata().map_err(io)?.is_file() { return Err(refusal("forbidden", "private notes ledger must be a regular owner-local file")); }
     let connection = Connection::open(path).map_err(database_error)?;
+    smallclaims::sqlite::census_files::register(&connection);
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfb2e85b9a602 owner=fractal_store::private_notes TODO=chunk-or-reference-variable-columns */ "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS notes_operations(operation TEXT PRIMARY KEY, uri TEXT NOT NULL, request_digest TEXT NOT NULL, generation TEXT NOT NULL, old_revision TEXT NOT NULL, new_revision TEXT NOT NULL, result TEXT, audit_completed INTEGER NOT NULL DEFAULT 0);").map_err(database_error)?;
     Ok(connection)
