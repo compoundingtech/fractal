@@ -351,10 +351,10 @@ pub fn execute(inv: &Invocation) -> Receipt {
         let uid = slot_uid()?;
         match inv.verb.as_str() {
             "run" => {
-                let file = File::open(inv.plan_file.as_ref().ok_or_else(|| io::Error::other("run requires a plan file"))?)?;
-                let plan: Plan = match serde_json::from_reader(file) {
+                let path = inv.plan_file.as_ref().ok_or_else(|| io::Error::other("run requires a plan file"))?;
+                let plan = match crate::read_plan_under(path, Path::new(crate::SLOT_ROOT)) {
                     Ok(plan) => plan,
-                    Err(e) => return Ok(Status::PlanRejected { reason: format!("invalid plan: {e}") }),
+                    Err(reason) => return Ok(Status::PlanRejected { reason }),
                 };
                 job_id = Some(plan.job_id.clone());
                 let validated = match plan.validate(&inv.slot) {

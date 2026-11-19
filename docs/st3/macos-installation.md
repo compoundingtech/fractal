@@ -32,6 +32,8 @@ existing job binding, binds the job under a root-owned lock, drops all credentia
 to the slot user and execs argv. The lock remains held through the credential
 transition and closes atomically at exec. Stdin/stdout/stderr remain inherited,
 preserving the runtime's release authorization and exit-status observation.
+The plan file itself must be an absolute, non-symlink regular file under the slot
+root, at most 1 MiB; descriptor-relative nonblocking opens reject FIFOs and devices.
 
 `cancel heavy1 JOB_ID` compares the root-owned binding before touching the slot:
 `staleJob` cannot retire a replacement job. A matching cancel removes the slot's

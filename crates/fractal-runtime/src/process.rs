@@ -931,21 +931,6 @@ impl ExecRuntime {
     /// its process group and every process that left that group, so the scope gets the signal
     /// where there is one. Once the group has ended, what it left in its scope ends.
     fn end_if(&self, id: &str, expected_generation: Option<&str>, signal: i32) -> Result<()> {
-        if let Some(generation) = self.read_generation_path(&self.record_path(id))?
-            && let Some(unit) = generation.scope_unit.as_deref()
-            && crate::darwin_slot::slot_for_unit(unit).is_some()
-        {
-            anyhow::ensure!(expected_generation.is_none_or(|expected| expected == generation.generation_id),
-                "Darwin execution changed before cancellation");
-            crate::isolate::end_scope_with_proof(unit, &|| {
-                let current = self.read_generation_path(&self.record_path(id))?
-                    .context("Darwin execution disappeared during cancellation")?;
-                anyhow::ensure!(current.generation_id == generation.generation_id,
-                    "Darwin execution changed during cancellation");
-                Ok(())
-            })?.context("Darwin cancellation did not prove retirement")?;
-            return Ok(());
-        }
         let observation = self.observe(id)?;
         let span = teardown_span(id, ExecTeardownCaller::EndIf, expected_generation, observation.as_ref());
         let _entered = span.enter();
@@ -980,6 +965,18 @@ impl ExecRuntime {
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
             tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec teardown rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
+        }
+        if let Some(unit) = generation.scope_unit.as_deref()
+            && crate::darwin_slot::slot_for_unit(unit).is_some()
+        {
+            crate::isolate::end_scope_with_proof(unit, &|| {
+                let current = self.read_generation_path(&self.record_path(id))?
+                    .context("Darwin execution disappeared during cancellation")?;
+                anyhow::ensure!(current.generation_id == generation.generation_id,
+                    "Darwin execution changed during cancellation");
+                Ok(())
+            })?.context("Darwin cancellation did not prove retirement")?;
+            return Ok(());
         }
         if let Some(unit) = &generation.scope_unit {
             // Read before the signal: a leader that has not joined its scope yet is systemd-run,
@@ -2488,8 +2485,12 @@ mod tests {
             runtime.observe("work").unwrap(),
             Some(ExecObservation::Indeterminate(_))
         ));
-        assert!(runtime.stop_if("work", Some("expected-generation")).is_err());
-        assert!(runtime.kill_if("work", Some("expected-generation")).is_err());
+        for error in [
+            runtime.stop_if("work", Some("expected-generation")).unwrap_err(),
+            runtime.kill_if("work", Some("expected-generation")).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("generation is indeterminate"), "{error:#}");
+        }
     }
 
     #[test]
