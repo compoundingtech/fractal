@@ -308,14 +308,14 @@ mod tests {
             assert_eq!(read(&pending_requests_sql(false)), expected, "{id}");
             assert_eq!(read(&pending_requests_sql(true)), expected.into_iter().take(1).collect::<Pending>(), "{id}");
         }
+        // Answers carry attempts, not origins. The final request repeats an answered attempt
+        // on b, covering b's earlier webhook and making its missing-attempt predicate NULL.
         assert_eq!(
             read(&pending_requests_sql(false)),
             vec![
                 (Some("declared".into()), Some("a".into())),
-                (Some(other), Some("b".into())),
                 (Some(null_first), None),
                 (Some("declared-new".into()), Some("a".into())),
-                (None, Some("b".into())),
             ],
         );
     }

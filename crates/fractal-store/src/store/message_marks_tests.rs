@@ -589,20 +589,22 @@ fn freshness_membership_fixture() -> Store {
         let connection = store.connection.write();
         for (subject, member) in [
             ("agent/null", None),
+            // A malformed member cannot enter the agent host expression index. Non-agent
+            // declarations still exercise the reader's exact member-decoding contract.
             ("agent/malformed", Some("{")),
             ("agent/incomplete", Some(r#"{"host":"node"}"#)),
             ("agent/invalid", Some(r#"{"host":"node","kind":"future-kind"}"#)),
         ] {
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb36605174032 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
-                 SELECT ?1,'agent',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
+                /* sqlite-large-value: allow-for-now lv-h5affa7f5bf63 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+                 SELECT ?1,'resource',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
                 params![subject, member, RECIPIENT],
             ).unwrap();
         }
         // Authorization has never imposed a subject-prefix or kind restriction.
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-h6e209926bd0e owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
-             SELECT 'person/member','person',revision,claim_id,body,member
+            /* sqlite-large-value: allow-for-now lv-h589820728542 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+             SELECT 'person/avery','person',revision,claim_id,body,member
              FROM desired WHERE subject=?1", [RECIPIENT],
         ).unwrap();
     }
@@ -614,7 +616,7 @@ fn freshness_membership_matches_full_desired_authorization() {
     let store = freshness_membership_fixture();
     let requested = [
         RECIPIENT, "agent/node.cedar", "agent/null", "agent/malformed", "agent/incomplete",
-        "agent/invalid", "agent/missing", "person/member", RECIPIENT,
+        "agent/invalid", "agent/missing", "person/avery", RECIPIENT,
     ];
     for host in ["node", "other", "unknown"] {
         let old = store.desired_subjects().unwrap().into_iter()
@@ -631,14 +633,14 @@ fn freshness_message_marks_authorize_only_current_hosted_consumers() {
     let store = freshness_membership_fixture();
     let message = "message/freshness-authorization";
     store.append_claim(&sent(message, RECIPIENT, &[])).unwrap();
-    for consumer in [RECIPIENT, "agent/node.cedar", "agent/incomplete", "agent/missing", "person/member"] {
+    for consumer in [RECIPIENT, "agent/node.cedar", "agent/incomplete", "agent/missing", "person/avery"] {
         message_marks::record(&store, message, "message.read", consumer).unwrap();
     }
     let answers = message_marks::host_marks(&store, &[message.into(), "message/absent".into()]).unwrap();
     assert!(answers[0].0);
     assert_eq!(
         answers[0].1.iter().map(|mark| mark.consumer.as_str()).collect::<BTreeSet<_>>(),
-        BTreeSet::from([RECIPIENT, "person/member"]),
+        BTreeSet::from([RECIPIENT, "person/avery"]),
     );
     assert_eq!(answers[1], (false, Vec::new()));
 }
