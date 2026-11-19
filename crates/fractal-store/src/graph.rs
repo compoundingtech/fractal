@@ -1539,6 +1539,17 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
+    // Placement belongs to the declaration even when this agent has no runtime member.
+    // Materialize inherited/default/local placement using the existing host child grammar.
+    let canonical_children = desired
+        .as_object_mut()
+        .expect("canonical node is an object")
+        .entry("children")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("canonical children are an array");
+    canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
+    canonical_children.push(serde_json::json!({"name": "host", "arguments": [host]}));
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
@@ -4584,6 +4595,24 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_launch_agents_retain_resolved_host_placement() {
+        for (source, expected) in [
+            ("version 2\nagent \"example/owner\" { host \"other\" }", "other"),
+            ("version 2\nhost \"other\" { agent \"example/owner\" {} }", "other"),
+            ("version 2\nagent \"example/owner\" { host \"local\" }", "node"),
+            ("version 2\nagent \"example/owner\" {}", "node"),
+        ] {
+            let intent = parse_intent(source, "node").unwrap();
+            let owner = &intent.subjects["agent/example/owner"];
+            assert!(owner.member.is_none());
+            assert_eq!(
+                canonical_child_value(&owner.desired, "host").and_then(Value::as_str),
+                Some(expected),
+            );
+        }
+    }
 
     #[test]
     fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
