@@ -20,6 +20,25 @@ The caller supplies explicit sorted envelope identities `(writer, sequence, enve
 
 There is **no daemon default archive writer**, no age selector, no hot deletion, no storage schema/version upgrade, no checkpoint-rule change, no fleet feature activation and no production archive converter in this PR. Merely linking the module or opening the normal store must not produce archive files or alter persistence defaults. No release-dependent byte saving is claimed for this inactive primitive.
 
+### Second PR: inactive native archive-addressed reads
+
+`ArchiveReaders` pins explicitly supplied verified segments, indexes full identities and rejects contradictory duplicate coverage. Native `replica_envelopes_with_archive`, `replication_signatures_with_archive`, `replica_record_with_archive` and `export_replication_difference_with_archive` provide original typed peer envelopes/signatures, envelope-plus-position repair witnesses with raw bytes, and the existing bounded replication difference protocol over a merged compact inventory. Existing entrypoints stay hot-only: no daemon configuration, catalogue loader or persisted activation is introduced.
+
+The merged inventory preserves all fork hashes and payloadless checkpoint identities; authoritative retirement still prevents serving archived payloads. Exact hot/cold duplicates collapse, while differing receipt/repair/signature snapshots fail closed pending the overlay-aware stage rather than silently selecting one tier. Repair reads do not mutate cold state or perform repair. The temporary merged inventory is not persisted or fed back into the hot inventory cache. Tests relocate wire rows only inside offline fixtures and exercise bounded empty-peer catch-up, byte-identical payload transfer, native repair witnesses, signature ordering, conflict refusal, retired non-resurrection and unchanged default readers.
+
+Signature responses independently read the hot signature table even when its envelope is absent: follow-up receipt legitimately retains signature-only rows. They union those rows with cold signatures by full envelope identity plus member key, collapse identical signatures and refuse contradictory signature text. Envelope presence is never a prerequisite for exporting a retained hot signature.
+
+
+### Third PR: separate native filesystem-capacity gauge
+
+The daemon's existing hourly database sampling lane also measures the dedicated `wire-archive` directory beside its graph database. It never creates that directory or enables an archive writer. A missing never-measured root is `not-activated`, not zero; a previously measured missing root in the same scope, unknown root category, symlink, special file, incomplete listing/stat or capacity overflow is unavailable. Copying or moving a graph does not transfer activation history to its new archive scope. An existing and successfully inventoried empty root may report zero.
+
+The layout has `segments`, `index`, `overlays`, `staging`, `orphans` and `backups` categories. Segment filenames are lowercase SHA-256 plus `.wire`; private `.wire-segment` files are staging and other segment-directory names are orphans. Hardlinks count once by device/inode, with deterministic category ownership. `archive_bytes` counts segment-file, index and overlay lengths; `capacity_bytes` additionally includes staging, orphan and backup-owned lengths. Sparse-file allocation and remote replicas are not inferred from these logical file lengths.
+
+Hourly derived samples persist under `wire_archive_size_samples/v1`. Net growth needs a baseline within 30 minutes of one day ago, same scope, no unavailable sample and no observation gap greater than 90 minutes; no one-hour extrapolation. Thus a missing hourly write also breaks coverage when its unknown result could not persist. Clock rollback or scope movement starts a new series. Missing/stale baselines remain unknown. The native `database-archive` row is a separate informational gauge with no passing objective budget; it keeps the existing hot `database` row unchanged.
+
+This first accounting integration explicitly reports `integrity: not-assessed` and null catalogue coverage. Filesystem scans are not a common catalogue-generation snapshot, do not verify payload hashes, and cannot establish whether every expected archived object is available. The catalogue-integrated generation/availability proof below is still mandatory before hot retirement or M1 acceptance. The sampler is not that proof and never labels named segment files as cryptographically verified sealed objects.
+
 ### Later production scope
 
 Archive-aware native reads, current-state overlays, catalogue publication, complete backup integration, separate archive native metrics and offline construction proofs precede activation. Historical claims, signature-candidate authority, global nonce membership, dependency invalidation and operation receipts need their own reader/representation changes; archiving three wire tables does not solve them implicitly.

@@ -46,6 +46,7 @@ pub use projection_gate::{ProjectionGate, ProjectionGuard};
 mod proof;
 pub mod prepared_envelope;
 mod replica_record;
+mod wire_archive;
 mod operation_conflict_fence;
 pub use operation_conflict_fence::valid as operation_conflict_discovery_valid;
 use crate::operation_metadata::OperationMetadata;
@@ -968,6 +969,7 @@ pub struct Store {
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
+    pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1337,6 +1339,7 @@ impl Store {
             connection,
             admitted: None,
             checkpoint_verify_latest: Default::default(),
+            checkpoint_worker: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -3030,6 +3033,13 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
+        Self::replication_signatures_on(&connection, requests)
+    }
+
+    fn replication_signatures_on(
+        connection: &Connection,
+        requests: &[ReplicaEnvelopeId],
+    ) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
         let mut statement = connection.prepare(
             "SELECT member_key, signature FROM replica_envelope_signatures
              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 ORDER BY member_key",
@@ -7743,20 +7753,32 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        self.export_replication_difference_from(fleet_id, remote, &snapshot, &snapshot.inventory, &snapshot.buckets, None)
+    }
+
+    fn export_replication_difference_from(
+        &self,
+        fleet_id: &str,
+        remote: &ReplicationInventory,
+        snapshot: &ReplicationSnapshot,
+        inventory: &CompactReplicationInventory,
+        buckets: &[ReplicationInventoryBucket],
+        mut archive: Option<&mut crate::wire_archive::ArchiveReaders>,
+    ) -> Result<ReplicationExchange> {
         let digests = {
             let _span = crate::profile::span("replication.digests");
-            self.exported_digests(&snapshot)?
+            self.exported_digests(snapshot)?
         };
         let _timing = time_stage(&self.replication_timers.export);
-        let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
+        let same = !remote.digest.is_empty() && remote.digest == inventory.digest;
         if !same && !remote.buckets.is_empty() {
             // The peer sent range digests, so only differing ranges need identities. Each
             // answer lists from the next differing range, so every one is listed in turn.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
                 compact_replication_difference_turn(
-                    &snapshot.inventory,
-                    &snapshot.buckets,
+                    inventory,
+                    buckets,
                     remote,
                     REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
                     self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
@@ -7764,7 +7786,10 @@ impl Store {
             };
             let envelopes = {
                 let _span = crate::profile::span("replication.envelopes");
-                self.replica_envelopes(missing)?
+                match archive.as_deref_mut() {
+                    Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
+                    None => self.replica_envelopes(missing)?,
+                }
             };
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
@@ -7777,9 +7802,9 @@ impl Store {
                 graph_digest: digests.0.clone(),
                 projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
-                    digest: snapshot.inventory.digest.clone(),
+                    digest: inventory.digest.clone(),
                     envelopes: listed,
-                    buckets: snapshot.buckets.clone(),
+                    buckets: buckets.to_vec(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
                     claim_range_query: None,
@@ -7800,7 +7825,7 @@ impl Store {
         };
         if !same {
             note_full_inventory_answer(
-                snapshot.inventory.envelopes.len(),
+                inventory.envelopes.len(),
                 remote.envelopes.len(),
                 remote_is_complete,
             );
@@ -7811,7 +7836,6 @@ impl Store {
             // Only membership is needed. Borrow IDs from the request instead of
             // duplicating the remote's entire inventory on every divergent sync.
             let known = remote.envelopes.iter().collect::<BTreeSet<_>>();
-            let inventory = &snapshot.inventory;
             inventory
                 .envelopes
                 .iter()
@@ -7836,17 +7860,20 @@ impl Store {
                 checkpoint: self.trimmed_checkpoint()?,
                 ..if same {
                     ReplicationInventory {
-                        digest: snapshot.inventory.digest.clone(),
+                        digest: inventory.digest.clone(),
                         // Equality is only true for this snapshot. Keep range proofs so a
                         // concurrent write cannot turn this answer into a full-inventory query.
-                        buckets: snapshot.buckets.clone(),
+                        buckets: buckets.to_vec(),
                         ..Default::default()
                     }
                 } else {
-                    snapshot.inventory.public()
+                    inventory.public()
                 }
             },
-            envelopes: self.replica_envelopes(missing)?,
+            envelopes: match archive {
+                Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
+                None => self.replica_envelopes(missing)?,
+            },
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),

@@ -751,7 +751,7 @@ mod tests {
             let current_rows = current_rows.expect("current_slo_rows waited for the blocked native ledger writer").unwrap();
             assert!(!current_rows.is_empty());
             assert!(current_rows.iter().all(|row| row["id"].is_string()));
-            for id in [crate::slo::targets().latency[0].name.as_str(), "database", "transaction/read"] {
+            for id in [crate::slo::targets().latency[0].name.as_str(), "database", "database-archive", "transaction/read"] {
                 let row = current_rows.iter().find(|row| row["id"] == id)
                     .unwrap_or_else(|| panic!("current_slo_rows omitted native objective {id}"));
                 assert_eq!(row["kind"], "objective");
@@ -783,16 +783,20 @@ mod tests {
                     assert!(row["remote_windows"].is_object());
                 }
             }
-            let store = &rows[server.len()..server.len() + 5];
+            let store = &rows[server.len()..server.len() + 6];
             assert_eq!(store.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(),
-                ["sql-statement", "transaction", "writer-hold", "cpu", "database"]);
+                ["sql-statement", "transaction", "writer-hold", "cpu", "database", "database-archive"]);
             assert_eq!(store[4]["budget"]["as_of_unix_ms"], as_of);
             assert_eq!(store[4]["budget"]["available"], !store[4]["budget"]["stale"].as_bool().unwrap());
+            assert_eq!(store[5]["kind"], "gauge");
+            assert!(store[5]["budget"].is_null());
+            assert_eq!(store[5]["integrity"], "not-assessed");
+            assert!(store[5]["catalogue_coverage"].is_null());
             let client = targets.latency.iter()
                 .filter(|latency| latency.paths.iter().any(|path| path.starts_with("client/ios/")))
                 .map(|latency| latency.name.as_str())
                 .chain(targets.share.iter().map(|share| share.name.as_str())).collect::<Vec<_>>();
-            assert_eq!(rows[server.len() + 5..].iter()
+            assert_eq!(rows[server.len() + 6..].iter()
                 .map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(), client);
             assert_eq!(report.get("paths").is_some(), name == "diagnostics");
         }
@@ -938,7 +942,7 @@ mod tests {
         assert_eq!(read["remote_windows"]["5m"]["count"], 2);
         assert_eq!(read["remote_windows"]["5m"]["over_target"], 1);
         assert_eq!(target("write-ack")["windows"]["1h"]["count"], 0);
-        for name in ["sql-statement", "transaction", "cpu", "database"] {
+        for name in ["sql-statement", "transaction", "cpu", "database", "database-archive"] {
             target(name);
         }
         let paths = report["paths"].as_array().unwrap();

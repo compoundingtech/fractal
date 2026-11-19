@@ -992,7 +992,7 @@ bins, but these producer limits do not establish a general physical value-size
 proof. The tracing TODO retains exact source, report and minute identities while
 resolving body/key representation; it is not permission to scan retained history.
 
-The schema site's `lv-h131f2c78b266` identity includes the additive
+The schema site's `lv-ha5268709f026` identity includes the additive
 `claims_observation_report_index` and `claims_observation_minute_time_index`.
 The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish the exact main Linux native package closure for cache-only consumers",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime rules or required merge gates change."},
+  "compatibility": {"status": "none", "detail": "The producer builds the same exact-source x86_64-linux package consumed by downstream native checks; the persistent-store verification job remains disabled."},
+  "downtime": {"status": "none", "detail": "No runtime restart or deployment is performed."},
+  "manual": {"status": "changed", "detail": "The cache owner must provision FRACTAL_CACHIX_CACHE_NAME and the scoped FRACTAL_CACHIX_AUTH_TOKEN repository secret. Consumers require fleet-declared read access and trust for that cache."},
+  "recovery": {"status": "none", "detail": "Publication or remote closure-proof failure fails the producer and does not grant consumer readiness."}
+}

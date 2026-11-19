@@ -109,6 +109,46 @@ Native KDL is unchanged: `declared-priority`, `declared-lane` and
 `resources: {}` emits an empty `declared-budgets` block. Agents must move
 `cpuSeconds` and `tokenBudget` to the mission budget.
 
+### Native declared-resource references
+
+Agents and top-level missions accept `resourceReferences`, including agent intents
+in `Fractal.agent`/`defineAgent` and kit seat inputs derived from `AgentIntent`:
+
+```ts
+resourceReferences: [
+  {
+    name: 'roll-authority',
+    subject: 'resource/demo/release-completion',
+    reason: 'Read the declared roll authority.',
+  },
+  { name: 'source', uri: 'git+ssh://example.org/demo%2Frepo' },
+]
+```
+
+Each entry requires a unique `name` within its owner and exactly one of `subject`
+or `uri`. `reason` is optional but must be nonblank when supplied. Names and the
+local portion after `resource/` follow native subject-name validation: at most
+512 ASCII characters, starting alphanumeric, then alphanumeric or `._-@/`, with
+no empty or `..` path segments or trailing slash. URIs follow native absolute-URI
+validation: any scheme, at most 4096 ASCII bytes, valid percent escapes, and no
+whitespace or forbidden URI characters. URI bytes are preserved, not normalized;
+native publication derives their `resource/uri/<sha256>` identity.
+
+Lowering preserves array order and emits actual native children:
+
+```kdl
+resource "roll-authority" subject="resource/demo/release-completion" reason="Read the declared roll authority."
+resource "source" uri="git+ssh://example.org/demo%2Frepo"
+```
+
+Omission and an empty array emit no children. These are declared reference edges,
+not kit metadata, admission `budget.resources`, or mission-owned `resources`
+(managed resource bodies). Those fields remain independent.
+`ResourceReferenceSchema` and its encoded `ResourceReference` type expose the
+same reusable validation contract. The native-shape golden is
+`fixtures/resource-references.kdl`; `src/resource-references.unit.test.ts`
+covers lowering, parsed-node roundtrips, omission, ordering and malformed inputs.
+
 ### Harness startup messages
 
 OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
