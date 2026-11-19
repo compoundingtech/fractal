@@ -7,6 +7,19 @@
 //! listed, and `projectors_tests` pins that order per phase and per claim kind.
 use super::*;
 
+/// These disposable heads lose disposition history and have no remaining readers.
+/// Durable usage claims are the complete rebuild source for the native source mirror.
+/// Drop the trigger first so upgraded stores cannot keep queuing orphaned background work.
+fn retire_credit_projection(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "DROP TRIGGER IF EXISTS usage_credit_claim_insert;
+         DROP TABLE IF EXISTS local_usage_credit_pending;
+         DROP TABLE IF EXISTS local_usage_credit_progress;
+         DROP TABLE IF EXISTS local_usage_credit_heads;"
+    )?;
+    Ok(())
+}
+
 /// The claim kinds an append projector takes.
 #[derive(Clone, Copy, Debug)]
 pub enum Takes {
@@ -59,7 +72,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "read-positions", run: read_positions::open },
     Hook { name: "attention-controls", run: attention_controls::open },
     Hook { name: "limits", run: limits::open_limits },
-    Hook { name: "usage-credits", run: usage_credits::open },
+    Hook { name: "credit-projection-retirement", run: retire_credit_projection },
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
@@ -126,11 +139,6 @@ pub const APPEND: &[AppendProjector] = &[
         project: |transaction, _| limits::flush_limits(transaction).map(drop),
     },
     AppendProjector {
-        name: "usage-credits",
-        takes: Takes::Kinds(&["usage.limits.observed"]),
-        project: usage_credits::project,
-    },
-    AppendProjector {
         name: "arrangements",
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project,
@@ -160,11 +168,6 @@ pub const APPEND: &[AppendProjector] = &[
 /// Projects a replicated claim the incremental projection extends the graph with, after every
 /// claim of the range has its event row.
 pub const REPLICATED: &[AppendProjector] = &[
-    AppendProjector {
-        name: "usage-credits",
-        takes: Takes::Kinds(&["usage.limits.observed"]),
-        project: usage_credits::project,
-    },
     AppendProjector {
         name: "arrangement-project",
         takes: Takes::Kinds(&["arrangement.edited"]),
@@ -199,7 +202,6 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "wake-demand", run: wake_demand::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
-    Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },
     Hook { name: "run-eta", run: run_eta::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
@@ -219,7 +221,6 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "arrangements", run: arrangements::rebuild },
     Hook { name: "read-positions", run: read_positions::rebuild },
     Hook { name: "attention-controls", run: attention_controls::rebuild },
-    Hook { name: "usage-credits", run: usage_credits::rebuild },
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "wake-lookup", run: wake_lookup::rebuild },
@@ -238,7 +239,6 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
     ReplayStage { phase: "full-replay/read-positions", run: read_positions::rebuild },
     ReplayStage { phase: "full-replay/attention-controls", run: attention_controls::rebuild },
-    ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
