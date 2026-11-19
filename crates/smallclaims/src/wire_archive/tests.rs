@@ -77,7 +77,7 @@ fn restore_conflict_rolls_back_preceding_envelopes() {
     let mut reader = SegmentReader::open(&path, &seal).unwrap();
     let mut destination = database();
     let transaction = destination.transaction().unwrap();
-    insert(&transaction, capture(&source, &ids[1]).unwrap()).unwrap();
+    insert(&transaction, &capture(&source, &ids[1]).unwrap()).unwrap();
     transaction.commit().unwrap();
     assert!(reader.restore_wire_rows(&mut destination).is_err());
     assert_eq!(destination.query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -149,4 +149,26 @@ fn reader_rejects_unknown_versions_and_entry_hash_mismatch_even_with_matching_fi
     let mut destination = database();
     assert!(reader.restore_wire_rows(&mut destination).is_err());
     assert_eq!(destination.query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[cfg(test)]
+#[test]
+fn incompatible_destination_affinity_rolls_back_all_wire_rows() {
+    let mut source = database();
+    let ids = fixture(&source);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("segment");
+    let seal = write_segment(&mut source, &ids, &path).unwrap();
+    let mut reader = SegmentReader::open(&path, &seal).unwrap();
+    let mut destination = Connection::open_in_memory().unwrap();
+    destination.execute_batch(&crate::store::SCHEMA.replace(
+        "accepted_at_unix_ms TEXT NOT NULL",
+        "accepted_at_unix_ms INTEGER NOT NULL",
+    )).unwrap();
+    let error = reader.restore_wire_rows(&mut destination).unwrap_err();
+    assert!(error.to_string().contains("destination changed archived wire cell types or values"));
+    for (table, _, _) in TABLES {
+        assert_eq!(destination.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+    assert_eq!(capture(&source, &ids[0]).unwrap().rows[0][0][4], Value::Text("000000123".into()));
 }

@@ -263,16 +263,22 @@ impl SegmentReader {
     /// This is not graph restore: use logical backup to restore claims, ledgers and projections.
     pub fn restore_wire_rows(&mut self, destination: &mut Connection) -> Result<()> {
         let transaction = destination.transaction()?;
-        for id in self.index.keys().cloned().collect::<Vec<_>>() {
-            insert(&transaction, self.evidence(&id)?)?;
+        let identities = self.index.keys().cloned().collect::<Vec<_>>();
+        for id in &identities {
+            insert(&transaction, &self.evidence(id)?)?;
+        }
+        // Validate after all INSERTs: a later trigger can also alter an earlier row.
+        // Read back every typed cell before committing, never publish coerced data.
+        for id in &identities {
+            ensure!(capture(&transaction, id)? == self.evidence(id)?, "destination changed archived wire cell types or values");
         }
         transaction.commit()?;
         Ok(())
     }
 }
 
-fn insert(transaction: &Transaction<'_>, evidence: WireEvidence) -> Result<()> {
-    for (index, rows) in evidence.rows.into_iter().enumerate() {
+fn insert(transaction: &Transaction<'_>, evidence: &WireEvidence) -> Result<()> {
+    for (index, rows) in evidence.rows.iter().enumerate() {
         let (table, columns, _) = TABLES[index];
         let placeholders = std::iter::repeat_n("?", columns.split(',').count()).collect::<Vec<_>>().join(",");
         let mut statement = transaction.prepare(&format!(

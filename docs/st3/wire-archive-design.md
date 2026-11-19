@@ -84,6 +84,8 @@ Export holds a single source read transaction across all three tables and the en
 
 Restore validates the externally addressed segment before applying rows and uses one destination transaction for the requested operation. An error in the last record/signature rolls back earlier rows. The first primitive is insert-only and fails destination key conflicts; it does not use replacement inserts or silently merge contradictory evidence. A future idempotent duplicate policy would require comparing every typed column. Do not reconcile mutable state by timestamps during primitive restore. This API restores a captured wire snapshot, not an inferred latest state.
 
+After all inserts, restore reads every selected row back inside the same transaction and compares the exact typed cells against the sealed evidence before committing. SQLite affinity coercion or destination triggers that change bytes/types fail the restore and roll back every inserted envelope, record and signature. Successful SQL execution alone does not prove a lossless restore.
+
 No claims, batches, graph projections, nonce-use tables, runtime ledgers or shards are implicitly fabricated. The caller must distinguish successful wire restoration from product readiness. A fresh product restore still needs its ordinary validated backup/replay orchestration. Successful checksums do not authorize producer starts, membership changes or old operation replay.
 
 ## 5. Production archive catalogue and native reads
