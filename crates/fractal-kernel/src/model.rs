@@ -943,6 +943,10 @@ pub struct StepSpec {
 pub struct ResourceLaneSpec {
     pub name: String,
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
     pub max_members: u32,
     pub capacity: Option<fractal_runtime::Capacity>,
     pub coverage: ResourceLaneCoverage,
