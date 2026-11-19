@@ -410,7 +410,7 @@ fn enable_idle_reader(seat: &Seat) {
     seat.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
     seat.store.append_claim(&ClaimInput {
         subject:"daemon/amber".into(),kind:"daemon.started".into(),actor:None,
-        fields:serde_json::from_value(json!({"status":"running","features":{"idle_residency":1}})).unwrap(),
+        fields:serde_json::from_value(json!({"status":"running","features":{"idle_residency":1,"owned_sets":1}})).unwrap(),
         evidence:Vec::new(),expected_subject:None,idempotency_key:None,
     }).unwrap();
     seat.store.replication_snapshot().unwrap();

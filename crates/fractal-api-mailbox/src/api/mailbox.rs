@@ -2633,7 +2633,7 @@ mod tests {
             let intent = crate::parse_intent(
                 "version 2\nagent \"eval.worker\" { command \"true\"; }", "node",
             ).unwrap();
-            store.apply(&intent, &BTreeMap::new(), "fixture").unwrap();
+            store.apply(&intent, &BTreeMap::from([("agent/eval.worker".into(), Vec::new())]), "fixture").unwrap();
             crate::store::mailbox_tests::ready(&store, "current");
             let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "current", "delivery")).unwrap();
             let declaration = store.suspension_lineage_at(&fence.subject, None).unwrap().pop().unwrap();
@@ -2716,7 +2716,6 @@ mod tests {
             append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume","incarnation_id":"current"}),
                 vec![resume.id.clone()], Some(suspension::resume_started_key(&resume.id)));
             check_held("verifying");
-            drop(check_held);
             append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume"}),
                 vec![resume.id.clone()], Some(suspension::resume_completed_key(&resume.id)));
             let (_, snapshot, updated, _) = update_snapshot(

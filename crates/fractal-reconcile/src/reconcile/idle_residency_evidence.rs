@@ -343,7 +343,8 @@ mod tests {
 
     fn action_claim(store: &Store, kind: &str, values: Value, evidence: Vec<String>) -> ClaimRecord {
         store.append_claim(&ClaimInput {
-            subject: "agent/amber.worker".into(), kind: kind.into(), actor: None,
+            // Actor-less runtime actions are local observations, not durable action receipts.
+            subject: "agent/amber.worker".into(), kind: kind.into(), actor: Some("person/test".into()),
             fields: serde_json::from_value(values).unwrap(), evidence,
             expected_subject: None, idempotency_key: None,
         }).unwrap()
@@ -365,7 +366,10 @@ mod tests {
                 ..Default::default()
             };
             let ended = suspended.accepted_at_unix_ms + 10;
+            store.idle_residency_enabled().unwrap();
             RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold, ended, end_class).unwrap();
+            assert_eq!(store.claims_for(&episode("amber", "sleep", &request.id),
+                Some("residency.sleep-ended")).unwrap().len(), 1);
             drop(store);
             let store = Store::open(&path, "amber").unwrap();
             RuntimeEvidence::default().end_sleep(&store, "agent/amber.worker", &hold, ended + 1000, end_class).unwrap();
@@ -413,8 +417,11 @@ mod tests {
             let completed = action_claim(&store, "runtime.action.succeeded",
                 json!({"action":action,"operation_status":if action == "resume" {"resumed"} else {"stopped"}}),
                 vec![end_request.id.clone()]);
+            store.idle_residency_enabled().unwrap();
             RuntimeEvidence::default().evaluate_subject(&store, "agent/amber.worker",
                 completed.accepted_at_unix_ms).unwrap();
+            assert_eq!(store.claims_for(&episode("amber", "sleep", &request.id),
+                Some("residency.sleep-ended")).unwrap().len(), 1);
             drop(store);
             let store = Store::open(&path, "amber").unwrap();
             let requests = store.claims_for("agent/amber.worker", Some("runtime.action.requested")).unwrap();
