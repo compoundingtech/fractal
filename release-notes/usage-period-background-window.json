@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Build usage lookups in bounded background pages and read only active reporting-window series",
+  "replay": {"status": "changed", "detail": "A persisted local cursor visits at most 64 claims per background writer loan after the APIs start serving. Exact canonical claim reads remain active until catch-up completes; interrupted work resumes on the next daemon start."},
+  "schema": {"status": "changed", "detail": "Adds local_usage_period_v1, its series/time and time/series indexes, a progress singleton, and transactional claims insert/update/delete triggers. Indexes are created on the new empty projection, never on populated claims. Historical usage indexes are not built or dropped at startup."},
+  "rules": {"status": "none", "detail": "No authoritative claims, checkpoint, retention or digest changes. Canonical timestamp ties and cumulative counter reset/delta semantics are preserved."},
+  "compatibility": {"status": "none", "detail": "The usage response is unchanged. Pending-only local activity selects its replicated pre-window baseline even without a replicated in-window reading, preventing cumulative overcount."},
+  "downtime": {"status": "none", "detail": "No historical body scan or claims index build occurs at startup. Backfill begins after serving, uses background writer admission, releases the writer between pages and rests 20 ms. Row bounds do not establish a byte or wall-time bound."},
+  "manual": {"status": "none", "detail": "No operator migration is required. Before projection readiness usage requests retain the exact, potentially expensive historical path. Ready reads scan only in-window lookup entries and seek boundaries for active or locally pending series."},
+  "recovery": {"status": "none", "detail": "Claims remain authoritative; the local projection is rebuildable. Older binaries ignore the added local tables and triggers. A failed background worker logs an error and leaves exact historical reads active; restart resumes the committed cursor."}
+}

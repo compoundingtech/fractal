@@ -998,3 +998,26 @@ The first uses source/report strings as variable index keys; the second combines
 a numeric minute with a variable subject key. Both index existing canonical
 claims without adding authoritative tables. Any later reference conversion must
 preserve exact retry, conflict exclusion, minute range and replication semantics.
+
+### Background usage-period lookup
+
+`fractal_store::store::usage_period` owns `lv-h8c2a4192756e`,
+`lv-h3aca5e04dde4` and `lv-h2c8754e606af`. The rebuildable local lookup stores
+existing claim IDs, normalized cumulative-series JSON and padded observed-time
+TEXT, with series/time and time/series indexes. It deliberately does not copy
+claim bodies. Inline keys preserve exact historical identity and full-u64 time
+ordering while backfill visits at most 64 source rows per background loan.
+This bounds rows, not encoded key/body bytes or transaction duration. The
+maintainer retains the variable-column/index-key reference conversion and
+writer-side JSON preparation debt; any replacement must preserve canonical
+ties, deletion/update maintenance and the complete-before-read-switch cursor.
+
+`fractal_seats::store::usage_period` owns `lv-h65f06f9a314c`,
+`lv-h5dbb84e35027`, `lv-h003f0f479205`, `lv-h7186f3970656` and
+`lv-h336e19be1e61`. These readers bind reporting-window times and existing
+series keys, then load canonical claim bodies only for selected boundaries.
+The exact historical reader remains active until backfill completes. Values
+remain inline to preserve the existing billing fold and pending-local baseline
+semantics; the tracing TODO must retain those identities and tie-breaking when
+moving keys or bodies to references. No logical input cap or value-size proof
+is introduced by these exceptions.
