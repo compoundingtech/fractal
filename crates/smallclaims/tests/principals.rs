@@ -69,9 +69,9 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 
 #[test]
 fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
-    // The landed runtime-operation migration owns 19; signature migration takes 20.
-    // Update this assertion only with the reviewed queue disposition.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+    // Runtime operations own 19, candidate authority owns 20, compact references own 21.
+    // Advance this assertion with the shared storage version when queue order changes.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 21);
 }
 
 fn key() -> Arc<MemberKey> {
@@ -858,6 +858,7 @@ fn nonce_inventory_transition(online: bool, snapshot_overlap: bool, remove_earli
             remove_candidate_schema(&connection);
             old_roots = principal_physical_roots(&connection, false);
         } else {
+            inline_signature_facade_for_old_fixture(&connection);
             connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
         }
         let cached: String = connection
@@ -1079,6 +1080,7 @@ fn first_open_untrusted_carrier_cannot_displace_verified_person() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1147,7 +1149,7 @@ fn assert_candidate_inventory(target: &Store, fixture: &SignatureCarriers) {
     for (signature, key, nonce) in rows {
         let writers = connection
             .prepare(
-                "SELECT writer FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2",
+                "SELECT writer FROM claim_signature_sources s WHERE claim_id=?1 AND (signature=?2 OR signature=(SELECT reference FROM claim_signature_originals o WHERE o.claim_id=s.claim_id AND o.signature=?2))",
             )
             .unwrap()
             .query_map(rusqlite::params![fixture.claim.id, signature], |row| {
@@ -1434,6 +1436,7 @@ fn opening_an_old_store_recovers_signatures_resumes_and_exposes_corruption() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1583,7 +1586,7 @@ fn large_candidate_judging_commits_pages_and_resumes_after_a_persisted_fault() {
     let seen = cursors.clone();
     let watched = claim.id.clone();
     let observer=store.connection.observe_commits(move |connection| {
-        let partial=connection.query_row("SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
+        let partial=connection.query_row("SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
         if let Some(cursor)=partial && !cursor.is_empty() && !state.swap(true,Ordering::SeqCst) {
             seen.lock().unwrap().push(cursor);
             connection.execute("UPDATE claim_signature_judging SET best_verdict='corrupt-fixture' WHERE claim_id=?1",[&watched]).unwrap();
@@ -1608,7 +1611,7 @@ fn large_candidate_judging_commits_pages_and_resumes_after_a_persisted_fault() {
     let connection = store.readers.get();
     let resumed: String = connection
         .query_row(
-            "SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1",
+            "SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1",
             [&claim.id],
             |row| row.get(0),
         )
@@ -1692,7 +1695,7 @@ fn a_new_candidate_before_the_judging_cursor_restarts_the_accumulator() {
     let changed = Arc::new(AtomicBool::new(false));
     let once = changed.clone();
     let observer=store.connection.observe_commits(move |connection| {
-        let partial=connection.query_row("SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
+        let partial=connection.query_row("SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
         if let Some(cursor)=partial && !cursor.is_empty() && !once.swap(true,Ordering::SeqCst) {
             assert!(serde_json::to_string(&added).unwrap()<cursor);
             store_claim_signature_tx(connection,&watched,&added).unwrap();
@@ -1956,7 +1959,9 @@ fn migration_commits_claim_offsets_inside_a_large_authenticated_envelope() {
         target.bind_fleet(FLEET).unwrap();
         target.pin_fleet_anchor(anchor.public()).unwrap();
         receive_carriers(&target, &exchange);
-        target.connection.write().execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
+        let connection = target.connection.write();
+        inline_signature_facade_for_old_fixture(&connection);
+        connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
     }
     let target = Store::open(&path, "birch", Arc::new(Plain)).unwrap();
     while target.signature_migration().unwrap().phase == "legacy" {
@@ -2565,9 +2570,17 @@ fn candidate_judging_never_rewrites_the_whole_dependency_set_in_one_commit() {
     }
 }
 
+/// An older store's facade contains inline text, not new-format references to
+/// candidates that these fixtures are about to remove.
+fn inline_signature_facade_for_old_fixture(connection: &rusqlite::Connection) {
+    connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+}
+
 /// Reconstruct the actual pre-upgrade schema, not only a missing migration control row.
 /// Immutable claims and authenticated carriers and the first-carried cache remain intact.
 fn remove_candidate_schema(connection: &rusqlite::Connection) {
+    inline_signature_facade_for_old_fixture(connection);
+    connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
