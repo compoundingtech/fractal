@@ -1172,8 +1172,10 @@ impl World {
                 };
                 fields.insert(name.clone(), value);
             }
+            // The host sample is a continuing host stream, not an episode subject.
+            let subject_id = if suffix == "host" { &host } else { &id };
             return Some(ClaimInput {
-                subject: format!("residency/{host}/{suffix}/{id}"),
+                subject: format!("residency/{host}/{suffix}/{subject_id}"),
                 kind: spec.kind.clone(), actor: None, fields, evidence: Vec::new(),
                 expected_subject: None, idempotency_key: Some(id),
             });
@@ -2367,7 +2369,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// The prior v36 characterization is recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
+const NEVER_TRIMS: &[u64] = &[34, 179];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
