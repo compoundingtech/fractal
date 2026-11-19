@@ -18,12 +18,14 @@ enum Reply {
     Value(Value),
     Error(u16),
     CursorGap,
+    Restart,
 }
 
 async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let mut listener = UnixListener::bind(&socket).unwrap();
+    let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         for (expected, reply) in script {
             let (mut caller, _) = listener.accept().await.unwrap();
@@ -38,6 +40,15 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
                 request.lines().next().unwrap(),
                 format!("GET {expected} HTTP/1.1")
             );
+            if matches!(reply, Reply::Restart) {
+                // Tear down the in-flight wait and the listening socket, then
+                // replace the daemon at the same endpoint without a timer.
+                drop(caller);
+                drop(listener);
+                std::fs::remove_file(&server_socket).unwrap();
+                listener = UnixListener::bind(&server_socket).unwrap();
+                continue;
+            }
             let (status, body) = match reply {
                 Reply::Value(value) => (
                     200,
@@ -59,6 +70,7 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
                         "details":{"resume_floor":30,"frontier":50,"full_resync":true}
                     }),
                 ),
+                Reply::Restart => unreachable!("restart handled before writing a response"),
             };
             let body = serde_json::to_vec(&body).unwrap();
             caller.write_all(format!(
@@ -253,4 +265,30 @@ async fn mission_follow_preserves_terminal_exit_codes_and_json_output() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn mission_follow_reconnects_after_the_daemon_socket_is_replaced() {
+    let terminal = run("completed", "normal");
+    let event_path = "/v1/events/page?after=10&wait=true&timeout_ms=30000";
+    let output = scripted_cli(
+        &["--json", "missions", "show", RUN, "--follow"],
+        vec![
+            ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+            (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            (event_path.into(), Reply::Restart),
+            (
+                event_path.into(),
+                Reply::Value(json!({
+                    "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                    "next_after":11,
+                })),
+            ),
+            (RUN_PATH.into(), Reply::Value(terminal.clone())),
+        ],
+    ).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), terminal);
+    assert!(stderr(&output).contains("follow gap:"));
+    assert!(stderr(&output).contains("follow recovered after"));
 }
