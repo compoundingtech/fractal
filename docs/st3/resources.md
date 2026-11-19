@@ -240,10 +240,18 @@ leaves at most one heavy-IO slot for ordinary work; it does not create a third s
 Ordinary finite work and seat starts/raises exclude unused landing memory. Landing custody
 consumes the reservation first, so it is not charged twice. Host holds, outside-memory
 pressure, disk floors, total room and total IO limits still apply to landing.
+The reservation is minimum protected headroom, not a ceiling: landing may also consume
+ordinary room. An authorized landing backlog can starve check/agent work by design.
 
 The host grant boundary authorizes every request path (shell, program and DSL) from native
-invocation ownership, the owning mission run's requester, or authenticated local-operator
-ownership. An unconfigured host refuses landing visibly with `unauthorized-landing`; it never
+invocation ownership, the owning mission run's immutable `initiating_principal` in its
+canonical `mission-run.created` receipt, or authenticated local-operator ownership.
+The receipt records the serving boundary's authenticated principal, never `--as`, a claimed
+actor or `requester` attribution. A BoundRun creator resolves to its own recorded initiating
+principal. System subscription/linked/scheduled children and supersession inherit their
+parent's original principal; a retry requested by another authenticated principal records
+that principal instead. Historical receipts with no principal remain unauthorized.
+An unconfigured host refuses landing visibly with `unauthorized-landing`; it never
 downgrades the class. Inspection and terminal receipts retain `class: landing`, and shell
 refusals carry `refusalCode` (`refusal_code` and `refusal_reason` in the durable receipt).
 `declared_priority` remains declaration metadata, not a second admission-class control.
@@ -253,6 +261,10 @@ asserted through the daemon's existing caller binding and native ownership recor
 that can rewrite the user's daemon state/configuration is outside this threat model.
 Deploy a daemon supporting these keys before adding them to host configuration; unknown host
 policy fields are rejected rather than ignored.
+After rollout, restart a historical factory intake root once from the Factory Manager seat
+through native `fractal missions start`; pre-roll roots cannot lend landing authority.
+Legacy client-v0 `mission.start` has no authenticated write principal and creates roots without
+one, even when its session supplies an allowlisted `authority_actor`. Such roots cannot use landing.
 
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`

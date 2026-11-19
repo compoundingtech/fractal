@@ -3761,6 +3761,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("workspace", string()),
             ("workspace_declaration", object()),
             ("requester", reference()),
+            ("initiating_principal", reference()),
             ("mode", string()),
             ("inputs", object()),
             ("timeout_ms", integer()),

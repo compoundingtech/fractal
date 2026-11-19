@@ -252,6 +252,7 @@ fn child_context(
         parent_step_run: normalize_step_run(parent_step_run),
         default_selector,
         started_by,
+        system_parent_run: Some(parent.subject.clone()),
     }
 }
 
@@ -3074,6 +3075,7 @@ impl MissionsStore for Store {
             parent_step_run: normalize_step_run(schedule),
             default_selector: None,
             started_by: None,
+            system_parent_run: Some(parent.subject.clone()),
         });
         self.create_declared_workspace_mission_run(request, child, Some(&subject), None,
             fractal_store::store::missions::MissionWorkspaceDeclaration {

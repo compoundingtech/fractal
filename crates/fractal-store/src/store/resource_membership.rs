@@ -536,7 +536,7 @@ impl Store {
             return Ok(owns.then(|| receipt.agent.clone()));
         }
         if owner.run.starts_with("mission-run/") {
-            return Ok(self.mission_run(&owner.run)?.map(|run| run.requester));
+            return Ok(self.mission_run_initiating_principal(&owner.run)?);
         }
         Ok(owner.run.starts_with("person/").then(|| owner.run.clone()))
     }

@@ -326,11 +326,11 @@ mod tests {
     }
 
     #[test]
-    fn ownerless_landing_exec_authorizes_the_mission_requester_without_st_agent() {
+    fn ownerless_landing_exec_authorizes_only_the_authenticated_initiating_principal() {
         use super::super::tests::{FakeRuntime, apply_source};
         let source = r#"version 2
         mission "landing" state="ready" {
-            goal "Verify requester-owned landing."
+            goal "Verify authenticated landing."
             step "land" {
                 agentless
                 lane "landing" host="node" class="landing" coverage="logical" {
@@ -339,20 +339,38 @@ mod tests {
                 exec "land" { command "true"; }
             }
         }"#;
-        for (requester, allowed, authorize_default) in [
-            (Some("agent/example/lander"), true, false),
-            (Some("agent/example/background"), false, false),
-            (None, false, false),
-            (None, true, true),
+        for (principal, requester, allowed, authorize_default) in [
+            (Some("agent/example/lander"), Some("agent/example/lander"), true, false),
+            (Some("person/operator"), Some("agent/example/lander"), false, false),
+            (None, Some("agent/example/lander"), false, false),
+            (None, None, false, true),
         ] {
             let store = Arc::new(Store::open_memory("node").unwrap());
             apply_source(&store, source, "landing-source");
             store.start_resource_authority("node", "epoch").unwrap();
-            let run = store.create_mission_run(&crate::model::MissionRunRequest {
-                mission: "landing".into(), revision: None, workspace: "/work".into(),
-                requester: requester.map(str::to_owned), mode: Some("run".into()),
-                inputs: BTreeMap::new(), idempotency_key: "landing-run".into(),
-            }).unwrap();
+            let run = if let Some(principal) = principal {
+                let revision = store.mission_spec("landing", None).unwrap().unwrap().revision;
+                let declaration = format!(
+                    "version 2\nmission-run \"landing/request\" {{ mission {:?}; workspace \"/work\"; requester {:?}; }}",
+                    format!("mission/landing@{revision}"), requester.unwrap_or("person/requester"),
+                );
+                let intent = crate::graph::parse_intent(&declaration, "node").unwrap();
+                let preview = store.mission(&intent, crate::model::IntentInput {
+                    kdl: declaration, source_name: None,
+                }).unwrap();
+                store.apply_as_impl(&intent, &preview.subject_tokens, "landing-run",
+                    Some(principal), None, crate::store::publication::CommitChecks {
+                        initiating_principal: Some(principal), ..Default::default()
+                    }).unwrap();
+                store.mission_run("landing/request").unwrap().unwrap()
+            } else {
+                store.create_mission_run(&crate::model::MissionRunRequest {
+                    mission: "landing".into(), revision: None, workspace: "/work".into(),
+                    requester: requester.map(str::to_owned), mode: Some("run".into()),
+                    inputs: BTreeMap::new(), idempotency_key: "landing-run".into(),
+                }).unwrap()
+            };
+            assert_eq!(store.mission_run_initiating_principal(&run.subject).unwrap().as_deref(), principal);
             let intent = crate::graph::parse_intent(source, "node").unwrap();
             let spec = &intent.missions["landing"].steps["land"];
             let declarations = crate::graph::parse_execution_intent(

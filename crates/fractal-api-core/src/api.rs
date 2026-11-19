@@ -11507,13 +11507,14 @@ pub async fn apply(
     State(state): State<AppState>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
-    apply_with_authority(state, request, None).await
+    apply_with_authority(state, request, None, None).await
 }
 
 async fn apply_with_authority(
     state: AppState,
     request: ApplyRequest,
     bound: Option<&str>,
+    initiating_principal: Option<&str>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = request.actor.as_deref().ok_or_else(|| {
         ApiError::bad(FractalError::new(
@@ -11553,23 +11554,16 @@ async fn apply_with_authority(
         return Err(ApiError::bad(error));
     }
     store_program_bundles(&state, &intent, &request.program_bundles)?;
-    let mut response = match request.force_reason.as_deref().map(str::trim) {
-        None => state.store.apply_as(
-            &intent,
-            &request.expected_subjects,
-            &request.idempotency_key,
-            Some(actor),
-        ),
-        Some(reason) if !reason.is_empty() => state.store.apply_forced(
-            &intent,
-            &request.expected_subjects,
-            &request.idempotency_key,
-            Some(actor),
-            reason,
-        ),
-        Some(_) => Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason")),
+    let force = request.force_reason.as_deref().map(str::trim);
+    if force == Some("") {
+        return Err(ApiError::bad(FractalError::new("source-force-refused", "--force needs a nonempty --reason")));
     }
-    .map_err(ApiError::bad)?;
+    let mut response = state.store.apply_as_impl(
+        &intent, &request.expected_subjects, &request.idempotency_key, Some(actor), None,
+        crate::store::publication::CommitChecks {
+            force, initiating_principal, ..Default::default()
+        },
+    ).map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
@@ -12859,10 +12853,7 @@ pub async fn start_mission_run_action(
             "a mission run needs a concrete requester, not `person/requester`",
         )));
     }
-    let response = state
-        .store
-        .create_mission_run(&request)
-        .map_err(ApiError::bad)?;
+    let response = state.store.create_mission_run(&request).map_err(ApiError::bad)?;
     let mut response = response;
     runs::present_mission_run(&state.store, &mut response).map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -13046,6 +13037,7 @@ pub struct LocalPeer {
 
 fn normalized_agent_actor(actor: &str) -> Option<String> {
     if actor.starts_with("person/") || actor.starts_with("daemon/") || actor.starts_with("system/")
+        || actor.starts_with("mission-run/")
     {
         None
     } else if actor.starts_with("agent/") {
