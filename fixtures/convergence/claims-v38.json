@@ -6353,6 +6353,12 @@
         "immutable": false,
         "reference": false
       },
+      "initiating_principal": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
       "inputs": {
         "value_type": "object",
         "required": false,
@@ -8903,7 +8909,8 @@
           "retired",
           "retiring",
           "uncertain",
-          "invalid-state"
+          "invalid-state",
+          "unauthorized-landing"
         ],
         "immutable": false,
         "reference": false
@@ -8942,6 +8949,18 @@
       "resource"
     ],
     "fields": {
+      "argv": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "argv_sha256": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "class": {
         "value_type": "string",
         "required": true,
@@ -8972,6 +8991,12 @@
           "logical",
           "enforced"
         ],
+        "immutable": false,
+        "reference": false
+      },
+      "disk_path": {
+        "value_type": "string",
+        "required": false,
         "immutable": false,
         "reference": false
       },
@@ -9026,6 +9051,12 @@
         "immutable": false,
         "reference": false
       },
+      "launched": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "memory_bytes": {
         "value_type": "integer",
         "required": false,
@@ -9044,9 +9075,51 @@
         "immutable": false,
         "reference": false
       },
+      "profile_estimate": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "profile_key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "queue_wait_ms": {
         "value_type": "integer",
-        "required": true,
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "refusal_code": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "refusal_reason": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "request_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "retired_at": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_generation": {
+        "value_type": "string",
+        "required": false,
         "immutable": false,
         "reference": false
       },
@@ -9056,14 +9129,21 @@
         "values": [
           "completed",
           "refused",
-          "cancelled"
+          "cancelled",
+          "retired"
         ],
+        "immutable": false,
+        "reference": false
+      },
+      "timed_out": {
+        "value_type": "boolean",
+        "required": false,
         "immutable": false,
         "reference": false
       },
       "wall_duration_ms": {
         "value_type": "integer",
-        "required": true,
+        "required": false,
         "immutable": false,
         "reference": false
       }

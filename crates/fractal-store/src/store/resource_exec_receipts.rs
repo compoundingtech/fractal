@@ -214,6 +214,86 @@ mod tests {
     use super::super::resource_membership::{LaneRequest, Owner};
     use super::super::shell_resources::{Command, PayloadResult};
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_root_retirement_commits_schema_admitted_receipt_and_replicates_exact_proof() {
+        use super::super::resource_membership::{Admission, Fit};
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        for kind in ["dsl", "program"] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(&directory.path().join("graph.db"), "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch").unwrap();
+            let runtime = fractal_runtime::ExecRuntime::new(
+                directory.path().join("runtime"), directory.path().join("logs"));
+            let mut request = command("proof").lane;
+            request.id = format!("{kind}:schema-proof");
+            request.name = format!("receipt-schema-{}", uuid::Uuid::new_v4().simple());
+            request.coverage = Coverage::Logical;
+            request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: 256 << 20 });
+            let grant = match store.request_resource_membership(&request,
+                Fit { room: request.capacity, ..Default::default() }, 1).unwrap() {
+                Admission::Admitted(grant) => grant,
+                other => panic!("expected direct-root admission: {other:?}"),
+            };
+            let policy = fractal_runtime::FiniteLane { name: request.name.clone(),
+                capacity: request.capacity, member_capacity: request.capacity,
+                memory_high_bytes: None, require_enforced: false };
+            let binding = fractal_runtime::ResourceExecutionBinding {
+                membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                authority_epoch: grant.authority_epoch.clone(),
+            };
+            store.prepare_resource_membership(&grant, "proof-root").unwrap();
+            let argv = vec!["sh".into(), "-c".into(), "sleep 60 & exit 7".into()];
+            let generation = runtime.spawn_in_lane_authorized("proof-root",
+                &fractal_runtime::Launch::Argv(argv.clone()), directory.path(),
+                &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &policy, binding: &binding, guard: &|| Ok(()),
+                    authorize: &|execution, release|
+                        store.release_resource_payload(&grant, "proof-root", execution, release),
+                }).unwrap();
+            store.launch_resource_membership(&grant, "proof-root", &generation, 2).unwrap();
+            let query = selector(1, Some(&generation.generation_id));
+            let ended = runtime.wait_for_exit("proof-root", &generation.generation_id).unwrap();
+            store.end_resource_execution(&grant, "proof-root", 3).unwrap();
+            assert_eq!(store.resource_exec_receipt(&query).unwrap_err().code,
+                "resource-receipt-stale-generation", "leader exit is not tree retirement");
+
+            // This public lifecycle call writes the retired membership and invokes the real
+            // append_claim_tx schema boundary in one transaction, without fabricated rows.
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 4).unwrap());
+            assert!(runtime.retired_if("proof-root", &generation.generation_id).unwrap());
+            let member = store.resource_membership_record(&grant.membership_id, &request.owner).unwrap();
+            assert_eq!(member.state, "retired");
+            assert_eq!(member.retired_at, Some(4));
+            let receipt = store.resource_exec_receipt(&query).unwrap();
+            assert_eq!(receipt.fields.argv, argv);
+            assert_eq!(receipt.fields.argv_sha256, argv_sha256(&argv));
+            assert_eq!(receipt.fields.runtime_generation, generation.generation_id);
+            assert_eq!(receipt.fields.retired_at, 4);
+            assert_eq!(receipt.fields.owner, request.owner);
+            assert_eq!(receipt.fields.exit_code, ended.exit_code);
+            assert_eq!(receipt.fields.exit_signal, ended.exit_signal);
+            let persisted = claims(&store, None);
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].id, receipt.claim_id);
+            let fields: BTreeMap<String, Value> =
+                serde_json::from_value(persisted[0].body["fields"].clone()).unwrap();
+            assert!(!fields.contains_key("wall_duration_ms"));
+            assert!(!fields.contains_key("queue_wait_ms"));
+            fractal_schema::registry().validate_claim(&receipt.subject, KIND, &fields).unwrap();
+
+            let replica = Store::open_memory("host-b").unwrap();
+            store.bind_fleet(FLEET).unwrap();
+            replica.bind_fleet(FLEET).unwrap();
+            let exchange = store.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+            replica.receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
+            let replicated = replica.resource_exec_receipt(&query).unwrap();
+            assert_eq!(serde_json::to_value(&replicated).unwrap(), serde_json::to_value(&receipt).unwrap());
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 5).unwrap());
+            assert_eq!(claims(&store, None).len(), 1);
+        }
+    }
+
     fn direct(kind: &str, attempt: u32, generation: &str) -> (super::super::resource_membership::Membership, fractal_runtime::ExecGeneration) {
         let mut request = command("proof").lane;
         request.id = format!("{kind}:proof:{attempt}");
