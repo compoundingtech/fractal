@@ -32,6 +32,27 @@ pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyh
             .is_none())
 }
 
+/// A pending offer made to this incarnation, including pre-boot mail it recovered.
+/// Transport replacement must not demote that staging to historical mail.
+pub fn offered_since(
+    store: &Store,
+    message: &crate::model::MessageView,
+    floor: (u128, u64),
+) -> anyhow::Result<bool> {
+    let (since, through) = floor;
+    if mailbox_reads::is_stream_item(message) {
+        return Ok(mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
+            .is_some_and(|(actor, at)| at >= since && actor == message.to));
+    }
+    if let Some((consumer, at)) = crate::store::message_marks::staged(&store.readers.get(), &message.subject)? {
+        return Ok(at >= since && consumer == message.to);
+    }
+    Ok(store.latest_claim(&message.subject, Some("message.staged"))?
+        .is_some_and(|claim| claim.store_index > through
+            && claim.accepted_at_unix_ms >= since
+            && claim.actor.as_deref() == Some(message.to.as_str())))
+}
+
 /// A batch settles when every member is delivered/read or terminally withdrawn (closed/expired).
 /// Read outside recovery locks; withdrawal never manufactures a delivery receipt.
 pub fn recovery_batch_settled(
@@ -180,22 +201,7 @@ pub fn hold_pre_boot_mail(
         let after_boot = message.created_index > through && sent.accepted_at_unix_ms >= since;
         let recent = recovery_backlog(sent.accepted_at_unix_ms, since) == Some(false);
         let recovered = admitted.contains(&message.subject);
-        let current_offer = (recent || recovered)
-            && if mailbox_reads::is_stream_item(message) {
-                mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
-                    .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
-            } else if let Some((consumer, at)) = crate::store::message_marks::staged(&store.readers.get(), &message.subject)? {
-                // A staging this member recorded as a mark has no graph index either.
-                at >= since && consumer == peer.agent
-            } else {
-                store
-                    .latest_claim(&message.subject, Some("message.staged"))?
-                    .is_some_and(|claim| {
-                        claim.store_index > through
-                            && claim.accepted_at_unix_ms >= since
-                            && claim.actor.as_deref() == Some(peer.agent.as_str())
-                    })
-            };
+        let current_offer = (recent || recovered) && offered_since(store, message, (since, through))?;
         if !after_boot && !((recent || recovered) && (never_offered(store, message)? || current_offer)) {
             message.status = "closed".into();
         }
