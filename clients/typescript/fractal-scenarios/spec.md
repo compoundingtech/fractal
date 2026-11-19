@@ -899,7 +899,7 @@ unmodelled agent subroutes are unsupported, not empty inventories.
 
 ### Store versions
 
-The replay models one store per world, as st's SQLite store index is one counter per host. The
+The replay models one store per world, as Fractal's SQLite store index is one counter per host. The
 initial synthetic state is store version 1. Each timeline event that changes state names its
 resulting version in numeric `store`; synthetic worlds increment it by one per state-changing
 event. Fidelity worlds preserve imported versions unchanged, so several recorded events can share
