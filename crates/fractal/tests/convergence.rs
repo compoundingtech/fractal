@@ -267,8 +267,7 @@ fn the_corpus_generates_valid_native_capture_inputs() {
 #[test]
 fn the_corpus_generates_valid_native_admission_inputs() {
     let mut world = World::new(1, Sabotage::None);
-    let mut written = Vec::new();
-    for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+    let written = ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"].map(|kind| {
         let spec = &corpus()[kind];
         assert_eq!(serde_json::to_value(spec).unwrap(),
             serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
@@ -276,9 +275,9 @@ fn the_corpus_generates_valid_native_admission_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         assert_eq!(input.fields["host"], world.nodes[0].name);
         let claim = world.nodes[0].store.append_claim(&input).unwrap();
-        written.push(claim.id);
         world.tap(0);
-    }
+        claim.id
+    });
     assert!(world.failures.is_empty(), "{:?}", world.failures);
     let replicated = claims(&world.oracle);
     for id in written {
@@ -1170,24 +1169,43 @@ impl World {
             let epoch = format!("convergence-{host}");
             let now = self.clock(index);
             let (subject, fields) = match spec.kind.as_str() {
-                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), json!({
-                    "id":id, "host":host, "class":"check", "coverage":"logical", "epoch":epoch,
-                    "owner":{"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null},
-                    "queued_at":now, "admitted_at":null, "retired_at":null, "state":"queued",
-                    "refusal":null, "finite":true, "admission_timeout_ms":null, "clock_uncertain":false
-                })),
-                "resource.admission.coverage" => (format!("resource-admission/{host}"), json!({
-                    "host":host, "epoch":epoch, "complete":true
-                })),
-                _ => (format!("gate-admission/{host}/{id}/accepted"), json!({
-                    "schema":"gate-slot.admission/v1", "id":id, "host":host, "class":"heavy",
-                    "at_ms":now, "onset_ms":now, "epoch":epoch, "coverage":"logical",
-                    "outcome":"accepted", "reason":"queued"
-                })),
+                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), BTreeMap::from([
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("check")),
+                    ("coverage".into(), json!("logical")),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("owner".into(), json!({"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null})),
+                    ("queued_at".into(), json!(now)),
+                    ("admitted_at".into(), Value::Null),
+                    ("retired_at".into(), Value::Null),
+                    ("state".into(), json!("queued")),
+                    ("refusal".into(), Value::Null),
+                    ("finite".into(), json!(true)),
+                    ("admission_timeout_ms".into(), Value::Null),
+                    ("clock_uncertain".into(), json!(false)),
+                ])),
+                "resource.admission.coverage" => (format!("resource-admission/{host}"), BTreeMap::from([
+                    ("host".into(), json!(host)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("complete".into(), json!(true)),
+                ])),
+                _ => (format!("gate-admission/{host}/{id}/accepted"), BTreeMap::from([
+                    ("schema".into(), json!("gate-slot.admission/v1")),
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("heavy")),
+                    ("at_ms".into(), json!(now)),
+                    ("onset_ms".into(), json!(now)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("coverage".into(), json!("logical")),
+                    ("outcome".into(), json!("accepted")),
+                    ("reason".into(), json!("queued")),
+                ])),
             };
             return Some(ClaimInput {
                 subject, kind:spec.kind.clone(), actor:None,
-                fields:serde_json::from_value(fields).unwrap(), evidence:Vec::new(),
+                fields, evidence:Vec::new(),
                 expected_subject:None, idempotency_key:Some(id),
             });
         }
