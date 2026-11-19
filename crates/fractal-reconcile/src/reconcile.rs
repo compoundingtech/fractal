@@ -8660,6 +8660,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             incarnation.as_deref(),
             observation.is_some(),
         );
+        if subject.kind == "exec" {
+            starting.insert("start_operation".into(), Value::from(operation_id));
+        }
         if let Some(observation) = &observation {
             if let Some(code) = observation.exit_code {
                 starting.insert("exit_code".into(), Value::from(code));
@@ -10885,6 +10888,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             observation.incarnation_id.as_deref(),
             adopted,
         );
+        if subject.kind == "exec"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && let Some(operation) = self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+        {
+            fields.insert("start_operation".into(), Value::from(operation));
+        }
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }

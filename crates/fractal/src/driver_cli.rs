@@ -348,7 +348,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         use std::os::unix::process::ExitStatusExt as _;
         status.signal()
     };
-    let exit = ClaimInput {
+    let mut exit = ClaimInput {
         subject: subject.into(),
         kind: "runtime.observed".into(),
         actor: Some(subject.into()),
@@ -368,6 +368,9 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         expected_subject: None,
         idempotency_key: None,
     };
+    if let Ok(operation) = std::env::var("ST3_START_OPERATION") {
+        exit.fields.insert("start_operation".into(), Value::from(operation));
+    }
     // A provider that exits while the daemon restarts still reports its own exit status.
     let _: ClaimRecord =
         retry_while_daemon_unreachable(subject, || client.post("/v1/claims", &exit)).await?;

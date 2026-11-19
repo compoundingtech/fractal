@@ -43,6 +43,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             ("host".into(), Value::from(self.host.clone())),
         ]);
         if let Some(incarnation) = incarnation { fields.insert("incarnation_id".into(), Value::from(incarnation)); }
+        if let Some(incarnation) = incarnation
+            && let Some(member) = desired.member.as_ref()
+            && let Some(operation) = self.runtime.start_operation(&member.runtime_id, false, incarnation)?
+        {
+            fields.insert("start_operation".into(), Value::from(operation));
+        }
         if let Some(reason) = reason { fields.insert("reason".into(), Value::from(reason)); }
         if phase == "execution-timeout" {
             fields.insert("timeout_extension_ms".into(), Value::from(view.timeout_extension_ms));
@@ -80,6 +86,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let Some(incarnation) = observation.incarnation_id.as_deref() else { return Ok(()); };
+        let Some(operation) = self.runtime.start_operation(&member.runtime_id, false, incarnation)? else { return Ok(()); };
+        let Some(token) = self.store.selected_desired_token(&desired.subject)? else { return Ok(()); };
+        let launched_current = self.store.observations_for(&desired.subject, "runtime.action.succeeded")?
+            .iter().any(|claim| {
+                let fields = &claim.body["fields"];
+                fields["operation"].as_str() == Some(operation.as_str())
+                    && fields["incarnation_id"].as_str() == Some(incarnation)
+                    && fields["desired_token"].as_str() == Some(token.as_str())
+            });
+        // A retry can reuse the subject while its previous physical generation is still
+        // observed. Do not attribute that generation's start/exit to this new attempt.
+        if !launched_current { return Ok(()); }
         if let Some(started) = self.runtime.exec_started_at(&member.runtime_id, incarnation)? {
             self.record_native_exec_phase(desired, "exec-started", started, Some(incarnation))?;
             let payload = self.runtime.exec_payload_state(&member.runtime_id, incarnation)?;
@@ -126,10 +144,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let execs = self.native_step_execs(view)?;
         if execs.is_empty() { return Ok(None); }
         let claims = self.store.claims_for(&view.subject, Some(KIND))?;
+        if execs.iter().any(|desired|
+            phase_at(&claims, view.attempt, &desired.subject, "dispatched").is_none())
+        {
+            // Enrollment is additive; existing attempts keep their original bounded clock.
+            return Ok(None);
+        }
         for desired in &execs {
-            if phase_at(&claims, view.attempt, &desired.subject, "dispatched").is_none() {
-                continue;
-            }
+            // Every declared exec is enrolled in this attempt.
             if timeout_observed(&claims, view, &desired.subject) {
                 return Ok(Some(true));
             }
@@ -158,11 +180,45 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(dispatched) = phase_at(&claims, view.attempt, &desired.subject, "dispatched") else { continue; };
             let started = phase_at(&claims, view.attempt, &desired.subject, "exec-started");
             let exited = phase_at(&claims, view.attempt, &desired.subject, "exec-exited");
+            let identity = claims.iter().find_map(|claim| {
+                let fields = &claim.body["fields"];
+                (fields["attempt"].as_u64() == Some(u64::from(view.attempt))
+                    && fields["exec"].as_str() == Some(desired.subject.as_str())
+                    && fields["phase"].as_str() == Some("exec-started"))
+                    .then(|| fields["incarnation_id"].as_str().zip(fields["start_operation"].as_str())).flatten()
+            });
             let result = self.store.latest_actual_value(&desired.subject)?;
-            let result_present = result.as_ref().is_some_and(|actual|
-                actual_field(actual, "status").and_then(Value::as_str) == Some("exited"));
-            if result_present || phase_at(&claims, view.attempt, &desired.subject, "result-replicated").is_some() {
-                self.record_step_exec_phase(view, desired, "result-replicated", now, None, None)?;
+            let matches = |actual: &Value, incarnation: &str, operation: &str| {
+                actual_field(actual, "incarnation_id").and_then(Value::as_str) == Some(incarnation)
+                    && actual_field(actual, "start_operation").and_then(Value::as_str) == Some(operation)
+            };
+            let result_present = identity.is_some_and(|(incarnation, operation)| {
+                result.as_ref().is_some_and(|actual|
+                    actual_field(actual, "status").and_then(Value::as_str) == Some("exited")
+                        && matches(actual, incarnation, operation))
+            });
+            let replicated = identity.is_some_and(|(incarnation, operation)| claims.iter().any(|claim| {
+                let fields = &claim.body["fields"];
+                fields["attempt"].as_u64() == Some(u64::from(view.attempt))
+                    && fields["exec"].as_str() == Some(desired.subject.as_str())
+                    && fields["phase"].as_str() == Some("result-replicated")
+                    && matches(&claim.body, incarnation, operation)
+            }));
+            if result_present || replicated {
+                if !replicated {
+                    let (incarnation, operation) = identity.expect("matching result has a start identity");
+                    self.store.append_claim(&ClaimInput {
+                        subject: view.subject.clone(), kind: KIND.into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("attempt".into(), Value::from(view.attempt)), ("phase".into(), Value::from("result-replicated")),
+                            ("exec".into(), Value::from(desired.subject.clone())), ("at_unix_ms".into(), Value::from(now as u64)),
+                            ("host".into(), Value::from(self.host.clone())), ("incarnation_id".into(), Value::from(incarnation)),
+                            ("start_operation".into(), Value::from(operation)),
+                        ]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some(format!("step-phase:{}:{}:{}:result-replicated:0", view.subject, view.attempt, desired.subject)),
+                    })?;
+                }
                 // Delivery is finished. Review/product gates own any subsequent waiting.
                 // Execution-overrun evaluation remains independent of this closed guard.
                 continue;

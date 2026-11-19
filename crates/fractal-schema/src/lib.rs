@@ -3807,6 +3807,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("host", required_string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
             ("timeout_extension_ms", integer()),
         ],
         "step-run.state" => &[
@@ -4395,6 +4396,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_evidence", object()),
             ("exec_exited_at_unix_ms", integer()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),

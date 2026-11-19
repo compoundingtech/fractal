@@ -2230,15 +2230,18 @@ delivery each default to one hour and the overall guard to 24 hours; these fail
 as `dispatch-stalled`, not as execution timeouts. Resource-lane payloads retain
 their separate admission/release budgets.
 These delivery guards close permanently once the exited actual state is
-replicated; later review/product waits are not delivery stalls. Known execution
-overruns remain independently enforceable. Terminal step transitions close any
-still-open display interval, preserving elapsed execution after failure/cancel.
+replicated with the current attempt's exec incarnation and start operation;
+subject-scoped results from earlier attempts cannot close them. Later
+review/product waits are not delivery stalls. Known execution overruns remain
+independently enforceable. Terminal step transitions close any still-open display
+interval, preserving elapsed execution after failure/cancel.
 
 Only newly materialized native attempts (and retries of already tracked attempts)
-are enrolled. Existing declarations without dispatch evidence are grandfathered:
-upgrading a daemon does not retroactively introduce execution timeouts or delivery
-stalls for in-flight steps. Unknown legacy timing is not reconstructed from recovery
-time. New native attempts use the new policy.
+are enrolled. Existing declarations without dispatch evidence retain their
+original legacy execution clock and its deadline; upgrade does not shorten or
+disable that budget, or retroactively introduce new delivery-stall policy.
+Unknown legacy exit timestamps are not reconstructed from recovery time.
+New native attempts use the new policy.
 
 Expiry records `dispatch-stalled` with the exec and the waiting subphase, raises
 an operational fault, and fails the step with that reason, never with an execution
