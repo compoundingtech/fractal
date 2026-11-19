@@ -370,7 +370,7 @@ impl Heartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_missions::MissionsStore;
+    use crate::MissionsStore;
 
     #[test]
     fn heartbeat_starts_without_a_wall_clock_frontier_or_timer() {
