@@ -3529,7 +3529,7 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     .await;
     // Acceptance is independently durable even without the optional seat TODO journal.
     // Recovery must publish the native clock, not manufacture one from a delivery status.
-    let accepted_at: u64 = daemon.store.connection.read().query_row(
+    let accepted_at: u64 = daemon.store.readers.get().query_row(
         "SELECT accepted_at_unix_ms FROM local_mail_input_acceptance_v1
          WHERE message='message/live' AND recipient='agent/quartz' AND incarnation='replacement'",
         [], |row| row.get(0),
