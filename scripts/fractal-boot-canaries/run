@@ -758,14 +758,24 @@ def idle_suspend_and_wake(node, seats):
     def resumed():
         agent = node.json("agents", "show", subject)["value"]
         suspension = agent.get("suspension") or {}
+        latest.update({key: agent.get(key) for key in latest})
         if parked(node, subject):
             fail("wake demand parked the idle seat")
         if suspension.get("phase") == "resumed" and (agent.get("delivery") or {}).get("state") in ("current", "legacy"):
             return agent
         return None
 
-    agent = until(resumed, seats.bound, "wake-class mail did not resume a channel-ready seat",
-                  lambda: node.daemon.poll() is None or fail("daemon exited during idle wake"))
+    try:
+        agent = until(resumed, seats.bound, "wake-class mail did not resume a channel-ready seat",
+                      lambda: node.daemon.poll() is None or fail("daemon exited during idle wake"))
+    except Failure as error:
+        actions = [row for row in trace(node, subject) if row.get("kind") in (
+            "runtime.action.requested", "runtime.action.succeeded", "runtime.action.failed",
+            "harness.diagnostic", "harness.session-file",
+        )]
+        fail(f"{error}; last residency snapshot: {json.dumps(latest, sort_keys=True)}; "
+             f"native action trace: {json.dumps(actions[-12:], sort_keys=True)}; "
+             f"daemon log: {node.tail('daemon.log')}")
     if agent["suspension"].get("native_session_id") != native:
         fail(f"idle wake changed the bound native session: {agent['suspension']}")
     until(lambda: len(native_sessions(node, "a")) > launches_before, seats.bound,

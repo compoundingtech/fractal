@@ -126,6 +126,7 @@ const api = {
       } finally {
         running = false;
         await events.get('agent_end')?.({ willContinue: false }, ctx);
+        if (harness === 'pi') await events.get('agent_settled')?.({}, ctx);
       }
     }, 0);
   },

@@ -22,6 +22,8 @@ person-authored wake mail. It requires the same native session, a ready channel,
 turn that reads the pending mail, without an explicit resume command. The pi-family stand-in
 reports `agent_start` and terminal `agent_end` around each model action, with a truthful `isIdle`
 probe, so the real extension—not the fixture—publishes the busy-to-idle transition.
+Pi additionally receives its native `agent_settled` edge; OMP proves idle by sampling after
+`agent_end`, because its protocol has no settled event.
 
 OMP also runs `ask-sigterm` and `ask-sigkill`. Each opens an unanswered ask, stops the private
 daemon with the named signal, removes its PTY processes to model a host shutdown, and starts
