@@ -332,6 +332,8 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         .spawn()
         .with_context(|| format!("start {} provider", args.driver))?;
     let status = child.wait().await?;
+    // Capture the payload edge before retrying delivery to a restarting daemon.
+    let exec_exited_at_unix_ms = now_ms() as u64;
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt as _;
@@ -343,6 +345,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         actor: Some(subject.into()),
         fields: BTreeMap::from([
             ("status".into(), Value::String("exited".into())),
+            ("exec_exited_at_unix_ms".into(), Value::from(exec_exited_at_unix_ms)),
             (
                 "exit_code".into(),
                 status.code().map(Value::from).unwrap_or(Value::Null),
