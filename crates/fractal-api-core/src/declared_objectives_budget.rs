@@ -27,7 +27,8 @@ pub(crate) fn classify_budget(
             && pair.0.fraction().is_some_and(|fraction| fraction / policy.allowance >= rate)
             && pair.1.fraction().is_some_and(|fraction| fraction / policy.allowance >= rate)
     };
-    let status = if horizon.eligible && horizon.fraction().is_some_and(|fraction| fraction >= policy.allowance) {
+    // Equality spends the allowance but still satisfies the declared inclusive bad-share bound.
+    let status = if horizon.eligible && horizon.fraction().is_some_and(|fraction| fraction > policy.allowance) {
         "exhausted"
     } else if burns(fast, policy.fast.burn_rate) || burns(slow, policy.slow.burn_rate) {
         "burning"
