@@ -1557,8 +1557,11 @@ Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 `FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
 Only the main publication step receives the write token; PRs never execute it.
 The producer uploads the complete output closure, including already-cached references,
-then queries the remote store recursively and retains the exact source/output/cache
-receipt and closure manifest as `fractal-native-publication`. Consumers must configure
+then queries the remote store recursively using the same cache-scoped write token
+through a job-temporary, owner-only netrc containing only the named cache host.
+Only that remote-store command receives the netrc path; an exit trap removes the
+file on success or failure. The exact source/output/cache receipt and closure
+manifest are retained as `fractal-native-publication`. Consumers must configure
 read access and trust for that same cache through their fleet cache-client declarations;
 no consumer should substitute an unrelated installed binary when this output is absent.
 
