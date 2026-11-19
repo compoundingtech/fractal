@@ -111,6 +111,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn program_membership(&self, run: &MissionRunView, request: &program::Request, grant: &Grant) -> Result<Membership> {
         let record = self.store.resource_membership_for_grant(grant)?;
+        record.request.class.ensure_supported()?;
         anyhow::ensure!(record.request.host == self.host, "resource membership does not belong to this execution host");
         let owns = record.request.owner.run == run.subject
             && record.request.owner.step == request.step && record.request.owner.attempt == request.attempt;
@@ -128,6 +129,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn retire_program_membership(&self, record: &Membership) -> Result<bool> {
+        record.request.class.ensure_supported()?;
         let mut retirement_errors = Vec::new();
         for child in &record.child_runs {
             smallclaims::touched::note_read(|| child.clone());
@@ -170,6 +172,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let Some(previous) = self.store.step_run(&owner.step)? else { continue; };
             if previous.step != view.step { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported previous-attempt resource retirement until upgrade");
+                ready = false;
+                continue;
+            }
             self.ensure_resource_authority()?;
             // Record the dependency even while asynchronous child/root retirement is pending.
             smallclaims::touched::note_read(||
@@ -183,6 +190,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         for record in self.store.resource_memberships_for_host(&self.host)? {
             if !record.request.owner.invocation.as_deref().is_some_and(|id| id.starts_with("program:"))
                 || matches!(record.state.as_str(), "retired" | "refused") { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported program resource cancellation until upgrade");
+                continue;
+            }
             let active = self.store.step_run(&record.request.owner.step)?.is_some_and(|step|
                 step.attempt == record.request.owner.attempt && program::RUNNING_STATES.contains(&step.status.as_str()));
             let live = self.program_engine.get().is_some_and(|engine|
@@ -792,6 +803,13 @@ mission "resource-child" state="ready" {
             idempotency_key: "scope-child".into(),
         }).unwrap();
         let record = store.resource_membership_for_grant(&grant).unwrap();
+        let mut future = record.clone();
+        future.request.class = fractal_runtime::RequestClass::Unknown("recovery".into());
+        let child_status = store.mission_run_status(&child).unwrap();
+        let index = store.index().unwrap();
+        assert!(reconciler.retire_program_membership(&future).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert_eq!(store.mission_run_status(&child).unwrap(), child_status);
+        assert_eq!(store.index().unwrap(), index, "unsupported-class retirement must append no child cancellation claims");
         let (result, reads) = smallclaims::touched::record(|| reconciler.retire_program_membership(&record));
         assert!(!result.unwrap(), "normal asynchronous cancellation must not refuse scope release");
         assert!(reads.contains(&child));

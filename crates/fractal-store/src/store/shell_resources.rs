@@ -169,6 +169,14 @@ fn expire_request_cancellations(connection: &Connection, now: u64) -> Result<()>
 }
 
 fn cancel_command(connection: &Connection, id: &str) -> Result<()> {
+    let class: Option<String> = connection.query_row(
+        "SELECT json_extract(body,'$.command.lane.class') FROM shell_resources_v1 WHERE id=?1",
+        [id], |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
+    if let Some(class) = class {
+        let class: resource_membership::RequestClass = serde::Deserialize::deserialize(
+            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&class))?;
+        class.ensure_supported()?;
+    }
     // A scalar cancel flag still rewrites one potentially unbounded JSON body.
     connection.execute(/* sqlite-large-value: allow-for-now lv-hf463932112ca owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
     Ok(())
@@ -334,7 +342,11 @@ impl Store {
     }
 
     pub fn cancel_shell_resource(&self, id: &str) -> Result<()> {
-        cancel_command(&self.connection.write(), id)
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        cancel_command(&transaction, id)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn shell_resource_queue_wait_ms(&self, execution: &Execution, now: u64) -> u64 {
@@ -435,6 +447,31 @@ mod tests {
         request.lane.class = future.command.lane.class.clone();
         assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class recovery"));
         assert!(store.shell_resource_if_exists("unsupported").unwrap().is_none());
+    }
+
+    #[test]
+    fn future_resource_class_cancellation_is_refused_for_execution_and_request() {
+        let store = Store::open_memory("host-a").unwrap();
+        let key = uuid::Uuid::now_v7();
+        let scope = RequestScope::Local { person: Some("person/operator"), host: "host-a" };
+        let id = request_execution_id(&scope, key).unwrap();
+        let mut request = command(&id);
+        request.lane.owner.run = "person/operator".into();
+        request.request_id = Some(key.to_string());
+        let mut execution = store.submit_shell_resource(request, 1).unwrap();
+        execution.command.lane.class = RequestClass::Unknown("recovery".into());
+        store.update_shell_resource(&execution).unwrap();
+        let before = store.shell_resource(&id).unwrap();
+        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(!store.shell_resource(&id).unwrap().cancel);
+        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(!store.shell_resource(&id).unwrap().cancel);
+        let after = store.shell_resource(&id).unwrap();
+        assert_eq!(after, before);
+        let mut supported = store.submit_shell_resource(command("supported"), 3).unwrap();
+        store.cancel_shell_resource("supported").unwrap();
+        supported.cancel = true;
+        assert_eq!(store.shell_resource("supported").unwrap(), supported);
     }
 
     const ENV_SENTINEL: &str = "shell-environment-security-regression-sentinel";
