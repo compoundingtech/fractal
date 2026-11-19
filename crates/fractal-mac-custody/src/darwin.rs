@@ -430,7 +430,7 @@ mod tests {
             let error = Command::new("/bin/sh").args(["-c", &script]).exec();
             panic!("test exec failed: {error}");
         }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp/custody-tests");
+        let root = Path::new(&test_env!("CARGO_MANIFEST_DIR")).join("../../tmp/custody-tests");
         std::fs::create_dir_all(&root).unwrap();
         let scratch = tempfile::tempdir_in(root).unwrap();
         let path = scratch.path().join("slot.lock");

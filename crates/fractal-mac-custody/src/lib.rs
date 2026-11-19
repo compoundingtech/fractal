@@ -8,6 +8,11 @@
 //! only matching successful retirement removes the binding. The root lock stays
 //! held from empty-slot validation through exec, where CLOEXEC closes it.
 //! Set plan env `FRACTAL_MAC_CUSTODY_STDIO=pipe` to reject sudo-inserted PTYs.
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+#[allow(dead_code, unused_macros)]
+mod ci_test_paths;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::{Component, Path, PathBuf}};
 
@@ -173,7 +178,7 @@ pub fn rejected_invocation(_: &[std::ffi::OsString], reason: String) -> Receipt 
 mod tests {
     use super::*;
     fn scratch() -> tempfile::TempDir {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp/custody-tests");
+        let root = Path::new(&test_env!("CARGO_MANIFEST_DIR")).join("../../tmp/custody-tests");
         std::fs::create_dir_all(&root).unwrap();
         tempfile::tempdir_in(root).unwrap()
     }
