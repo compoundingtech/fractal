@@ -116,7 +116,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
         if trimmed.starts_with("```") && (!fence || trimmed == "```") {
             flush(&mut paragraph, &mut lines);
             fence = !fence;
-            lines.push(Line::from(Span::styled(sanitize(line), theme.dim())));
+            lines.push(Line::from(Span::styled(sanitize(line), theme.dim())).decoration());
         } else if fence {
             // Layout expands tabs for terminal cells; the input/source is never rewritten.
             lines.push(Line::from(Span::styled(sanitize(line), base.fg(theme.subtext1))));
@@ -129,8 +129,8 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
         } else if let Some((marker, item)) = list_item(trimmed) {
             flush(&mut paragraph, &mut lines);
             let indent = " ".repeat(line.len() - trimmed.len());
-            let first = [run(format!("{indent}{marker}"), base.fg(theme.lavender))];
-            let rest = [run(format!("{indent}{}", " ".repeat(width_of(&marker))), base)];
+            let first = [decoration(indent.clone(), base.fg(theme.lavender)), run(marker.clone(), base.fg(theme.lavender))];
+            let rest = [decoration(format!("{indent}{}", " ".repeat(width_of(&marker))), base)];
             lines.extend(wrap(&inline_ask(item, base, theme), width, &first, &rest, None));
         } else {
             if !paragraph.is_empty() { paragraph.push(' '); }

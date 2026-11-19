@@ -6,12 +6,11 @@
 
 pub use crate::pane::truncate;
 use crate::theme::{self, Theme};
-use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::Arc;
 #[path = "semantic_text.rs"]
 mod semantic;
-pub use semantic::{Line, Span};
+pub use semantic::{Continuation, CopyRole, Line, Span, TableRow};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[path = "ask_markdown.rs"]
@@ -79,6 +78,8 @@ pub struct Run {
     pub text: String,
     pub style: Style,
     pub link: Option<Arc<str>>,
+    pub role: CopyRole,
+    pub table_column: Option<usize>,
 }
 
 pub fn run(text: impl Into<String>, style: Style) -> Run {
@@ -86,12 +87,31 @@ pub fn run(text: impl Into<String>, style: Style) -> Run {
         text: text.into(),
         style,
         link: None,
+        role: CopyRole::Content,
+        table_column: None,
     }
+}
+
+/// Presentation-only runs, including wrapper prefixes and hanging indents.
+pub fn decoration(text: impl Into<String>, style: Style) -> Run {
+    Run { role: CopyRole::Decoration, ..run(text, style) }
+}
+
+/// Alignment is visual; copied fields have one meaningful label/value separator.
+pub fn field_prefixes(label: &str, columns: usize, style: Style) -> (Vec<Run>, [Run; 1]) {
+    let padding = columns.saturating_sub(label.chars().count());
+    let mut first = vec![if label.is_empty() { decoration(label, style) } else { run(label, style) }];
+    if padding > 0 {
+        let gap = usize::from(!label.is_empty());
+        if gap > 0 { first.push(run(" ", style)); }
+        first.push(decoration(" ".repeat(padding - gap), style));
+    }
+    (first, [decoration(" ".repeat(width(label) + padding), style)])
 }
 
 /// A labeled link with an independent, shared target (never inferred from drawn cells).
 pub fn link(label: impl Into<String>, target: impl Into<Arc<str>>, style: Style) -> Run {
-    Run { text: label.into(), style, link: Some(target.into()) }
+    Run { text: label.into(), style, link: Some(target.into()), role: CopyRole::Content, table_column: None }
 }
 
 /// Word-wrap runs into lines of `width` columns. The first line starts with `first`, later
@@ -116,28 +136,28 @@ pub fn wrap(
     };
     let start = |current: &mut Vec<Span<'static>>, used: &mut usize, prefix: &[Run]| {
         for run in prefix {
-            current.push(Span { content: run.text.clone().into(), style: with_bg(run.style, fill), link: run.link.clone() });
+            current.push(Span { content: run.text.clone().into(), style: with_bg(run.style, fill), link: run.link.clone(), role: run.role, table_column: run.table_column });
         }
         *used = prefix_width(prefix);
     };
     let finish = |current: &mut Vec<Span<'static>>,
                   used: usize,
                   lines: &mut Vec<Line<'static>>,
-                  joining: Option<Alignment>| {
+                  joining: Continuation| {
         if let Some(bg) = fill
             && used < width
         {
-            current.push(Span::styled(
+            current.push(Span::decoration(
                 " ".repeat(width - used),
                 Style::default().bg(bg),
             ));
         }
         let mut line = Line::from(std::mem::take(current));
-        line.alignment = joining;
+        line.continuation = joining;
         lines.push(line);
     };
     // How the line being built continues the one before it (see `continues`).
-    let mut joining = None;
+    let mut joining = Continuation::Newline;
     start(&mut current, &mut used, first);
     let mut line_has_words = false;
     let tokens = tokens(runs, fill);
@@ -148,15 +168,15 @@ pub fn wrap(
                 // A source newline is a real row boundary, including blank paragraphs.
                 // Ratatui spans cannot carry it: Buffer::set_line drops control characters.
                 finish(&mut current, used, &mut lines, joining);
-                joining = None;
+                joining = Continuation::Newline;
                 start(&mut current, &mut used, rest);
                 line_has_words = false;
                 next += 1;
             }
-            Token::Space(style, link) => {
+            Token::Space(style, link, role, column) => {
                 // A space: keep it unless it would start a line.
                 if line_has_words && used < width {
-                    push(&mut current, " ", *style, link);
+                    push(&mut current, " ", *style, link, *role, *column);
                     used += 1;
                 }
                 next += 1;
@@ -168,37 +188,37 @@ pub fn wrap(
                     .iter()
                     .position(|token| !matches!(token, Token::Piece(..)))
                     .map_or(tokens.len(), |offset| next + offset);
-                let word: Vec<(&str, Style, &Option<Arc<str>>)> = tokens[next..end]
+                let word: Vec<(&str, Style, &Option<Arc<str>>, CopyRole, Option<usize>)> = tokens[next..end]
                     .iter()
                     .filter_map(|token| match token {
-                        Token::Piece(text, style, link) => Some((text.as_str(), *style, link)),
+                        Token::Piece(text, style, link, role, column) => Some((text.as_str(), *style, link, *role, *column)),
                         _ => None,
                     })
                     .collect();
                 next = end;
-                let word_width = word.iter().map(|(text, _, _)| self::width(text)).sum::<usize>();
+                let word_width = word.iter().map(|(text, _, _, _, _)| self::width(text)).sum::<usize>();
                 if used + word_width > width && line_has_words {
                     trim_trailing_space(&mut current, &mut used);
                     finish(&mut current, used, &mut lines, joining);
-                    joining = Some(SPACE_WRAP);
+                    joining = Continuation::Space;
                     start(&mut current, &mut used, rest);
                 }
                 if used + word_width <= width {
-                    for (text, style, link) in word {
-                        push(&mut current, text, style, link);
+                    for (text, style, link, role, column) in word {
+                        push(&mut current, text, style, link, role, column);
                     }
                     used += word_width;
                 } else {
                     // A word longer than the line: break it by character.
-                    for (text, style, link) in word {
+                    for (text, style, link, role, column) in word {
                         for character in text.chars() {
                             let w = character.width().unwrap_or(0);
                             if used + w > width {
                                 finish(&mut current, used, &mut lines, joining);
-                                joining = Some(WORD_WRAP);
+                                joining = Continuation::Word;
                                 start(&mut current, &mut used, rest);
                             }
-                            push(&mut current, &character.to_string(), style, link);
+                            push(&mut current, &character.to_string(), style, link, role, column);
                             used += w;
                         }
                     }
@@ -212,21 +232,9 @@ pub fn wrap(
     lines
 }
 
-/// A line that only wraps the one before it, at a space (the space is dropped) or inside a long
-/// word, is marked in its alignment: drawing a line (`Buffer::set_line`) ignores alignment, and
-/// copying joins the two back into one line, so only real newlines reach the clipboard
-/// (Nathan, 2026-10-03).
-const SPACE_WRAP: Alignment = Alignment::Left;
-const WORD_WRAP: Alignment = Alignment::Right;
-
-/// What joins `line` to the line before it when copied: a space or nothing if it only wraps that
-/// line, `None` if it starts a line of its own.
+/// The source separator preceding a physical line, independent of visual alignment.
 pub fn continues(line: &Line<'_>) -> Option<&'static str> {
-    match line.alignment {
-        Some(SPACE_WRAP) => Some(" "),
-        Some(WORD_WRAP) => Some(""),
-        _ => None,
-    }
+    line.continuation.separator()
 }
 
 impl crate::SelectionLine for Line<'_> {
@@ -237,24 +245,47 @@ impl crate::SelectionLine for Line<'_> {
     fn continuation(&self) -> Option<&str> {
         continues(self)
     }
+    fn decoration_only(&self) -> bool { self.role == CopyRole::Decoration }
+    fn table_row(&self) -> Option<(usize, usize)> {
+        self.table_row.as_ref().map(|row| (Arc::as_ptr(row) as usize, row.columns))
+    }
+    fn cell_continuation(&self, column: usize) -> Option<&str> {
+        self.table_continuations.get(column).and_then(|value| value.separator())
+    }
+    fn table_header(&self) -> Vec<Vec<crate::pane::CopyFragment>> {
+        if !self.table_header { return Vec::new(); }
+        self.table_row.as_ref().map(|row| row.header.iter().map(|cell| cell.iter().map(|span| crate::pane::CopyFragment {
+            text: span.content.to_string(), link: span.link.clone(), column: None,
+        }).collect()).collect()).unwrap_or_default()
+    }
+    fn copy_fragments(&self, from: usize, to: usize) -> Vec<crate::pane::CopyFragment> {
+        let mut column: usize = 0;
+        let mut fragments = Vec::new();
+        for span in &self.spans {
+            let end = column.saturating_add(span.width());
+            if span.role == CopyRole::Content && end > from && column < to {
+                let text = crate::pane::columns(&span.content, from.saturating_sub(column), to.saturating_sub(column));
+                if !text.is_empty() {
+                    fragments.push(crate::pane::CopyFragment { text, link: span.link.clone(), column: span.table_column });
+                }
+            }
+            column = end;
+        }
+        fragments
+    }
 }
 
 /// `line` drawn after `prefix` (an edge, an indent), still wrapping the line before it if it did.
-pub fn prefixed(prefix: Vec<Span<'static>>, line: Line<'static>) -> Line<'static> {
-    let alignment = line.alignment;
-    let style = line.style;
-    let mut spans = prefix;
-    spans.extend(line.spans);
-    let mut line = Line::from(spans);
-    line.alignment = alignment;
-    line.style = style;
+pub fn prefixed(mut prefix: Vec<Span<'static>>, mut line: Line<'static>) -> Line<'static> {
+    prefix.append(&mut line.spans);
+    line.spans = prefix;
     line
 }
 
 /// What `wrap` lays out: the runs cut at every space and newline, each piece keeping its style.
 enum Token {
-    Piece(String, Style, Option<Arc<str>>),
-    Space(Style, Option<Arc<str>>),
+    Piece(String, Style, Option<Arc<str>>, CopyRole, Option<usize>),
+    Space(Style, Option<Arc<str>>, CopyRole, Option<usize>),
     Newline,
 }
 
@@ -268,10 +299,10 @@ fn tokens(runs: &[Run], fill: Option<Color>) -> Vec<Token> {
             }
             for (index, piece) in logical_line.split(' ').enumerate() {
                 if index > 0 {
-                    tokens.push(Token::Space(style, run.link.clone()));
+                    tokens.push(Token::Space(style, run.link.clone(), run.role, run.table_column));
                 }
                 if !piece.is_empty() {
-                    tokens.push(Token::Piece(piece.to_owned(), style, run.link.clone()));
+                    tokens.push(Token::Piece(piece.to_owned(), style, run.link.clone(), run.role, run.table_column));
                 }
             }
         }
@@ -289,14 +320,14 @@ fn trim_trailing_space(current: &mut [Span<'static>], used: &mut usize) {
     }
 }
 
-fn push(current: &mut Vec<Span<'static>>, text: &str, style: Style, link: &Option<Arc<str>>) {
+fn push(current: &mut Vec<Span<'static>>, text: &str, style: Style, link: &Option<Arc<str>>, role: CopyRole, table_column: Option<usize>) {
     if let Some(last) = current.last_mut()
-        && last.style == style && last.link == *link
+        && last.style == style && crate::pane::same_link(&last.link, link) && last.role == role && last.table_column == table_column
     {
         last.content.to_mut().push_str(text);
         return;
     }
-    current.push(Span { content: text.to_owned().into(), style, link: link.clone() });
+    current.push(Span { content: text.to_owned().into(), style, link: link.clone(), role, table_column });
 }
 
 fn with_bg(style: Style, fill: Option<Color>) -> Style {
@@ -306,20 +337,24 @@ fn with_bg(style: Style, fill: Option<Color>) -> Style {
     }
 }
 
+fn run_fragment(source: &Run, text: &str, link: Option<Arc<str>>) -> Run {
+    Run { text: text.to_owned(), style: source.style, link, role: source.role, table_column: source.table_column }
+}
+
 /// Split raw HTTP(S) URLs before wrapping, preserving punctuation and existing targets.
 fn mark_urls(runs: &[Run]) -> std::borrow::Cow<'_, [Run]> {
-    if !runs.iter().any(|run| run.link.is_none() && (run.text.contains("http://") || run.text.contains("https://") || run.text.contains("doc/"))) {
+    if !runs.iter().any(|run| run.role == CopyRole::Content && run.link.is_none() && (run.text.contains("http://") || run.text.contains("https://") || run.text.contains("doc/"))) {
         return std::borrow::Cow::Borrowed(runs);
     }
     let mut marked = Vec::new();
     for run in runs {
-        if run.link.is_some() {
+        if run.link.is_some() || run.role == CopyRole::Decoration {
             marked.push(run.clone());
             continue;
         }
         let mut rest = run.text.as_str();
         while let Some(start) = rest.find("https://").into_iter().chain(rest.find("http://")).min() {
-            if start > 0 { marked.push(self::run(&rest[..start], run.style)); }
+            if start > 0 { marked.push(run_fragment(run, &rest[..start], None)); }
             rest = &rest[start..];
             let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'')).unwrap_or(rest.len());
             let mut target = &rest[..end];
@@ -331,10 +366,10 @@ fn mark_urls(runs: &[Run]) -> std::borrow::Cow<'_, [Run]> {
             while target.ends_with(']') && target.matches(']').count() > target.matches('[').count() {
                 target = &target[..target.len() - 1];
             }
-            marked.push(link(target, target, run.style));
+            marked.push(run_fragment(run, target, Some(Arc::from(target))));
             rest = &rest[target.len()..];
         }
-        if !rest.is_empty() { marked.push(self::run(rest, run.style)); }
+        if !rest.is_empty() { marked.push(run_fragment(run, rest, None)); }
     }
     let references = marked.iter().filter(|run| run.link.is_none())
         .flat_map(|run| fractal_ui_model::documents::document_links(&run.text))
@@ -347,17 +382,17 @@ fn mark_references(runs: Vec<Run>, references: &[String]) -> Vec<Run> {
     if references.is_empty() { return runs; }
     let mut marked = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.link.is_some() {
+        if run.link.is_some() || run.role == CopyRole::Decoration {
             marked.push(run);
             continue;
         }
         let mut rest = run.text.as_str();
         while let Some((start, reference)) = next_reference(rest, references) {
-            if start > 0 { marked.push(self::run(&rest[..start], run.style)); }
-            marked.push(link(&rest[start..start + reference.len()], reference, run.style));
+            if start > 0 { marked.push(run_fragment(&run, &rest[..start], None)); }
+            marked.push(run_fragment(&run, &rest[start..start + reference.len()], Some(Arc::from(reference))));
             rest = &rest[start + reference.len()..];
         }
-        if !rest.is_empty() { marked.push(self::run(rest, run.style)); }
+        if !rest.is_empty() { marked.push(run_fragment(&run, rest, None)); }
     }
     marked
 }
@@ -493,7 +528,7 @@ fn markdown_references(input: &str, width: usize, base: Style, theme: &Theme, re
             lines.push(Line::from(Span::styled(
                 format!("```{}", language.trim()),
                 theme.dim(),
-            )));
+            )).decoration());
             index += 1;
             // Code keeps its indentation: wrapping drops spaces that start a line, so each line's
             // own indent (past the fence's) goes into its prefix. The prefix repeats on every row
@@ -503,17 +538,20 @@ fn markdown_references(input: &str, width: usize, base: Style, theme: &Theme, re
             while index < source.len() && !source[index].trim_start().starts_with("```") {
                 let code = source[index];
                 let spaces = code.len() - code.trim_start_matches(' ').len();
-                let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence).min(deepest))), base);
+                let indent = decoration("  ", base);
+                let source_indent = run(" ".repeat(spaces.saturating_sub(fence).min(deepest)), base);
+                let first = [indent.clone(), source_indent];
+                let rest = [decoration(format!("  {}", " ".repeat(spaces.saturating_sub(fence).min(deepest))), base)];
                 lines.extend(wrap(
                     &mark_references(vec![run(&code[spaces..], Style::default().fg(theme.subtext1))], references),
                     width,
-                    std::slice::from_ref(&indent),
-                    std::slice::from_ref(&indent),
+                    &first,
+                    &rest,
                     None,
                 ));
                 index += 1;
             }
-            lines.push(Line::from(Span::styled("```", theme.dim())));
+            lines.push(Line::from(Span::styled("```", theme.dim())).decoration());
             index += 1;
             continue;
         }
@@ -541,18 +579,18 @@ fn markdown_references(input: &str, width: usize, base: Style, theme: &Theme, re
             lines.push(Line::from(Span::styled(
                 "─".repeat(width.min(80)),
                 theme::fg(theme.surface2),
-            )));
+            )).decoration());
         } else if let Some(quote) = trimmed.strip_prefix("> ").or(trimmed.strip_prefix('>')) {
             let style = base.fg(theme.subtext0).add_modifier(Modifier::ITALIC);
-            let bar = [run("│ ", theme::fg(theme.surface2))];
+            let bar = [decoration("│ ", theme::fg(theme.surface2))];
             lines.extend(wrap(&inline_references(quote, style, theme, references), width, &bar, &bar, None));
         } else if let Some((marker, item)) = list_item(trimmed) {
             let indent = " ".repeat(line.len() - trimmed.len());
             let first = [
-                run(indent.clone(), base),
+                decoration(indent.clone(), base),
                 run(marker.clone(), theme::fg(theme.lavender)),
             ];
-            let rest = [run(indent + &" ".repeat(width_of(&marker)), base)];
+            let rest = [decoration(indent + &" ".repeat(width_of(&marker)), base)];
             lines.extend(wrap(&inline_references(item, base, theme, references), width, &first, &rest, None));
         } else {
             lines.extend(wrap(&inline_references(trimmed, base, theme, references), width, &[], &[], None));
@@ -633,6 +671,7 @@ fn table(rows: &[&str], width: usize, base: Style, theme: &Theme, references: &[
     };
     let mut lines = Vec::new();
     for (index, row) in runs.iter().enumerate() {
+        let source_row = Arc::new(TableRow { columns, header: Vec::new() });
         let wrapped = row
             .iter()
             .zip(&widths)
@@ -645,20 +684,23 @@ fn table(rows: &[&str], width: usize, base: Style, theme: &Theme, references: &[
             })
             .collect::<Vec<_>>();
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        let mut continuations = vec![Continuation::Newline; columns];
         for line_index in 0..height {
             let mut spans = Vec::new();
+            continuations.fill(Continuation::Newline);
             for (column, w) in widths.iter().enumerate() {
                 if column > 0 {
-                    spans.push(Span::styled(" │ ", theme::fg(theme.surface2)));
+                    spans.push(Span::decoration(" │ ", theme::fg(theme.surface2)));
                 }
                 let mut used = 0;
                 if let Some(line) = wrapped[column].get(line_index) {
                     used = line.width();
-                    spans.extend(line.spans.iter().cloned());
+                    continuations[column] = line.continuation;
+                    spans.extend(line.spans.iter().cloned().map(|mut span| { span.table_column = Some(column); span }));
                 }
                 // The last column's trailing spaces would only be copied; the others hold the grid.
                 if column + 1 < widths.len() {
-                    spans.push(Span::styled(" ".repeat(w.saturating_sub(used)), base));
+                    spans.push(Span::decoration(" ".repeat(w.saturating_sub(used)), base));
                 }
             }
             // Nothing after the last column but what is in it: no trailing spaces to copy.
@@ -671,7 +713,10 @@ fn table(rows: &[&str], width: usize, base: Style, theme: &Theme, references: &[
                     break;
                 }
             }
-            lines.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            line.table_row = Some(source_row.clone());
+            line.table_continuations = continuations.clone();
+            lines.push(line);
         }
         if index == 0 {
             let rule = widths
@@ -679,7 +724,7 @@ fn table(rows: &[&str], width: usize, base: Style, theme: &Theme, references: &[
                 .map(|w| "─".repeat(*w))
                 .collect::<Vec<_>>()
                 .join("─┼─");
-            lines.push(Line::from(Span::styled(rule, theme::fg(theme.surface2))));
+            lines.push(Line::from(Span::styled(rule, theme::fg(theme.surface2))).decoration());
         }
     }
     lines
@@ -727,23 +772,47 @@ fn records(
         return lines;
     };
     for (row, row_runs) in runs.iter().enumerate().skip(1) {
+        let source_row = Arc::new(TableRow {
+            columns: row_runs.len(),
+            header: if row == 1 {
+                runs[0].iter().map(|cell| cell.iter().map(|run| Span {
+                    content: run.text.clone().into(), style: run.style, link: run.link.clone(),
+                    role: run.role, table_column: None,
+                }).collect()).collect()
+            } else { Vec::new() },
+        });
         if row > 1 {
-            lines.push(Line::default());
+            lines.push(Line::default().decoration());
         }
+        let mut first_line = row == 1;
         for (column, cell) in row_runs.iter().enumerate() {
             let heading = headings.get(column).map(String::as_str).unwrap_or("");
-            let first = [run(format!("{heading}: "), theme.dim())];
-            lines.extend(wrap(cell, width, &first, &[run("  ", base)], None));
+            let first = [decoration(format!("{heading}: "), theme.dim())];
+            for mut line in wrap(cell, width, &first, &[decoration("  ", base)], None) {
+                line.table_header = first_line;
+                first_line = false;
+                line.table_continuations = vec![Continuation::Newline; row_runs.len()];
+                line.table_continuations[column] = line.continuation;
+                line.table_row = Some(source_row.clone());
+                for span in &mut line.spans { span.table_column = Some(column); }
+                lines.push(line);
+            }
         }
     }
     if runs.len() == 1 {
-        lines.extend(wrap(
-            &[run(headings.join(" · "), base.add_modifier(Modifier::BOLD))],
-            width,
-            &[],
-            &[],
-            None,
-        ));
+        let source_row = Arc::new(TableRow { columns: headings.len(), header: Vec::new() });
+        let mut header = Vec::new();
+        for (column, heading) in headings.iter().enumerate() {
+            if column > 0 { header.push(decoration(" · ", base.add_modifier(Modifier::BOLD))); }
+            let mut run = run(heading, base.add_modifier(Modifier::BOLD));
+            run.table_column = Some(column);
+            header.push(run);
+        }
+        for mut line in wrap(&header, width, &[], &[], None) {
+            line.table_row = Some(source_row.clone());
+            line.table_continuations = vec![line.continuation; headings.len()];
+            lines.push(line);
+        }
     }
     lines
 }
@@ -850,8 +919,9 @@ mod tests {
                 assert_eq!(prefixed.drawn_links(), expected);
             }
         }
-        let line = Line::from(Span { content: "label".into(), style: theme.dim(), link: Some(Arc::from("https://target")) })
-            .style(Style::default().bg(Color::Blue)).alignment(WORD_WRAP);
+        let mut line = Line::from(Span { content: "label".into(), style: theme.dim(), link: Some(Arc::from("https://target")), ..Span::default() })
+            .style(Style::default().bg(Color::Blue));
+        line.continuation = Continuation::Word;
         let prefixed = prefixed(vec![Span::raw("│ ")], line.clone());
         assert_eq!(prefixed.style, line.style);
         assert_eq!(prefixed.alignment, line.alignment);
@@ -1102,5 +1172,107 @@ mod tests {
             Span::raw(" plain"),
         ]);
         assert_eq!(ansi(&line), "\x1b[1;38;2;1;2;3mhi\x1b[0m plain");
+    }
+
+    fn entire(lines: &[Line<'_>]) -> crate::Selection {
+        crate::Selection { pane: "test".into(), anchor: (0, 0), head: (lines.len().saturating_sub(1), u16::MAX) }
+    }
+
+    fn framed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        let style = Style::default();
+        let mut output = vec![Line::raw("╭─ title ─╮").decoration()];
+        output.extend(lines.into_iter().map(|line| {
+            let mut line = prefixed(vec![Span::decoration("│ ▎ ", style)], line);
+            line.spans.push(Span::decoration("   │", style));
+            line
+        }));
+        output.push(Line::raw("╰─ buttons ─╯").decoration());
+        output
+    }
+
+    #[test]
+    fn semantic_copy_composes_prose_links_real_newlines_and_card_chrome() {
+        let theme = Theme::default();
+        let target = "https://example.com/a/very/long/target";
+        let source = format!("Read [a long linked label]({target}), then {target}.\n\n> quoted 界 text\n```rs\n  let answer = 42;\n```");
+        let lines = framed(markdown(&source, 17, Style::default(), &theme));
+        let selection = entire(&lines);
+        let prose = format!("Read a long linked label, then {target}.\n\nquoted 界 text\n  let answer = 42;");
+        assert_eq!(selection.text(&lines), prose);
+        assert_eq!(selection.text_with_link_targets(&lines), format!("Read a long linked label ({target}), then {target}.\n\nquoted 界 text\n  let answer = 42;"));
+        let mut reverse = selection.clone();
+        std::mem::swap(&mut reverse.anchor, &mut reverse.head);
+        assert_eq!(reverse.text_with_link_targets(&lines), selection.text_with_link_targets(&lines));
+        assert!(lines.iter().all(|line| line.alignment.is_none()));
+    }
+
+    #[test]
+    fn semantic_tables_copy_source_rows_not_interleaved_physical_cells() {
+        let source = "| key | value |\n| --- | --- |\n| first long cell | [second long linked cell](https://target) |\n| 界 | final |";
+        for width in [10, 24, 100] {
+            let lines = framed(markdown(source, width, Style::default(), &Theme::default()));
+            let selection = entire(&lines);
+            assert_eq!(selection.text(&lines), "key\tvalue\nfirst long cell\tsecond long linked cell\n界\tfinal", "width {width}");
+            assert_eq!(selection.text_with_link_targets(&lines), "key\tvalue\nfirst long cell\tsecond long linked cell (https://target)\n界\tfinal", "width {width}");
+        }
+    }
+
+    #[test]
+    fn table_partial_reverse_selection_keeps_cell_order_and_omits_rules() {
+        let lines = framed(markdown("| a | b |\n|---|---|\n| abc | def |", 80, Style::default(), &Theme::default()));
+        let mut selection = crate::Selection { pane: "test".into(), anchor: (3, 5), head: (3, 12) };
+        assert_eq!(selection.text(&lines), "bc\tdef");
+        std::mem::swap(&mut selection.anchor, &mut selection.head);
+        assert_eq!(selection.text(&lines), "bc\tdef");
+        let header = framed(markdown("| abcdefgh | ijklmnop |", 6, Style::default(), &Theme::default()));
+        assert_eq!(entire(&header).text(&header), "abcdefgh\tijklmnop");
+    }
+
+    #[test]
+    fn adjacent_duplicate_targets_remain_distinct_link_occurrences() {
+        let style = Style::default();
+        let lines = wrap(&[link("first", "https://same", style), link("second", "https://same", style)], 4, &[], &[], None);
+        assert_eq!(entire(&lines).text_with_link_targets(&lines), "first (https://same)second (https://same)");
+    }
+
+    #[test]
+    fn partial_reverse_unicode_selection_respects_physical_columns_and_roles() {
+        let style = Style::default();
+        let lines = vec![prefixed(vec![Span::decoration("│ ", style)], Line::raw("a界bc"))];
+        let mut selection = crate::Selection { pane: "test".into(), anchor: (0, 3), head: (0, 5) };
+        assert_eq!(selection.text(&lines), "界b");
+        std::mem::swap(&mut selection.anchor, &mut selection.head);
+        assert_eq!(selection.text(&lines), "界b");
+        selection.anchor = (0, 0);
+        selection.head = (0, 1);
+        assert_eq!(selection.text(&lines), "");
+        assert_eq!(entire(&lines).text(&lines), "a界bc");
+        assert_eq!(crate::Selection { pane: "test".into(), anchor: (0, 0), head: (1, 99) }.text(&["▎ literal", "```rs"]), "▎ literal\n```rs");
+    }
+
+    #[test]
+    fn repeated_links_and_source_newlines_survive_document_append_and_style() {
+        let style = Style::default();
+        let runs = [link("same long label", "https://a", style), run(" / ", style), link("same long label", "https://a", style), run("\nnext", style)];
+        let mut child = crate::doc::Doc::<()>::new();
+        child.lines(wrap(&runs, 9, &[], &[], Some(Color::Black)).into_iter().map(|line| line.style(style.fg(Color::Green))));
+        child.copy_blocks.push(0..child.lines.len());
+        let count = child.lines.len();
+        let mut parent = crate::doc::Doc::<()>::new();
+        parent.line(Line::raw("chrome").decoration());
+        parent.append(child, 3);
+        assert_eq!(parent.copy_blocks, vec![1..count + 1]);
+        assert_eq!(entire(&parent.lines).text_with_link_targets(&parent.lines), "same long label (https://a) / same long label (https://a)\nnext");
+        assert!(parent.lines[2..].iter().any(|line| line.continuation != Continuation::Newline));
+    }
+
+    #[test]
+    fn field_alignment_is_decoration_but_labels_and_one_gap_are_content() {
+        let style = Style::default();
+        let (first, rest) = field_prefixes("name", 9, style);
+        let lines = wrap(&[run("long value wraps here", style)], 17, &first, &rest, None);
+        assert_eq!(entire(&lines).text(&lines), "name long value wraps here");
+        let (first, rest) = field_prefixes("", 4, style);
+        assert!(first.iter().chain(&rest).all(|run| run.role == CopyRole::Decoration));
     }
 }

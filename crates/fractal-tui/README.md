@@ -122,8 +122,19 @@ selection keeps that tab visible; manual scrolling may still hide the active tab
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
 `Ctrl+A` then `t` opens the agent's terminal from its conversation; Enter attaches a detached terminal pane.
-`Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
-it on release.
+`Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too.
+
+Plain mouse drag selects semantic text within one pane and requests clipboard copy on
+release. Card borders, alignment padding, quote bars, conversation gutters and table
+rules are excluded; soft-wrapped prose and links rejoin, and tables copy as TSV.
+The context menu's **Copy text** action copies the pointed card/block body.
+Outside text inputs and conversation typing, `y` copies the focused card body
+(an existing answer-confirmation shortcut still takes precedence). Named links include
+their target when copying a whole body. Terminal panes retain their native text model.
+Clipboard requests use OSC 52: success means the request was written, not that the
+terminal accepted it; enable clipboard access and tmux passthrough where necessary.
+Use the terminal's selection override (for example Shift or Option, depending on
+terminal settings) for native screen-cell selection instead.
 
 Managed agents show their details beside the terminal by default
 when the **pane** is at least 120 columns wide (not the whole window). The details use

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Application actions requested by a conversation pane, never performed by the renderer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +63,13 @@ pub struct Selection {
 /// A displayed line's text and whether wrapping joined it to the previous line.
 /// Implement this for an embedding UI's line type; the `ratatui` feature supplies its `Line`
 /// implementation. Plain strings start their own lines.
+#[derive(Debug)]
+pub struct CopyFragment {
+    pub text: String,
+    pub link: Option<Arc<str>>,
+    pub column: Option<usize>,
+}
+
 pub trait SelectionLine {
     fn plain_text(&self) -> Cow<'_, str>;
 
@@ -69,6 +77,14 @@ pub trait SelectionLine {
     fn continuation(&self) -> Option<&str> {
         None
     }
+    fn copy_fragments(&self, from: usize, to: usize) -> Vec<CopyFragment> {
+        vec![CopyFragment { text: columns(&self.plain_text(), from, to), link: None, column: None }]
+    }
+    fn decoration_only(&self) -> bool { false }
+    /// Stable source row identity and number of cells, when this is part of a table.
+    fn table_row(&self) -> Option<(usize, usize)> { None }
+    fn cell_continuation(&self, _column: usize) -> Option<&str> { None }
+    fn table_header(&self) -> Vec<Vec<CopyFragment>> { Vec::new() }
 }
 
 impl SelectionLine for str {
@@ -91,73 +107,142 @@ impl<T: SelectionLine + ?Sized> SelectionLine for &T {
     fn continuation(&self) -> Option<&str> {
         (*self).continuation()
     }
+    fn copy_fragments(&self, from: usize, to: usize) -> Vec<CopyFragment> { (*self).copy_fragments(from, to) }
+    fn decoration_only(&self) -> bool { (*self).decoration_only() }
+    fn table_row(&self) -> Option<(usize, usize)> { (*self).table_row() }
+    fn cell_continuation(&self, column: usize) -> Option<&str> { (*self).cell_continuation(column) }
+    fn table_header(&self) -> Vec<Vec<CopyFragment>> { (*self).table_header() }
+}
+
+/// Equal targets may be distinct occurrences; wrapping shares the original target allocation.
+pub(crate) fn same_link(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct CopyText {
+    text: String,
+    label: String,
+    target: Option<Arc<str>>,
+    separator: Cow<'static, str>,
+}
+
+impl CopyText {
+    fn flush_link(&mut self, targets: bool) {
+        self.text.push_str(&self.label);
+        if targets && let Some(target) = &self.target && self.label != target.as_ref() {
+            self.text.push_str(" (");
+            self.text.push_str(target);
+            self.text.push(')');
+        }
+        self.label.clear();
+        self.target = None;
+    }
+    fn append(&mut self, fragment: CopyFragment, targets: bool) {
+        if !same_link(&fragment.link, &self.target) {
+            self.flush_link(targets);
+            self.text.push_str(&self.separator);
+        } else if self.target.is_some() {
+            self.label.push_str(&self.separator);
+        } else {
+            self.text.push_str(&self.separator);
+        }
+        self.separator = Cow::Borrowed("");
+        self.target = fragment.link;
+        if self.target.is_some() { self.label.push_str(&fragment.text); }
+        else { self.text.push_str(&fragment.text); }
+    }
+    fn join(&mut self, separator: &str) {
+        if self.separator.is_empty() {
+            self.separator = match separator {
+                "" => Cow::Borrowed(""),
+                " " => Cow::Borrowed(" "),
+                "\n" => Cow::Borrowed("\n"),
+                other => Cow::Owned(other.to_owned()),
+            };
+        } else {
+            self.separator.to_mut().push_str(separator);
+        }
+    }
+    fn finish(mut self, targets: bool) -> String {
+        self.flush_link(targets);
+        self.text
+    }
 }
 
 impl Selection {
-    /// The selected text as the person would paste it: without the edge Fractal TUI draws beside a
-    /// message, the indent its body sits at, or the fences it draws around code.
+    /// Copy source content, excluding only explicitly marked presentation cells.
     pub fn text<L: SelectionLine>(&self, lines: &[L]) -> String {
+        self.extract(lines, false)
+    }
+
+    /// Copy source prose and full link targets, once per contiguous link occurrence.
+    pub fn text_with_link_targets<L: SelectionLine>(&self, lines: &[L]) -> String {
+        self.extract(lines, true)
+    }
+
+    fn extract<L: SelectionLine>(&self, lines: &[L], targets: bool) -> String {
         let (start, end) = order(self.anchor, self.head);
-        let mut out: Vec<String> = Vec::new();
-        for line in start.0..=end.0.min(lines.len().saturating_sub(1)) {
-            let Some(line_text) = lines.get(line) else {
-                break;
-            };
-            let plain = line_text.plain_text();
-            let from = if line == start.0 { start.1 as usize } else { 0 };
-            let to = if line == end.0 {
-                end.1 as usize + 1
-            } else {
-                usize::MAX
-            };
-            let piece = columns(&plain, from.max(edge(&plain)), to);
-            if fence(&piece) {
-                continue;
+        let mut output = Vec::new();
+        let mut prose: Option<CopyText> = None;
+        let mut table: Option<(usize, Vec<CopyText>)> = None;
+        let flush_table = |table: &mut Option<(usize, Vec<CopyText>)>, output: &mut Vec<String>| {
+            if let Some((_, cells)) = table.take() {
+                output.push(cells.into_iter().map(|cell| cell.finish(targets)).collect::<Vec<_>>().join("\t"));
             }
-            let piece = piece.trim_end();
-            // A line drawn only because the one before it wrapped is copied onto that line: the
-            // clipboard gets the real newlines, not the pane's (Nathan, 2026-10-03).
-            match (line_text.continuation(), out.last_mut()) {
-                (Some(join), Some(previous)) if line > start.0 => {
-                    previous.push_str(join);
-                    previous.push_str(piece.trim_start());
+        };
+        for index in start.0..=end.0.min(lines.len().saturating_sub(1)) {
+            let Some(line) = lines.get(index) else { break };
+            if line.decoration_only() { continue; }
+            let from = if index == start.0 { usize::from(start.1) } else { 0 };
+            let to = if index == end.0 { usize::from(end.1) + 1 } else { usize::MAX };
+            let fragments = line.copy_fragments(from, to);
+            if let Some((id, columns)) = line.table_row() {
+                if let Some(previous) = prose.take() { output.push(previous.finish(targets)); }
+                if table.as_ref().is_some_and(|(previous, _)| *previous != id) { flush_table(&mut table, &mut output); }
+                if table.is_none() && from == 0 {
+                    let header = line.table_header();
+                    if !header.is_empty() {
+                        output.push(header.into_iter().map(|fragments| {
+                            let mut cell = CopyText::default();
+                            for fragment in fragments { cell.append(fragment, targets); }
+                            cell.finish(targets)
+                        }).collect::<Vec<_>>().join("\t"));
+                    }
                 }
-                _ => out.push(piece.to_owned()),
+                let (_, cells) = table.get_or_insert_with(|| (id, (0..columns).map(|_| CopyText::default()).collect()));
+                let mut previous_column = None;
+                for fragment in fragments {
+                    let Some(column) = fragment.column else { continue };
+                    let Some(cell) = cells.get_mut(column) else { continue };
+                    if previous_column != Some(column) && (!cell.text.is_empty() || !cell.label.is_empty()) {
+                        cell.join(line.cell_continuation(column).unwrap_or("\n"));
+                    }
+                    previous_column = Some(column);
+                    cell.append(fragment, targets);
+                }
+            } else {
+                flush_table(&mut table, &mut output);
+                match (line.continuation(), prose.as_mut()) {
+                    (Some(separator), Some(previous)) => previous.join(separator),
+                    _ => {
+                        if let Some(previous) = prose.take() { output.push(previous.finish(targets)); }
+                        prose = Some(CopyText::default());
+                    }
+                }
+                if let Some(current) = prose.as_mut() {
+                    for fragment in fragments { current.append(fragment, targets); }
+                }
             }
         }
-        dedent(out).join("\n")
+        flush_table(&mut table, &mut output);
+        if let Some(previous) = prose { output.push(previous.finish(targets)); }
+        output.join("\n")
     }
-}
-
-/// The display columns a message's edge ("▎ ", or "● " on the first row of mail to the person,
-/// after any indent) takes at a line's start.
-fn edge(line: &str) -> usize {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    match line[indent..].strip_prefix(['▎', '●']) {
-        Some(rest) if rest.is_empty() || rest.starts_with(' ') => indent + 2,
-        _ => 0,
-    }
-}
-
-/// A code fence the renderer drew: "```" and an optional language, nothing else.
-fn fence(line: &str) -> bool {
-    line.trim()
-        .strip_prefix("```")
-        .is_some_and(|language| !language.contains(char::is_whitespace))
-}
-
-/// Remove the indent every non-empty line shares.
-fn dedent(lines: Vec<String>) -> Vec<String> {
-    let indent = lines
-        .iter()
-        .filter(|line| !line.is_empty())
-        .map(|line| line.len() - line.trim_start_matches(' ').len())
-        .min()
-        .unwrap_or(0);
-    lines
-        .into_iter()
-        .map(|line| line.get(indent..).unwrap_or_default().to_owned())
-        .collect()
 }
 
 /// Keep one state per embedding surface; keys retain scroll and drafts across pane switches.
