@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Key complete private-overlay sources and recursively referenced local packages instead of a filename allowlist.",
+  "replay": { "status": "none", "detail": "No application-data replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only cache identity conservatively includes all private/vendor source files and local file/link/workspace package sources, excluding documented generated directories. The public five-file digest remains the first component. Unrelated overlay source changes also invalidate the cache." },
+  "downtime": { "status": "none", "detail": "No deployment activation or restart." },
+  "manual": { "status": "none", "detail": "No released-product manual step." },
+  "recovery": { "status": "none", "detail": "Missing, ambiguous or escaping local install inputs fail closed. Dependency publication, leases and retirement behavior are unchanged." }
+}
