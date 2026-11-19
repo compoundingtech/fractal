@@ -4518,8 +4518,7 @@ impl Ui {
                 }
             }
             MenuAction::CopyText(text) => {
-                copy(&text);
-                self.flash("Copied message text");
+                self.copy_text(&text);
             }
             MenuAction::Reply { agent, message } => {
                 self.open(&agent);
@@ -4550,8 +4549,7 @@ impl Ui {
                 self.drop_tab((group, tab), Drop::Strip { group: to, index: end });
             }
             MenuAction::CopyPath(path) => {
-                copy(&path);
-                self.flash(format!("Copied {path}"));
+                self.copy_text(&path);
             }
             MenuAction::SplitGroup { group, right } => {
                 self.focus_group(group);

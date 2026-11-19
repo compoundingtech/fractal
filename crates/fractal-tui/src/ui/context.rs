@@ -120,7 +120,7 @@ impl Ui {
             });
             (hit, subject, entry, pane_subject)
         };
-        let menu = if matches!(hit, Some(Hit::GlassTab(..))) {
+        let mut menu = if matches!(hit, Some(Hit::GlassTab(..))) {
             // Tab structure has its own existing actions, rather than the subject's actions.
             return Some(PointMenu::Glass);
         } else if let Some((agent, entry)) = entry {
@@ -136,6 +136,19 @@ impl Ui {
         } else {
             None
         };
+        let body = {
+            let info = self.frame.borrow();
+            let layer = info.covers.iter().rposition(|(rect, _)| contains(*rect, column, row))
+                .map_or(0, |index| index + 1);
+            info.panes.iter().rev()
+                .find(|pane| pane.layer >= layer && contains(pane.rect, column, row))
+                .map(|pane| pane.pointed_body(pane.top + usize::from(row - pane.rect.y)))
+                .filter(|text| !text.trim().is_empty())
+        };
+        if let Some(text) = body {
+            menu.get_or_insert_with(|| ("text".into(), Vec::new())).1
+                .push(("Copy text".into(), MenuAction::CopyText(text)));
+        }
         menu.map(PointMenu::Content).or_else(|| {
             let on_split = self.frame.borrow().glass_leaves.iter().any(|rect| {
                 contains(*rect, column, row)
