@@ -93,6 +93,59 @@ Class contention weights are 1000 for recovery and landing, 100 for check and 10
 priority does not create extra capacity.
 
 
+## Lane names, priorities and Darwin allocation
+
+Resource lane names and scheduling classes are separate axes. On Linux, `resources exec
+--lane NAME` selects a named resource policy; `--class landing|check|agent` selects its
+admission priority, not a physical slot pool. Linux lane names are not restricted to the
+Darwin allocation below. Requests still declare their CPU/memory profile, disk peak and IO
+needs; naming a lane does not supply a footprint.
+
+Do not mechanically copy legacy gate-slot flags. Its `--class heavy|gate|eval` selects
+physical workload capacity, unlike the resource API's scheduling class. Its `--lane build`
+selects normal heavy capacity, while `--lane check` (also spelled `--class heavy
+--expect-short`) selects separate short-heavy capacity with a 300-second admission bound.
+Neither means native `--class check`, and short-heavy work is not the gate pool. For example,
+`scripts/web-check` uses that legacy short-heavy lane, not a gate-class allocation.
+A Linux cutover must preserve the intended named policy, profile and time budgets explicitly;
+the legacy short FIFO and slots are not implied by a native lane's spelling.
+
+Darwin shell execution uses these canonical lane names and a fixed custody slot inventory:
+
+| Native lane | Maximum members | Custody slot | Dedicated user | UID | Job root |
+| --- | --- | --- | --- | --- | --- |
+| `heavy` | 1 | `heavy1` | `_fractal-heavy1` | 471 | `/Users/Shared/fractal-jobs/heavy1` |
+| `gate` | 3 | `gate1` | `_fractal-gate1` | 472 | `/Users/Shared/fractal-jobs/gate1` |
+| `gate` | 3 | `gate2` | `_fractal-gate2` | 473 | `/Users/Shared/fractal-jobs/gate2` |
+| `gate` | 3 | `gate3` | `_fractal-gate3` | 474 | `/Users/Shared/fractal-jobs/gate3` |
+| `eval` | 1 | `eval1` | `_fractal-eval1` | 475 | `/Users/Shared/fractal-jobs/eval1` |
+
+UID 476 is spare, not additional admitted capacity. Gate's three rows describe one
+capacity-three lane, not three policies each allowing three members. Shell callers choose
+the lane and priority, never a UID or slot number. The host derives the canonical member
+limit and eligible slots from the same inventory, validates that policy, and atomically
+allocates one free slot when admitting a membership. A queued request owns no slot.
+Each admitted independent root consumes its declared shared host footprint once; multiple
+gate members still compete for memory, disk and IO room. A slot remains occupied through
+preparation, execution, cancellation and uncertain retirement until positive UID-custody
+retirement proof permits reuse. Payload exit alone does not free it, and nesting must inherit
+the existing membership rather than acquire a second slot.
+
+After admission the host creates a per-execution workspace at `<slot-root>/<job-id>/`,
+exports it as `FRACTAL_JOB_WORKSPACE`, and uses it as the default working directory.
+An explicit shell `--cwd` must remain within the admitted slot root; otherwise launch refuses
+with `darwin-custody-cwd`. Workspace cleanup follows confirmed retirement; a cleanup or ACL
+failure reports the leftover rather than claiming it was removed. Source trees, toolchain
+inputs and output destinations must already be accessible to the dedicated user. Admission
+does not make an operator's home directory readable or broaden its ACLs. A build caller whose
+inputs are inaccessible must arrange an accessible source/output layout before cutover.
+
+The resource scheduling class remains `landing`, `check` or `agent` for every Darwin lane;
+it does not change the eligible slot set. `build` and `check` are not Darwin shell lane
+aliases. The slot-backed shell path does not change program/DSL lane execution: those
+Darwin lanes retain logical coverage and their existing named policies. UID custody proves
+process retirement, not Linux-equivalent CPU/memory limits; neither path promises enforced
+coverage on Darwin.
 
 ## Shell callers
 
@@ -187,8 +240,9 @@ or a closed argument enum. Do not grant root shells, `systemd-run`, arbitrary ma
 or another escape from the admitted user member. This inspection API grants no sudo permission.
 
 Linux defaults to enforced coverage: a transient scope beneath `app-lanes.slice` with memory and
-CPU limits. macOS refuses `resources exec` before launch with `unsupported-platform` because it
-has no whole-tree retirement proof; `ls`, `show`, `hold` and `release` remain available.
+CPU limits. macOS shell execution uses the canonical `heavy`, `gate` and `eval` lanes above with
+logical coverage and dedicated-UID custody. Unsupported lanes or unavailable custody refuse
+before payload launch; there is no detached-process fallback.
 A nested resource exec validates and inherits its parent's membership through an environment
 marker instead of reserving a second footprint; custody lasts until every execution root retires.
 Disk accounting uses declared reservations, not measured disk peaks; memory peaks come from cgroup
@@ -467,11 +521,13 @@ absence still requires an inactive unit with no cgroup and a snapshot newer than
 join. PTY launcher acknowledgement and observed pre-migration process membership complete that
 join boundary before the old scope can disappear.
 
-Darwin offers host-local logical exclusivity and scoped cancellation, not Linux-equivalent
-whole-tree CPU/memory enforcement. Required `enforced` coverage returns `UnsupportedCoverage`.
-Logical-only execution does not imply an enforced resource cap. Detached process groups cannot
-prove quiescence of escaped descendants; uncertain retirement retains custody instead of promising
-safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
+Darwin offers host-local admission and cancellation, not Linux-equivalent whole-tree CPU/memory
+enforcement. Required `enforced` coverage returns `UnsupportedCoverage`; logical coverage does
+not imply an enforced resource cap. Slot-backed shell execution uses dedicated-UID custody
+to prove retirement, including descendants that escape the original process group.
+Program/DSL logical execution retains its existing process-group boundary, which cannot prove
+quiescence of escaped descendants. In either path uncertain retirement retains custody instead
+of promising safe successor execution. Arbitrary shell SSH is not a remote target mutation fence.
 
 ## FACTORY integration boundary
 

@@ -363,9 +363,14 @@ impl ExecRuntime {
         env: &BTreeMap<String, String>, authorization: FiniteExecutionAuthorization<'_>,
         slot: crate::darwin_slot::Slot,
     ) -> Result<ExecGeneration> {
-        anyhow::ensure!(cfg!(target_os = "macos"), "Darwin slots require macOS");
-        crate::darwin_slot::Helper::detect_in(env)
-            .context("helperUnavailable: requested Darwin slot has no authorized helper")?;
+        (|| -> Result<()> {
+            anyhow::ensure!(cfg!(target_os = "macos"), "Darwin slots require macOS");
+            crate::darwin_slot::Helper::detect_in(env)
+                .context("helperUnavailable: requested Darwin slot has no authorized helper")?;
+            Ok(())
+        })().map_err(|error| error.context(StartRejected {
+            operation: env.get("ST3_START_OPERATION").cloned(),
+        }))?;
         let mut runtime = self.clone();
         runtime.darwin_slot = Some(slot);
         runtime.spawn_in_lane_authorized(id, launch, cwd, env, authorization)
@@ -1822,9 +1827,39 @@ mod tests {
                 authorize: &|_, _| anyhow::bail!("unavailable custody must never authorize payload"),
             }, crate::darwin_slot::Slot::Heavy1,
         );
-        let error = result.unwrap_err().to_string();
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<StartRejected>().is_some());
+        let error = format!("{error:#}");
         assert!(error.contains("helperUnavailable") || error.contains("require macOS"), "{error}");
         assert!(!runtime.record_path("requested-slot").exists());
+        assert!(!root.path().join("must-not-run").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_darwin_helper_rejects_start_operation_before_release() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let policy = FiniteLane {
+            name: "darwin_fixture".into(), capacity: None, require_enforced: false,
+        };
+        let environment = BTreeMap::from([("ST3_START_OPERATION".into(), "prepared-operation".into())]);
+        let authorized = std::cell::Cell::new(false);
+        let error = runtime.spawn_in_darwin_slot_authorized(
+            "missing-helper", &crate::Launch::Shell("touch must-not-run".into()),
+            root.path(), &environment, FiniteExecutionAuthorization {
+                lane: &policy, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|_, _| {
+                    authorized.set(true);
+                    anyhow::bail!("missing helper must not authorize a payload")
+                },
+            }, crate::darwin_slot::Slot::Gate1,
+        ).unwrap_err();
+        let rejected = error.downcast_ref::<StartRejected>().expect("pre-spawn rejection");
+        assert_eq!(rejected.operation.as_deref(), Some("prepared-operation"));
+        assert!(format!("{error:#}").contains("helperUnavailable"));
+        assert!(!authorized.get());
+        assert!(!runtime.record_path("missing-helper").exists());
         assert!(!root.path().join("must-not-run").exists());
     }
 
