@@ -22,8 +22,8 @@ pub enum PayloadState {
 struct Receipt { operation: String, payload: PayloadState }
 
 pub(crate) fn path(root: &Path, id: &str, operation: &str) -> PathBuf {
-    let digest = hex::encode(Sha256::digest(operation.as_bytes()));
-    root.join(format!("{id}.payload-{digest}.json"))
+    let digest = Sha256::digest(operation.as_bytes());
+    root.join(format!("{id}.payload-{digest:x}.json"))
 }
 
 fn persist(path: &Path, operation: &str, payload: PayloadState) -> Result<()> {
@@ -63,6 +63,16 @@ pub(crate) fn read(path: &Path, operation: &str) -> Result<Option<PayloadState>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_path_uses_fixed_width_sha256() {
+        assert_eq!(
+            path(Path::new("/receipts"), "exec-example", "abc"),
+            Path::new("/receipts").join(
+                "exec-example.payload-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.json"
+            )
+        );
+    }
 
     #[test]
     fn completion_survives_daemon_outage_and_is_operation_fenced() {
