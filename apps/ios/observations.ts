@@ -217,7 +217,7 @@ export class Observations {
     if (this.closed.length > MAX_KEPT_INTERVALS) this.closed = this.closed.slice(-MAX_KEPT_INTERVALS);
     // Once assigned an ID a batch is immutable, even when retention expires.
     if (this.batch?.intervals.some(interval => interval.start + MINUTE_MS <= floor)) this.batch = null;
-    if (moved) void this.persist().catch(() => { /* retained in memory for the next save */ });
+    if (moved) void this.serialize(() => this.persist()).catch(() => { /* retained in memory for the next save */ });
     // Something is waiting to be told: whoever reports hears it now, with no timer of ours.
     if (this.closed.length || this.batch) this.ready?.();
   }
@@ -270,10 +270,13 @@ export class Observations {
   refused(reportId: string): Promise<void> { return this.accepted(reportId); }
 
   /** Keep everything, the minute still open included, for the app going to the background. */
-  async flush(): Promise<void> {
-    this.advanceShare();
-    this.sweep();
-    await this.persist();
+  flush(): Promise<void> {
+    return this.serialize(async () => {
+      await this.load();
+      this.advanceShare();
+      this.sweep();
+      await this.persist();
+    });
   }
 
   /** Closed intervals not yet accepted, and the minute in progress. */
@@ -285,14 +288,11 @@ export class Observations {
     return result;
   }
 
-  private persisting: Promise<void> = Promise.resolve();
   private async persist(omitBatch = false): Promise<void> {
     await this.load();
     const saved: Saved = { bins: 2, closed: this.closed, minutes: [...this.minutes.values()], ...(!omitBatch && this.batch ? { batch: this.batch } : {}) };
     const encoded = JSON.stringify(saved);
-    const result = this.persisting.then(() => this.storage.write(encoded));
-    this.persisting = result.catch(() => {});
-    return result;
+    await this.storage.write(encoded);
   }
 }
 

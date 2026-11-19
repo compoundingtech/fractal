@@ -3,8 +3,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 
 pub const KIND: &str = "custom.client.observation-minute";
-const REPORT_LOOKUP: &str = "SELECT body FROM claims WHERE kind='custom.client.observation-minute' AND json_extract(body,'$.fields.source')=?1 AND json_extract(body,'$.fields.report_id')=?2";
-const MINUTE_LOOKUP: &str = "SELECT body FROM claims WHERE subject=?1 AND kind='custom.client.observation-minute'";
+const REPORT_LOOKUP: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='custom.client.observation-minute' AND json_extract(body,'$.fields.source')=?1 AND json_extract(body,'$.fields.report_id')=?2";
+const MINUTE_LOOKUP: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.observation-minute'";
 const LIVE_MINUTES: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='custom.client.observation-minute' AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)>=?1 AND CAST(json_extract(body,'$.fields.start_ms') AS INTEGER)<=?2 ORDER BY subject";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +63,21 @@ fn source_for_grant(connection: &Connection, grant: &str, actor: &str, current: 
     Ok(format!("custom/client/observation-source-{digest}"))
 }
 
+/// Admission and evaluation must recognize exactly the same source-backed authority.
+/// Merely replicated bytes, even in a signed batch, cannot claim a phone's replay key.
+fn admitted_minute(connection: &Connection, claim: &ClaimRecord) -> Result<Option<ObservationMinute>, FractalError> {
+    if !crate::pairing::operation_is_trusted(connection, &claim.id, &claim.origin,
+        claim.actor.as_deref(), &claim.body["fields"]).map_err(internal)? { return Ok(None); }
+    let Ok(minute) = serde_json::from_value::<ObservationMinute>(claim.body["fields"].clone()) else { return Ok(None); };
+    if minute.subject() != claim.subject { return Ok(None); }
+    match source_for_grant(connection, &minute.pairing_grant, claim.actor.as_deref().unwrap_or_default(), false) {
+        Ok(source) if source == minute.source => Ok(Some(minute)),
+        Ok(_) => Ok(None),
+        Err(error) if error.code == "forbidden" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 impl Store {
     pub fn observation_source(&self, grant: &str, actor: &str) -> Result<String, FractalError> {
         source_for_grant(&self.readers.get(), grant, actor, true)
@@ -88,19 +103,18 @@ impl Store {
                 return Err(FractalError::new("forbidden", "observation source must match the authenticated device"));
             }
             let mut reports = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfcc0104f3a41 owner=fractal_store::store::observation_minutes TODO=trace-statement-and-value-representation */ REPORT_LOOKUP).map_err(internal)?;
-            let bodies = reports.query_map(params![first.source, first.report_id], |row| row.get::<_, String>(0)).map_err(internal)?;
-            for body in bodies {
-                let body: Value = serde_json::from_str(&body.map_err(internal)?).map_err(internal)?;
-                if body["fields"]["report_digest"] != first.report_digest { return Err(conflict()); }
+            let rows = reports.query_map(params![first.source, first.report_id], smallclaims::store::claim_from_row).map_err(internal)?;
+            for row in rows {
+                let Some(old) = admitted_minute(tx, &row.map_err(internal)?)? else { continue; };
+                if old.report_digest != first.report_digest { return Err(conflict()); }
             }
             let mut missing = Vec::new();
             for (minute, input) in minutes.iter().zip(&inputs) {
                 let mut existing = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d4d7e936cfe owner=fractal_store::store::observation_minutes TODO=trace-statement-and-value-representation */ MINUTE_LOOKUP).map_err(internal)?;
-                let rows = existing.query_map([&input.subject], |row| row.get::<_, String>(0)).map_err(internal)?;
+                let rows = existing.query_map([&input.subject], smallclaims::store::claim_from_row).map_err(internal)?;
                 let mut found = false;
-                for body in rows {
-                    let body: Value = serde_json::from_str(&body.map_err(internal)?).map_err(internal)?;
-                    let old: ObservationMinute = serde_json::from_value(body["fields"].clone()).map_err(internal)?;
+                for row in rows {
+                    let Some(old) = admitted_minute(tx, &row.map_err(internal)?)? else { continue; };
                     if !old.same_content(minute) { return Err(conflict()); }
                     found = true;
                 }
@@ -127,16 +141,7 @@ impl Store {
             let mut unique = BTreeMap::<String, Option<ObservationMinute>>::new();
             for row in rows {
                 let claim = row?;
-                if !crate::pairing::operation_is_trusted(&connection, &claim.id, &claim.origin,
-                    claim.actor.as_deref(), &claim.body["fields"])? { continue; }
-                let Ok(minute) = serde_json::from_value::<ObservationMinute>(claim.body["fields"].clone()) else { continue; };
-                if minute.subject() != claim.subject { continue; }
-                match source_for_grant(&connection, &minute.pairing_grant, claim.actor.as_deref().unwrap_or_default(), false) {
-                    Ok(source) if source == minute.source => {},
-                    Ok(_) => continue,
-                    Err(error) if error.code == "forbidden" => continue,
-                    Err(error) => return Err(error.into()),
-                }
+                let Some(minute) = admitted_minute(&connection, &claim)? else { continue; };
                 unique.entry(claim.subject).and_modify(|old| {
                     if old.as_ref().is_some_and(|old| !old.same_content(&minute)) { *old = None; }
                 }).or_insert(Some(minute));
@@ -204,5 +209,68 @@ mod tests {
         conflict.over = 1;
         append_independent(&conflict);
         assert!(store.observation_minutes(120_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unadmitted_replicated_minutes_cannot_occupy_phone_replay_keys() {
+        for spoof in ["equal", "conflicting", "wrong-person"] {
+            let issuer = Store::open_memory("issuer").unwrap();
+            let fleet = "observation-adversarial-fleet";
+            issuer.bind_fleet(fleet).unwrap();
+            let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+            issuer.pin_fleet_anchor(key.public()).unwrap();
+            issuer.set_member_key(Some(key.clone())).unwrap();
+            issuer.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+            let grant = "custom/client/adversarial-phone";
+            issuer.append_client_operation_claim(&ClaimInput {
+                subject: grant.into(), kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/example".into()),
+                fields: serde_json::from_value(json!({"device_id":"example-device-key",
+                    "person_id":"person/example","session_actor":"client/example-phone",
+                    "credential_hash":"example-digest","scopes":[],"expires_at_unix_ms":u64::MAX})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let authentic = ObservationMinute {
+                source: issuer.observation_source(grant, "person/example").unwrap(), pairing_grant: grant.into(),
+                report_id: "11111111-1111-4111-8111-111111111111".into(), report_digest: "a".repeat(64),
+                target: "ios-connect".into(), carrier: "fabric".into(), path: None,
+                start_ms: 60_000, count: 1, over: 0, max_ms: 100, buckets: vec![(103, 1)],
+            };
+            let mut forged = authentic.clone();
+            if spoof == "conflicting" {
+                forged.report_digest = "b".repeat(64);
+                forged.count = 2;
+                forged.buckets = vec![(103, 2)];
+            }
+            // A real signed replication envelope is not a phone-admission receipt.
+            // Also exercise a native receipt whose actor is not the paired person.
+            issuer.with_all_runs_fenced(|tx| -> Result<(), FractalError> {
+                let actor = if spoof == "wrong-person" { "person/other" } else { "person/example" };
+                let claim = append_claim_tx(tx, issuer.origin(), &forged.subject(), KIND, Some(actor),
+                    &json!({"fields":forged,"evidence":[]}), &[], None).map_err(internal)?;
+                if spoof == "wrong-person" {
+                    crate::pairing::append_operation_receipt_tx(tx, &claim).map_err(internal)?;
+                }
+                Ok(())
+            }).unwrap();
+            let exchange = issuer.export_replication_exchange(fleet, &Default::default()).unwrap();
+            let receiver = Store::open_memory("receiver").unwrap();
+            receiver.pin_fleet_anchor(key.public()).unwrap();
+            receiver.receive_replication_exchange("issuer", fleet, &exchange).unwrap();
+            receiver.validate_replication_backlog().unwrap();
+            receiver.project_replication_backlog().unwrap();
+            assert!(receiver.observation_minutes(120_000).unwrap().is_empty(), "{spoof}");
+            let before = receiver.index().unwrap();
+            assert!(receiver.accept_observation_minutes("person/example", std::slice::from_ref(&authentic)).unwrap(), "{spoof}");
+            let accepted = receiver.index().unwrap();
+            assert!(accepted > before, "{spoof}: authentic admission must append rather than acknowledge a spoof");
+            assert_eq!(receiver.observation_minutes(120_000).unwrap(), vec![authentic.clone()], "{spoof}");
+            assert!(!receiver.accept_observation_minutes("person/example", std::slice::from_ref(&authentic)).unwrap(), "{spoof}");
+            assert_eq!(receiver.index().unwrap(), accepted, "{spoof}: authentic retry must not append");
+            let mut conflict = authentic;
+            conflict.report_digest = "c".repeat(64);
+            assert_eq!(receiver.accept_observation_minutes("person/example", &[conflict]).unwrap_err().code,
+                "idempotency-conflict", "{spoof}: admitted content still fences conflicting retries");
+        }
     }
 }

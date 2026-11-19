@@ -414,3 +414,50 @@ function memberAccepts(sample) {
   assert.equal(JSON.parse(stored).batch.report_id, batch.report_id);
   assert.deepEqual(await producer.nextReport(), batch, 'retry retains the exact saved payload');
 }
+
+// ---- Background saves cannot resurrect a batch while its durable removal is pending.
+for (const trigger of ['flush', 'sweep']) {
+  const removing = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let now = T0 + 100;
+  let stored = null;
+  let blockRemoval = false;
+  let ids = 0;
+  const storage = {
+    read: async () => stored,
+    write: async value => {
+      if (blockRemoval && !JSON.parse(value).batch) {
+        removing.resolve();
+        await release.promise;
+      }
+      stored = value;
+    },
+  };
+  const clock = { now: () => now, id: () => `serialized-${++ids}` };
+  const context = () => ({ carrier: 'lan' });
+  const producer = new Observations(storage, clock, context);
+  producer.observe('ios-connect', 100);
+  now += MINUTE_MS;
+  const batch = await producer.nextReport();
+  await producer.flush();
+  blockRemoval = true;
+  const accepting = producer.accepted(batch.report_id);
+  await removing.promise;
+  if (trigger === 'sweep') {
+    producer.observe('ios-recover', 200);
+    now += MINUTE_MS;
+    producer.observe('ios-recover', 300); // closes a minute, scheduling an automatic save
+  }
+  const backgrounded = producer.flush();
+  release.resolve();
+  await accepting;
+  await backgrounded;
+  assert.equal(JSON.parse(stored).batch, undefined, `${trigger} must not save the acknowledged batch again`);
+  const restarted = new Observations(storage, clock, context);
+  const next = await restarted.nextReport();
+  if (trigger === 'flush') assert.equal(next, null, 'restart has no acknowledged interval');
+  else {
+    assert.notEqual(next.report_id, batch.report_id);
+    assert.deepEqual(next.intervals.map(interval => interval.interval_start), [new Date(T0 + MINUTE_MS).toISOString()]);
+  }
+}
