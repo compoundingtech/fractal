@@ -7938,6 +7938,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "mission_resource_lane": 2,
                     "idle_residency": 1,
                     "per_run_missions": 1,
+                    "work_rebind_v1": 1,
                     "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),

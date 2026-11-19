@@ -308,7 +308,20 @@ pub(super) fn validate_mission(
 }
 
 fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) -> Result<(), FractalError> {
-    let Barrier { feature, minimum_version, code, later, .. } = barrier;
+    require_fleet_feature(connection, origin, barrier.feature, barrier.minimum_version,
+        barrier.code, barrier.later)
+}
+
+/// Check the current fleet's reader support inside the caller's writer transaction.
+/// Missing/ambiguous members and unfenced writers fail closed, as mission field admission does.
+pub fn require_fleet_feature(
+    connection: &Connection,
+    origin: &str,
+    feature: &str,
+    minimum_version: u64,
+    code: &'static str,
+    later: &str,
+) -> Result<(), FractalError> {
     let refused = |reason: String| FractalError::new(code, reason);
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     for member in membership.incarnations().filter(|member| member.end.is_none()) {
@@ -337,8 +350,8 @@ fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) ->
             .map_err(internal)?;
         let advertised = features.flatten()
             .and_then(|features| serde_json::from_str::<Value>(&features).ok())
-            .and_then(|features| features.get(*feature).and_then(Value::as_u64))
-            .is_some_and(|version| version >= *minimum_version);
+            .and_then(|features| features.get(feature).and_then(Value::as_u64))
+            .is_some_and(|version| version >= minimum_version);
         if !advertised {
             return Err(refused(format!(
                 "host/{} runs an older build that would refuse this revision (it has not advertised {feature}>={minimum_version}); {later} once every member is upgraded",

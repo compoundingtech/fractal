@@ -2239,6 +2239,9 @@ pub trait MissionsStore {
     /// Returns true only when durable runtime evidence proves that a claimed work incarnation is
     /// no longer the actor's live incarnation. Absence of runtime evidence is unknown, not death.
     fn work_claim_is_orphaned(&self, work: &StepRunView) -> Result<bool>;
+    /// Publish the native-session binding and any same-session lease transfers atomically.
+    /// Stale incarnation reports cannot replace the live incarnation's binding.
+    fn bind_native_session(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError>;
     /// Once per store, before a replay from nothing first decides its graph. Earlier replays
     /// re-applied claims over the rows a projection had left and could re-apply a run's old
     /// terminal state over the revision that reopened it, so this node's reconciler treated the
@@ -2248,6 +2251,127 @@ pub trait MissionsStore {
     /// A run with a peer's claim this node has not projected yet may have been reopened for real,
     /// so it is left to the claims. Returns the settled runs.
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>>;
+}
+
+fn work_rebind_enabled_tx(connection: &Connection, origin: &str) -> Result<bool> {
+    match fractal_store::store::mission_capacity::require_fleet_feature(
+        connection, origin, "work_rebind_v1", 1, "work-rebind-unavailable",
+        "resume work leases once every ownership writer reads work.rebound",
+    ) {
+        Ok(()) => Ok(true),
+        Err(error) if error.code == "work-rebind-unavailable" => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn session_field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
+    claim.body.get("fields")?.get(name)?.as_str()
+}
+
+fn session_history_tx(connection: &Connection, actor: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h34b52ae49ecf owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY CANONICAL_DESC(claims)"
+    )))?;
+    let rows = statement.query_map(params![actor, kind], claim_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn fresh_session_since_tx(connection: &Connection, binding: &ClaimRecord) -> Result<bool> {
+    let bound = canonical::claim_key(connection, &binding.id)?;
+    for request in session_history_tx(connection, &binding.subject, "runtime.action.requested")? {
+        let action = session_field(&request, "action");
+        let fresh = matches!(action, Some("fresh-context" | "fresh-session"))
+            || (matches!(action, Some("restart" | "restart-when-idle"))
+                && request.body["fields"]["fresh_session"] == true);
+        if fresh && canonical::claim_key(connection, &request.id)? > bound {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn work_incarnation_is_orphaned_tx(
+    connection: &Connection, origin: &str, actor: &str, incarnation: &str,
+) -> Result<bool> {
+    if !matches!(
+        fractal_store::store::runtime_incarnation_state(connection, actor, incarnation)?,
+        fractal_store::store::IncarnationRuntime::Ended
+    ) {
+        return Ok(false);
+    }
+    // Ending a process is not proof that its native session ended. Keep its existing lease
+    // until a successor binds a different session, fresh-session intent fences continuity,
+    // or the ordinary lease-expiry path releases it. No extension is granted here.
+    if work_rebind_enabled_tx(connection, origin)?
+        && let Some(binding) = session_history_tx(connection, actor, "harness.session-file")?.first()
+        && session_field(binding, "incarnation_id") == Some(incarnation)
+        && session_field(binding, "session_id").is_some_and(|id| !id.is_empty())
+        && !fresh_session_since_tx(connection, binding)?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn rebind_native_session_leases_tx(
+    transaction: &Transaction<'_>, origin: &str, binding: &ClaimRecord,
+) -> Result<(), FractalError> {
+    if !work_rebind_enabled_tx(transaction, origin).map_err(internal)? {
+        return Ok(());
+    }
+    let (Some(harness), Some(session), Some(incarnation)) = (
+        session_field(binding, "harness"), session_field(binding, "session_id"),
+        session_field(binding, "incarnation_id"),
+    ) else { return Ok(()); };
+    if !current_harness_at(transaction, &binding.subject, None).map_err(internal)?
+        .is_some_and(|live| live.state != "ended" && live.incarnation_id == incarnation)
+    {
+        return Ok(());
+    }
+    let history = session_history_tx(transaction, &binding.subject, "harness.session-file")
+        .map_err(internal)?;
+    let Some(prior) = history.iter().filter(|claim| session_field(claim, "harness") == Some(harness))
+        .find(|claim| claim.id != binding.id)
+    else { return Ok(()); };
+    let Some(from) = session_field(prior, "incarnation_id") else { return Ok(()); };
+    if from == incarnation || session_field(prior, "session_id") != Some(session)
+        || fresh_session_since_tx(transaction, prior).map_err(internal)?
+    {
+        return Ok(());
+    }
+    let actor = physical_actor(transaction, &binding.subject)?;
+    let held = {
+        let mut statement = transaction.prepare(
+            "SELECT subject, attempt FROM step_runs
+             WHERE lease_owner=?1 AND lease_incarnation=?2
+               AND status IN ('claimed','working','verifying','blocked','waiting-person')
+             ORDER BY subject",
+        ).map_err(internal)?;
+        let rows = statement.query_map(params![actor, from], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        }).map_err(internal)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
+    };
+    for (subject, attempt) in held {
+        // The binding, proof, fact and projection share one writer transaction. A restart or
+        // fresh intent cannot interleave between validation and transfer.
+        let claim = append_receipt_claim_tx(
+            transaction, origin, &subject, "work.rebound", Some(&actor),
+            &json!({"fields": {
+                "attempt": attempt, "claimant": actor, "from_incarnation": from,
+                "to_incarnation": incarnation, "session_id": session, "harness": harness,
+            }}), &[binding.id.clone(), prior.id.clone()], None,
+            &format!("work-rebound:{subject}:{attempt}:{from}:{incarnation}"),
+        ).map_err(claim_append_error)?;
+        project_mission_run_update(transaction, &claim)?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h8039b3da4b85 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_lease_renewals SET lease_incarnation=?2
+             WHERE subject=?1 AND lease_owner=?3 AND lease_incarnation=?4",
+            params![subject, incarnation, actor, from],
+        ).map_err(internal)?;
+    }
+    Ok(())
 }
 
 // Both entry points share the same transaction and existing transition guards. Only
@@ -2262,6 +2386,16 @@ fn set_step_state_guarded(
 ) -> Result<bool> {
     let subject = normalize_step_run(subject);
     store.with_run_fence_internal(&subject, |transaction| -> Result<bool> {
+            if status == "orphaned" {
+                let lease: (Option<String>, Option<String>) = transaction.query_row(
+                    "SELECT lease_owner, lease_incarnation FROM step_runs WHERE subject=?1",
+                    [&subject], |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let (Some(actor), Some(incarnation)) = lease else { return Ok(false); };
+                if !work_incarnation_is_orphaned_tx(transaction, &store.origin, &actor, &incarnation)? {
+                    return Ok(false);
+                }
+            }
             let current: Option<StepStateRow> = transaction
                 .query_row(
                     "SELECT step_runs.status,
@@ -8594,10 +8728,28 @@ impl MissionsStore for Store {
         };
         smallclaims::touched::note_read(|| actor.to_owned());
         let connection = self.readers.get();
-        Ok(matches!(
-            fractal_store::store::runtime_incarnation_state(&connection, actor, incarnation)?,
-            fractal_store::store::IncarnationRuntime::Ended
-        ))
+        work_incarnation_is_orphaned_tx(&connection, &self.origin, actor, incarnation)
+    }
+
+    fn bind_native_session(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+        if input.kind != "harness.session-file" {
+            return Err(FractalError::new("invalid-session-binding", "expected a native-session binding"));
+        }
+        // The standard binding append already checks the running incarnation under the writer
+        // lock before deduplication. Its follow-up keeps continuity proof and transfer there too.
+        let then = |transaction: &Transaction<'_>, binding: &ClaimRecord| {
+            rebind_native_session_leases_tx(transaction, &self.origin, binding)
+        };
+        let (claim, _) = append_claim_with_commit_context(
+            &self.graph, input, None, None, None, None,
+            ClaimCommitContext {
+                then: Some(&then),
+                all_run_projections: true,
+                ..Default::default()
+            },
+        )?;
+        self.run_projection_finished();
+        Ok(claim)
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {

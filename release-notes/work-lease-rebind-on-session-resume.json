@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A seat that restarts without a fresh session keeps its held work leases under the new incarnation",
+  "replay": {
+    "status": "none",
+    "detail": "No forced replay. work.rebound transfers only an exact held lease and replays idempotently. Orphaned or released leases are never resurrected. A possibly resumable session retains its existing lease until a binding or fresh intent resolves continuity, or ordinary lease expiry releases it."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Registers the work.rebound claim kind (fields, system-only write policy, durable retention) in the claim registry, so the registry digest changes. No table, index, trigger or schema-version change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or rules-digest changes. A fleet capability barrier gates the new ownership protocol."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Emission of work.rebound and resumable-session orphan deferral require every current fleet member to advertise work_rebind_v1>=1. Ambiguous membership, missing support or unfenced outside writers close the barrier. While closed, ownership keeps the prior orphan/reclaim behavior. Older members retain unknown facts; no new transfers are emitted during a mixed-version roll."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal rolling binary restarts. Session transfers activate only after the fleet capability barrier opens."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator cutover. Capability advertisements automatically open or close the writer barrier; native-session publication, proof and transfer commit atomically."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A rollback stops advertising work_rebind_v1 and closes the barrier, so no further transfers are emitted. Already retained work.rebound facts remain authoritative on supporting readers; older readers retain but do not apply them."
+  }
+}

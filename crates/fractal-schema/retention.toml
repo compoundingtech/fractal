@@ -274,6 +274,7 @@
 "work.person-override" = { class = "durable" }
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
+"work.rebound" = { class = "durable" }
 "work.released" = { class = "durable" }
 "work.handoff-returned" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }

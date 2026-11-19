@@ -2231,6 +2231,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.rebound",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("step-runs"),
+            true,
+            &[],
+        ),
+        (
             "work.nudged",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -3979,6 +3988,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
         ],
+        "work.rebound" => &[
+            ("attempt", integer()),
+            ("claimant", reference()),
+            ("from_incarnation", string()),
+            ("to_incarnation", string()),
+            ("session_id", string()),
+            ("harness", string()),
+        ],
         "work.nudged" => &[
             ("attempt", integer()),
             ("agent", reference()),
@@ -5557,6 +5574,7 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.remove("work.rebound").unwrap();
         for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
             current.claims.remove(kind).unwrap();
         }
