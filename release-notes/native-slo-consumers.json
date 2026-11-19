@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Present the complete native SLO inventory in diagnostics and fixed Mac signal tiles",
+  "replay": { "status": "none", "detail": "Presentation only; no stored claim changes." },
+  "schema": { "status": "none", "detail": "Uses existing SLO projections without client schema or generated-client changes." },
+  "rules": { "status": "none", "detail": "Native objective evaluations remain authoritative; consumers do not evaluate thresholds." },
+  "compatibility": { "status": "changed", "detail": "Doctor lists all native objective and budget rows, including declared objectives, rather than independently judging request telemetry. Native green/red tones map to pass/fail, and yellow/quiet or unknown tones map to warn, so strict diagnostics no longer hide an unmeasured or missed SLO as informational. The superseded telemetry-only diagnostic evaluator is removed. The Mac signal board retains ten tiles and includes the native objective families in its drill-down membership." },
+  "downtime": { "status": "none", "detail": "Normal daemon and app rollout." },
+  "manual": { "status": "none", "detail": "No configuration or objective-policy changes." },
+  "recovery": { "status": "none", "detail": "Ordinary binary and app rollback; no persisted-state changes." }
+}
