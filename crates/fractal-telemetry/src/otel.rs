@@ -654,7 +654,7 @@ const HTTP_SERVER_DURATION_INSTRUMENT: &str = "http.server.request.duration";
 /// product is 237 real (route, method) pairs from the router x 12 client classes x
 /// 5 outcomes = 14,220, above the 2,000-series per-daemon budget, so the SDK view
 /// caps this stream and folds anything beyond into the `otel.metric.overflow` series.
-const HTTP_SERVER_DURATION_CARDINALITY_LIMIT: usize = 1_500;
+const HTTP_SERVER_DURATION_CARDINALITY_LIMIT: usize = 1_500 - crate::residency::SERIES_ALLOCATION;
 
 /// Extractor over the request's headers, so W3C `traceparent`/`tracestate` extraction
 /// needs no header copy and no extra dependency.
