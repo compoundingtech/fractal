@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build or verify/extract one exact-source workspace test archive."""
 import argparse
+import gzip
 import hashlib
 import http.client
 import json
@@ -20,7 +21,7 @@ import zipfile
 import subprocess
 import sys
 
-FILES = ('workspace.tar.zst', 'sekrets-st3', 'production-build.json')
+FILES = ('workspace.tar.zst', 'sekrets-st3.gz', 'production-build.json')
 
 
 def output(*command):
@@ -42,8 +43,7 @@ def identity():
 
 
 def validate_byte_sizes(manifest, actual):
-    # Version-2 producers without this optional inventory remain valid. Sizes
-    # supplement the mandatory digests; they never replace source/hash checks.
+    # Sizes supplement mandatory digests; they never replace source/hash checks.
     if 'byte_sizes' not in manifest:
         return
     sizes = manifest['byte_sizes']
@@ -86,7 +86,7 @@ def verify(manifest, current, directory, producer_attempt):
         raise ValueError("invalid successful producer attempt")
     if manifest.get('standalone_model') is not True:
         raise ValueError('standalone model tests and dependency boundary must pass in the producer')
-    if manifest.get('version') != 2 or manifest.get('identity') != expected:
+    if manifest.get('version') != 3 or manifest.get('identity') != expected:
         raise ValueError('test archive source/run/attempt/platform/tool/recipe identity mismatch')
     if set(manifest.get('files', {})) != set(FILES):
         raise ValueError('the workspace archive and production gateway files are required')
@@ -343,7 +343,7 @@ def main():
     if args.action == 'build':
         directory.mkdir(parents=True, exist_ok=True)
         subprocess.run(['cargo', 'nextest', 'archive', '--workspace', '--locked',
-                        '--profile', 'ci', '-E', 'all()',
+                        '--profile', 'ci', '-E', 'all()', '--zstd-level', '10',
                         '--archive-file', str(directory / FILES[0])], check=True)
         # Keep the original no-default-features unit/integration/doc tests and dependency gate,
         # using the producer's compiler cache instead of rebuilding in the runtime consumer.
@@ -361,9 +361,10 @@ def main():
         if (len(binaries) != 1 or len(libraries) != 1
                 or any('test-support' in item['features'] or item['profile']['test'] for item in binaries + libraries)):
             raise ValueError('standalone production gateway feature/profile identity required')
-        import shutil
-        shutil.copy2(binaries[0]['executable'], directory / 'sekrets-st3')
-        manifest = {'version': 2, 'standalone_model': True, 'identity': current, 'workspace': str(Path.cwd().resolve()),
+        with open(binaries[0]['executable'], 'rb') as source, (directory / FILES[1]).open('wb') as compressed:
+            with gzip.GzipFile(filename='', mode='wb', fileobj=compressed, mtime=0) as stream:
+                shutil.copyfileobj(source, stream)
+        manifest = {'version': 3, 'standalone_model': True, 'identity': current, 'workspace': str(Path.cwd().resolve()),
                     'files': {name: digest(directory / name) for name in FILES},
                     'byte_sizes': {name: (directory / name).stat().st_size for name in FILES}}
         (directory / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
@@ -390,9 +391,11 @@ def main():
             raise ValueError('the matching rendered-hook executable must be archived')
         scratch = Path(os.environ['RUNNER_TEMP']) / 'ci-test-scratch'
         scratch.mkdir(exist_ok=True)
-        production = directory / 'sekrets-st3'
-        # Actions artifact transfer does not retain executable permissions; bytes were just
-        # hash-verified against the producer manifest, so restore the intended binary mode.
+        production = extracted / 'sekrets-st3'
+        # Decompress only after the complete ZIP, producer manifest and compressed
+        # payload digests have passed. The upload directory contains no raw copy.
+        with gzip.open(directory / FILES[1], 'rb') as source, production.open('wb') as stream:
+            shutil.copyfileobj(source, stream)
         production.chmod(0o755)
         with open(os.environ['GITHUB_ENV'], 'a') as stream:
             for key, value in {'CI_TEST_EXTRACTED': str(extracted),

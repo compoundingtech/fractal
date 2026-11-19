@@ -39,7 +39,7 @@ public struct SignalBoard: Sendable, Equatable {
 
     private static let daemonIDs: Set<String> = [
       "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
-      "terminal-attach", "sql-statement", "writer-hold", "cpu", "cpu/idle", "database",
+      "terminal-attach", "sql-statement", "writer-hold", "cpu", "cpu/idle", "database", "database-archive",
     ]
   }
 

@@ -3951,6 +3951,7 @@ fn client_agent_cards_presented(
     queues: &CardQueues<'_>,
     selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
+    let idle_residency_policy = crate::config::idle_residency_policy();
     let agent_subjects = status
         .subjects
         .iter()
@@ -4200,6 +4201,15 @@ fn client_agent_cards_presented(
             } else {
                 None
             };
+            let residency = crate::residency::evaluate_at(
+                store,
+                &subject.subject,
+                Some(snapshot_index),
+                idle_residency_policy.settings.after_ms,
+            )?.not_before(
+                idle_residency_policy.enabled_at_unix_ms,
+                idle_residency_policy.settings.after_ms,
+            );
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -4354,6 +4364,12 @@ fn client_agent_cards_presented(
                 } else {
                     None
                 },
+            });
+            value["residency"] = json!({
+                "policy": residency.policy,
+                "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                "refusal_reason": residency.refusal_reason,
             });
             value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
@@ -7220,6 +7236,8 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 /// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
 /// publication and refolds only the cards whose claims changed, when it can tell which.
 pub fn start_agent_roster(state: &AppState) {
+    crate::mail_delivery_objectives::start(state);
+    crate::admission_objectives::start(state);
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
@@ -8579,7 +8597,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
     });
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;
@@ -11763,6 +11781,12 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    let admission = crate::admission_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, admission));
+    let mail = crate::mail_delivery_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     let declared = crate::declared_objectives::rows(store, now, &rows)?;
     drop(rows.splice(budgets..budgets, declared));

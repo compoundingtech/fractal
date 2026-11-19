@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v36.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v38.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -101,6 +101,15 @@ fn the_corpus_includes_every_registry_kind() {
             corpus().contains_key(kind),
             "add {kind} to a versioned corpus"
         );
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_residency_evidence() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in corpus().keys().filter(|kind| kind.starts_with("residency.")) {
+        let input = world.claim_of(&corpus()[kind], 0).expect("residency input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
     }
 }
 
@@ -261,6 +270,27 @@ fn the_corpus_generates_valid_native_capture_inputs() {
     let replicated = claims(&world.oracle);
     for id in written.values() {
         assert!(replicated.contains_key(id), "capture claim {id} must replicate");
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_admission_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let written = ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"].map(|kind| {
+        let spec = &corpus()[kind];
+        assert_eq!(serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+        let input = world.claim_of(spec, 0).expect("generate native admission evidence");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        assert_eq!(input.fields["host"], world.nodes[0].name);
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        world.tap(0);
+        claim.id
+    });
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written {
+        assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
     }
 }
 
@@ -1141,6 +1171,83 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), "resource.admission.observed"
+            | "resource.admission.coverage" | "gate.admission.observed") {
+            let id = self.fresh("admission");
+            let host = self.nodes[index].name.as_str();
+            let epoch = format!("convergence-{host}");
+            let now = self.clock(index);
+            let (subject, fields) = match spec.kind.as_str() {
+                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), BTreeMap::from([
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("check")),
+                    ("coverage".into(), json!("logical")),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("owner".into(), json!({"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null})),
+                    ("queued_at".into(), json!(now)),
+                    ("admitted_at".into(), Value::Null),
+                    ("retired_at".into(), Value::Null),
+                    ("state".into(), json!("queued")),
+                    ("refusal".into(), Value::Null),
+                    ("finite".into(), json!(true)),
+                    ("admission_timeout_ms".into(), Value::Null),
+                    ("clock_uncertain".into(), json!(false)),
+                ])),
+                "resource.admission.coverage" => (format!("resource-admission/{host}"), BTreeMap::from([
+                    ("host".into(), json!(host)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("complete".into(), json!(true)),
+                ])),
+                _ => (format!("gate-admission/{host}/{id}/accepted"), BTreeMap::from([
+                    ("schema".into(), json!("gate-slot.admission/v1")),
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("heavy")),
+                    ("at_ms".into(), json!(now)),
+                    ("onset_ms".into(), json!(now)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("coverage".into(), json!("logical")),
+                    ("outcome".into(), json!("accepted")),
+                    ("reason".into(), json!("queued")),
+                ])),
+            };
+            return Some(ClaimInput {
+                subject, kind:spec.kind.clone(), actor:None,
+                fields, evidence:Vec::new(),
+                expected_subject:None, idempotency_key:Some(id),
+            });
+        }
+        if spec.kind.starts_with("residency.") {
+            let host = self.nodes[index].name.clone();
+            let suffix = match spec.kind.as_str() {
+                "residency.wake-demand" | "residency.resumed" | "residency.first-turn" => "wake",
+                "residency.outcome" => "outcome",
+                "residency.sleep-ended" => "sleep",
+                "residency.eligibility-outcome" => "eligibility",
+                "residency.unrouted" => "unrouted",
+                "residency.host-sample" => "host",
+                _ => unreachable!(),
+            };
+            let id = self.fresh("residency");
+            let mut fields = BTreeMap::from([("host".into(), json!(host))]);
+            for (name, field) in &spec.fields {
+                if !field.required || name == "host" { continue; }
+                let value = match name.as_str() {
+                    "resume_failed" | "useless" | "short_sleep" | "refused" => json!(0),
+                    "memory_coverage" => json!("unavailable"),
+                    _ => self.value_of(field, index),
+                };
+                fields.insert(name.clone(), value);
+            }
+            // The host sample is a continuing host stream, not an episode subject.
+            let subject_id = if suffix == "host" { &host } else { &id };
+            return Some(ClaimInput {
+                subject: format!("residency/{host}/{suffix}/{subject_id}"),
+                kind: spec.kind.clone(), actor: None, fields, evidence: Vec::new(),
+                expected_subject: None, idempotency_key: Some(id),
+            });
+        }
         if matches!(spec.kind.as_str(), fractal_schema::github_capture::FACT_KIND
             | fractal_schema::github_capture::COMMIT_KIND | fractal_schema::github_capture::AUTHORITY_KIND
             | fractal_schema::github_capture::FENCED_KIND)
@@ -2326,8 +2433,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v36 adds native GitHub capture inputs, shifting the seeded schedule.
-/// The prior v35 characterization is recorded in fixtures/convergence/README.md.
+/// Corpus v38 adds native admission evidence, shifting the seeded schedule.
+/// Prior corpus characterizations are recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2340,7 +2447,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v36 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v38 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2349,7 +2456,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v36 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v38 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2357,7 +2464,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v36 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v38 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2570,7 +2677,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v36.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v38.json"
         }))
         .unwrap(),
     )

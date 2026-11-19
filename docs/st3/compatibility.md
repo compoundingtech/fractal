@@ -138,6 +138,36 @@ The `owner_run` addition in `restart-retries-a-parked-launch.json` illustrates t
 gap: its text requires daemons to deploy together, despite compatibility `none`.
 That historical fragment is immutable; its classification needs a fresh correction.
 
+### Residency evidence reader foundation
+
+The eight `residency.*` evidence kinds and the `residency/HOST/EPISODE/ID`
+subject family are registered reader-first. This adds no evidence writer, timer,
+sensor scheduling, objective, or idle-suspend activation. Evidence is durable,
+system-only, closed-schema, and does not wake reconciliation.
+
+Older registries quarantine these kinds as retryable `unknown-claim-kind` records;
+known claims still admit. A supporting reader retries the retained original records
+after upgrade. Deploy readers before enabling any future evidence producer; this
+foundation does not establish an all-member activation gate or the adjacent-release
+guarantee. The registry and retention digests change; SQLite storage does not.
+
+Times are Unix milliseconds; outcome flags are integer 0/1. `reason` is a nonempty
+string bounded to 128 UTF-8 bytes without control characters. Sleep `end_class` is
+`wake`, `manual`, `stop`, or `retire`; unrouted `kind` is `attach` or `explicit-resume`.
+Host samples omit `held_silent_age_seconds` when the sensor is unavailable, never
+substitute zero. `memory_coverage` is `complete` (both deltas), `partial` (one), or
+`unavailable` (neither). Signed byte deltas are host available after minus before
+(`host_available_delta_bytes`) and private memory before minus after
+(`private_reclaimed_bytes`), not a sum of resident sizes. Optional `seat` is an agent
+subject reference; native session, incarnation, source message, and turn identity
+remain evidence fields rather than metric labels.
+
+Regenerate `schema.md` with
+`nix develop -c cargo run --locked -p fractal-schema --example schema_markdown -- docs/st3/schema.md`.
+Client code generation does not apply: this change does not alter client-v0 schemas,
+operations, declarations, or templates.
+
+
 ### Fleet feature activation and offline rejoin
 
 Design sketch (**open, [#4002](https://github.com/compoundingtech/fractal/issues/4002)**):
@@ -277,6 +307,42 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | Claim registry and replication | Admitted history, known claim vocabulary, projection digests and signature verification are separate checks. Equal replication digests alone do not establish claim-signature validity. An exchange's optional `build` names the sender's build for divergence faults; older peers omit it and ignore it. See [replication](replication.md). |
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
+
+### Reader-first compact claim-signature references
+
+This release keeps the default storage version at **20** and continues writing
+inline signature TEXT, so the previous published release can reopen and write
+the same member store. Installing the reader does not activate compaction or
+claim production byte savings. Empty additive dictionary/progress tables are
+local representation infrastructure, not a format flip.
+
+The reader additionally supports explicitly activated **version 21** stores.
+It preserves their version marker rather than relabeling reference-bearing
+data as version 20. The selected-signature facade, carrying-writer provenance,
+and judgment cursors in that format use 32-byte SHA-256 references. Exact UTF-8
+text remains authoritative: canonical candidates and their ordering are
+unchanged, and a claim-scoped dictionary preserves legacy-only evidence.
+Collisions, changed/missing targets and missing canonical authority fail closed.
+
+The default writer may move to version 21 only in a later release whose N-1
+published binary already contains this reader arm. Do not manually change
+`user_version` to activate it on a fleet store. The v21 fixture explicitly
+exercises the later cutover, not a deployment-ready operator activation path.
+Within that format, conversion runs after authorization bootstrap, at most
+64 rows per writer loan with durable cursors and a 10 ms cooperative budget
+checked between rows. A single SQLite operation, row decode, or commit can
+exceed that budget; no statement is aborted. The complete legacy authorization
+model serves until its existing activation gate passes. Conversion preserves
+signed bytes, lexical judging pagination and global nonce replay evidence.
+
+The dictionary deliberately repeats candidate text as an incrementally built
+lookup index. Include that overhead when measuring net savings; replacing four
+inline copies with four references is not the net database reduction. Deleted
+inline payloads free SQLite pages for reuse, not immediate filesystem shrinkage.
+No automatic VACUUM, checkpoint, or production-store rewrite is part of this
+reader-first release. Default v20 stores retain N-1 rollback compatibility.
+Once a later release activates v21, roll back only to a published binary with
+this v21 reader, never by decrementing `user_version`.
 
 ### Additive assistant admission index
 
