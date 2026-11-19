@@ -2954,6 +2954,34 @@ impl Store {
         self.fractal.ivm_views.clone()
     }
 
+    /// Initialize the canonical native source lifetime for producers without shadow views.
+    /// This installs no view, certifies no projection, and preserves existing source
+    /// epochs, event retention and unavailable-state fences.
+    pub fn initialize_native_source_lifecycle(&self) -> Result<()> {
+        static EMPTY: std::sync::LazyLock<smallclaims::ivm::Views> =
+            std::sync::LazyLock::new(|| smallclaims::ivm::Views::new(Vec::new())
+                .expect("empty native source registry is valid"));
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        EMPTY.create_schema(&transaction)?;
+        let cut = match smallclaims::ivm::source_cut(&transaction)? {
+            Some(cut) => cut,
+            None => smallclaims::ivm::SourceCut {
+                epoch: 1, admitted: current_index_tx(&transaction)?, projected: 0, local_generation: 0,
+            },
+        };
+        EMPTY.initialize_empty(&transaction, cut)?;
+        let installed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ivm_event_state')",
+            [], |row| row.get(0),
+        )?;
+        if !installed {
+            smallclaims::ivm::events::install(&transaction, 4096)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open(path, origin, fractal.clone())?;
