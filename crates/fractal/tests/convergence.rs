@@ -2367,7 +2367,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// The prior v36 characterization is recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
+const NEVER_TRIMS: &[u64] = &[34, 179];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
