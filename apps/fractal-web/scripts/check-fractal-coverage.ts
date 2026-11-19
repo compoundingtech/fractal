@@ -74,7 +74,7 @@ export const checkCoverage = (schema: unknown): { readonly lines: readonly strin
   return { lines, errors }
 }
 
-export const runCoverage = Effect.fn('check-fractal-coverage')(function* (path: string = defaultSchemaPath) {
+export const runCoverage = Effect.fn('check-st-coverage')(function* (path: string = defaultSchemaPath) {
   const text = yield* Effect.try({ try: () => readFileSync(path, 'utf8'), catch: cause => new CoverageError({ message: `Cannot read schema ${path}`, cause }) })
   const schema = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(text).pipe(
     Effect.mapError(cause => new CoverageError({ message: `Cannot decode schema ${path}`, cause })),
