@@ -11,6 +11,9 @@ const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeatu
     carries: "automatic idle suspension and wake",
 };
 
+// Only demand-holding waiters recheck; a leader can disappear without a runtime action.
+const WAKE_QUEUE_RECHECK_MS: u128 = 1_000;
+
 // Reserve the source writer before the graph writer: separate WAL databases need both
 // reservations to exclude a shard acceptance between frontier validation and graph commit.
 fn with_source_fence<T>(store: &Store, action: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -326,8 +329,10 @@ impl Store {
         smallclaims::touched::note_read(|| "kind:runtime.action.succeeded".to_owned());
         smallclaims::touched::note_read(|| "kind:runtime.action.failed".to_owned());
         let initial = self.wake_demand(subject)?;
-        if !initial.frontier.caught_up || initial.oldest.is_none() {
-            return Ok(IdleWakeAdmission::default());
+        if initial.oldest.is_none() { return Ok(IdleWakeAdmission::default()); }
+        let queue_recheck_at = now.saturating_add(WAKE_QUEUE_RECHECK_MS);
+        if !initial.frontier.caught_up {
+            return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: Some(queue_recheck_at) });
         }
         let before = initial.frontier;
         let mut own_pending = initial.oldest;
@@ -352,7 +357,9 @@ impl Store {
                 own_pending.take()
             } else {
                 let demand = self.wake_demand_untracked(&desired.subject)?;
-                if !demand.frontier.caught_up { return Ok(IdleWakeAdmission::default()); }
+                if !demand.frontier.caught_up {
+                    return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
+                }
                 demand.oldest
             };
             let Some(pending) = pending else { continue; };
@@ -370,15 +377,21 @@ impl Store {
                 let due = state.updated_at_unix_ms.saturating_add(delay);
                 if now < due { if desired.subject == subject { retry_at = Some(due); } continue; }
             }
+            if desired.subject == subject { retry_at = Some(queue_recheck_at); }
             candidates.push((!pending.person, pending.sent_ms, pending.subject, desired.subject, lineage, attempts));
         }
         candidates.sort();
         let available = concurrency.saturating_sub(active);
         let selected = candidates.into_iter().take(available).find(|candidate| candidate.3 == subject);
         let demand = self.wake_demand(subject)?;
-        if before != demand.frontier { return Ok(IdleWakeAdmission::default()); }
+        if before != demand.frontier {
+            return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
+        }
         with_source_fence(self, || self.connection.batched(|tx| -> Result<IdleWakeAdmission> {
-            if !frontier_matches(self, tx, &demand.frontier)? || owned(tx, &self.origin, subject)?.is_none() { return Ok(IdleWakeAdmission::default()); }
+            if !frontier_matches(self, tx, &demand.frontier)? {
+                return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at.or(Some(queue_recheck_at)) });
+            }
+            if owned(tx, &self.origin, subject)?.is_none() { return Ok(IdleWakeAdmission::default()); }
             declared_admission::validate_fleet(tx, &self.origin, &FEATURE).map_err(anyhow::Error::new)?;
             for (seat, lineage, pending, incarnation) in &queued {
                 let key = format!("idle-wake-demand:{seat}:{lineage}");
@@ -612,6 +625,44 @@ mod tests {
             &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"resumed","incarnation_id":"three"}}),
             &[], None, &crate::suspension::resume_completed_key(&resume))).unwrap().unwrap();
         assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_some());
+    }
+
+    #[test]
+    fn queued_wake_rechecks_when_an_unadmitted_leaders_message_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let orchard = "agent/alder.orchard";
+        let intent = crate::parse_intent(
+            "version 2\nagent \"orchard\" { workspace \".\"; command \"true\"; }", "alder").unwrap();
+        store.apply(&intent, &BTreeMap::from([(orchard.into(), Vec::new())]), "orchard").unwrap();
+        let declaration = store.selected_desired_token(orchard).unwrap().unwrap();
+        let suspend = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
+            "runtime.action.requested", Some(orchard),
+            &json!({"evidence":[declaration],"fields":{"action":"suspend","cause":"idle","incarnation_id":"two"}}),
+            &[], None, "orchard-suspend")).unwrap().unwrap();
+        complete_suspend(&store, orchard, &suspend.id);
+        let garden = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+        complete_suspend(&store, SEAT, &garden);
+        claim(&store, "message/garden", "message.sent", Some(SEAT),
+            json!({"from":SEAT,"to":SEAT,"content":"Agent demand.","status":"sent","tags":[]}));
+        claim(&store, "message/orchard", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":orchard,"content":"Person demand.","status":"sent","tags":[]}));
+        let now = 9_000_000_000_000;
+        let (waiting, reads) = smallclaims::touched::record(|| store.admit_idle_wake(SEAT, 1, now).unwrap());
+        assert!(waiting.operation_id.is_none(), "person demand on orchard leads the queue");
+        let due = waiting.retry_at_unix_ms.unwrap();
+        assert_eq!(due, now + WAKE_QUEUE_RECHECK_MS);
+        let incremental = crate::incremental::Incremental::default();
+        incremental.observe(&store).unwrap();
+        incremental.evaluated("member:garden", reads, Some(due));
+        claim(&store, "message/orchard", "message.closed", Some("person/avery"), json!({"status":"closed"}));
+        assert_eq!(store.admit_idle_wake(orchard, 1, now + 1).unwrap(), IdleWakeAdmission::default());
+        assert_eq!(crate::suspension::current(&store, orchard).unwrap().unwrap().operation_id, suspend.id,
+            "the leader disappeared without producing a resume action");
+        incremental.observe(&store).unwrap();
+        assert!(!incremental.needs("member:garden", due - 1), "the other seat's closure does not dirty garden");
+        assert!(incremental.needs("member:garden", due), "the waiting seat's exact deadline restores liveness");
+        assert!(store.admit_idle_wake(SEAT, 1, due).unwrap().operation_id.is_some());
     }
 
     #[test]
