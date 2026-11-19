@@ -1,5 +1,5 @@
-//! st-owned observation outbox. Opt-in is per directory, never process-global: an adopted
-//! provider keeps its transport while a fresh st seat initializes this database before spawn.
+//! Fractal-owned observation outbox. Opt-in is per directory, never process-global: an adopted
+//! provider keeps its transport while a fresh Fractal seat initializes this database before spawn.
 //! A snapshot and its event commit together. The driver removes only acknowledged events;
 //! readers of provider-local evidence do not depend on the daemon being reachable.
 use std::cell::RefCell;
@@ -235,7 +235,7 @@ fn signal_wake(agent_dir: &Path) {
             && error.kind() != io::ErrorKind::WouldBlock
             && error.raw_os_error() != Some(libc::ENXIO)
         {
-            tracing::warn!("st harness event wake failed: {error}");
+            tracing::warn!("fractal harness event wake failed: {error}");
         }
     }
 }
@@ -562,7 +562,7 @@ pub fn remove_snapshot(agent_dir: &Path, kind: &str) -> Result<()> {
 }
 
 /// The existing record readers remain useful inside a producer (ownership/coalescing), but
-/// fresh st seats read their local snapshot rather than a polled transport file.
+/// fresh Fractal seats read their local snapshot rather than a polled transport file.
 pub fn read_record(path: &Path) -> io::Result<Vec<u8>> {
     let dir = path.parent().unwrap_or(Path::new("."));
     if enabled(dir) {

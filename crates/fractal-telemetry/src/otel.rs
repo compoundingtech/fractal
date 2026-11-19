@@ -600,7 +600,7 @@ fn signal_export_enabled(variable: &str) -> bool {
         SignalChoice::Enabled => true,
         SignalChoice::Disabled => false,
         SignalChoice::Unsupported => {
-            eprintln!("st: unsupported {variable}; signal disabled (expected otlp or none)");
+            eprintln!("fractal: unsupported {variable}; signal disabled (expected otlp or none)");
             false
         }
     }
@@ -830,7 +830,7 @@ pub fn record_http_request_duration(
             .f64_histogram(HTTP_SERVER_DURATION_INSTRUMENT)
             .with_unit("s")
             .with_description(
-                "st3 HTTP server request duration by route, method, client class and request outcome",
+                "Fractal HTTP server request duration by route, method, client class and request outcome",
             )
             .build()
     });
@@ -1291,7 +1291,7 @@ impl Telemetry {
                     telemetry.tracer_provider = Some(provider);
                 }
                 Err(error) => {
-                    eprintln!("st: otel span exporter unavailable, traces disabled: {error}");
+                    eprintln!("fractal: otel span exporter unavailable, traces disabled: {error}");
                 }
             }
         }
@@ -1321,7 +1321,7 @@ impl Telemetry {
                     telemetry.meter_provider = Some(provider);
                 }
                 Err(error) => {
-                    eprintln!("st: otel metric exporter unavailable, metrics disabled: {error}");
+                    eprintln!("fractal: otel metric exporter unavailable, metrics disabled: {error}");
                 }
             }
         }
@@ -1340,7 +1340,7 @@ impl Telemetry {
                     );
                 }
                 Err(error) => {
-                    eprintln!("st: otel log exporter unavailable, logs disabled: {error}")
+                    eprintln!("fractal: otel log exporter unavailable, logs disabled: {error}")
                 }
             }
         }

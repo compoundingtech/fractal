@@ -98,7 +98,7 @@ impl DeliveryGate {
     }
 }
 
-/// Where a native prompt stands in st: still open, answered by the seat's person (and how), or
+/// Where a native prompt stands in Fractal: still open, answered by the seat's person (and how), or
 /// gone. The same shape as the daemon's `GET /v1/harness-prompts/state`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -112,7 +112,7 @@ type PromptAnswerRead = dyn Fn(u64, u64) -> Option<PromptAnswer> + Send + Sync;
 
 /// How a native driver reads a person's answer to its prompt, named by the (ownership,
 /// transition) sequences of the state record observation the prompt wrote. The owning control
-/// plane supplies it; `None` means st could not say this time.
+/// plane supplies it; `None` means Fractal could not say this time.
 #[derive(Clone)]
 pub struct PromptAnswers(Arc<PromptAnswerRead>, Option<Arc<PromptCallPublish>>);
 

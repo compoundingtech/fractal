@@ -216,7 +216,7 @@ pub async fn serve_listener(
             // one accept. Keep the listener and back off, as the daemon's own API does.
             Err(error) => {
                 if backoff == ACCEPT_BACKOFF_START {
-                    eprintln!("st3: tile {name}'s endpoint: accept a connection: {error}");
+                    eprintln!("fractal: tile {name}'s endpoint: accept a connection: {error}");
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
@@ -292,7 +292,7 @@ fn spawn_with(
                     });
                     let message = format!("{error:#}");
                     if !missing && reported.as_ref() != Some(&message) {
-                        eprintln!("st3: tile endpoints: {message}");
+                        eprintln!("fractal: tile endpoints: {message}");
                         reported = Some(message);
                     }
                     None
@@ -370,9 +370,9 @@ async fn withdraw_changed<S: PartialEq, K: Ord + Clone + std::fmt::Display>(
                 // Cancelled is the expected outcome; a task that had already ended is the same.
                 Ok(Ok(())) => {}
                 Ok(Err(error)) if error.is_cancelled() => {}
-                Ok(Err(error)) => eprintln!("st3: tile {name}'s endpoint task failed: {error}"),
+                Ok(Err(error)) => eprintln!("fractal: tile {name}'s endpoint task failed: {error}"),
                 Err(_) => eprintln!(
-                    "st3: tile {name}'s endpoint did not stop within {} s; carrying on",
+                    "fractal: tile {name}'s endpoint did not stop within {} s; carrying on",
                     wait.as_secs()
                 ),
             }
@@ -404,7 +404,7 @@ async fn serve_tile(
                 .await
             }
             Err(error) => {
-                eprintln!("st3: tile {name}'s endpoint: {error:#}");
+                eprintln!("fractal: tile {name}'s endpoint: {error:#}");
                 // Wait for root to change the directory before trying again.
                 Change::watch(&directory).await;
             }
@@ -627,7 +627,7 @@ use super::*;
     #[tokio::test]
     async fn registry_watch_follows_missing_ancestors_until_the_registry_appears() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("st-tiles");
+        let directory = root.path().join("fractal-tiles");
         let path = directory.join("tiles.toml");
         let ancestor_changed = Change::watch(&path);
         tokio::pin!(ancestor_changed);

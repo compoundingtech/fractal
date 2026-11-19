@@ -4,7 +4,7 @@
 //! harness files. Each driver tick turns what changed into claims on the seat: a
 //! `subagent.appeared` for each new subagent, with the step the seat holds, a `subagent.renewed`
 //! once half of a running subagent's lease has passed, and a `subagent.ended` with its tokens
-//! for each end. A subagent leaves the ledger only once its end is recorded, so an st outage
+//! for each end. A subagent leaves the ledger only once its end is recorded, so a Fractal outage
 //! delays these claims and loses none. The store answers a repeated appearance or end with the
 //! claim it has, so a retry after a lost answer records nothing twice.
 //!
@@ -62,7 +62,7 @@ struct Published {
     /// Subagents recorded as appeared and not yet ended, with their lease.
     #[serde(default)]
     open: BTreeMap<String, u64>,
-    /// Subagents st ended while the harness still ran them, which this driver records no more.
+    /// Subagents Fractal ended while the harness still ran them, which this driver records no more.
     #[serde(default)]
     closed: BTreeSet<String>,
 }
@@ -115,7 +115,7 @@ impl Publisher {
         if let Err(error) =
             ledger::update(agent_dir, |ledger| ledger.adopt(incarnation, started_at_ms))
         {
-            tracing::warn!("st driver: subagent ledger adoption failed: {error:#}");
+            tracing::warn!("fractal driver: subagent ledger adoption failed: {error:#}");
         }
         let published = std::fs::read(agent_dir.join(PUBLISHED_FILE))
             .ok()
@@ -234,7 +234,7 @@ impl Publisher {
             if !closed && !self.published.open.contains_key(id) {
                 continue;
             }
-            // Its responses reach the parent's usage even when st already ended it.
+            // Its responses reach the parent's usage even when Fractal already ended it.
             let ended = match self.settle(ended, &mut counted, now, final_pass) {
                 Ok(Some(ended)) => ended,
                 Ok(None) => continue,
@@ -273,7 +273,7 @@ impl Publisher {
                 Ok(lease) => {
                     self.published.open.insert(id, lease);
                 }
-                // st ended it (its lease ran out while this driver could not renew): leave it.
+                // Fractal ended it (its lease ran out while this driver could not renew): leave it.
                 Err(error) if refused(&error) => {
                     self.published.open.remove(&id);
                     self.published.closed.insert(id);
@@ -551,7 +551,7 @@ impl Publisher {
             Ok(tokens) => Some(tokens),
             Err(error) => {
                 tracing::debug!(
-                    "st driver: no tokens for subagent {}: {error:#}",
+                    "fractal driver: no tokens for subagent {}: {error:#}",
                     ended.subagent.id
                 );
                 None

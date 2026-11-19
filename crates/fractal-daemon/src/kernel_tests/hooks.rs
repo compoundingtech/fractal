@@ -1,7 +1,7 @@
 use crate::hooks::*;
 
 /// Claude ends a hook at its timeout, so the permission hook's timeout outlasts the wait for a
-/// person's answer: an answer st accepts from a client always finds its hook.
+/// person's answer: an answer Fractal accepts from a client always finds its hook.
 #[test]
 fn the_permission_hook_outlasts_the_wait_for_an_answer() {
     let settings = claude_settings_registration();
