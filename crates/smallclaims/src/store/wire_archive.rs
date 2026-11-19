@@ -1,7 +1,6 @@
 //! Opt-in native wire readers. No daemon path supplies an archive yet.
 //! Immutable duplicate coverage must agree; later mutable overlays cannot be guessed here.
 use super::*;
-use anyhow::Context as _;
 use crate::wire_archive::{ArchiveReaders, ArchivedRecord, WireEvidence, capture};
 
 fn evidence(connection: &Connection, archive: &mut ArchiveReaders, id: &ReplicaEnvelopeId) -> Result<Option<WireEvidence>> {
