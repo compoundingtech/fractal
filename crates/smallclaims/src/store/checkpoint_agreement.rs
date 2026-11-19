@@ -1023,13 +1023,13 @@ impl Store {
     }
 
     pub fn checkpoint_worker_phase(&self, phase: CheckpointPhase) {
-        *self.checkpoint_worker.lock() = Some(CheckpointWorker {
+        *self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner) = Some(CheckpointWorker {
             phase, updated_at_unix_ms: now_ms(), error: None,
         });
     }
 
     pub fn checkpoint_worker_error(&self, error: String) {
-        if let Some(worker) = self.checkpoint_worker.lock().as_mut() {
+        if let Some(worker) = self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
             worker.error = Some(error);
             worker.updated_at_unix_ms = now_ms();
         }
@@ -1492,7 +1492,7 @@ impl Store {
             left,
             machine_version: BTreeMap::new(),
             verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
-            worker: self.checkpoint_worker.lock().clone(),
+            worker: self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         })
     }
 
