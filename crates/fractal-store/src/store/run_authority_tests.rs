@@ -4,6 +4,64 @@ use super::*;
 use crate::config::RunAuthorityMode;
 use crate::model::{AuthorityGrant, AuthorityVerb, MissionRunRequest};
 
+#[test]
+fn retired_agent_authority_is_readable_but_refused_on_every_new_write_shape() {
+    let store = Store::open_memory("node").unwrap();
+    for field in [
+        r#"mission-authority "none""#,
+        r#"mission-authority { publish "example/*"; }"#,
+        r#"queue-authority { move "example/*"; }"#,
+        r#"seat-authority { stop "example/*"; }"#,
+        r#"agent-authority { apply "example/*"; }"#,
+    ] {
+        let declaration = format!(r#"agent "example/worker" {{ workspace "."; command "true"; {field}; }}"#);
+        for source in [
+            format!("version 2\n{declaration}"),
+            format!("version 2\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {declaration} }}"),
+            format!("version 2\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; step \"work\" {{ goal \"Work.\"; {declaration} }} }}"),
+        ] {
+            let intent = crate::graph::parse_intent(&source, "node").unwrap();
+            let decoded: NormalizedIntent = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+            assert_eq!(decoded.source_hash, intent.source_hash);
+            let error = store.apply(&intent, &BTreeMap::new(), &format!("retired:{}", intent.source_hash)).unwrap_err();
+            assert_eq!(error.code, "retired-agent-authority");
+        }
+        let desired = json!({"kind": "agent", "desired": {"children": [{"name": field.split_whitespace().next().unwrap()}]}});
+        let mission = json!({"steps": {"work": {"loop_spec": {"on_keep": {"declarations_kdl": declaration}}}}});
+        for (kind, payload) in [
+            ("intent.desired", desired),
+            ("mission.published", mission.clone()),
+            ("revision-proposal.created", json!({"mission_spec": mission.clone()})),
+            ("run-generation.created", json!({"mission_spec": mission.clone()})),
+            ("mission-run.created", json!({"mission_spec": mission.clone()})),
+            ("work.person-asked", json!({"mission_spec": mission})),
+        ] {
+            for body in [payload.clone(), json!({"fields": {"body": payload}, "body": {}})] {
+                let mut writer = store.connection.write();
+                let tx = writer.transaction().unwrap();
+                let error = append_claim_tx(&tx, "node", "mission/example/work", kind,
+                    Some("agent/example/worker"), &body, &[], None).unwrap_err();
+                assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "retired-agent-authority");
+            }
+        }
+    }
+}
+
+#[test]
+fn retired_authority_names_in_user_data_are_not_declarations() {
+    run_authority::validate_new_claim("intent.desired", "agent/example/worker", &json!({
+        "kind": "agent",
+        "member": {"env": {"declarations_kdl": "not kdl", "desired": {
+            "children": [{"name": "mission-authority"}]
+        }}},
+        "desired": {"children": [{"name": "env", "children": [{"name": "mission-authority"}]}]}
+    })).unwrap();
+    run_authority::validate_new_claim("intent.desired", "resource/example/data", &json!({
+        "kind": "resource",
+        "desired": {"children": [{"name": "mission-authority"}]}
+    })).unwrap();
+}
+
 /// The mode is the daemon's, process-wide: tests that depend on it take turns, and each gives
 /// back the mode it found.
 static MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());

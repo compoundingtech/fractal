@@ -85,8 +85,9 @@ A person moves runs with `--as person/NAME` or `person` in the Fractal config, l
 mutations. With `--json`, it prints the action result.
 
 An agent moves runs in any seat's queue, including its own, with `--as agent/PATH`; in
-[free mode](../site/reference/configuration.md#free-mode) it needs no grant, and a `queue-authority` block in its
-declaration is ignored. The move records the agent as its actor. The agent's queue move goes to
+[free mode](../site/reference/configuration.md#free-mode) it needs no grant. Historical
+`queue-authority` blocks remain readable, but new declarations carrying them are refused.
+The move records the agent as its actor. The agent's queue move goes to
 `POST /v1/agent-queue-moves`; that route also accepts a person. An agent's local client-v0 session can also use the `agent.queue-move` action. With `--json`, the
 route prints the move claim.
 

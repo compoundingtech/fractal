@@ -12697,7 +12697,6 @@ version 2
      agent "sup" {
        workspace "."
        command "true"
-       mission-authority { revise "revision" }
      }
     step "work" { goal "First goal." }
   }
@@ -12742,7 +12741,6 @@ version 2
      agent "sup" {
        workspace "."
        command "true"
-       mission-authority { revise "revision" }
      }
     step "work" { goal "Corrected goal." }
   }
@@ -13287,7 +13285,7 @@ mission "elsewhere/jobs/one" state="ready" {
     assert_eq!(status, StatusCode::OK, "{revised}");
     assert_eq!(revised["status"], "applied");
 
-    // Declaring a seat with authority blocks succeeds; the preview says they are ignored.
+    // Historical syntax remains previewable, but cannot be newly published.
     let seat = r#"version 2
 agent "example/other" {
   workspace "."
@@ -13313,11 +13311,15 @@ agent "example/other" {
     assert!(
         previewed["warnings"].as_array().unwrap().iter().any(|warning| {
             warning.as_str().unwrap()
-                == "free-mode: `agent/example/other` declares `mission-authority`, `seat-authority`, which st ignores; within a fleet every agent may do what its person may do"
+                == "free-mode: `agent/example/other` declares `mission-authority`, `seat-authority`, which never restricts agents; new writes are refused with retired-agent-authority"
         }),
         "{previewed}"
     );
-    apply(seat.into(), "free-declare").await;
+    let (_, refused) = json_request(app.clone(), "/v1/intent/apply",
+        serde_json::to_value(apply_request(&state, seat, agent, "free-retired")).unwrap()).await;
+    assert!(refused.to_string().contains("retired-agent-authority"), "{refused}");
+    apply(seat.replace("  mission-authority { publish \"example/*\" }\n", "")
+        .replace("  seat-authority { stop \"example/*\" }\n", ""), "free-declare").await;
     assert_eq!(writer("agent/example/other").as_deref(), Some(agent));
 
     // It stops another seat, then itself.
@@ -13395,7 +13397,6 @@ version 2
     agent "planner" {
       workspace "."
       command "true"
-      mission-authority { publish "project/*" }
     }
     step "compile" {
       assigned-to "agent/${ST_MISSION_RUN}/planner"
