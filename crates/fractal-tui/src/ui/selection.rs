@@ -71,7 +71,13 @@ impl Ui {
             self.flash("No text to copy");
             return;
         }
-        let result = send_clipboard(text, &mut io::stdout());
+        self.forward_clipboard(text, &mut io::stdout());
+    }
+
+    /// Forward a program's exact payload, including whitespace or an empty clipboard clear.
+    /// Only semantic selection copy applies the empty-content guard above.
+    pub(super) fn forward_clipboard(&mut self, text: &str, writer: &mut impl Write) {
+        let result = send_clipboard(text, writer);
         self.flash(match result {
             Ok(()) => "Clipboard request sent (OSC 52) · terminal permission required; tmux needs set-clipboard on".to_owned(),
             Err(error) => format!("Clipboard request failed: {error}"),
@@ -179,5 +185,22 @@ mod tests {
             fn flush(&mut self) -> io::Result<()> { Ok(()) }
         }
         assert!(send_clipboard("body", &mut Failed).is_err());
+        let mut ui = fixture();
+        ui.forward_clipboard(" ", &mut Failed);
+        assert!(ui.flash.as_ref().unwrap().0.starts_with("Clipboard request failed:"));
+    }
+
+    #[test]
+    fn program_clipboard_payloads_preserve_empty_and_whitespace_content() {
+        for (payload, encoded) in [("", ""), (" ", "IA=="), ("\t\n", "CQo=")] {
+            let mut ui = fixture();
+            let mut bytes = Vec::new();
+            ui.forward_clipboard(payload, &mut bytes);
+            assert_eq!(bytes, format!("\x1b]52;c;{encoded}\x07").as_bytes());
+            assert!(ui.flash.as_ref().unwrap().0.starts_with("Clipboard request sent (OSC 52)"));
+        }
+        let mut ui = fixture();
+        ui.copy_text(" \t\n");
+        assert_eq!(ui.flash.as_ref().unwrap().0, "No text to copy");
     }
 }
