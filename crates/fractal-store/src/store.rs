@@ -20,6 +20,8 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod idle_residency;
+mod residency_evidence;
 pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;
@@ -845,7 +847,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfc9ed02b4ad7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0f0625bb0cf6 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -879,6 +881,12 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_idle_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
+CREATE INDEX IF NOT EXISTS claims_suspension_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume');
 CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
 ON claims(subject, json_extract(body, '$.fields.request_key'))
 WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
@@ -11308,7 +11316,7 @@ pub fn desired_lineage_from_tx(
 }
 
 /// `desired_lineage_from_tx` over the claims accepted at or before `at`.
-fn desired_lineage_from_at_tx(
+pub(crate) fn desired_lineage_from_at_tx(
     connection: &Connection,
     mut current: String,
     equivalent: fn(&Value, &Value) -> bool,
@@ -24626,6 +24634,9 @@ pub struct ClaimCommitContext<'a> {
     pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Suspension/launch frontier read with an admitted mailbox staged/delivered decision.
+    /// Revalidate under the receipt writer lock so quiescing cannot race intake.
+    pub mailbox_intake_frontier: Option<u64>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
     /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
@@ -24806,6 +24817,15 @@ pub fn append_claim_with_commit_context(
             let fence = normalized_fence.as_deref();
             let settled_receipt = if let Some(fence) = fence {
                 check_mailbox_fence(transaction, fence, &graph.origin)?;
+                if let Some(frontier) = context.mailbox_intake_frontier
+                    && matches!(input.kind.as_str(), "message.staged" | "message.delivered")
+                    && crate::suspension::mailbox_intake_index(transaction, &fence.subject).map_err(internal)? != frontier
+                {
+                    return Err(FractalError::new(
+                        "seat-suspension-changed",
+                        "the seat's suspension or launch changed before delivery was recorded",
+                    ));
+                }
                 let index = transaction.query_row(
                     "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),
