@@ -278,13 +278,34 @@ mission "landing-proof" state="ready" {
         assert_eq!(status, StatusCode::OK, "{body}");
         let anonymous = state.store.mission_run("landing/anonymous").unwrap().unwrap();
         assert_eq!(state.store.mission_run_initiating_principal(&anonymous.subject).unwrap(), None);
+        // Fractal.run and uses-mission share create_child_mission_run. Scoped
+        // lane.run uses create_program_child_mission_run; neither borrows requester.
+        let linked_request = MissionRunRequest {
+            mission: "landing-proof".into(), revision: None,
+            workspace: root.path().join("linked").display().to_string(),
+            requester: Some(parent.requester.clone()), inputs: BTreeMap::new(), mode: Some("run".into()),
+            idempotency_key: "landing-linked-child".into(),
+        };
+        let linked = state.store.create_child_mission_run(
+            &linked_request, &parent, &parent.steps[0].subject, None,
+        ).unwrap();
+        let scoped = state.store.create_program_child_mission_run(
+            &MissionRunRequest { idempotency_key: "landing-scoped-child".into(), ..linked_request },
+            &parent, &parent.steps[0].subject,
+        ).unwrap();
+        for child in [&linked, &scoped] {
+            assert_eq!(state.store.mission_run_initiating_principal(&child.subject).unwrap().as_deref(), agent);
+        }
         state.store.start_resource_authority("node", "landing-test").unwrap();
         for (owner_run, may_land, invocation) in [
             (&land, allowed, "exec/proof"), (&land, allowed, "program:proof"),
+            (&linked, allowed, "exec/proof"), (&linked, allowed, "program:proof"),
+            (&scoped, allowed, "exec/proof"), (&scoped, allowed, "program:proof"),
             (&anonymous, false, "exec/proof"), (&anonymous, false, "program:proof"),
         ] {
             let request = LaneRequest {
-                id: format!("{}:{invocation}", owner_run.id), name: invocation.into(), host: "node".into(), max_members: 1,
+                id: format!("{}:{invocation}", owner_run.id), name: format!("{}:{invocation}", owner_run.id),
+                host: "node".into(), max_members: 1,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
                 class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
                 disk: None, io: None, admission_timeout_ms: None,
@@ -292,7 +313,7 @@ mission "landing-proof" state="ready" {
                     attempt: owner_run.steps[0].attempt, invocation: Some(invocation.into()) },
             };
             let fit = Fit {
-                room: Some(fractal_runtime::Capacity { cores: 4, memory: 4 }),
+                room: Some(fractal_runtime::Capacity { cores: 8, memory: 8 }),
                 landing: fractal_runtime::host::LandingPolicy {
                     allowed_actors: BTreeSet::from(["agent/example/lander".into()]), ..Default::default()
                 }, ..Default::default()

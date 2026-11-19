@@ -173,8 +173,8 @@ withdraw   cancel       uncertain      cancel tree       descendants remain
 ```
 
 The host evaluates holds, class priority, logical occupancy and physical fit in its writer
-transaction. Within the highest waiting class it prefers FIFO, but before the head has waited
-15 minutes a later ticket may pass only when the earlier ticket does not fit and the later one
+transaction. Landing is strict FIFO with no same-class backfill. Within check or agent,
+before the head has waited 15 minutes a later ticket may pass only when the earlier ticket does not fit and the later one
 fits all current budgets: ARC-aware memory, mount disk floors and reservations, and heavy-IO
 tokens. Fresh fit observations, not a previous blocked reason, decide backfill. Lower classes
 cannot pass a higher-class head.
