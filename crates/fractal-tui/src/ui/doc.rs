@@ -127,13 +127,12 @@ pub trait DocExt {
 impl DocExt for Doc {
     /// A "label   value" row with the value wrapped under itself.
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style) {
-        let label = format!("{label:<10}");
-        let indent = " ".repeat(text::width(&label));
+        let (first, rest) = text::field_prefixes(label, 10, theme::dim());
         self.lines.extend(text::wrap(
             &text::inline(&text::sanitize(value), value_style),
             width,
-            &[run(label, theme::dim())],
-            &[run(indent, theme::dim())],
+            &first,
+            &rest,
             None,
         ));
     }
@@ -141,15 +140,16 @@ impl DocExt for Doc {
     fn section(&mut self, title: &str, count: Option<usize>, width: usize) {
         let mut spans = vec![Span::styled(title.to_owned(), theme::label())];
         if let Some(count) = count {
-            spans.push(Span::styled(format!(" {count}"), theme::dim()));
+            spans.push(Span::decoration(format!(" {count}"), theme::dim()));
         }
         let used = spans.iter().map(|span| span.width()).sum::<usize>() + 1;
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
+        spans.push(Span::decoration(" ", Style::default()));
+        spans.push(Span::decoration(
             "─".repeat(width.saturating_sub(used)),
             theme::fg(theme::SURFACE0),
         ));
-        self.lines.push(Line::from(spans));
+        let line = Line::from(spans);
+        self.lines.push(if title.is_empty() { line.decoration() } else { line });
     }
     /// A row of buttons. Each is `[key label]`, and clicking it presses the key.
     fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]) {
@@ -158,20 +158,20 @@ impl DocExt for Doc {
         let mut column = 0u16;
         for (index, (key, label, hit, color)) in buttons.iter().enumerate() {
             if index > 0 {
-                spans.push(Span::raw("  "));
+                spans.push(Span::decoration("  ", Style::default()));
                 column += 2;
             }
             let key_text = format!(" {key} ");
             let label_text = format!(" {label} ");
             let width = (text::width(&key_text) + text::width(&label_text)) as u16;
-            spans.push(Span::styled(
+            spans.push(Span::decoration(
                 key_text,
                 Style::default()
                     .fg(theme::CRUST)
                     .bg(*color)
                     .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(
+            spans.push(Span::decoration(
                 label_text,
                 Style::default().fg(*color).bg(theme::SURFACE0),
             ));
@@ -183,7 +183,7 @@ impl DocExt for Doc {
             });
             column += width;
         }
-        self.lines.push(Line::from(spans));
+        self.lines.push(Line::from(spans).decoration());
     }
     /// Place whole buttons on the same row when the available cells allow it.
     fn buttons_fit(&mut self, buttons: &[(&str, &str, Hit, Color)], width: usize) {
@@ -219,10 +219,10 @@ impl DocExt for Doc {
         );
         let fill = width.saturating_sub(2 + 1 + text::width(&title));
         self.lines.push(Line::from(vec![
-            Span::styled(format!("{tl}{h}"), border),
-            Span::styled(title, theme::strong(color)),
-            Span::styled(format!("{}{tr}", h.repeat(fill)), border),
-        ]));
+            Span::decoration(format!("{tl}{h}"), border),
+            Span::decoration(title, theme::strong(color)),
+            Span::decoration(format!("{}{tr}", h.repeat(fill)), border),
+        ]).decoration());
         let base = self.lines.len();
         let inner_width = width.saturating_sub(4);
         for target in inner.targets {
@@ -238,18 +238,21 @@ impl DocExt for Doc {
                 .into_iter()
                 .map(|(id, range)| (id, range.start + base..range.end + base)),
         );
+        self.copy_blocks.extend(inner.copy_blocks.into_iter().map(|range| range.start + base..range.end + base));
+        self.copy_blocks.push(base..base + inner.lines.len());
         for line in inner.lines {
             let used = line.width();
-            let mut spans = vec![Span::styled(format!("{v} "), border)];
-            spans.extend(line.spans);
-            spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
-            spans.push(Span::styled(format!(" {v}"), border));
-            self.lines.push(Line::from(spans));
+            let mut line = fractal_conversation_ui::text::prefixed(
+                vec![Span::decoration(format!("{v} "), border)], line,
+            );
+            line.spans.push(Span::decoration(" ".repeat(inner_width.saturating_sub(used)), Style::default()));
+            line.spans.push(Span::decoration(format!(" {v}"), border));
+            self.lines.push(line);
         }
-        self.lines.push(Line::from(Span::styled(
+        self.lines.push(Line::from(Span::decoration(
             format!("{bl}{}{br}", h.repeat(width.saturating_sub(2))),
             border,
-        )));
+        )).decoration());
     }
 }
 
@@ -320,5 +323,52 @@ mod tests {
         assert!(doc.lines.iter().all(|line| line.width() == 30));
         assert_eq!(doc.targets[0].line, 2);
         assert_eq!(doc.targets[0].column, 2);
+    }
+
+    fn copied(doc: &Doc) -> String {
+        fractal_conversation_ui::Selection {
+            pane: "card".into(),
+            anchor: (0, 0),
+            head: (doc.lines.len().saturating_sub(1), u16::MAX),
+        }.text(&doc.lines)
+    }
+
+    #[test]
+    fn card_copy_rejoins_prose_and_urls_and_copies_wrapped_tables_as_tsv() {
+        let prose = "Wrapped prose should read as one paragraph without the frame.";
+        let url = "https://example.com/a/long/path?complete=target";
+        let source = format!("{prose}\n\nVista: {url}\n\n| Item | Notes |\n| --- | --- |\n| Copper | A long note that wraps inside its cell |\n| Silver | Short |");
+        for heavy in [false, true] {
+            let mut inner = Doc::new();
+            inner.lines(text::markdown(&source, 26, theme::text()));
+            inner.buttons(&[("a", "Approve", Hit::Key('a'), theme::GREEN)]);
+            let mut card = Doc::new();
+            card.card("request · waiting", theme::ACCENT, heavy, inner, 30);
+            assert_eq!(copied(&card), format!("{prose}\n\nVista: {url}\n\nItem\tNotes\nCopper\tA long note that wraps inside its cell\nSilver\tShort"));
+            assert!(card.lines.iter().all(|line| line.width() == 30));
+            assert_eq!(card.copy_blocks.last(), Some(&(1..card.lines.len() - 1)));
+        }
+    }
+
+    #[test]
+    fn nested_cards_keep_copy_metadata_but_not_chrome_or_keycaps() {
+        let mut body = Doc::new();
+        body.wrap(&[run("A paragraph whose words wrap across several rows.", theme::text())], 16);
+        body.blank();
+        body.lines(text::markdown("> Quoted words are content, not the quote bar.", 16, theme::text()));
+        let mut nested = Doc::new();
+        nested.card("inner", theme::ACCENT, false, body, 20);
+        let mut outer = Doc::new();
+        outer.card("outer", theme::ACCENT, true, nested, 24);
+        assert_eq!(copied(&outer), "A paragraph whose words wrap across several rows.\n\nQuoted words are content, not the quote bar.");
+        assert_eq!(outer.copy_blocks.len(), 2);
+        assert!(outer.lines.iter().all(|line| line.width() == 24));
+    }
+
+    #[test]
+    fn field_copy_uses_a_semantic_gap_not_alignment_padding() {
+        let mut doc = Doc::new();
+        doc.field("owner", "Copper gardener with a long description", 24, theme::text());
+        assert_eq!(copied(&doc), "owner Copper gardener with a long description");
     }
 }
