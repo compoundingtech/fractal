@@ -9137,7 +9137,7 @@ fn started_revision_note(
 async fn follow_mission_run(
     client: &Client,
     run: MissionRunView,
-    _cursor: u64,
+    cursor: u64,
     json_output: bool,
     limit: usize,
 ) -> Result<()> {
@@ -9148,13 +9148,15 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+        client, run, cursor, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
     ).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow_mission_run_to(
     client: &Client,
     mut run: MissionRunView,
+    mut cursor: u64,
     json_output: bool,
     interactive: bool,
     limit: usize,
@@ -9164,6 +9166,7 @@ async fn follow_mission_run_to(
     let client = client.clone().with_follow_retry();
     let client = &client;
     let mut prior = String::new();
+    let mut event_feed = LocalEventFeed::default();
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9218,7 +9221,29 @@ async fn follow_mission_run_to(
         if cli_output::closed() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // The tree can gain children beyond the rendered page, so follow lifecycle
+        // events globally rather than filtering to the currently visible subjects.
+        // Empty long-poll responses and unrelated graph activity do not reread it.
+        loop {
+            let page = event_feed
+                .read(
+                    client,
+                    &format!("after={cursor}&wait=true&timeout_ms=30000"),
+                )
+                .await?;
+            if let Some(scanned) = page.next_after {
+                cursor = cursor.max(scanned);
+            }
+            if page.items.iter().any(|event| {
+                event.kind.starts_with("mission-run.") || event.kind.starts_with("step-run.")
+            }) {
+                break;
+            }
+            client.follow_recovered();
+            if cli_output::closed() {
+                return Ok(());
+            }
+        }
         run = client
             .get(&format!(
                 "/v1/mission-runs/{}",
