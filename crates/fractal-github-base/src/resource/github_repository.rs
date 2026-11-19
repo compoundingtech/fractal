@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
+    github_client, github_graphql_nodes, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -96,6 +96,9 @@ pub struct RepositoryCursor {
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identities: BTreeMap<String, ItemIdentity>,
+    /// Repository-scoped unavailable identities must not be rediscovered from stale listings.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    tombstones: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
     /// Where the open listing a resume reads for identities continues, when it had more pages
@@ -197,11 +200,13 @@ struct ItemIdentity {
 /// listing once, for the identities of open items. The version maps, which are most of a
 /// cursor's bytes, stay with the member that polled. `None` when the observer has read nothing
 /// yet.
+/// Repository-scoped tombstones also travel with the claim so takeover cannot revive gone nodes.
 pub fn replicated_cursor(cursor: &str) -> Option<String> {
     let cursor = RepositoryCursor::parse(Some(cursor));
     let position = RepositoryCursor {
         items_since: cursor.items_since,
         comments_since: cursor.comments_since,
+        tombstones: cursor.tombstones,
         ..RepositoryCursor::default()
     };
     (position != RepositoryCursor::default())
@@ -234,12 +239,14 @@ struct PullRequestCheck {
     changed: bool,
     open: Arc<Vec<serde_json::Map<String, Value>>>,
     resolved: Arc<Vec<Value>>,
+    not_found: Arc<Vec<String>>,
     emit_pulls: bool,
 }
 
 struct RepositoryDetails {
     open: Arc<Vec<serde_json::Map<String, Value>>>,
     resolved: Arc<Vec<Value>>,
+    not_found: Arc<Vec<String>>,
     identities_read: usize,
 }
 
@@ -1459,6 +1466,7 @@ async fn observe_poll(
                         issue.get("number").and_then(Value::as_u64),
                     )
                 {
+                    if cursor.tombstones.contains(id) { continue; }
                     let identity = cursor.identities.entry(id.into()).or_insert(ItemIdentity {
                         number,
                         pull: item.pull,
@@ -1545,6 +1553,7 @@ async fn observe_poll(
                     issue.get("node_id").and_then(Value::as_str),
                     issue.get("number").and_then(Value::as_u64),
                 ) {
+                    if cursor.tombstones.contains(id) { continue; }
                     cursor.identities.entry(id.into()).or_insert(ItemIdentity {
                         number,
                         pull: issue.get("pull_request").is_some(),
@@ -1678,6 +1687,23 @@ async fn observe_poll(
         if details.identities_read > 0 {
             cursor.detail_after = identities.get(details.identities_read - 1).map(|(id, _)| id.clone());
         }
+        for id in details.not_found.iter() {
+            let Some(identity) = cursor.identities.remove(id) else { continue; };
+            cursor.tombstones.insert(id.clone());
+            cursor.seen.remove(&format!("identity/{id}"));
+            // A missing node says nothing about who closed it or where it moved.
+            // Use the existing closed-subject lifecycle, but retain the reason.
+            merge(&mut items, Item {
+                pull: identity.pull,
+                listed: false,
+                facts: serde_json::Map::from_iter([
+                    ("number".into(), json!(identity.number)),
+                    ("node_id".into(), json!(id)),
+                    ("state".into(), json!("closed")),
+                    ("state_reason".into(), json!("not_found")),
+                ]),
+            });
+        }
         for node in details.resolved.iter() {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
                 continue;
@@ -1738,6 +1764,7 @@ async fn observe_poll(
                         continue;
                     }
                     if let Some(id) = facts.get("node_id").and_then(Value::as_str) {
+                        if cursor.tombstones.contains(id) { continue; }
                         cursor
                             .identities
                             .entry(id.into())
@@ -1952,11 +1979,13 @@ async fn open_pull_requests(
         return Ok(RepositoryDetails {
             open: previous.open,
             resolved: previous.resolved,
+            not_found: previous.not_found,
             identities_read: 0,
         });
     }
     let mut nodes = Vec::new();
     let mut resolved = Vec::new();
+    let mut not_found = Vec::new();
     let mut after = Value::Null;
     let mut identities_read = 0;
     let mut page_size = PULL_REQUEST_PAGE_SIZE;
@@ -2031,7 +2060,8 @@ async fn open_pull_requests(
                 Some(false) => (&issue_token, RESOLVED_ISSUES),
                 None => (&read_token, RESOLVED_ITEMS),
             };
-            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            let (resolved_data, missing, request_cacheable) = github_graphql_nodes(client, api_base, auth, query, &ids).await?;
+            not_found.extend(missing);
             cacheable &= request_cacheable;
             resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
@@ -2109,6 +2139,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
+    let not_found = Arc::new(not_found);
     if cacheable { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -2120,12 +2151,14 @@ async fn open_pull_requests(
                 changed: false,
                 open: open.clone(),
                 resolved: resolved.clone(),
+                not_found: not_found.clone(),
                 emit_pulls,
             },
         ); }
     Ok(RepositoryDetails {
         open,
         resolved,
+        not_found,
         identities_read,
     })
 }
@@ -3162,6 +3195,72 @@ mod tests {
                 .iter()
                 .any(|request| request.starts_with("POST"))
         );
+    }
+
+    #[tokio::test]
+    async fn partial_not_found_tombstones_do_not_poison_or_reenter_the_watch_set() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let stale = json!([
+            issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_gone"})),
+            issue(2, "2026-09-10T00:00:00Z", json!({"node_id": "I_live"})),
+            issue(3, "2026-09-10T00:00:00Z", json!({"node_id": "PR_gone",
+                "pull_request": {}, "html_url": "https://github.com/acme/garden/pull/3"})),
+        ]);
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", stale.clone());
+        *github.graphql_pulls.lock() = Some((vec![], 100));
+        let live = json!({"id": "I_live", "state": "OPEN", "number": 2,
+            "url": "https://github.com/acme/garden/issues/2"});
+        *github.graphql.lock() = json!({
+            "data": {"nodes": [null, live, null]},
+            "errors": [
+                {"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Could not resolve node I_gone"},
+                {"type": "NOT_FOUND", "path": ["nodes", 2], "message": "Could not resolve node PR_gone"},
+            ],
+        }).to_string();
+        let first = observe_at(request(&["issues", "pull_requests"], None, None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        for (collection, number) in [("issues", 1), ("pull_requests", 3)] {
+            let gone = item(&first.facts, collection, number);
+            assert_eq!(gone["state"], "closed");
+            assert_eq!(gone["state_reason"], "not_found");
+        }
+        assert_eq!(item(&first.facts, "issues", 2)["state"], "open");
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert_eq!(cursor.identities.keys().collect::<Vec<_>>(), vec!["I_live"]);
+        assert_eq!(cursor.tombstones, BTreeSet::from(["I_gone".into(), "PR_gone".into()]));
+
+        // A takeover rereads both discovery listings. Even stale REST/PR listings cannot revive
+        // tombstones, and the healthy identity still gets its detail read.
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", stale);
+        let mut stale_pull = open_pull(3, "head", "SUCCESS");
+        stale_pull["id"] = json!("PR_gone");
+        *github.graphql_pulls.lock() = Some((vec![stale_pull], 100));
+        *github.graphql.lock() = json!({"data": {"nodes": [live]}}).to_string();
+        let position = replicated_cursor(first.cursor.as_deref().unwrap()).unwrap();
+        let mut next_request = request(&["issues", "pull_requests"], Some(&position), Some(first.facts));
+        next_request.refresh = true;
+        let next = observe_at(next_request, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(RepositoryCursor::parse(next.cursor.as_deref()).identities.keys()
+            .collect::<Vec<_>>(), vec!["I_live"]);
+        assert_eq!(github.graphql_requests.lock().last().unwrap()["variables"]["ids"], json!(["I_live"]));
+        assert!(items(&next.facts, "issues").iter().all(|item| item["node_id"] != "I_gone"));
+        assert!(items(&next.facts, "pull_requests").is_empty());
+
+        // A transferred issue discovered in another repository is independent, even with the
+        // same node ID. The unavailable original subject is not given an invented transfer target.
+        github.route("/repos/acme/greenhouse", json!({"id": 8}));
+        github.route("/repos/acme/greenhouse/issues?state=open&per_page=100",
+            json!([issue(77, "2026-09-10T00:00:00Z", json!({"node_id": "I_gone",
+                "html_url": "https://github.com/acme/greenhouse/issues/77"}))]));
+        *github.graphql.lock() = json!({"data": {"nodes": [{"id": "I_gone",
+            "state": "OPEN", "number": 77, "url": "https://github.com/acme/greenhouse/issues/77"}]}}).to_string();
+        let mut destination_request = request(&["issues"], None, None);
+        destination_request.locator = "acme/greenhouse".into();
+        let destination = observe_at(destination_request, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&destination.facts, "issues", 77)["state"], "open");
+        assert!(RepositoryCursor::parse(destination.cursor.as_deref()).identities.contains_key("I_gone"));
+        assert!(RepositoryCursor::parse(next.cursor.as_deref()).tombstones.contains("I_gone"));
     }
 
     #[tokio::test]
