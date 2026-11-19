@@ -532,6 +532,9 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     peer.validate_replication_backlog().unwrap();
     peer.apply_replication_repairs().unwrap();
     peer.project_replication_backlog().unwrap();
+    assert!(peer.fleet_view_sealed().unwrap().members.iter()
+        .any(|member| member.name == "birch" && member.state == "current"
+            && member.member_key == key.public()));
     // Plain has no product hook that replaces leave_fleet's zero high-water
     // placeholder with the signed envelope sequence. Match the production
     // leave claim explicitly, as the worker's LeaveFixture does.
@@ -541,7 +544,8 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     peer.append_claim(&smallclaims::ClaimInput {
         subject: "host/birch".into(),
         kind: "fleet.member-left".into(),
-        actor: Some("person/example".into()),
+        // The node key authenticates this departure; no person signer is installed.
+        actor: None,
         fields: serde_json::from_value(serde_json::json!({
             "member_key": key.public(), "high_water": high_water,
         })).unwrap(),
@@ -552,6 +556,20 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     let exchange = peer.export_replication_exchange_answering(
         FLEET, &store.replication_inventory().unwrap(), &store.replication_signature_requests().unwrap(),
     ).unwrap();
+    assert!(exchange.envelopes.iter().filter(|envelope| envelope.writer == "birch")
+        .any(|envelope| envelope.member_key.as_deref() == Some(key.public())
+            && envelope.signature.as_deref().is_some_and(|signature| {
+                smallclaims::fleet::verify_signature(
+                    key.public(),
+                    &smallclaims::fleet::envelope_signature_message(
+                        FLEET, &envelope.writer, envelope.sequence, &envelope.hash,
+                    ),
+                    signature,
+                )
+            })));
+    assert!(peer.fleet_view_sealed().unwrap().members.iter()
+        .any(|member| member.name == "birch" && member.state == "ended"
+            && member.ended.as_deref() == Some("left")));
     store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     store.validate_replication_backlog().unwrap();
     store.apply_replication_repairs().unwrap();
