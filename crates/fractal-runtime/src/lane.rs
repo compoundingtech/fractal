@@ -41,13 +41,14 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub enum RequestClass { Landing, Check, #[default] Agent, Unknown(String) }
+pub enum RequestClass { Recovery, Landing, Check, #[default] Agent, Unknown(String) }
 
 impl RequestClass {
     pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
 
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Recovery => "recovery",
             Self::Landing => "landing", Self::Check => "check", Self::Agent => "agent",
             Self::Unknown(value) => value,
         }
@@ -76,6 +77,7 @@ impl<'de> serde::Deserialize<'de> for RequestClass {
             }
             fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
                 Ok(match value {
+                    "recovery" => RequestClass::Recovery,
                     "landing" => RequestClass::Landing, "check" => RequestClass::Check,
                     "agent" => RequestClass::Agent, value => RequestClass::Unknown(value.to_owned()),
                 })
@@ -447,7 +449,7 @@ fn finite_slices(
     (parent, member, child)
 }
 
-fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>) -> Result<Vec<String>> {
+fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>, weights: Option<crate::resource_class::Weights>) -> Result<Vec<String>> {
     let mut properties = match capacity {
         Some(capacity) => {
             anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
@@ -466,6 +468,14 @@ fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>)
         "IOAccounting=yes".to_owned(),
         memory_high_bytes.map_or_else(|| "MemoryHigh=infinity".to_owned(), |high| format!("MemoryHigh={high}")),
     ]);
+    // Class weights order contention between concurrent member executions; the aggregate
+    // parent slice stays unweighted so lanes compete by occupancy, not by class.
+    if let Some(weights) = weights {
+        properties.extend([
+            format!("CPUWeight={}", weights.cpu),
+            format!("IOWeight={}", weights.io),
+        ]);
+    }
     Ok(properties)
 }
 
@@ -483,11 +493,12 @@ pub(crate) fn prepare_finite(
     }
     let (parent, member, child) = finite_slices(&policy.name, binding, unit);
     // Validate every envelope before mutating any unit.
-    let parent_properties = finite_properties(policy.capacity, None)?;
+    let parent_properties = finite_properties(policy.capacity, None, None)?;
+    let member_weights = Some(crate::resource_class::weights(&policy.class)?);
     let member_properties = member.as_ref().map(|member| {
-        finite_properties(member_capacity, policy.memory_high_bytes).map(|properties| (member, properties))
+        finite_properties(member_capacity, policy.memory_high_bytes, member_weights).map(|properties| (member, properties))
     }).transpose()?;
-    let child_properties = finite_properties(member_capacity, policy.memory_high_bytes)?;
+    let child_properties = finite_properties(member_capacity, policy.memory_high_bytes, member_weights)?;
     let units = std::iter::once((&parent, parent_properties))
         .chain(member_properties)
         .chain(std::iter::once((&child, child_properties)));
@@ -858,14 +869,14 @@ mod tests {
 
     #[test]
     fn future_resource_classes_round_trip_without_granting_authority() {
-        for name in ["recovery", "future-class"] {
+        for name in ["future-class", "another-future-class"] {
             let encoded = serde_json::to_string(name).unwrap();
             let class: RequestClass = serde_json::from_str(&encoded).unwrap();
             assert_eq!(class, RequestClass::Unknown(name.into()));
             assert_eq!(serde_json::to_string(&class).unwrap(), encoded);
             assert!(class.ensure_supported().unwrap_err().to_string().contains(name));
         }
-        for class in [RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
+        for class in [RequestClass::Recovery, RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
             let decoded: RequestClass = serde_json::from_str(&serde_json::to_string(&class).unwrap()).unwrap();
             assert_eq!(decoded, class);
             decoded.ensure_supported().unwrap();
@@ -995,8 +1006,8 @@ mod tests {
 
     #[test]
     fn finite_properties_keep_member_and_parent_envelopes_separate() {
-        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None).unwrap();
-        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2)).unwrap();
+        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None, None).unwrap();
+        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2), None).unwrap();
         assert!(parent.iter().any(|value| value == "CPUQuota=400%"));
         assert!(parent.iter().any(|value| value == "MemoryMax=4294967296"));
         assert!(parent.iter().any(|value| value == "MemoryHigh=infinity"));
@@ -1006,10 +1017,10 @@ mod tests {
         for properties in [&parent, &child] {
             assert!(properties.iter().any(|value| value == "IOAccounting=yes"));
         }
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0)).is_err());
-        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB)).is_err());
-        assert!(finite_properties(None, Some(GIB)).is_err());
-        assert!(finite_properties(None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0), None).is_err());
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB), None).is_err());
+        assert!(finite_properties(None, Some(GIB), None).is_err());
+        assert!(finite_properties(None, None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
     }
 
     #[test]
