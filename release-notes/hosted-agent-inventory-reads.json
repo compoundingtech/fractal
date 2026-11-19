@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use existing host and kind indexes for per-agent metrics and parked-agent/observer fault snapshots instead of decoding the entire desired inventory.",
+  "replay": {"status": "none", "detail": "No claims or replay behavior change."},
+  "schema": {"status": "none", "detail": "Reuses the existing desired_agent_host_index and desired_kind_subject_index; no table, index or stored-format changes."},
+  "rules": {"status": "none", "detail": "Agent membership selection and parked-agent/observer fault values are unchanged, including existing handling of unreadable member declarations."},
+  "compatibility": {"status": "none", "detail": "No wire, client, CLI or mixed-version contract changes."},
+  "downtime": {"status": "none", "detail": "No migration or restart beyond normal release deployment."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Revert to restore the previous readers without changing stored data."}
+}
