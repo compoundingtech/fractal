@@ -126,7 +126,7 @@ pub fn direct_person_binding_tx(connection: &Connection, step: &StepRunView, act
 }
 
 pub fn person_evidence_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<ClaimRecord>> {
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h608979b5ef99 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4f30e7197200 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
         "WITH RECURSIVE sources(subject,attempt) AS (
            SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
              coalesce(json_extract(c.body,'$.fields.source_attempt'),sources.attempt)
