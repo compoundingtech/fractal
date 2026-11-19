@@ -362,12 +362,89 @@ const declaredAdmissionNodes = ({
       ]),
 ]
 
+// Match native declaration_syntax::validate_name(value, false), including empty segments.
+const ResourceReferenceName = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string =>
+      value.length <= 512 &&
+      /^[A-Za-z0-9][A-Za-z0-9._@/-]*$/u.test(value) &&
+      !value.endsWith('/') &&
+      !value.split('/').some((part) => part === '' || part === '..'),
+    { message: 'invalid resource reference name' },
+  ),
+)
+// Native absolute URIs accept any scheme and preserve authored bytes, not URL normalization.
+const ResourceReferenceUri = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string =>
+      value.length <= 4096 &&
+      /^[A-Za-z][A-Za-z0-9+.-]*:.+$/u.test(value) &&
+      /^[\x21-\x7e]+$/u.test(value) &&
+      !/["<>\\^`{|}]/u.test(value) &&
+      !/%(?![A-Fa-f0-9]{2})/u.test(value),
+    { message: 'expected an absolute resource URI' },
+  ),
+)
+const ResourceReferenceFields = {
+  name: ResourceReferenceName,
+  reason: Schema.optionalKey(
+    Text.pipe(Schema.refine((value): value is string => value.trim().length > 0)),
+  ),
+}
+
+/** A named native declared-resource edge, not a managed resource body or kit metadata. */
+export const ResourceReferenceSchema = Schema.Union([
+  Schema.Struct({
+    ...ResourceReferenceFields,
+    subject: Schema.String.pipe(
+      Schema.refine(
+        (value): value is string =>
+          value.startsWith('resource/') &&
+          Schema.is(ResourceReferenceName)(value.slice('resource/'.length)),
+        { message: 'expected resource/ followed by a valid resource name' },
+      ),
+    ),
+    uri: Schema.optionalKey(Schema.Never),
+  }),
+  Schema.Struct({
+    ...ResourceReferenceFields,
+    uri: ResourceReferenceUri,
+    subject: Schema.optionalKey(Schema.Never),
+  }),
+]).annotate({ identifier: 'Fractal.ResourceReference' })
+
+export type ResourceReference = typeof ResourceReferenceSchema.Encoded
+
+const ResourceReferences = Schema.Array(ResourceReferenceSchema).pipe(
+  Schema.refine(
+    (values): values is typeof values =>
+      new Set(values.map((value) => value.name)).size === values.length,
+    { message: 'resource reference names must be unique within their declaration' },
+  ),
+)
+
+const resourceReferenceNodes = (
+  references: readonly ResourceReference[] | undefined,
+): Node[] =>
+  (references ?? []).map((reference) =>
+    node({
+      name: 'resource',
+      args: [reference.name],
+      props: {
+        ...(reference.subject === undefined ? {} : { subject: reference.subject }),
+        ...(reference.uri === undefined ? {} : { uri: reference.uri }),
+        ...(reference.reason === undefined ? {} : { reason: reference.reason }),
+      },
+    }),
+  )
+
 const AgentSchemaFields = Schema.Struct({
   id: SubjectId,
   identity: Schema.optionalKey(Text),
   name: Schema.optionalKey(Text),
   description: Schema.optionalKey(Text),
   principal: Schema.optionalKey(PersonReferenceSchema),
+  resourceReferences: Schema.optionalKey(ResourceReferences),
   lifecycle: Schema.optionalKey(
     Schema.Union([Schema.Literal('standing'), Schema.Literal('owner'), Schema.Literal('bounded')]),
   ),
@@ -1019,6 +1096,7 @@ export const ReportToSchema = Schema.declare<typeof AgentSchema.Encoded>(isAgent
 export const MissionSchema = Schema.Struct({
   id: MissionId,
   budget: Schema.optionalKey(MissionBudget),
+  resourceReferences: Schema.optionalKey(ResourceReferences),
   ...RetiredAdmissionFields,
   inputs: Schema.optionalKey(
     Schema.Array(MissionInputSchema).pipe(
@@ -2321,6 +2399,7 @@ const loopReferences = (input: LoopInput): readonly RunReference[] => [
 
 const assembleMission = <const TMission extends string>(
   input: MissionInput<TMission>,
+  resolveAgent: (value: unknown, step: string) => unknown = (value) => value,
 ): typeof MissionSchema.Type => {
   const phases: readonly (readonly object[])[] = [
     input.steps,
@@ -2438,13 +2517,18 @@ const assembleMission = <const TMission extends string>(
               isInputHandle(value) === true ? { name: value.name, kind: value.kind } : value,
             ),
           }),
-      steps: input.steps.map((s) =>
-        isStepHandle(s) === true
+      reportTo: resolveAgent(input.reportTo, input.id),
+      ...(input.assignedTo === undefined ? {} : { assignedTo: resolveAgent(input.assignedTo, input.id) }),
+      steps: input.steps.map((s) => {
+        const wire = isStepHandle(s) === true
           ? stepData.get(s)!.wire
           : 'round' in s && s.round !== undefined
             ? authoredLoopWire(s)
-            : authoredStepWire(s),
-      ),
+            : authoredStepWire(s)
+        return 'assignedTo' in wire && wire.assignedTo !== undefined
+          ? { ...wire, assignedTo: resolveAgent(wire.assignedTo, wire.id) }
+          : wire
+      }),
       ...(input.finally === undefined
         ? {}
         : {
@@ -2490,8 +2574,9 @@ const wireFinalSteps = (
 /** Validates authoring references and materializes plain wire data before serialization. */
 export const missionWire = <const TMission extends string>(
   input: MissionInput<TMission>,
+  resolveAgent?: (value: unknown, step: string) => unknown,
 ): typeof MissionSchema.Encoded => {
-  const m = assembleMission(input)
+  const m = assembleMission(input, resolveAgent)
   return {
     ...m,
     reportTo: { id: m.reportTo.id },
@@ -2532,6 +2617,7 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
     },
     children: [
       ...declaredAdmissionNodes(m),
+      ...resourceReferenceNodes(m.resourceReferences),
       ...(m.concurrentRuns === undefined
         ? []
         : [node({ name: 'concurrent-runs', props: { max: m.concurrentRuns } })]),
@@ -2601,6 +2687,7 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
     ...optionalChild({ name: 'name', value: a.name }),
     ...optionalChild({ name: 'description', value: a.description }),
     ...optionalChild({ name: 'principal', value: a.principal?.subject }),
+    ...resourceReferenceNodes(a.resourceReferences),
     ...optionalChild({ name: 'lifecycle', value: a.lifecycle }),
     ...declaredAdmissionNodes(a),
     ...optionalChild({ name: 'host', value: a.host }),

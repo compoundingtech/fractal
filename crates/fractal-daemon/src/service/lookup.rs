@@ -185,20 +185,32 @@ pub(super) fn native() -> Result<Services> {
     )
 }
 
-/// Home Manager's legacy phase uses its own agent labels for both default-instance services.
+/// Home Manager uses phase-dependent labels for both default-instance services.
 #[cfg(any(target_os = "macos", test))]
 fn launchd(
     default_instance: bool,
     [daemon, replication]: [&str; 2],
     status: impl Fn(&str) -> Result<ServiceStatus>,
 ) -> Result<Services> {
-    let resolve = |old: &str, home_manager_name: &'static str| -> Result<ServiceStatus> {
-        let names = candidate_names(old, default_instance.then_some(home_manager_name));
-        select(names.iter().map(|name| status(name)).collect::<Result<Vec<_>>>()?)
+    let resolve = |old: &str, home_manager_names: [&str; 2]| -> Result<ServiceStatus> {
+        let mut statuses = candidate_names(old, None).iter()
+            .map(|name| status(name)).collect::<Result<Vec<_>>>()?;
+        if default_instance {
+            let [legacy, renamed] = home_manager_names;
+            let (legacy, renamed) = (status(legacy)?, status(renamed)?);
+            // Prefer the running Home Manager agent, then an installed agent.
+            // Equal states retain the legacy label, independent of discovery order.
+            let prefer_renamed = (renamed.running, renamed.installed) > (legacy.running, legacy.installed);
+            statuses.push(if prefer_renamed { renamed } else { legacy });
+        }
+        select(statuses)
     };
     let services = Services {
-        daemon: resolve(daemon, "org.nix-community.home.smalltalk")?,
-        replication: resolve(replication, "org.nix-community.home.smalltalk-replication")?,
+        daemon: resolve(daemon, ["org.nix-community.home.smalltalk", "org.nix-community.home.fractal"])?,
+        replication: resolve(replication, [
+            "org.nix-community.home.smalltalk-replication",
+            "org.nix-community.home.fractal-replication",
+        ])?,
     };
     check_conflicts([&services.daemon, &services.replication])?;
     Ok(services)
@@ -438,21 +450,31 @@ mod tests {
     #[test]
     fn launchd_resolves_home_manager_agents_for_the_default_instance_only() {
         const LABELS: [&str; 2] = ["com.compoundingtech.st3", "com.compoundingtech.st3.replication"];
-        let hm_running = |name: &str| Ok(status(name, name.starts_with("org.nix-community.home.smalltalk"), name.starts_with("org.nix-community.home.smalltalk")));
-        let services = launchd(true, LABELS, hm_running).unwrap();
-        assert_eq!(
-            (services.daemon.name.as_str(), services.daemon.running),
-            ("org.nix-community.home.smalltalk", true),
-        );
-        assert_eq!(
-            (services.replication.name.as_str(), services.replication.running),
-            ("org.nix-community.home.smalltalk-replication", true),
-        );
+        for family in ["smalltalk", "fractal"] {
+            let daemon = format!("org.nix-community.home.{family}");
+            let replication = format!("{daemon}-replication");
+            for (installed, running) in [(true, false), (false, true), (true, true)] {
+                let hm_status = |name: &str| {
+                    let hm = name == daemon || name == replication;
+                    Ok(status(name, hm && installed, hm && running))
+                };
+                let services = launchd(true, LABELS, hm_status).unwrap();
+                assert_eq!(services.daemon.name, daemon);
+                assert_eq!(services.replication.name, replication);
+                assert_eq!((services.daemon.installed, services.daemon.running), (installed, running));
+                assert_eq!((services.replication.installed, services.replication.running), (installed, running));
 
-        // Home Manager agents belong to the default instance; a named instance never adopts them.
-        let named = launchd(false, ["com.compoundingtech.st3-try", "com.compoundingtech.st3-try.replication"], hm_running).unwrap();
-        assert_eq!(named.replication.name, "com.compoundingtech.st3-try.replication");
-        assert!(!named.replication.installed && !named.replication.running);
+                // A named instance never adopts either family's Home Manager agents.
+                let named = launchd(false, ["com.compoundingtech.st3-try", "com.compoundingtech.st3-try.replication"], |name| {
+                    assert!(!name.starts_with("org.nix-community.home."));
+                    hm_status(name)
+                }).unwrap();
+                assert_eq!(named.daemon.name, "com.compoundingtech.st3-try");
+                assert_eq!(named.replication.name, "com.compoundingtech.st3-try.replication");
+                assert!(!named.daemon.installed && !named.daemon.running);
+                assert!(!named.replication.installed && !named.replication.running);
+            }
+        }
 
         // Staged cutover: the running legacy agent and the installed Fractal agent conflict.
         let staged = launchd(true, LABELS, |name: &str| {
@@ -461,5 +483,38 @@ mod tests {
         });
         let Err(conflict) = staged else { panic!("a staged cutover must conflict") };
         assert!(conflict.to_string().contains("conflicting service units"));
+    }
+
+    #[test]
+    fn launchd_home_manager_coexistence_prefers_running_then_installed_then_legacy() {
+        const LABELS: [&str; 2] = ["com.compoundingtech.st3", "com.compoundingtech.st3.replication"];
+        let states = [(false, false), (true, false), (false, true), (true, true)];
+        for legacy in states {
+            for renamed in states {
+                let calls = std::cell::RefCell::new(Vec::new());
+                let services = launchd(true, LABELS, |name| {
+                    calls.borrow_mut().push(name.to_owned());
+                    let (installed, running) = match name {
+                        "org.nix-community.home.smalltalk" | "org.nix-community.home.smalltalk-replication" => legacy,
+                        "org.nix-community.home.fractal" | "org.nix-community.home.fractal-replication" => renamed,
+                        _ => (false, false),
+                    };
+                    Ok(status(name, installed, running))
+                }).unwrap();
+                let expected = if legacy == (false, false) && renamed == (false, false) {
+                    LABELS
+                } else if (renamed.1, renamed.0) > (legacy.1, legacy.0) {
+                    ["org.nix-community.home.fractal", "org.nix-community.home.fractal-replication"]
+                } else {
+                    ["org.nix-community.home.smalltalk", "org.nix-community.home.smalltalk-replication"]
+                };
+                assert_eq!([services.daemon.name.as_str(), services.replication.name.as_str()], expected,
+                    "legacy={legacy:?}, renamed={renamed:?}");
+                let calls = calls.into_inner();
+                assert_eq!(calls.len(), 8);
+                let unique: std::collections::BTreeSet<_> = calls.iter().collect();
+                assert_eq!(unique.len(), calls.len(), "each label is inspected only once");
+            }
+        }
     }
 }

@@ -35,6 +35,23 @@ or losing this local table loses registrations; recovery requires the phone to r
 again with a valid locally issued pairing, not a graph replay. Full local database backups
 contain these secrets and must remain private; a graph-only backup cannot recover them.
 
+Phone service minutes are durable `custom.client.observation-minute` claims, not
+member-local observations or diagnostic JSONL. The phone persists an exact report
+before upload; paired ingestion atomically records its minute summaries and
+trusted operation receipts. The logical source binds the authenticated person
+and device, independently of the receiving member or a replacement pairing grant.
+Exact retries collapse by source/target/carrier/path/minute. Conflicting replicated
+content for the same minute supplies unknown evidence, not a chosen winner or a
+second population. Native iOS objectives fold these claims fleet-wide; absent
+minutes and absent foreground time are never inferred to be zero or healthy.
+The held client request-latency diagnostic retains its existing local admission,
+JSONL and in-memory phone windows until its separately authorized cutover.
+Those local windows are diagnostic-only and never supply native objective rows
+or doctor verdicts. A replacement pairing on the same process can still meet the
+legacy diagnostic report-scope conflict after the durable graph deduplicates it;
+activation must resolve that boundary rather than interpreting the refusal as
+missing fleet evidence.
+
 ## Large inline values
 
 New storage work must avoid unbounded large inline SQLite objects, including variable
@@ -357,6 +374,8 @@ order from the same admitted claims.
 | `claim_signature_counts`, `claim_signature_writer_counts` | Incremental inspection projections | Candidate and carrying-writer counts maintained by admission/deletion triggers. The attributable inspection threshold reports a fault without deleting candidates. |
 | `claim_signature_judging` | Local incremental work | Durable candidate cursor, best candidate and dependency availability for bounded writer loans. Relevant changes invalidate its accumulator; partial candidate state cannot authorize a dependent claim. |
 | `claim_signature_migration` | Local bootstrap progress | Durable inventory cursor, reconciliation targets, serving model and explicit fault. Complete isolated legacy semantics serve until atomic candidate activation; reaching an envelope does not authorize its claims under candidate semantics, since later envelopes can carry more candidates. The legacy P0 remains visible during bootstrap. |
+| `claim_signature_originals` | Local lossless representation index | Exact original signature text keyed by claim and 32-byte reference, preserving canonical-candidate membership and legacy-only facade evidence. It is populated transactionally without changing signed bytes or candidate ordering; missing or changed targets fail closed. |
+| `claim_signature_reference_migration` | Local representation progress | Durable phase and keyset cursor for bounded inline-text to reference conversion after authorization bootstrap. Not replicated and not an authorization-readiness gate. |
 | `claim_signature_nonce_uses` | Shared incremental projection | Cryptographically matching key/nonce use per live claim, including non-winning candidates. Invalid signature bytes cannot reserve another key's nonce; deletion invalidates affected dependencies before removing use. |
 | `claim_signatures` | Shared projection | Best candidate under current authority: Verified before Held before Invalid, then normalized signature bytes. Every candidate contributes authority dependencies and matching nonce use, including non-winners. Readers pin one complete legacy or candidate model. |
 | `claim_verdict_fresh`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdicts` | Local cache of shared outcomes | Current-authority candidate fold and dependency work, outside replication digests and rebuilt by `recheck_claim_verdicts`. Links accumulate conservatively per page until claim removal or explicit recheck; completing a judgment does not rewrite its whole dependency set. Property tests compare inventory, selection, verdicts and recomputation across shuffled, split and duplicate delivery. |
@@ -410,6 +429,8 @@ order from the same admitted claims.
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
 | `local_harness_question_generations` | Local | Exact admitted native question process/provider/session generations, persisted before observation and retired only after durable resolution. Survives restart; not replicated or included in shared projection digests. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
+| `local_wake_demand_v1` | Local cache | Disposable wake-class pending metadata derived from the canonical earliest graph send (accepted time, then claim ID), or the mirrored shard send when no graph send exists. Graph lifecycle claims, local marks/staging and mirrored shard lifecycle clear demand. Rebuilt from retained graph/mirror metadata in restartable 64-subject startup transactions; never replicated or included in shared projection digests. |
+| `local_wake_demand_pending_v1` | Local cache | Trigger-maintained changed-subject work for the disposable wake-demand fold, not message or receipt authority. Reconstructing the versioned projection from retained graph and mirrored shard sends supersedes this queue; ordinary startup drains interrupted folds. Never replicated or included in shared projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
 | `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |

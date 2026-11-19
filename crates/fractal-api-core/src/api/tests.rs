@@ -1251,6 +1251,8 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         .unwrap()
         .unwrap();
     assert_eq!(suspension.phase, "quiescing");
+    assert_eq!(suspension.cause(), "manual");
+    assert_eq!(suspension.mode(), "git");
     assert!(suspension.holds_seat());
     let (_, body) = ask("/v1/agents/suspend", "again").await;
     assert_eq!(body["code"], "already-suspended");
@@ -1277,6 +1279,96 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         })).await;
         assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
     }
+}
+
+#[tokio::test]
+async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let source = format!(
+        "version 2\nagent \"test/seat\" {{ host \"node\"; workspace {:?}; harness \"omp\" {{}} }}",
+        root.path().display().to_string(),
+    );
+    let request = apply_request(&state, &source, "person/test", "declare");
+    let (status, body) = json_request(app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subject = "agent/test/seat";
+    let token = state.store.selected_desired_token(subject).unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence,
+            expected_subject: None, idempotency_key: key,
+        }).unwrap()
+    };
+    let suspend = append("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"incumbent"
+    }), vec![token.clone()], None);
+    append("runtime.action.succeeded", json!({
+        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place", "source_host":"node"
+    }), vec![suspend.id.clone()], Some(crate::suspension::suspend_snapshot_key(&suspend.id)));
+    append("runtime.action.succeeded", json!({"action":"suspend"}),
+        vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
+    let before = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    let boundary = state.store.index().unwrap();
+    let error = request_suspend(&state, serde_json::from_value(json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"stale"
+    })).unwrap(), Some(SuspensionFence {
+        desired: token.clone(), incarnation: Some("successor".into()),
+    })).unwrap_err();
+    assert_eq!(error.code, "stale-fence");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().cause(), "idle");
+    let payload = json!({"subject":subject, "actor":"person/test", "idempotency_key":"make-manual"});
+    let (status, converted) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{converted}");
+    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(converted["id"], replay["id"]);
+    assert_eq!(converted["body"]["fields"]["operation_id"], before.operation_id);
+    let after = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    assert_eq!(after.cause(), "manual");
+    assert!(after.holds_seat());
+    assert_eq!(after.operation_id, before.operation_id);
+    assert_eq!(after.native_session_id, before.native_session_id);
+    assert_eq!(after.mode(), "in-place");
+    assert_eq!(after.suspended_at_unix_ms, before.suspended_at_unix_ms);
+    assert_eq!(crate::suspension::current_at(&state.store, subject, Some(boundary)).unwrap().unwrap().cause(), "idle");
+    let path = root.path().join("reopened.sqlite3");
+    state.store.copy_store_to(&path).unwrap();
+    let reopened = Store::open(&path, "node").unwrap();
+    assert_eq!(crate::suspension::current(&reopened, subject).unwrap().unwrap(), after);
+    let shown = client_suspension(&after);
+    assert_eq!(shown["cause"], "manual");
+    assert_eq!(shown["mode"], "in-place");
+    let (status, refused) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "host":"other", "idempotency_key":"move"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "snapshot-in-place");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "suspended");
+    let (status, resumed) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"same-host"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let resume = state.store.claim_by_id(resumed["id"].as_str().unwrap()).unwrap().unwrap();
+    append("runtime.action.succeeded", json!({"action":"resume", "incarnation_id":"resumed"}),
+        vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
+    append("runtime.observed", json!({"status":"running", "runtime_id":"seat", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.session-file", json!({"harness":"omp", "session_id":"native", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.observed", json!({"state":"idle", "incarnation_id":"resumed", "quiescent":true, "blocking":[]}), vec![], None);
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "resumed");
+    assert!(crate::suspension::blockers(&state.store, subject, "resumed").unwrap().is_empty());
+    let requests = state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len();
+    let (status, replay) = json_request(app, "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], converted["id"]);
+    assert_eq!(state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len(), requests);
+    let resumed_path = root.path().join("resumed.sqlite3");
+    state.store.copy_store_to(&resumed_path).unwrap();
+    let resumed_store = Store::open(&resumed_path, "node").unwrap();
+    assert_eq!(resumed_store.suspension_manual_request(subject, "agent-suspend:agent/test/seat:make-manual")
+        .unwrap().unwrap().id, converted["id"].as_str().unwrap());
 }
 
 #[tokio::test]
@@ -6530,6 +6622,16 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
     let mut state = state(root.path());
     state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
     state.configured_peers = vec!["cobalt".into()];
+    // A pass needs a live worker and a fresh exchange, beside the refusal under test.
+    state.store.record_replication_worker_heartbeat();
+    state
+        .store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("cobalt".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now_ms());
     let app = router(state.clone());
     let (status, recorded) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
         "peer": "cobalt", "status": "refused", "error": "refused by that member's Fabric grants (service st3-peer-v1); replication can continue through other members"
@@ -6559,6 +6661,47 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
             .as_str()
             .unwrap()
             .contains("cobalt: refused by that member's Fabric grants")
+    );
+}
+
+/// The silent dial-out incident shape: redeemed membership, stored envelopes, no worker
+/// process. Doctor must fail loudly instead of passing on persisted history.
+#[tokio::test]
+async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.store.bind_fleet("94cd11ba-c582-4558-9c84-c3bda922eb6d").unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
+    state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
+    let app = router(state);
+    let (status, doctor) = get_request(app, "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "replication")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no replication worker heartbeat"),
+        "{check}"
     );
 }
 
@@ -6678,6 +6821,8 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
         .store
         .receive_replication_exchange("alder", "fleet/waiting", &exchange)
         .unwrap();
+    // A pass needs the live-worker evidence beside the waiting claim.
+    state.store.record_replication_worker_heartbeat();
     let report = doctor_report(&state).unwrap().0;
     let check = report
         .checks
@@ -6733,6 +6878,44 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
             .iter()
             .any(|check| check.name == "shared-projections")
     );
+}
+
+#[test]
+fn doctor_distinguishes_disabled_checkpoint_worker_from_missing_participant_seals() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet/checkpoint-diagnostics".into());
+    state.configured_peers.push("absent-writer".into());
+    state.store.checkpoint_worker_phase(CheckpointPhase::Disabled);
+    let report = doctor_report(&state).unwrap().0;
+    let check = report.checks.iter().find(|check| check.name == "checkpoint").unwrap();
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=Disabled"));
+    assert!(check.message.contains("disabled by config on 1 node"));
+    assert!(check.message.contains("newest stable none"));
+    assert!(check.message.contains("absent-writer phase=seal (no seal)"));
+}
+
+#[test]
+fn checkpoint_doctor_warns_on_worker_failure_or_halt_without_pending_work() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    state.store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = state.store.checkpoint_status(client_now_ms(), &[]).unwrap();
+    status.pending = None;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=trim (halted"));
+    status.halted = false;
+    assert_eq!(checkpoint_doctor_check(&status).status, "pass");
 }
 
 #[test]

@@ -85,15 +85,26 @@ impl Native {
         ensure!(output.status.success() || output.status.code() == Some(113), "cannot inspect {target}: {}", String::from_utf8_lossy(&output.stderr));
         let disabled = Self::output("launchctl", &["print-disabled", self.domain()?])?;
         ensure!(disabled.status.success(), "cannot inspect launchd disabled state");
-        let disabled = String::from_utf8_lossy(&disabled.stdout).lines().find_map(|line| {
-            let (key, value) = line.trim().split_once(" => ")?;
-            (key.trim_matches('"') == name).then_some(value.trim() == "true")
-        }).unwrap_or(false);
+        let disabled = launchd_disabled(&String::from_utf8_lossy(&disabled.stdout), name)?.unwrap_or(false);
         Ok(Unit { name: name.into(), file: base.join(format!("{name}.plist")),
             installed: base.join(format!("{name}.plist")).is_file() || output.status.success(),
             // Loaded launchd jobs can restart themselves even when currently waiting.
             running: output.status.success(), enabled: !disabled })
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launchd_disabled(text: &str, label: &str) -> Result<Option<bool>> {
+    for line in text.lines() {
+        let Some((key, value)) = line.trim().split_once("=>") else { continue; };
+        if key.trim().trim_matches('"') != label { continue; }
+        return match value.trim() {
+            "true" | "disabled" => Ok(Some(true)),
+            "false" | "enabled" => Ok(Some(false)),
+            value => bail!("unknown launchd disabled state for {label}: {value}"),
+        };
+    }
+    Ok(None)
 }
 
 fn property<'a>(text: &'a str, name: &str) -> Result<&'a str> {
@@ -301,6 +312,30 @@ impl Manager for Native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_launchd_disabled_boolean_and_named_states() -> Result<()> {
+        let label = "com.compoundingtech.fractal";
+        for (value, expected) in [("true", true), ("disabled", true), ("false", false), ("enabled", false)] {
+            let text = format!("disabled services = {{\n    \"{label}\" => {value}\n}}\n");
+            assert_eq!(launchd_disabled(&text, label)?, Some(expected), "{value}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn absent_launchd_disabled_override_is_distinct() -> Result<()> {
+        assert_eq!(launchd_disabled("disabled services = {\n    \"com.example.other\" => disabled\n}\n",
+            "com.compoundingtech.fractal")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_launchd_disabled_state_fails_closed() {
+        let error = launchd_disabled("disabled services = {\n    \"com.compoundingtech.fractal\" => unknown\n}\n",
+            "com.compoundingtech.fractal").unwrap_err();
+        assert_eq!(error.to_string(), "unknown launchd disabled state for com.compoundingtech.fractal: unknown");
+    }
 
     fn linux_plan(installed: &[&str], running: &[&str]) -> Result<Services> {
         linux_services(|name| Ok(Unit {

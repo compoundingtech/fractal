@@ -3738,6 +3738,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     json!({
         "action": suspension.action,
         "phase": suspension.phase,
+        "cause": suspension.cause(),
+        "mode": suspension.mode(),
         "operation_id": suspension.operation_id,
         "harness": suspension.harness,
         "native_session_id": suspension.native_session_id,
@@ -3949,6 +3951,7 @@ fn client_agent_cards_presented(
     queues: &CardQueues<'_>,
     selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
+    let idle_residency_policy = crate::config::idle_residency_policy();
     let agent_subjects = status
         .subjects
         .iter()
@@ -4198,6 +4201,15 @@ fn client_agent_cards_presented(
             } else {
                 None
             };
+            let residency = crate::residency::evaluate_at(
+                store,
+                &subject.subject,
+                Some(snapshot_index),
+                idle_residency_policy.settings.after_ms,
+            )?.not_before(
+                idle_residency_policy.enabled_at_unix_ms,
+                idle_residency_policy.settings.after_ms,
+            );
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -4352,6 +4364,12 @@ fn client_agent_cards_presented(
                 } else {
                     None
                 },
+            });
+            value["residency"] = json!({
+                "policy": residency.policy,
+                "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                "refusal_reason": residency.refusal_reason,
             });
             value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
@@ -7218,6 +7236,8 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 /// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
 /// publication and refolds only the cards whose claims changed, when it can tell which.
 pub fn start_agent_roster(state: &AppState) {
+    crate::mail_delivery_objectives::start(state);
+    crate::admission_objectives::start(state);
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
@@ -8577,8 +8597,17 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
     });
+    let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
+    health["replication"] = json!({
+        "state": replication,
+        "status": replication.status(),
+        "message": replication.message(),
+    });
+    if replication.status() == "fail" {
+        health["status"] = json!("degraded");
+    }
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;
     }
@@ -9647,6 +9676,15 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
+fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+    let blocking = status.blocking_summary();
+    DoctorCheck {
+        name: "checkpoint".into(),
+        status: if blocking.is_some() { "warn" } else { "pass" }.into(),
+        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+    }
+}
+
 /// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
 /// threads, each under its own deadline from the clock, so a slow check costs its own time and
 /// not the time of the checks after it. A worker past the first reads on a reader it is
@@ -10297,6 +10335,7 @@ fn doctor_report_within(
                 },
             }),
             Ok(replication) => {
+                let operational_health = replication.health;
                 let unavailable = replication
                     .peers
                     .iter()
@@ -10415,6 +10454,7 @@ fn doctor_report_within(
                     || replication.unhealthy_projections != 0
                     || !diverged.is_empty()
                     || first_sync_failed.is_some()
+                    || operational_health.status() == "fail"
                 {
                     "fail"
                 } else if !unavailable.is_empty()
@@ -10422,6 +10462,7 @@ fn doctor_report_within(
                     || unresolved != 0
                     || !catching_up.is_empty()
                     || unmeasured
+                    || operational_health.status() == "warn"
                 {
                     "warn"
                 } else {
@@ -10431,7 +10472,8 @@ fn doctor_report_within(
                     name: "replication".into(),
                     status: status.into(),
                     message: format!(
-                        "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        "{}; {}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        operational_health.message(),
                         removed
                             .map(|notice| format!(
                                 "{}; ",
@@ -10507,6 +10549,13 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
+    if state.fleet_id.is_some() {
+        checks.check("checkpoint", || {
+            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
+                .map_err(ApiError::internal)?;
+            Ok(vec![checkpoint_doctor_check(&status)])
+        });
+    }
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10729,6 +10778,7 @@ async fn replication_worker_status(
         state.store.record_replication_worker(&request.peer, worker);
     }
     if let Some(process) = request.process {
+        state.store.record_replication_worker_heartbeat();
         let catching_up = state.store.replication_catching_up();
         let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let cpu = meter.cpu_minutes();
@@ -10757,6 +10807,17 @@ fn replication_peer_names(state: &AppState) -> Vec<String> {
             .filter(|member| member.state == "current")
             .map(|member| member.name.clone()),
     );
+    // Bootstrap membership can be empty: the worker still dials the pinned sponsor route.
+    if let (Some(fleet), Ok(Some(file))) = (
+        state.fleet_id.as_deref(),
+        crate::config::FleetFile::load(&state.state_dir),
+    ) && file.fleet_id == fleet
+        && !file.sponsor_routes.is_empty()
+        && let Some(sponsor) = file.sponsor
+        && view.members.iter().all(|member| member.name != sponsor)
+    {
+        names.insert(sponsor);
+    }
     names.retain(|name| {
         let current = view.current(name);
         let ended = view.members.iter().any(|member| member.name == *name) && current.is_empty();
@@ -10803,6 +10864,9 @@ pub struct FleetStatus {
     pub fabric_protocol: Option<String>,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
+    /// The same live worker/exchange diagnostic used by doctor and operational alerts.
+    #[serde(default)]
+    pub replication_health: smallclaims::replication::ReplicationHealth,
     pub invites: Vec<crate::store::FleetInviteView>,
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11243,6 +11307,11 @@ pub fn request_suspend(
     {
         return Ok(prior);
     }
+    if let Some(prior) = state.store.suspension_manual_request(&subject, &key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
     if crate::rollout::status(&state.store, &subject)
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
@@ -11262,6 +11331,36 @@ pub fn request_suspend(
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
+        let manual_key = crate::suspension::suspend_manual_key(
+            suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
+        );
+        if suspension.cause() == "idle" && suspension.phase == "suspended" {
+            check_suspension_fence(
+                fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
+            )?;
+            let (claim, _) = state.store.append_source_gated(
+                &subject,
+                &ClaimInput {
+                    subject: subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: Some(actor),
+                    fields: BTreeMap::from([
+                        ("action".into(), json!("suspend")),
+                        ("operation_status".into(), json!("manual")),
+                        ("cause".into(), json!("manual")),
+                        ("request_key".into(), json!(key)),
+                        ("operation_id".into(), json!(suspension.operation_id)),
+                    ]),
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or_else(|| suspension.operation_id.clone())],
+                    expected_subject: None,
+                    idempotency_key: Some(manual_key),
+                },
+                crate::store::owned_sets::Verb::Suspend,
+                force_reason,
+            ).map_err(ApiError::bad)?;
+            signal_changed(state);
+            return Ok(claim);
+        }
         return Err(ApiError::bad(
             FractalError::new(
                 "already-suspended",
@@ -11376,6 +11475,14 @@ pub fn request_resume(
             "resume needs a host name",
         )));
     }
+    if suspension.mode() == "in-place"
+        && suspension.source_host.as_deref() != Some(host.as_str())
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "snapshot-in-place",
+            "an in-place suspension can only resume on its source host",
+        )));
+    }
     let launch_token = if let Some((incumbent, old)) =
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
@@ -11419,6 +11526,9 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
+    state.store.record_idle_unrouted(&subject,
+        crate::store::idle_residency::UnroutedKind::ExplicitResume)
+        .map_err(ApiError::internal)?;
     let (claim, _) = state
         .store
         .append_source_gated(
@@ -11703,8 +11813,10 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
     let now = client_now_ms() as u64;
+    let mut report = request_latency_target_windows();
+    client_observations::attach(store, &mut report, now)?;
     let mut rows = crate::objectives::rows(
-        &request_latency_target_windows(),
+        &report,
         &limits,
         now,
         fresh_ms,
@@ -11718,6 +11830,12 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    let admission = crate::admission_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, admission));
+    let mail = crate::mail_delivery_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     let declared = crate::declared_objectives::rows(store, now, &rows)?;
     drop(rows.splice(budgets..budgets, declared));

@@ -5104,6 +5104,188 @@ mission "legacy-child" state="ready" {
     }
 
     #[test]
+    fn restart_active_publication_only_retargets_head_following_runs() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |goal: &str| format!(r#"version 2
+mission "revision-intent" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  concurrent-runs
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &source("Use the first revision."), "intent-first");
+        let first = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        let start = |revision: Option<String>, key: &str| {
+            store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "revision-intent".into(),
+                revision,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: key.into(),
+            }).unwrap()
+        };
+        let pinned = start(Some(first.revision.clone()), "intent-pin");
+        let head = start(None, "intent-head");
+        apply_source(&store, &source("Use the second revision."), "intent-second");
+        let second = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&pinned.id).unwrap().unwrap().superseded_by.is_none());
+        let replacement = store.mission_run(&head.id).unwrap().unwrap().superseded_by.unwrap();
+        assert_eq!(store.mission_run(&replacement).unwrap().unwrap().revision, second.revision);
+        store.set_mission_run_state(&pinned.id, "failed", "terminal", None).unwrap();
+        let retry = store.retry_mission_run(&pinned.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "intent-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision);
+        apply_source(&store, &source("Use the third revision."), "intent-third");
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+        assert!(store.mission_run(&replacement).unwrap().unwrap().superseded_by.is_some(),
+            "a head-following successor must still follow later heads");
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(false);
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_legacy_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(true);
+    }
+
+    fn assert_restart_active_preserves_exact_revision_child(legacy: bool) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let child_source = |goal: &str| format!(r#"version 2
+mission "pinned-work" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &child_source("Review the first change."), "pin-first");
+        let first = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        apply_source(&store, &format!(r#"version 2
+mission "pin-parent" state="ready" {{
+  goal "Run the exact child."
+  step "execute" {{ agentless; uses-mission "pinned-work@{}"; }}
+}}"#, first.revision), "pin-parent");
+        let parent = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pin-parent".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: "pin-parent-run".into(),
+        }).unwrap();
+        if legacy {
+            // Author a pre-metadata creation receipt, rather than modifying signed history.
+            store.append_claim(&crate::model::ClaimInput {
+                subject: "mission-run/legacy-pin-child".into(),
+                kind: "mission-run.created".into(),
+                actor: Some("person/test".into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "mission": first.subject,
+                    "revision": first.revision,
+                    "initial_revision": first.revision,
+                    "current_generation": "run-generation/legacy-pin-generation",
+                    "root_revision": parent.revision,
+                    "root_mission_run": parent.subject,
+                    "parent_step_run": parent.steps[0].subject,
+                    "workspace": "/tmp",
+                    "requester": "person/test",
+                    "inputs": {},
+                    "mode": "run",
+                    "status": "running",
+                    "phase": "normal",
+                    "admission_publication": null,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("legacy-child-creation".into()),
+            }).unwrap();
+            store.replay_replication_graph().unwrap();
+            assert_eq!(store.mission_run("legacy-pin-child").unwrap().unwrap()
+                .parent_step_run.as_deref(), Some(parent.steps[0].subject.as_str()));
+        }
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let child = store.mission_run_for_parent_step(&parent.steps[0].subject)
+            .unwrap().expect("the exact-revision child is live");
+        assert_eq!(child.revision, first.revision);
+        assert!(child.superseded_by.is_none());
+        let creation = store.latest_claim(&child.subject, Some("mission-run.created"))
+            .unwrap().unwrap();
+        assert_eq!(creation.body.get("revision_pinned"),
+            if legacy { None } else { Some(&Value::Bool(true)) });
+        // The registry is unchanged from before pin metadata existed.
+        assert!(matches!(
+            crate::store::classify_replicated_claim_with_registry(
+                &creation, fractal_schema::registry(),
+            ).unwrap(),
+            smallclaims::store::ReplicatedClaimAdmission::Valid,
+        ));
+        assert!(smallclaims::hash::claim_id_is_content_hash(&creation).unwrap());
+        let signed_digest = smallclaims::principal::content_digest(
+            &creation.subject, &creation.kind, creation.actor.as_deref(), &creation.body,
+        );
+        let mut stripped = creation.clone();
+        if legacy {
+            stripped.body["revision_pinned"] = Value::Bool(true);
+        } else {
+            stripped.body.as_object_mut().unwrap().remove("revision_pinned");
+        }
+        assert!(!smallclaims::hash::claim_id_is_content_hash(&stripped).unwrap());
+        assert_ne!(signed_digest, smallclaims::principal::content_digest(
+            &stripped.subject, &stripped.kind, stripped.actor.as_deref(), &stripped.body,
+        ));
+        // Rebuilding projections must not turn either creation format into head intent.
+        store.replay_replication_graph().unwrap();
+        apply_source(&store, &child_source("Review a different change."), "pin-second");
+        let second = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        assert_ne!(first.revision, second.revision);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let retained = store.mission_run(&child.id).unwrap().unwrap();
+        assert!(retained.superseded_by.is_none(), "a head publication must not supersede an exact-revision child");
+        assert_eq!(retained.status, child.status);
+        assert_eq!(retained.revision, first.revision);
+        assert_eq!(retained.generation, child.generation);
+        let replica = Arc::new(Store::open_memory("node").unwrap());
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        replica.replay_replication_graph().unwrap();
+        let restarted = Reconciler::new(
+            replica.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&child.id).unwrap().unwrap().superseded_by.is_none());
+        replica.set_mission_run_state(&child.id, "failed", "terminal", None).unwrap();
+        let retry = replica.retry_mission_run(&child.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "pin-child-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision, "even a default retry retains a pin");
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
         exact_produced_mission_revision(false);
     }
@@ -8346,11 +8528,12 @@ mission "task" state="ready" {{
             ),
             "running-render-failure",
         );
+        let run_scratch = tempfile::tempdir().unwrap();
         store
             .create_mission_run(&MissionRunRequest {
                 mission: "task".into(),
                 revision: None,
-                workspace: workspace_path.clone(),
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
                 requester: Some("person/test".into()),
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -12387,6 +12570,91 @@ schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
     }
 
     #[test]
+    fn scheduled_recovery_acknowledges_existing_checkout_runs_before_admission() {
+        use serde_json::json;
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            apply_source(&store, &format!(r#"version 2
+schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace "{}" }}
+}}"#, root.path().display()), "recovery-cycle");
+            let request = store.append_claim(&ClaimInput {
+                subject: "schedule/cycle".into(), kind: "schedule.work-requested".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), json!("node")), ("occurrence".into(), json!(4)),
+                    ("mission".into(), json!("mission/scheduled-cycle")),
+                    ("mission_revision".into(), json!(revision)),
+                    ("workspace".into(), json!(root.path().to_string_lossy())), ("inputs".into(), json!({})),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let run_request = MissionRunRequest {
+                mission: "scheduled-cycle".into(), revision: Some(revision),
+                workspace: root.path().join("pre-upgrade-run").to_string_lossy().into_owned(),
+                requester: Some("daemon/node".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: format!("schedule-work:{}", request.id),
+            };
+            let run = if legacy {
+                store.create_mission_run(&run_request).unwrap()
+            } else {
+                store.create_scheduled_mission_run(&run_request, None, "schedule/cycle", 4).unwrap()
+            };
+            // Model an already admitted pre-upgrade checkout without bypassing admission.
+            fs::write(root.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            let schedule = store.desired_subjects().unwrap().into_iter().find(|s| s.subject == "schedule/cycle").unwrap();
+            reconciler.reconcile_schedule_work_with_start(&schedule, |_, _, _, _| {
+                panic!("an existing run must be acknowledged without starting or inspecting scratch")
+            }).unwrap();
+            let starts = store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].body["fields"]["mission_run"], run.subject);
+            assert!(store.claims_for(&schedule.subject, Some("schedule.work-failed")).unwrap().is_empty());
+            assert!(store.pending_schedule_work_requests(&schedule.subject).unwrap().is_empty());
+            assert!(store.schedule_has_active_started_run(&schedule.subject).unwrap());
+            reconciler.reconcile_schedule_work(&schedule).unwrap();
+            assert_eq!(store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn inherited_checkout_scratch_fails_child_and_loop_steps_durably() {
+        for loop_round in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            let body = if loop_round {
+                r#"loop "dispatch" { max-rounds 1; round { completion { when "all-steps-exhausted"; }; step "done" { agentless; }; }; }"#.to_owned()
+            } else {
+                format!(r#"step "dispatch" {{ agentless; uses-mission "scheduled-cycle@{revision}"; }}"#)
+            };
+            apply_source(&store, &format!(r#"version 2
+mission "parent" state="ready" {{
+  goal "Handle an inherited unsafe scratch directory."
+  completion {{ when "all-steps-exhausted"; }}
+  {body}
+}}"#), "inherited-checkout-parent");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "parent".into(), revision: None,
+                workspace: root.path().to_string_lossy().into_owned(),
+                requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "inherited-checkout-run".into(),
+            }).unwrap();
+            fs::create_dir(root.path().join(".git")).unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
+            let current = store.mission_run(&run.subject).unwrap().unwrap();
+            assert_eq!(current.steps.iter().find(|step| step.step == "dispatch").unwrap().status, "failed");
+            assert!(store.mission_run_for_parent_step(&current.steps[0].subject).unwrap().is_none());
+            assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+                claim.body.pointer("/fields/code").and_then(Value::as_str)
+                    == Some("mission-workspace-in-worktree")
+            }));
+        }
+    }
+
+    #[test]
     fn subscription_start_contention_waits_without_durable_failure_then_starts() {
         use serde_json::json;
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
@@ -13663,6 +13931,41 @@ schedule "{name}" {{
             .and_then(Value::as_str)
             .unwrap();
         assert!(Path::new(&store.mission_run(run).unwrap().unwrap().workspace).is_dir());
+    }
+
+    #[tokio::test]
+    async fn scheduled_work_rejects_checkout_scratch_before_creating_a_directory() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(checkout.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+        let workspace_root = checkout.path().join("cycles");
+        let at = (Utc::now() + chrono::Duration::milliseconds(50))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nschedule \"cycle\" {{ at \"{at}\"; work {{ mission \"scheduled-cycle@{revision}\"; workspace {:?} }} }}",
+                workspace_root.display().to_string()
+            ),
+            "schedule-unsafe-workspace",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        reconciler.reconcile_once().unwrap();
+        assert!(!workspace_root.exists(), "admission must not dirty the checkout");
+        assert!(store.claims_for("schedule/cycle", Some("schedule.work-started")).unwrap().is_empty());
+        assert!(!store.claims_for("schedule/cycle", Some("schedule.work-failed")).unwrap().is_empty());
+        assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str)
+                == Some("mission-workspace-in-worktree")
+        }));
     }
 
     #[tokio::test]
@@ -15730,7 +16033,7 @@ mission "collision" state="ready" {
         let mut request = MissionRunRequest {
             mission: "collision".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -26069,7 +26372,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "resource-input".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::from([("source".into(), "resource/source".into())]),
@@ -26124,7 +26427,7 @@ version 2
         let request = |mission: &str| MissionRunRequest {
             mission: mission.into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -26198,7 +26501,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "restart".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),

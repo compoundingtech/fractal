@@ -101,8 +101,9 @@ fs.appendFileSync(sessionFile, JSON.stringify({ type: 'launch', at: Date.now() }
 record('session', { sessionId, sessionFile, resumed });
 const events = new Map();
 let title = '';
+let running = false;
 const ctx = {
-  isIdle: () => true,
+  isIdle: () => !running,
   getAsyncJobSnapshot: () => ({ running: [] }),
   sessionManager: { getSessionId: () => sessionId, getSessionFile: () => sessionFile, getEntries: () => [] },
   ui: { notify: (message, level) => record('notification', { message, level }) },
@@ -115,9 +116,19 @@ const api = {
   // the model answers. Delivered and read evidence come from the extension, not from here.
   sendUserMessage: async (content) => {
     fs.appendFileSync(sessionFile, JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: content }] } }) + '\n');
-    record('turn', { text: content });
-    await events.get('context')?.({ messages: [{ role: 'user', content }] }, ctx);
-    setTimeout(() => act(content), 0);
+    setTimeout(async () => {
+      running = true;
+      try {
+        await events.get('agent_start')?.({}, ctx);
+        record('turn', { text: content });
+        await events.get('context')?.({ messages: [{ role: 'user', content }] }, ctx);
+        act(content);
+      } finally {
+        running = false;
+        await events.get('agent_end')?.({ willContinue: false }, ctx);
+        if (harness === 'pi') await events.get('agent_settled')?.({}, ctx);
+      }
+    }, 0);
   },
 };
 const index = process.argv.findIndex((arg) => arg === '--extension' || arg === '-e');
