@@ -36,6 +36,24 @@ const DECISION = {
 }
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
+    if (ctx.payload.mode === 'await-foreign') {
+      return ctx.child({ key: 'observe', mode: 'await', run: 'mission-run/pr-42-head12' })
+    }
+    if (['start', 'start-await', 'start-invalid', 'start-reported'].includes(ctx.payload.mode)) {
+      const published = await wait(ctx, 'publish', () => ctx.child({
+        key: 'publish', mode: 'start', runId: ctx.payload.mode === 'start-invalid' ? 'invalid id' : 'pr-42-head12',
+        mission: 'program-child', input: { head: 'h1' },
+        ...(ctx.payload.mode === 'start-reported' ? { reportTo: 'agent/pr/author' } : {}),
+      }))
+      if (published._tag === 'Failure') return published
+      if (ctx.payload.mode === 'start-await') {
+        const terminal = await wait(ctx, 'observe', () => ctx.child({
+          key: 'observe', mode: 'await', run: published.value.run,
+        }))
+        if (terminal._tag === 'Failure') return terminal
+      }
+      return { _tag: 'Success', value: { published: published.value, gate: await gate(ctx) } }
+    }
     if (ctx.payload.mode === 'child') {
       const published = await wait(ctx, 'publish', () => ctx.child({ key: 'publish', mission: 'program-child', input: { head: 'h1' } }))
       if (published._tag === 'Failure') return published
@@ -73,8 +91,10 @@ struct Started {
 type Entry = (String, String, u64, Option<String>);
 
 fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open_memory("node").unwrap());
+    fixture_with_store(Arc::new(Store::open_memory("node").unwrap()), tempfile::tempdir().unwrap())
+}
+
+fn fixture_with_store(store: Arc<Store>, dir: tempfile::TempDir) -> Fixture {
     store.set_ask_deadlines(true);
     let bundle = dir.path().join("program.mjs");
     std::fs::write(&bundle, BUNDLE).unwrap();
@@ -591,4 +611,303 @@ fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     assert_eq!(run.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
     assert_eq!(fixture.status(&still_open), "cancelled");
     assert!(fixture.engine.requests(&parent.run).is_empty());
+}
+
+#[test]
+fn named_start_publishes_before_ack_and_separate_await_observes_termination() {
+    let fixture = fixture();
+    let parent = fixture.start("named-await", "start-await");
+    fixture.until("publication is acknowledged without waiting for termination", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let child = "mission-run/pr-42-head12";
+    assert_eq!(fixture.result(&parent.step, "publish", 1),
+        Some(("completed".into(), json!({"run": child}))));
+    assert_eq!(fixture.children(&parent.step).len(), 1);
+    assert!(!matches!(fixture.run_status(child).as_str(), "completed" | "failed" | "cancelled"));
+    assert!(fixture.result(&parent.step, "observe", 1).is_none());
+    fixture.complete_child(child);
+    fixture.until("separate await returns the child's result", ||
+        fixture.result(&parent.step, "observe", 1).is_some());
+    let (_, result) = fixture.result(&parent.step, "observe", 1).unwrap();
+    assert_eq!(result["run"], child);
+    assert_eq!(result["status"], "completed");
+    std::fs::write(&parent.gate, "").unwrap();
+    fixture.until("parent completes", || fixture.status(&parent.step) == "completed");
+}
+
+#[test]
+fn named_start_lost_ack_adopts_one_child_and_replays_after_host_restart() {
+    let fixture = fixture();
+    let parent = fixture.start("lost-start-ack", "start");
+    let run = fixture.store.mission_run(&parent.run).unwrap().unwrap();
+    // Publication committed, but no waiting association or acknowledgement was delivered.
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None,
+        workspace: run.workspace.clone(), requester: Some(run.requester.clone()),
+        mode: Some(run.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: format!("program:{}:1:publish", parent.step),
+    };
+    let child = fixture.store.create_named_program_child_mission_run(
+        &request, &run, &parent.step, "pr-42-head12", None, None).unwrap();
+    fixture.until("lost acknowledgement is recovered", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    assert_eq!(fixture.result(&parent.step, "publish", 1),
+        Some(("completed".into(), json!({"run": child.subject}))));
+    fixture.until("parent proceeds while child is running", ||
+        count(&fixture.journal(&parent.step), "gate", "started") == 1);
+    assert!(!matches!(fixture.run_status(&child.subject).as_str(), "completed" | "failed" | "cancelled"));
+    let host = fixture.kill_host();
+    fixture.until("restarted host replays the same handle", ||
+        fixture.engine.host_pid().is_some_and(|pid| pid != host)
+        && count(&fixture.journal(&parent.step), "gate", "started") == 2);
+    assert_eq!(fixture.children(&parent.step).len(), 1);
+    fixture.store.request_mission_run_cancellation(&parent.run, "cancel parent after start").unwrap();
+    fixture.until("parent cancellation cancels the acknowledged child", ||
+        fixture.run_status(&child.subject) == "cancelled");
+}
+
+#[test]
+fn named_child_public_id_conflicts_are_atomic_and_old_child_replay_still_adopts() {
+    let fixture = fixture();
+    let a = fixture.start("creator-a", "start");
+    let b = fixture.start("creator-b", "start");
+    let parent_a = fixture.store.mission_run(&a.run).unwrap().unwrap();
+    let parent_b = fixture.store.mission_run(&b.run).unwrap().unwrap();
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None,
+        workspace: parent_a.workspace.clone(), requester: Some(parent_a.requester.clone()),
+        mode: Some(parent_a.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: "named-contract".into(),
+    };
+    let child = fixture.store.create_named_program_child_mission_run(
+        &request, &parent_a, &a.step, "pr-42-head12", None, None).unwrap();
+    let replay = fixture.store.create_named_program_child_mission_run(
+        &request, &parent_a, &a.step, "mission-run/pr-42-head12", None, None).unwrap();
+    assert_eq!(child.subject, replay.subject);
+    let mut different_input = request.clone();
+    different_input.inputs.insert("head".into(), "h2".into());
+    for (contract, parent, step) in [
+        (&different_input, &parent_a, &a.step),
+        (&request, &parent_b, &b.step),
+    ] {
+        let error = fixture.store.create_named_program_child_mission_run(
+            contract, parent, step, "pr-42-head12", None, None).unwrap_err();
+        assert_eq!(error.code, "child-conflict");
+    }
+    let mut different_operation = request.clone();
+    different_operation.idempotency_key = "another-creation".into();
+    // Existing occurrence callers intentionally adopt by subject, without imposing the new
+    // program-start contract on their replay semantics.
+    let existing_occurrence = fixture.store.create_mission_run_inner(
+        &different_input, None, Some(&child.subject), None).unwrap();
+    assert_eq!(existing_occurrence.subject, child.subject);
+    assert_eq!(existing_occurrence.inputs["head"].value, "h1");
+    assert_eq!(fixture.store.create_named_program_child_mission_run(
+        &different_operation, &parent_a, &a.step, "pr-42-head12", None, None).unwrap_err().code, "child-conflict");
+    assert!(fixture.children(&b.step).is_empty());
+    fixture.complete_child(&child.subject);
+    fixture.store.set_mission_run_state(&child.subject, "completed", "terminal", None).unwrap();
+    let mut legacy = request;
+    legacy.idempotency_key = "legacy-child-replay".into();
+    let first = fixture.store.create_program_child_mission_run(&legacy, &parent_a, &a.step).unwrap();
+    let replay = fixture.store.create_program_child_mission_run(&legacy, &parent_a, &a.step).unwrap();
+    assert_eq!(first.subject, replay.subject);
+}
+
+#[test]
+fn awaiting_another_parents_child_is_a_typed_refusal() {
+    let fixture = fixture();
+    let creator = fixture.start("handle-owner", "start");
+    fixture.until("owner receives a handle", ||
+        fixture.result(&creator.step, "publish", 1).is_some());
+    let observer = fixture.start("foreign-observer", "await-foreign");
+    fixture.until("foreign await is refused", ||
+        fixture.result(&observer.step, "observe", 1).is_some());
+    assert_eq!(fixture.result(&observer.step, "observe", 1), Some(("failed".into(), json!({
+        "_tag": "ChildFailed", "run": "mission-run/pr-42-head12", "status": "refused",
+        "reason": "the handle does not name a child of this parent run",
+    }))));
+    assert!(!matches!(fixture.run_status("mission-run/pr-42-head12").as_str(),
+        "completed" | "failed" | "cancelled"));
+    assert!(fixture.children(&observer.step).is_empty());
+    let conflicting = fixture.start("conflicting-dispatcher", "start");
+    fixture.until("conflicting publication is refused", ||
+        fixture.result(&conflicting.step, "publish", 1).is_some());
+    let (status, error) = fixture.result(&conflicting.step, "publish", 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ChildConflict");
+    assert!(fixture.children(&conflicting.step).is_empty());
+}
+
+#[test]
+fn start_validates_public_id_with_declaration_rules_before_publication() {
+    let fixture = fixture();
+    let parent = fixture.start("invalid-public-id", "start-invalid");
+    fixture.until("invalid declaration ID is refused", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let (status, error) = fixture.result(&parent.step, "publish", 1).unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(error["_tag"], "ChildConflict");
+    assert!(fixture.children(&parent.step).is_empty());
+}
+
+#[test]
+fn explicit_child_conflicts_never_rebind_or_release_existing_resource_custody() {
+    use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("store.db");
+    let fixture = fixture_with_store(Arc::new(Store::open(&database, "node").unwrap()), dir);
+    let a = fixture.start("resource-creator-a", "start");
+    let b = fixture.start("resource-creator-b", "start");
+    let parent_a = fixture.store.mission_run(&a.run).unwrap().unwrap();
+    let parent_b = fixture.store.mission_run(&b.run).unwrap().unwrap();
+    fixture.store.start_resource_authority("node", "named-child-test").unwrap();
+    let membership = |id: &str, parent: &MissionRunView, step: &str| {
+        let request = LaneRequest {
+            id: id.into(), name: id.into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
+            profile: None, profile_estimate: None, disk_path: None,
+            class: fractal_runtime::RequestClass::Agent, coverage: Coverage::Logical,
+            disk: None, io: None, admission_timeout_ms: None,
+            owner: Owner { run: parent.subject.clone(), step: step.into(), attempt: 1,
+                invocation: Some(id.into()) },
+        };
+        assert!(matches!(fixture.store.request_resource_membership(&request, Fit {
+            room: Some(fractal_runtime::Capacity { cores: 8, memory: 8 }), ..Fit::default()
+        }, 1).unwrap(), Admission::Admitted(_)));
+        fixture.store.resource_membership_record(id, &request.owner).unwrap()
+    };
+    let lane_a = membership("lane-a", &parent_a, &a.step);
+    let lane_b = membership("lane-b", &parent_b, &b.step);
+    let input = BTreeMap::from([("head".into(), "h1".into())]);
+    // Crash A after its custody write but before publication. The child process holds the
+    // actual SQLite writer transaction; SIGKILL must leave neither half committed.
+    use std::io::BufRead;
+    let mut crashed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", concat!(module_path!(), "::named_child_crash_writer"), "--nocapture"])
+        .env("FRACTAL_NAMED_CHILD_CRASH_DB", &database)
+        .env("FRACTAL_NAMED_CHILD_CRASH_MEMBER", serde_json::to_string(&lane_a).unwrap())
+        .stdout(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .spawn().unwrap();
+    let mut output = std::io::BufReader::new(crashed.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(output.read_line(&mut line).unwrap(), 0, "crash writer exited before attaching");
+        if line.trim_end().ends_with("named-child-attached") { break; }
+    }
+    crashed.kill().unwrap();
+    crashed.wait().unwrap();
+    assert!(fixture.store.resource_membership_record("lane-a", &lane_a.request.owner).unwrap().child_runs.is_empty());
+    assert!(fixture.store.mission_run("pr-42-head12").unwrap().is_none());
+    // B can now atomically attach and publish. A's retry loses without acquiring custody.
+    let child = fixture.reconciler.start_program_child(&parent_b, &b.step, "program-child",
+        &input, "resource-creator-b".into(), Some(&lane_b), Some("pr-42-head12"), None).unwrap();
+    let conflict = fixture.reconciler.start_program_child(&parent_a, &a.step, "program-child",
+        &input, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12"), None).unwrap_err();
+    assert_eq!(conflict.code, "child-conflict");
+    let changed = BTreeMap::from([("head".into(), "h2".into())]);
+    let conflict = fixture.reconciler.start_program_child(&parent_b, &b.step, "program-child",
+        &changed, "resource-creator-b".into(), Some(&lane_b), Some("pr-42-head12"), None).unwrap_err();
+    assert_eq!(conflict.code, "child-conflict");
+    let loser = fixture.store.resource_membership_record("lane-a", &lane_a.request.owner).unwrap();
+    let winner = fixture.store.resource_membership_record("lane-b", &lane_b.request.owner).unwrap();
+    assert!(loser.child_runs.is_empty());
+    assert_eq!(winner.child_runs, vec![child.subject.clone()]);
+    assert_eq!(fixture.store.resource_context_for_run(&child.subject).unwrap().unwrap().request.id, "lane-b");
+    assert_eq!(fixture.store.mission_run(&child.subject).unwrap().unwrap().parent_step_run.as_deref(), Some(b.step.as_str()));
+    fixture.store.cancel_resource_membership(lane_a.grant.as_ref().unwrap(), &lane_a.request.owner, 2).unwrap();
+    fixture.store.request_mission_run_cancellation(&a.run, "cancel losing parent").unwrap();
+    fixture.reconciler.evaluate_mission_run_ids(vec![a.run.trim_start_matches("mission-run/").to_owned()]).unwrap();
+    assert_eq!(fixture.run_status(&a.run), "cancelled");
+    assert!(!matches!(fixture.run_status(&child.subject).as_str(), "completed" | "failed" | "cancelled"));
+    assert_eq!(fixture.store.resource_context_for_run(&child.subject).unwrap().unwrap().request.id, "lane-b");
+}
+
+#[test]
+fn named_child_crash_writer() {
+    use std::io::Write;
+    let Some(database) = std::env::var_os("FRACTAL_NAMED_CHILD_CRASH_DB") else { return };
+    let store = Store::open(std::path::Path::new(&database), "node").unwrap();
+    let member: crate::store::resource_membership::Membership =
+        serde_json::from_str(&std::env::var("FRACTAL_NAMED_CHILD_CRASH_MEMBER").unwrap()).unwrap();
+    store.with_all_runs_fenced::<(), anyhow::Error>(|transaction| {
+        store.attach_resource_child_tx(transaction, member.grant.as_ref().unwrap(),
+            &member.request.owner, "mission-run/pr-42-head12")?;
+        println!("named-child-attached");
+        std::io::stdout().flush().unwrap();
+        // The parent kills this process while the attachment is uncommitted.
+        let mut byte = [0];
+        std::io::Read::read_exact(&mut std::io::stdin(), &mut byte).unwrap();
+        panic!("crash writer must be killed before publication");
+    }).unwrap();
+}
+
+#[test]
+fn named_start_report_to_matches_cli_defaults_validation_and_creation_identity() {
+    let fixture = fixture();
+    apply_source(&fixture.store, r#"version 2
+mission "program-child" state="ready" report-to="agent/default/reporter" stalled-after="7m" report-completed=#true report-stalls=#false {
+  concurrent-runs
+  goal "Observe report routing."
+  input "head" kind="text"
+  step "publish" { agentless }
+}"#, "named-child-report-defaults");
+    let started = fixture.start("report-routing-parent", "start");
+    let parent = fixture.store.mission_run(&started.run).unwrap().unwrap();
+    let request = MissionRunRequest {
+        mission: "program-child".into(), revision: None, workspace: parent.workspace.clone(),
+        requester: Some(parent.requester.clone()), mode: Some(parent.mode.clone()),
+        inputs: BTreeMap::from([("head".into(), "h1".into())]),
+        idempotency_key: "default-report-routing".into(),
+    };
+    let default = fixture.store.create_named_program_child_mission_run(
+        &request, &parent, &started.step, "report/default", None, None).unwrap();
+    let default_claim = fixture.store.latest_claim(&default.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(default_claim.body["fields"]["report_to"], "agent/default/reporter");
+    assert_eq!(default_claim.body["fields"]["stalled_after_ms"], 420_000);
+    assert_eq!(default_claim.body["fields"]["report_completed"], true);
+    assert_eq!(default_claim.body["fields"]["report_stalls"], false);
+    let explicit_request = MissionRunRequest {
+        idempotency_key: "explicit-report-routing".into(), ..request.clone()
+    };
+    let explicit = fixture.store.create_named_program_child_mission_run(
+        &explicit_request, &parent, &started.step, "report/explicit", Some("agent/pr/author"), None).unwrap();
+    let explicit_claim = fixture.store.latest_claim(&explicit.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(explicit_claim.body["fields"]["report_to"], "agent/pr/author");
+    for field in ["stalled_after_ms", "report_completed", "report_stalls"] {
+        assert_eq!(explicit_claim.body["fields"][field], default_claim.body["fields"][field]);
+    }
+    assert_eq!(fixture.store.mission_run_initiating_principal(&explicit.subject).unwrap(),
+        fixture.store.mission_run_initiating_principal(&parent.subject).unwrap());
+    let replay = fixture.store.create_named_program_child_mission_run(
+        &explicit_request, &parent, &started.step, "report/explicit", Some("agent/pr/author"), None).unwrap();
+    assert_eq!(replay.subject, explicit.subject);
+    for changed_target in [None, Some("agent/another/author")] {
+        assert_eq!(fixture.store.create_named_program_child_mission_run(
+            &explicit_request, &parent, &started.step, "report/explicit", changed_target, None).unwrap_err().code,
+            "child-conflict");
+    }
+    for invalid in ["person/author", "author", "agent/", "agent//author", "agent/pr author"] {
+        assert_eq!(fixture.store.create_named_program_child_mission_run(
+            &request, &parent, &started.step, "report/invalid", Some(invalid), None).unwrap_err().code,
+            "invalid-report-to");
+    }
+    assert!(fixture.store.mission_run("report/invalid").unwrap().is_none());
+}
+
+#[test]
+fn native_start_report_to_is_committed_before_the_handle_without_lending_authority() {
+    let fixture = fixture();
+    let parent = fixture.start("reported-native", "start-reported");
+    fixture.until("routed publication returns its handle", ||
+        fixture.result(&parent.step, "publish", 1).is_some());
+    let child = fixture.store.mission_run("pr-42-head12").unwrap().unwrap();
+    let claim = fixture.store.latest_claim(&child.subject, Some("mission-run.created")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["report_to"], "agent/pr/author");
+    assert!(claim.body["fields"]["report_completed"].is_null());
+    assert_eq!(fixture.store.mission_run_initiating_principal(&child.subject).unwrap(),
+        fixture.store.mission_run_initiating_principal(&parent.run).unwrap());
 }

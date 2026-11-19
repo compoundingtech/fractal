@@ -10,6 +10,9 @@ pub struct FinitePolicy {
     pub disk_floors: std::collections::BTreeMap<std::path::PathBuf, u64>,
     /// None permits unrestricted heavy IO; constrained hosts default to one slot.
     pub heavy_io_slots: Option<u32>,
+    /// The execution host owns declared seeds; callers select keys, not known-key bytes.
+    pub profiles: std::collections::BTreeMap<String, crate::ResourceProfileSeed>,
+    pub landing: LandingPolicy,
 }
 
 impl Default for FinitePolicy {
@@ -18,8 +21,19 @@ impl Default for FinitePolicy {
             disk_floor_bytes: 2 << 30,
             disk_floors: std::collections::BTreeMap::new(),
             heavy_io_slots: Some(1),
+            profiles: std::collections::BTreeMap::new(),
+            landing: LandingPolicy::default(),
         }
     }
+}
+
+/// A carve-out of existing host room, never additional capacity.
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct LandingPolicy {
+    pub allowed_actors: std::collections::BTreeSet<String>,
+    pub memory_bytes: u64,
+    pub heavy_io_slots: u32,
 }
 
 /// The host's online CPUs and installed memory: the machine, not the caller's own quota, which a
@@ -207,6 +221,21 @@ pub fn installed_memory_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landing_policy_defaults_to_zero_capacity_and_no_authorized_actors() {
+        let policy: FinitePolicy = serde_json::from_str("{}").unwrap();
+        assert_eq!(policy.landing, LandingPolicy::default());
+        let policy: FinitePolicy = serde_json::from_str(r#"{
+            "heavyIoSlots": 2,
+            "landing": {"allowedActors":["agent/example/lander"],"memoryBytes":1024,"heavyIoSlots":1}
+        }"#).unwrap();
+        assert!(policy.landing.allowed_actors.contains("agent/example/lander"));
+        assert_eq!(policy.landing.memory_bytes, 1024);
+        assert_eq!(policy.landing.heavy_io_slots, 1);
+        assert_eq!(policy.heavy_io_slots, Some(2));
+        assert!(serde_json::from_str::<FinitePolicy>(r#"{"landing":{"unknown":1}}"#).is_err());
+    }
 
     const LOW_PRESSURE: &str =
         "some avg10=4.00 avg60=3.00 avg300=2.00 total=100\n\

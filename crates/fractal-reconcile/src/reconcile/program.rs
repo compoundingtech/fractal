@@ -139,6 +139,10 @@ pub struct Request {
 pub enum Wait {
     /// A linked child run of `mission` with these inputs.
     Run { mission: String, input: BTreeMap<String, String> },
+    /// Publish a named linked child, resolving at committed creation rather than termination.
+    Start { mission: String, input: BTreeMap<String, String>, run_id: String, report_to: Option<String> },
+    /// Observe an existing child linked to this parent.
+    Await { child: String },
     /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
     Ask(Box<PersonAskRequest>),
     /// Resource operations always visit the host authority, including journal replay.
@@ -615,6 +619,12 @@ impl ProgramEngine {
             };
             match (fields["status"].as_str(), fields["child"].as_str()) {
                 (Some("started"), Some(child)) => {
+                    waits.insert(key.to_owned(), child.to_owned());
+                }
+                (Some("completed"), Some(child))
+                    if fields["value"]["run"].as_str() == Some(child)
+                        && fields["value"]["status"].is_null() => {
+                    // A start acknowledgement completes the operation, not the linked child.
                     waits.insert(key.to_owned(), child.to_owned());
                 }
                 (Some("completed" | "failed"), _) => {
@@ -1298,10 +1308,21 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
         });
     }
     if message["t"] == "run" {
+        if message["mode"] == "await" {
+            return Ok(Wait::Await { child: text("run")? });
+        }
         let mission = text("mission")?;
         let input = serde_json::from_value::<BTreeMap<String, String>>(message["input"].clone())
             .map_err(|_| "`input` must map each mission input to a string".to_owned())?;
         let mission = mission.strip_prefix("mission/").unwrap_or(&mission).to_owned();
+        if message["mode"] == "start" {
+            let report_to = match &message["reportTo"] {
+                Value::Null => None,
+                Value::String(value) => Some(value.clone()),
+                _ => return Err("`reportTo` must name an agent".into()),
+            };
+            return Ok(Wait::Start { mission, input, run_id: text("runId")?, report_to });
+        }
         return Ok(Wait::Run { mission, input });
     }
     let deadline_ms = match &message["deadline"] {

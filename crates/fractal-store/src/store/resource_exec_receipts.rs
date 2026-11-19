@@ -1,4 +1,4 @@
-//! Terminal shell membership observations in the durable claims log.
+//! Terminal execution observations in the existing durable claims log.
 use super::*;
 use super::resource_membership::{Coverage, RequestClass};
 use super::shell_resources::Execution;
@@ -12,27 +12,35 @@ pub fn head_prefix(head: &str) -> String {
     format!("resource/exec/{component}/")
 }
 
-pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: &Execution) -> Result<()> {
-    let request = &execution.command.lane;
-    anyhow::ensure!(request.host == origin, "only the executing host may record its receipt");
-    let result = execution.result.as_ref();
-    anyhow::ensure!(execution.started_at.is_none() || result.is_some(),
-        "launched shell execution must persist its outcome before terminal retirement");
-    let head_start = result.and_then(|result| result.head_start.as_deref()).or(execution.head_start.as_deref());
-    let class = match request.class {
-        RequestClass::Landing => "landing",
-        RequestClass::Check => "check",
-        RequestClass::Agent => "agent",
+use fractal_runtime::argv_sha256;
+
+pub fn subject(origin: &str, execution: &Execution) -> String {
+    let head = execution.result.as_ref().and_then(|result| result.head_start.as_deref())
+        .or(execution.head_start.as_deref()).unwrap_or_default();
+    let class = match execution.command.lane.class {
+        RequestClass::Landing => "landing", RequestClass::Check => "check", RequestClass::Agent => "agent",
     };
-    let subject = format!("{}{}/{}/{}", head_prefix(head_start.unwrap_or_default()), hex::encode(origin), class, hex::encode(&execution.command.id));
+    format!("{}{}/{}/{}", head_prefix(head), hex::encode(origin), class, hex::encode(&execution.command.id))
+}
+
+/// The same immutable engine observations feed the durable claim and terminal receipt file.
+pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
+    let request = &execution.command.lane;
+    let result = execution.result.as_ref();
+    let head_start = result.and_then(|result| result.head_start.as_deref()).or(execution.head_start.as_deref());
     let mut fields = serde_json::Map::new();
     for (name, value) in [
         ("exec_id", json!(execution.command.id)),
+        ("argv", json!(execution.command.argv)),
+        ("argv_sha256", json!(argv_sha256(&execution.command.argv))),
+        ("launched", json!(execution.started_at.is_some())),
         ("host", json!(request.host)),
         ("class", json!(request.class)),
         ("owner", json!(request.owner)),
         ("coverage", json!(request.coverage)),
         ("state", json!(execution.state)),
+        ("timed_out", json!(execution.timed_out)),
+        ("refusal_code", json!(execution.refusal_code)),
         ("disk_reserved_bytes", json!(request.disk.as_ref().map_or(0, |disk| disk.bytes))),
         ("queue_wait_ms", json!(execution.queue_wait_ms)),
         ("wall_duration_ms", json!(result.map_or(0, |result| result.wall_duration_ms))),
@@ -41,6 +49,11 @@ pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: 
     // turns an unavailable cgroup peak into a measured zero.
     for (name, value) in [
         ("memory_bytes", request.capacity.as_ref().map(|capacity| json!(capacity.memory))),
+        ("request_id", execution.command.request_id.as_ref().map(|request_id| json!(request_id))),
+        ("profile_key", request.profile.as_ref().map(|key| json!(key))),
+        ("profile_estimate", request.profile_estimate.as_ref().map(|estimate| json!(estimate))),
+        ("disk_path", request.disk.as_ref().map(|disk| json!(disk.path))),
+        ("refusal_reason", execution.refusal_code.map(|_| json!(execution.reason))),
         ("io", request.io.as_ref().map(|io| json!(io))),
         ("head_start", head_start.map(|head| json!(head))),
         ("head_end", result.and_then(|result| result.head_end.as_ref()).map(|head| json!(head))),
@@ -53,6 +66,145 @@ pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: 
     ] {
         if let Some(value) = value { fields.insert(name.into(), value); }
     }
+    fields
+}
+
+pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: &Execution) -> Result<()> {
+    let request = &execution.command.lane;
+    anyhow::ensure!(request.host == origin, "only the executing host may record its receipt");
+    let result = execution.result.as_ref();
+    anyhow::ensure!(execution.started_at.is_none() || result.is_some(),
+        "launched shell execution must persist its outcome before terminal retirement");
+    let subject = subject(origin, execution);
+    let fields = receipt_fields(execution);
+    append_claim_tx(transaction, origin, &subject, KIND, None, &json!({"fields": fields}), &[], None)?;
+    Ok(())
+}
+
+/// An exact read selector, not an admission request or a request for the latest success.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptQuery {
+    pub step_run: String,
+    pub attempt: u32,
+    pub generation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReceiptFields {
+    pub exec_id: String,
+    pub runtime_generation: String,
+    pub argv: Vec<String>,
+    pub argv_sha256: String,
+    pub owner: super::resource_membership::Owner,
+    pub host: String,
+    pub class: RequestClass,
+    pub coverage: Coverage,
+    pub state: String,
+    pub launched: bool,
+    pub retired_at: u64,
+    pub exit_code: Option<i32>,
+    pub exit_signal: Option<i32>,
+    pub profile_key: Option<String>,
+    pub head_start: Option<String>,
+    pub head_end: Option<String>,
+    pub clean_start: Option<bool>,
+    pub clean_end: Option<bool>,
+    #[serde(flatten)]
+    pub observations: serde_json::Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptReference {
+    pub claim_id: String,
+    pub subject: String,
+    pub origin: String,
+    pub fields: ReceiptFields,
+}
+
+impl Store {
+    /// Read authoritative claims through the exact owner/attempt index, never desired state.
+    pub fn resource_exec_receipt(&self, query: &ReceiptQuery) -> Result<ReceiptReference, FractalError> {
+        if query.step_run.is_empty() || query.attempt == 0 {
+            return Err(FractalError::new("resource-receipt-invalid-selector", "stepRun and a positive attempt are required"));
+        }
+        let connection = self.readers.get();
+        let sql = if query.generation.is_some() {
+            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+             FROM claims INDEXED BY claims_resource_exec_owner_attempt_index
+             WHERE kind='resource.exec-receipt' AND json_extract(body,'$.fields.owner.step')=?1
+               AND json_extract(body,'$.fields.owner.attempt')=?2
+               AND json_extract(body,'$.fields.runtime_generation')=?3 LIMIT 2"
+        } else {
+            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+             FROM claims INDEXED BY claims_resource_exec_owner_attempt_index
+             WHERE kind='resource.exec-receipt' AND json_extract(body,'$.fields.owner.step')=?1
+               AND json_extract(body,'$.fields.owner.attempt')=?2 AND ?3 IS NULL LIMIT 2"
+        };
+        // A two-row ambiguity probe does not bound claim bytes; trace both selector templates and receipt values.
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3b485fbfd664 owner=fractal_store::store::resource_exec_receipts TODO=trace-statement-and-value-representation */ sql).map_err(internal)?;
+        let mut rows = statement.query_map(rusqlite::params![query.step_run, query.attempt, query.generation], claim_from_row)
+            .map_err(internal)?;
+        let Some(mut claim) = rows.next().transpose().map_err(internal)? else {
+            if query.generation.is_some() {
+                return Err(FractalError::new("resource-receipt-stale-generation", "no receipt binds the requested runtime generation"));
+            }
+            return Err(FractalError::new("resource-receipt-missing",
+                "no eligible terminal receipt for this exact step-run and attempt; historical launches without a snapshot, nonlaunches, and unconfirmed retirement are not proof"));
+        };
+        if rows.next().transpose().map_err(internal)?.is_some() {
+            return Err(FractalError::new("resource-receipt-ambiguous", "multiple receipts bind this selector; select the exact runtime generation"));
+        }
+        let fields: ReceiptFields = serde_json::from_value(claim.body.get_mut("fields").map(Value::take).unwrap_or(Value::Null))
+            .map_err(|_| FractalError::new("resource-receipt-ineligible", "receipt lacks a complete immutable launch, outcome, or retirement binding"))?;
+        if claim.actor.is_some() || claim.origin != fields.host || !fields.launched || fields.state != "retired"
+            || (fields.exit_code.is_none() && fields.exit_signal.is_none())
+            || fields.argv_sha256 != argv_sha256(&fields.argv)
+        {
+            return Err(FractalError::new("resource-receipt-ineligible", "receipt is not a host-owned retired payload outcome"));
+        }
+        Ok(ReceiptReference { claim_id: claim.id, subject: claim.subject, origin: claim.origin, fields })
+    }
+}
+
+/// Only the transaction confirming the complete owning tree retired calls this. Missing
+/// historical facts permit capacity release but never fabricate an eligible receipt.
+pub(super) fn append_root_tx(transaction: &Transaction<'_>, origin: &str,
+    member: &super::resource_membership::Membership, root: &super::resource_membership::ExecutionRoot,
+    generation: &fractal_runtime::ExecGeneration) -> Result<()> {
+    let request = &member.request;
+    anyhow::ensure!(request.host == origin && member.state == "retired" && member.retired_at.is_some(),
+        "only the executing host may record a retired resource root");
+    let Some(snapshot) = &generation.payload_launch else { return Ok(()); };
+    if generation.payload_released_at_unix_ms.is_none()
+        || (generation.exit_code.is_none() && generation.exit_signal.is_none()) { return Ok(()); }
+    let Some(grant) = &member.grant else { anyhow::bail!("retired resource root has no membership identity"); };
+    anyhow::ensure!(root.execution.as_ref().is_some_and(|identity| identity.generation_id == generation.generation_id)
+        && generation.group_exited && generation.resource_membership.as_ref().is_some_and(|binding|
+            binding.membership_id == grant.membership_id && binding.generation == grant.generation
+                && binding.authority_epoch == grant.authority_epoch)
+        && snapshot.argv_sha256 == argv_sha256(&snapshot.argv), "resource receipt generation binding changed");
+    let end = generation.retirement_repository.as_ref();
+    let mut fields = serde_json::Map::new();
+    for (key, value) in [
+        ("exec_id", json!(root.runtime_id)), ("runtime_generation", json!(generation.generation_id)),
+        ("argv", json!(snapshot.argv)), ("argv_sha256", json!(snapshot.argv_sha256)),
+        ("owner", json!(request.owner)), ("host", json!(request.host)), ("class", json!(request.class)),
+        ("coverage", json!(request.coverage)), ("state", json!("retired")), ("launched", json!(true)),
+        ("retired_at", json!(member.retired_at)), ("exit_code", json!(generation.exit_code)),
+        ("exit_signal", json!(generation.exit_signal)), ("profile_key", json!(request.profile)),
+        ("profile_estimate", json!(request.profile_estimate)), ("memory_bytes", json!(request.capacity.map(|capacity| capacity.memory))),
+        ("disk_reserved_bytes", json!(request.disk.as_ref().map_or(0, |disk| disk.bytes))),
+        ("io", json!(request.io)), ("head_start", json!(snapshot.repository.head)),
+        ("clean_start", json!(snapshot.repository.clean)),
+        ("head_end", json!(end.and_then(|observation| observation.head.as_ref()))),
+        ("clean_end", json!(end.and_then(|observation| observation.clean))),
+    ] {
+        if !value.is_null() { fields.insert(key.into(), value); }
+    }
+    let subject = format!("{}root/{}/{}/{}", head_prefix(snapshot.repository.head.as_deref().unwrap_or_default()),
+        hex::encode(origin), hex::encode(&root.runtime_id), hex::encode(&generation.generation_id));
     append_claim_tx(transaction, origin, &subject, KIND, None, &json!({"fields": fields}), &[], None)?;
     Ok(())
 }
@@ -63,12 +215,236 @@ mod tests {
     use super::super::resource_membership::{LaneRequest, Owner};
     use super::super::shell_resources::{Command, PayloadResult};
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_root_retirement_commits_schema_admitted_receipt_and_replicates_exact_proof() {
+        use super::super::resource_membership::{Admission, Fit};
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        for kind in ["dsl", "program"] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(&directory.path().join("graph.db"), "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch").unwrap();
+            let runtime = fractal_runtime::ExecRuntime::new(
+                directory.path().join("runtime"), directory.path().join("logs"));
+            let mut request = command("proof").lane;
+            request.id = format!("{kind}:schema-proof");
+            request.name = format!("receipt-schema-{}", uuid::Uuid::new_v4().simple());
+            request.coverage = Coverage::Logical;
+            request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: 256 << 20 });
+            let grant = match store.request_resource_membership(&request,
+                Fit { room: request.capacity, ..Default::default() }, 1).unwrap() {
+                Admission::Admitted(grant) => grant,
+                other => panic!("expected direct-root admission: {other:?}"),
+            };
+            let policy = fractal_runtime::FiniteLane { name: request.name.clone(),
+                capacity: request.capacity, member_capacity: request.capacity,
+                memory_high_bytes: None, require_enforced: false };
+            let binding = fractal_runtime::ResourceExecutionBinding {
+                membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                authority_epoch: grant.authority_epoch.clone(),
+            };
+            store.prepare_resource_membership(&grant, "proof-root").unwrap();
+            let argv = vec!["sh".into(), "-c".into(), "sleep 60 & exit 7".into()];
+            let generation = runtime.spawn_in_lane_authorized("proof-root",
+                &fractal_runtime::Launch::Argv(argv.clone()), directory.path(),
+                &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &policy, binding: &binding, guard: &|| Ok(()),
+                    authorize: &|execution, release|
+                        store.release_resource_payload(&grant, "proof-root", execution, release),
+                }).unwrap();
+            store.launch_resource_membership(&grant, "proof-root", &generation, 2).unwrap();
+            let query = selector(1, Some(&generation.generation_id));
+            let ended = runtime.wait_for_exit("proof-root", &generation.generation_id).unwrap();
+            store.end_resource_execution(&grant, "proof-root", 3).unwrap();
+            assert_eq!(store.resource_exec_receipt(&query).unwrap_err().code,
+                "resource-receipt-stale-generation", "leader exit is not tree retirement");
+
+            // This public lifecycle call writes the retired membership and invokes the real
+            // append_claim_tx schema boundary in one transaction, without fabricated rows.
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 4).unwrap());
+            assert!(runtime.retired_if("proof-root", &generation.generation_id).unwrap());
+            let member = store.resource_membership_record(&grant.membership_id, &request.owner).unwrap();
+            assert_eq!(member.state, "retired");
+            assert_eq!(member.retired_at, Some(4));
+            let receipt = store.resource_exec_receipt(&query).unwrap();
+            assert_eq!(receipt.fields.argv, argv);
+            assert_eq!(receipt.fields.argv_sha256, argv_sha256(&argv));
+            assert_eq!(receipt.fields.runtime_generation, generation.generation_id);
+            assert_eq!(receipt.fields.retired_at, 4);
+            assert_eq!(receipt.fields.owner, request.owner);
+            assert_eq!(receipt.fields.exit_code, ended.exit_code);
+            assert_eq!(receipt.fields.exit_signal, ended.exit_signal);
+            let persisted = claims(&store, None);
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].id, receipt.claim_id);
+            let fields: BTreeMap<String, Value> =
+                serde_json::from_value(persisted[0].body["fields"].clone()).unwrap();
+            assert!(!fields.contains_key("wall_duration_ms"));
+            assert!(!fields.contains_key("queue_wait_ms"));
+            fractal_schema::registry().validate_claim(&receipt.subject, KIND, &fields).unwrap();
+
+            let replica = Store::open_memory("host-b").unwrap();
+            store.bind_fleet(FLEET).unwrap();
+            replica.bind_fleet(FLEET).unwrap();
+            let exchange = store.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+            replica.receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
+            let replicated = replica.resource_exec_receipt(&query).unwrap();
+            assert_eq!(serde_json::to_value(&replicated).unwrap(), serde_json::to_value(&receipt).unwrap());
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 5).unwrap());
+            assert_eq!(claims(&store, None).len(), 1);
+        }
+    }
+
+    fn direct(kind: &str, attempt: u32, generation: &str) -> (super::super::resource_membership::Membership, fractal_runtime::ExecGeneration) {
+        let mut request = command("proof").lane;
+        request.id = format!("{kind}:proof:{attempt}");
+        request.owner.attempt = attempt;
+        request.profile = Some("proof-profile".into());
+        let member = serde_json::from_value(json!({
+            "request": request, "state": "retired", "reason": "tree empty", "queuedAt": 1,
+            "retiredAt": 30, "grant": {"membershipId":"member", "generation":"grant",
+                "authorityEpoch":"epoch", "coverage":"logical"},
+            "roots": [{"runtimeId":"proof-root", "execution":{"generationId":generation}}]
+        })).unwrap();
+        let argv = vec!["sh".to_owned(), "-c".to_owned(), "exit 7".to_owned()];
+        let execution = serde_json::from_value(json!({
+            "schema":"st.runtime.exec-generation.v1", "pid":123, "createdAtUnixMs":1,
+            "startToken":1, "generationId":generation, "groupExited":true, "exitCode":7,
+            "payloadReleasedAtUnixMs":10, "resourceMembership":{"membershipId":"member",
+                "generation":"grant", "authorityEpoch":"epoch"},
+            "payloadLaunch":{"argv":argv, "argvSha256":argv_sha256(&argv), "cwd":"/workspace",
+                "repository":{"head":"head-one", "clean":true}},
+            "retirementRepository":{"head":"head-one", "clean":false}
+        })).unwrap();
+        (member, execution)
+    }
+
+    fn append_direct(store: &Store, member: &super::super::resource_membership::Membership,
+        execution: &fractal_runtime::ExecGeneration) -> Result<()> {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction()?;
+        append_root_tx(&tx, "host-a", member, &member.roots[0], execution)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn selector(attempt: u32, generation: Option<&str>) -> ReceiptQuery {
+        ReceiptQuery { step_run: "proof".into(), attempt, generation: generation.map(str::to_owned) }
+    }
+
+    #[test]
+    fn direct_dsl_and_program_receipts_require_retirement_and_preserve_outcomes() {
+        for kind in ["dsl", "program"] {
+            let store = Store::open_memory("host-a").unwrap();
+            let (mut member, mut execution) = direct(kind, 1, "runtime-one");
+            member.state = "retiring".into();
+            assert!(append_direct(&store, &member, &execution).is_err());
+            assert_eq!(store.resource_exec_receipt(&selector(1, None)).unwrap_err().code, "resource-receipt-missing");
+            member.state = "retired".into();
+            append_direct(&store, &member, &execution).unwrap();
+            let receipt = store.resource_exec_receipt(&selector(1, None)).unwrap();
+            assert_eq!(receipt.fields.exit_code, Some(7));
+            assert_eq!(receipt.fields.exit_signal, None);
+            assert_eq!(receipt.fields.argv, execution.payload_launch.as_ref().unwrap().argv);
+            assert_eq!(receipt.fields.profile_key.as_deref(), Some("proof-profile"));
+            assert_eq!(receipt.fields.head_start.as_deref(), Some("head-one"));
+            assert_eq!(receipt.fields.clean_end, Some(false));
+            assert!(!receipt.fields.observations.contains_key("memory_peak_bytes"));
+            let response = serde_json::to_value(&receipt).unwrap();
+            assert!(response.get("grant").is_none());
+            assert!(response["fields"].get("resource_membership").is_none());
+            assert!(!receipt.claim_id.is_empty());
+            assert_eq!(claims(&store, None)[0].kind, KIND);
+
+            member.roots[0].runtime_id = "signal-root".into();
+            member.roots[0].execution.as_mut().unwrap().generation_id = "runtime-signal".into();
+            execution.generation_id = "runtime-signal".into();
+            execution.exit_code = None;
+            execution.exit_signal = Some(15);
+            append_direct(&store, &member, &execution).unwrap();
+            let signal = store.resource_exec_receipt(&selector(1, Some("runtime-signal"))).unwrap();
+            assert_eq!(signal.fields.exit_signal, Some(15));
+            assert_eq!(signal.fields.exit_code, None);
+            assert_eq!(store.resource_exec_receipt(&selector(1, None)).unwrap_err().code, "resource-receipt-ambiguous");
+        }
+    }
+
+    #[test]
+    fn historical_missing_outcome_and_nonlaunches_never_create_proof() {
+        for missing in ["snapshot", "outcome", "release"] {
+            let store = Store::open_memory("host-a").unwrap();
+            let (member, mut execution) = direct("dsl", 1, "runtime-one");
+            match missing {
+                "snapshot" => execution.payload_launch = None,
+                "outcome" => { execution.exit_code = None; execution.exit_signal = None; }
+                "release" => execution.payload_released_at_unix_ms = None,
+                _ => unreachable!(),
+            }
+            append_direct(&store, &member, &execution).unwrap();
+            assert!(claims(&store, None).is_empty());
+            assert_eq!(store.resource_exec_receipt(&selector(1, None)).unwrap_err().code, "resource-receipt-missing");
+        }
+    }
+
+    #[test]
+    fn exact_receipt_lookup_fences_attempt_generation_command_and_finalizer_identity() {
+        let store = Store::open_memory("host-a").unwrap();
+        let (member, execution) = direct("program", 1, "runtime-one");
+        append_direct(&store, &member, &execution).unwrap();
+        let first = store.resource_exec_receipt(&selector(1, None)).unwrap();
+        assert_eq!(store.resource_exec_receipt(&selector(2, None)).unwrap_err().code, "resource-receipt-missing");
+        assert_eq!(store.resource_exec_receipt(&selector(1, Some("stale"))).unwrap_err().code, "resource-receipt-stale-generation");
+        let own_step = ReceiptQuery { step_run: "finalizer".into(), ..selector(1, None) };
+        assert_eq!(store.resource_exec_receipt(&own_step).unwrap_err().code, "resource-receipt-missing");
+        let (member, mut changed) = direct("program", 2, "runtime-two");
+        let snapshot = changed.payload_launch.as_mut().unwrap();
+        snapshot.argv[2] = "exit 0".into();
+        snapshot.argv_sha256 = argv_sha256(&snapshot.argv);
+        append_direct(&store, &member, &changed).unwrap();
+        let second = store.resource_exec_receipt(&selector(2, None)).unwrap();
+        assert_ne!(first.fields.argv_sha256, second.fields.argv_sha256);
+        assert_ne!(first.claim_id, second.claim_id);
+        assert_eq!(store.resource_exec_receipt(&selector(1, None)).unwrap().claim_id, first.claim_id);
+        changed.generation_id = "replacement".into();
+        assert!(append_direct(&store, &member, &changed).is_err());
+        let mut desired = member.clone();
+        desired.request.host = "another-host".into();
+        assert!(append_direct(&store, &desired, &execution).is_err());
+        let original = store.resource_exec_receipt(&selector(1, None)).unwrap();
+        assert_eq!(original.fields.profile_key.as_deref(), Some("proof-profile"));
+        assert_eq!(original.fields.head_start.as_deref(), Some("head-one"));
+    }
+
+    #[test]
+    fn receipt_restart_reads_original_claim_through_exact_owner_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipts.db");
+        let original;
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            let (member, execution) = direct("dsl", 1, "runtime-one");
+            append_direct(&store, &member, &execution).unwrap();
+            original = store.resource_exec_receipt(&selector(1, None)).unwrap().claim_id;
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        let receipt = store.resource_exec_receipt(&selector(1, Some("runtime-one"))).unwrap();
+        assert_eq!(receipt.claim_id, original);
+        assert_eq!(receipt.fields.argv[2], "exit 7");
+        let connection = store.readers.get();
+        let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT id FROM claims
+            INDEXED BY claims_resource_exec_owner_attempt_index WHERE kind='resource.exec-receipt'
+            AND json_extract(body,'$.fields.owner.step')='proof'
+            AND json_extract(body,'$.fields.owner.attempt')=1", [], |row| row.get(3)).unwrap();
+        assert!(plan.contains("SEARCH") && plan.contains("claims_resource_exec_owner_attempt_index"), "{plan}");
+    }
+
     fn command(id: &str) -> Command {
-        Command { id: id.into(), lane: LaneRequest {
+        Command { id: id.into(), request_id: None, lane: LaneRequest {
             id: format!("shell:{id}"), name: "checks".into(), host: "host-a".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
             class: RequestClass::Check, disk: None, io: None, coverage: Coverage::Logical,
             admission_timeout_ms: None,
+            profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: "person/operator".into(), step: id.into(), attempt: 1, invocation: None },
         }, argv: vec!["true".into()], cwd: "/workspace".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None }
     }
@@ -88,6 +464,31 @@ mod tests {
     fn claims(store: &Store, prefix: Option<&str>) -> Vec<ClaimRecord> {
         store.claims_page_matching(ClaimsFilter { kind: Some(KIND), subject_prefix: prefix,
             ..ClaimsFilter::default() }, None, 0, None, false, 100).unwrap().claims
+    }
+
+    #[test]
+    fn landing_refusal_remains_typed_in_the_durable_terminal_receipt() {
+        use super::super::resource_membership::{Admission, Fit, RefusalCode};
+        let store = Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let mut command = command("denied-landing");
+        command.lane.class = RequestClass::Landing;
+        let mut execution = store.submit_shell_resource(command, 10).unwrap();
+        let admission = store.request_resource_membership(&execution.command.lane,
+            Fit { room: Some(fractal_runtime::Capacity { cores: 2, memory: 4096 }), ..Fit::default() }, 10).unwrap();
+        let Admission::Refused { code, reason } = admission else { panic!("landing must be refused") };
+        assert_eq!(code, RefusalCode::UnauthorizedLanding);
+        execution.state = "refused".into();
+        execution.refusal_code = Some(code);
+        execution.reason = reason;
+        execution.ended_at = Some(11);
+        store.update_shell_resource(&execution).unwrap();
+        let receipt = claims(&store, None);
+        assert_eq!(receipt.len(), 1);
+        assert_eq!(receipt[0].body["fields"]["class"], "landing");
+        assert_eq!(receipt[0].body["fields"]["refusal_code"], "unauthorized-landing");
+        assert!(receipt[0].body["fields"]["refusal_reason"].as_str().unwrap().contains("allowedActors"));
+        assert_eq!(store.shell_resource("denied-landing").unwrap().refusal_code, Some(code));
     }
 
     #[test]
@@ -123,6 +524,11 @@ mod tests {
         let fields = &page[0].body["fields"];
         assert_eq!(fields["host"], "host-a"); assert_eq!(fields["class"], "check");
         assert_eq!(fields["memory_bytes"], 1024); assert_eq!(fields["disk_reserved_bytes"], 0);
+        assert_eq!(fields["argv"], json!(["true"]));
+        assert_eq!(fields["argv_sha256"], argv_sha256(&execution.command.argv));
+        let stored = store.shell_resource("one").unwrap();
+        assert_eq!(stored.root_exec_id, "one");
+        assert_eq!(stored.receipt_subject.as_deref(), Some(page[0].subject.as_str()));
         assert!(fields.get("memory_peak_bytes").is_none());
         assert!(claims(&store, Some(&head_prefix("other"))).is_empty());
         assert_eq!(fractal_schema::retention::policy().kind(KIND).class, fractal_schema::retention::Class::Durable);
@@ -164,11 +570,17 @@ mod tests {
     fn nested_execution_claims_only_the_charged_membership() {
         let store = Store::open_memory("host-a").unwrap();
         let parent = terminal(&store, "parent", "completed");
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let grant = match store.request_resource_membership(&parent.command.lane,
+            super::super::resource_membership::Fit {
+                room: parent.command.lane.capacity, ..Default::default()
+            }, 10).unwrap() {
+            super::super::resource_membership::Admission::Admitted(grant) => grant,
+            other => panic!("expected admitted parent: {other:?}"),
+        };
         let mut child_command = command("child");
-        child_command.parent = Some(super::super::resource_membership::Grant {
-            membership_id: "parent".into(), authority_epoch: "epoch".into(),
-            generation: "generation".into(), coverage: Coverage::Logical,
-        });
+        child_command.lane = parent.command.lane.clone();
+        child_command.parent = Some(grant);
         let mut child = store.submit_shell_resource(child_command, 10).unwrap();
         child.state = "completed".into();
         store.update_shell_resource(&child).unwrap();

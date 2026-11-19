@@ -206,6 +206,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         const STARTING_SECS: u64 = 600;
         let status = &self.seat_admission.status;
         let mut held = if include_finite { self.store.held_resource_membership_bytes(&self.host, candidate)? } else { 0 };
+        if include_finite {
+            held = held.saturating_add(self.store.unused_landing_memory(
+                &self.host, self.seat_admission.finite_policy.landing.memory_bytes)?);
+        }
         let mut running = BTreeSet::new();
         for desired in self.store.desired_subjects()? {
             let Some(member) = desired.member.as_ref().filter(|member| member.host == self.host) else { continue };

@@ -4,6 +4,6 @@
  * and `Worker`.
  */
 export * from './fractal.ts'
-export { ask, command, cwd, env, mission, run, step, Worker } from './program.ts'
+export { ask, await, command, cwd, env, mission, run, start, step, Worker } from './program.ts'
 export { resources } from './resources.ts'
 export { StepExecution, StepExecutionUsage } from './step-execution.ts'

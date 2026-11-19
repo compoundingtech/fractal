@@ -1393,9 +1393,11 @@ fn ignored_authority_warnings(
 pub async fn apply_with_bound(
     State(state): State<AppState>,
     bound: Option<BoundActor>,
+    principal: Option<Extension<write_principal::WritePrincipal>>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
-    apply_with_authority(state, request, bound.as_ref().map(BoundActor::actor)).await
+    apply_with_authority(state, request, bound.as_ref().map(BoundActor::actor),
+        principal.as_ref().map(|Extension(principal)| principal.actor())).await
 }
 
 pub async fn get_mission(

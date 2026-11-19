@@ -12,6 +12,23 @@ const intent = { meta, id: 'checks', goal: 'Check source.', reportTo, input: Sch
 // This is a protocol test, not a replacement host accountant. Native parity tests own fit,
 // queue clocks, process containment, cancellation races and confirmed physical retirement.
 describe('scoped native resource lanes', () => {
+  it.effect('passes keyed profiles and disk paths without synthesizing client estimates', () => Effect.gen(function* () {
+    const operations: ResourceRequest[] = []
+    const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('checks', {
+      host: 'executor', profile: 'check.unit', diskPath: '/workspace', maxMembers: 3, class: 'check',
+    })))
+    const host = fakeHost({ resource: async (request) => {
+      operations.push(request)
+      return { _tag: 'Success', value: request.operation === 'resource.lane.acquire' ? membership : null }
+    } })
+    expect((yield* start(program, host))._tag).toBe('Success')
+    expect(operations[0]?.payload).toEqual({
+      name: 'checks', host: 'executor', profile: 'check.unit', diskPath: '/workspace',
+      maxMembers: 3, class: 'check', coverage: 'logical',
+    })
+    expect(operations.map((request) => request.operation)).toEqual(['resource.lane.acquire', 'resource.lane.release'])
+  }))
+
   it.effect('preserves impossible admission failures as typed resource errors', () => Effect.gen(function* () {
     for (const code of ['impossible', 'impossible-capacity']) {
       const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })))
@@ -19,6 +36,24 @@ describe('scoped native resource lanes', () => {
       const host = fakeHost({ resource: async () => ({ _tag: 'Failure', error }) })
       expect(yield* start(program, host)).toEqual({ _tag: 'Failure', error })
     }
+  }))
+
+  it.effect('decodes unauthorized landing as a typed lane failure, including replay', () => Effect.gen(function* () {
+    const error = { _tag: 'ResourceError', code: 'unauthorized-landing', message: 'Landing actor is not authorized by this host.' }
+    const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('landing', {
+      host: 'executor', class: 'landing',
+    })))
+    const requests: ResourceRequest[] = []
+    const resource = async (request: ResourceRequest): Promise<ProgramExit> => {
+      requests.push(request)
+      return { _tag: 'Failure', error }
+    }
+    const host = fakeHost({ resource })
+    expect(yield* start(program, host)).toEqual({ _tag: 'Failure', error })
+    expect(requests.map((request) => request.operation)).toEqual(['resource.lane.acquire'])
+    expect(requests[0]?.payload).toMatchObject({ name: 'landing', class: 'landing' })
+    expect(yield* start(program, fakeHost({ journal: journalOf(host.recorded), resource }))).toEqual({ _tag: 'Failure', error })
+    expect(requests.map((request) => request.operation)).toEqual(['resource.lane.acquire', 'resource.lane.acquire'])
   }))
 
   it.effect('acquires and executes through the native boundary, then awaits release', () => Effect.gen(function* () {

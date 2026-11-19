@@ -2,7 +2,7 @@ use super::*;
 
 /// Attribution supplied by the serving boundary, independent of request JSON.
 #[derive(Clone, Debug)]
-pub(super) struct WritePrincipal {
+pub struct WritePrincipal {
     actor: String,
 }
 

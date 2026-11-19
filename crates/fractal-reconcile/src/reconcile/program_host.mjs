@@ -263,7 +263,7 @@ const worker = async () => {
       signal: controller.signal,
       started: (key) => parentPort.postMessage({ t: 'journal', key, status: 'started' }),
       record: (entry) => request({ t: 'journal', ...entry }),
-      child: (child) => request({ t: 'run', key: child.key, mission: child.mission, input: child.input }),
+      child: (child) => request({ t: 'run', ...child }),
       ask: (ask) => request({ t: 'ask', ...ask }),
       resource: (resource, signal) => {
         const pending = request({ t: 'resource', ...resource })

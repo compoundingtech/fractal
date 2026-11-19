@@ -1,7 +1,7 @@
 //! Shell requests are a durable transport into the existing finite host authority.
 use super::*;
 use crate::store::resource_membership::{Admission, Grant};
-use crate::store::shell_resources::{Execution, PayloadResult, PARENT_ENV};
+use crate::store::shell_resources::{Execution, PayloadResult};
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn reconcile_shell_resources(&self) -> Result<()> {
@@ -213,6 +213,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
+        if execution.command.parent.is_none() {
+            if execution.command.lane.disk_path.is_none() && execution.command.lane.profile.is_some()
+                && execution.command.lane.profile.as_ref().and_then(|key| self.seat_admission.finite_policy.profiles.get(key))
+                    .is_some_and(|seed| seed.disk.is_some())
+            {
+                execution.command.lane.disk_path = Some(execution.command.cwd.clone());
+            }
+            self.resolve_resource_profile(&mut execution.command.lane)?;
+            // Preserve the host-resolved snapshot before a payload can be prepared.
+            if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+        }
         let request = execution.command.lane.clone();
         let cancelling_grant = if execution.cancel {
             let member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
@@ -262,6 +273,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Admission::Refused { code, reason } => {
                     let record = self.store.resource_membership_record(&request.id, &request.owner)?;
                     execution.state = "refused".into(); execution.reason = format!("{}: {reason}", code.as_str()); execution.blocked_by = record.blocked_by;
+                    execution.refusal_code = Some(code);
                     execution.ended_at = Some(now);
                     return Ok(());
                 }
@@ -274,13 +286,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         let newly_started = !record.roots.iter().any(|root| root.runtime_id == execution.command.id);
         if newly_started {
             execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(execution, now);
-            let mut environment = execution.command.environment.clone();
-            environment.insert(PARENT_ENV.into(), serde_json::to_string(&crate::store::shell_resources::ParentContext { grant: grant.clone(), request: request.clone() })?);
-            // Nested CLIs must reconnect to the exact authority which owns the inherited grant.
-            environment.insert("ST3_ENDPOINT".into(), self.endpoint.clone());
-            environment.insert("FRACTAL_ENDPOINT".into(), self.endpoint.clone());
+            let mut environment = self.store.take_shell_environment(&execution.command.id)
+                .context("environment-unavailable: shell launch environment lost; resubmit the command")?;
+            // Native admission binds canonical markers immediately before preparing this root.
+            resource_lanes::set_authority_endpoint(&mut environment, &self.endpoint);
             fs::create_dir_all(result_path.parent().context("shell result path has no parent")?)?;
             let executable = launch_executable()?.to_string_lossy().into_owned();
+            let payload = LaunchSpec::Argv(execution.command.argv.clone());
             let mut argv = vec![executable, "resource-payload".into(), result_path.to_string_lossy().into_owned(), "--".into()];
             argv.extend(execution.command.argv.clone());
             let mut member = MemberSpec {
@@ -292,7 +304,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 driver: None, terminal_size: None, capacity: None, declared_priority: None, declared_lane: None, declared_budgets: None,
             };
             resource_lanes::set_request(&mut member, &request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, &payload, None, &|| {
                 anyhow::ensure!(!self.store.shell_resource(&execution.command.id)?.cancel, "shell request cancelled before payload release");
                 self.store.shell_resource_owner_live(&request.owner)?;
                 Ok(())

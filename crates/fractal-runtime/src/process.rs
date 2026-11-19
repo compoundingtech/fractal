@@ -84,6 +84,11 @@ pub struct ExecGeneration {
     pub payload_released_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_membership: Option<ResourceExecutionBinding>,
+    /// Frozen before gate release, before daemon/isolation wrappers; old launches are ineligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_launch: Option<crate::PayloadLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement_repository: Option<crate::RepositoryObservation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,10 +106,24 @@ pub enum ResourceCoverage {
     LogicalOnly,
 }
 
+/// Exact live kernel scope evidence for one authenticated member execution.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberScope {
+    pub exec_id: String,
+    pub generation: String,
+    pub state: String,
+    /// Unified cgroup path as reported by /proc/PID/cgroup, not a filesystem prefix.
+    pub cgroup_path: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct FiniteLane {
     pub name: String,
     pub capacity: Option<crate::lane::Capacity>,
+    /// Frozen per-generation envelope; absent historical callers inherit the aggregate cap.
+    pub member_capacity: Option<crate::lane::Capacity>,
+    pub memory_high_bytes: Option<u64>,
     pub require_enforced: bool,
 }
 
@@ -162,6 +181,8 @@ pub struct ExecRuntime {
     scope_join_limit: Duration,
     finite_lane: Option<FiniteLane>,
     resource_membership: Option<ResourceExecutionBinding>,
+    launch_operation: Option<crate::LaunchOperation>,
+    payload_launch: Option<crate::Launch>,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -252,6 +273,8 @@ impl ExecRuntime {
             scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
             finite_lane: None,
             resource_membership: None,
+            launch_operation: None,
+            payload_launch: None,
         }
     }
 
@@ -270,6 +293,17 @@ impl ExecRuntime {
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.
     pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
         self.unlaned_seat = policy;
+        self
+    }
+
+    pub fn with_launch_operation(mut self, operation: Option<crate::LaunchOperation>) -> Self {
+        self.launch_operation = operation;
+        self
+    }
+
+    /// The daemon supplies the payload before adding its credential/driver wrappers.
+    pub fn with_payload_launch(mut self, launch: crate::Launch) -> Self {
+        self.payload_launch = Some(launch);
         self
     }
 
@@ -347,7 +381,7 @@ impl ExecRuntime {
                     error
                 } else {
                     error.context(StartRejected {
-                        operation: env.get("ST3_START_OPERATION").cloned(),
+                        operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
                     })
                 }
             })
@@ -435,7 +469,9 @@ impl ExecRuntime {
         let coverage = self.finite_lane.as_ref().map(FiniteLane::coverage).transpose()?;
         let lane = match (&self.finite_lane, coverage) {
             (Some(policy), Some(ResourceCoverage::Enforced)) => {
-                Some(crate::lane::prepare_finite(&policy.name, policy.capacity)?)
+                Some(crate::lane::prepare_finite(
+                    policy, self.resource_membership.as_ref(), &unit,
+                )?)
             }
             (Some(_), _) => None,
             (None, _) => crate::lane::prepare(capacity, id)?,
@@ -490,7 +526,7 @@ impl ExecRuntime {
                 tracing::debug!(
                     caller = "spawn_inner",
                     runtime_id = id,
-                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    operation_id = self.launch_operation.as_ref().map_or("unavailable", |operation| operation.0.as_str()),
                     guard_decision = "skip",
                     reason = "spawn_guard_rejected",
                     %error,
@@ -530,9 +566,11 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
-            start_operation: env.get("ST3_START_OPERATION").cloned(),
+            start_operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
+            payload_launch: self.finite_lane.as_ref().map(|_| crate::PayloadLaunchSnapshot::capture(self.payload_launch.as_ref().unwrap_or(launch), cwd)),
+            retirement_repository: None,
         };
         let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
         children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
@@ -568,8 +606,10 @@ impl ExecRuntime {
             let mut released_at = None;
             let release_result = (|| -> Result<()> {
                 if let Some(lane) = &lane {
-                    crate::lane::verify_finite(lane, policy.capacity,
-                        generation.scope_unit.as_deref().context("finite execution lacks its scope")?, pid)?;
+                    crate::lane::verify_finite(
+                        lane, policy, generation.resource_membership.as_ref(),
+                        generation.scope_unit.as_deref().context("finite execution lacks its scope")?, pid,
+                    )?;
                 }
                 let mut attempted = false;
                 let mut persisted = false;
@@ -932,6 +972,37 @@ impl ExecRuntime {
         self.end_if(id, expected_generation, libc::SIGKILL)
     }
 
+    /// Return current kernel containment only after matching host-owned membership evidence.
+    pub fn member_scope(&self, exec_id: &str, expected: &ResourceExecutionBinding) -> Result<MemberScope> {
+        anyhow::ensure!(cfg!(target_os = "linux"), "member scope requires Linux kernel containment");
+        let observation = self.observe(exec_id)?.context("member execution is missing")?;
+        let ExecObservation::Running(generation) = &observation else {
+            anyhow::bail!("member execution is not running");
+        };
+        anyhow::ensure!(generation.resource_membership.as_ref() == Some(expected),
+            "member execution binding differs");
+        let unit = generation.scope_unit.as_deref().context("member execution has no scope")?;
+        let start_token = process_start_token(generation.pid)?;
+        let placement = fs::read_to_string(format!("/proc/{}/cgroup", generation.pid))?;
+        let actual = placement.lines().find_map(|line| line.strip_prefix("0::"))
+            .context("member execution has no unified cgroup")?;
+        let snapshot = crate::systemd::snapshot_after_admission()?;
+        let scope = snapshot.units.get(unit).context("member execution scope is missing")?;
+        anyhow::ensure!(scope.load == "loaded" && scope.active == "active",
+            "member execution scope is not active");
+        let scope_path = scope.control_group.as_deref().context("member scope control group is unavailable")?;
+        let result = verify_member_scope(exec_id, &observation, expected, start_token, actual, scope_path)?;
+        let current = self.observe(exec_id)?.context("member execution disappeared during scope readback")?;
+        anyhow::ensure!(matches!(&current, ExecObservation::Running(value)
+            if value.generation_id == generation.generation_id
+                && value.resource_membership.as_ref() == Some(expected)
+                && value.scope_unit == generation.scope_unit),
+            "member execution changed during scope readback");
+        anyhow::ensure!(process_generation_alive(generation.pid, generation.start_token)?,
+            "member execution exited during scope readback");
+        Ok(result)
+    }
+
     /// Stop this exact generation and await both leader exit and whole-scope emptiness with
     /// kernel notifications. This is the blocking retirement worker, never a host-writer call.
     /// A delivered signal alone, or a detached-session exit, does not authorize capacity release.
@@ -953,10 +1024,20 @@ impl ExecRuntime {
             .context("execution scope has no whole-tree retirement proof")?;
         anyhow::ensure!(self.retired_if(id, expected_generation)?,
             "execution retains whole-tree custody after scope retirement");
-        let current = self.read_generation_path(&self.record_path(id))?
+        let mut current = self.read_generation_path(&self.record_path(id))?
             .context("execution generation disappeared after retirement")?;
         anyhow::ensure!(current.generation_id == expected_generation,
             "execution generation changed after retirement");
+        if current.retirement_repository.is_none() {
+            if let Some(snapshot) = &current.payload_launch {
+                current.retirement_repository = Some(crate::RepositoryObservation::capture(Path::new(&snapshot.cwd)));
+                self.update_generation(id, &current)?;
+            }
+        }
+        let current = self.read_generation_path(&self.record_path(id))?
+            .context("execution generation disappeared while binding retirement")?;
+        anyhow::ensure!(current.generation_id == expected_generation,
+            "execution generation changed while binding retirement");
         Ok(current)
     }
 
@@ -1179,6 +1260,15 @@ impl ExecRuntime {
             }
             anyhow::ensure!(generation.resource_membership == current.resource_membership,
                 "execution resource membership binding changed");
+            if generation.payload_launch.is_none() && current.payload_launch.is_some() {
+                generation.to_mut().payload_launch = current.payload_launch.clone();
+            }
+            anyhow::ensure!(generation.payload_launch == current.payload_launch,
+                "execution payload launch snapshot changed");
+            // The first confirmed retirement observation is immutable, including unknowns.
+            if current.retirement_repository.is_some() {
+                generation.to_mut().retirement_repository = current.retirement_repository.clone();
+            }
             if generation.payload_released_at_unix_ms.is_none() && current.payload_released_at_unix_ms.is_some() {
                 generation.to_mut().payload_released_at_unix_ms = current.payload_released_at_unix_ms;
             }
@@ -1580,6 +1670,39 @@ fn owned_child_waitable(pid: u32) -> Result<bool> {
     }
 }
 
+fn verify_member_scope(
+    exec_id: &str,
+    observation: &ExecObservation,
+    expected: &ResourceExecutionBinding,
+    start_token: u64,
+    actual: &str,
+    scope_path: &Path,
+) -> Result<MemberScope> {
+    let ExecObservation::Running(generation) = observation else {
+        anyhow::bail!("member execution is not running");
+    };
+    anyhow::ensure!(!generation.group_exited && generation.isolation_mode == "scope",
+        "member execution has no live kernel scope");
+    anyhow::ensure!(generation.resource_membership.as_ref() == Some(expected),
+        "member execution binding differs");
+    anyhow::ensure!(generation.start_token == start_token, "member execution PID changed incarnation");
+    let unit = generation.scope_unit.as_deref().context("member execution has no scope")?;
+    anyhow::ensure!(scope_path.file_name() == Some(std::ffi::OsStr::new(unit)),
+        "member execution scope identity differs");
+    let relative = scope_path.strip_prefix("/sys/fs/cgroup")
+        .context("member execution scope is outside the unified cgroup filesystem")?;
+    anyhow::ensure!(relative.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+        "member execution scope path is not canonical");
+    let path = format!("/{}", relative.to_str().context("member scope path is not UTF-8")?);
+    anyhow::ensure!(actual == path, "member execution did not join its exact scope");
+    Ok(MemberScope {
+        exec_id: exec_id.into(),
+        generation: generation.generation_id.clone(),
+        state: "running".into(),
+        cgroup_path: path,
+    })
+}
+
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
     let mut hash = Sha256::new();
     hash.update(id.as_bytes());
@@ -1593,6 +1716,40 @@ fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128)
 mod tests {
     use super::*;
 
+    #[test]
+    fn member_scope_requires_exact_live_generation_placement() {
+        let binding = fixture_resource_binding();
+        let generation: ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema": SCHEMA, "pid": 123, "createdAtUnixMs": 1, "startToken": 456,
+            "generationId": "execution-generation", "isolationMode": "scope",
+            "scopeUnit": "st3-member-123-1.scope", "resourceMembership": binding
+        })).unwrap();
+        let current = ExecObservation::Running(generation.clone());
+        let path = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-member-123-1.scope";
+        let kernel_path = PathBuf::from(format!("/sys/fs/cgroup{path}"));
+        let proof = verify_member_scope("member", &current, &binding, 456, path, &kernel_path).unwrap();
+        assert_eq!(proof.cgroup_path, path);
+        assert_eq!(proof.generation, generation.generation_id);
+        assert_eq!(proof.state, "running");
+        for wrong in [
+            path.replace("st3-member-123-1.scope", "st3-sibling-123-2.scope"),
+            kernel_path.parent().unwrap().strip_prefix("/sys/fs/cgroup").unwrap().display().to_string(),
+            format!("{path}/descendant"),
+        ] {
+            assert!(verify_member_scope("member", &current, &binding, 456, &wrong, &kernel_path).is_err());
+        }
+        assert!(verify_member_scope("member", &ExecObservation::Exited(generation.clone()),
+            &binding, 456, path, &kernel_path).is_err());
+        let mut retired = generation.clone();
+        retired.group_exited = true;
+        assert!(verify_member_scope("member", &ExecObservation::Running(retired),
+            &binding, 456, path, &kernel_path).is_err());
+        let mut wrong_binding = binding.clone();
+        wrong_binding.generation = "replacement-membership".into();
+        assert!(verify_member_scope("member", &current, &wrong_binding, 456, path, &kernel_path).is_err());
+        assert!(verify_member_scope("member", &current, &binding, 457, path, &kernel_path).is_err());
+    }
+
     fn fixture_resource_binding() -> ResourceExecutionBinding {
         ResourceExecutionBinding {
             membership_id: "fixture-membership".into(),
@@ -1602,11 +1759,64 @@ mod tests {
     }
 
     #[test]
+    fn payload_snapshot_is_immutable_across_restart_and_stale_observers() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        fs::create_dir_all(&runtime.state_dir).unwrap();
+        let historical: ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema":SCHEMA, "pid":123, "startToken":1, "createdAtUnixMs":1,
+            "generationId":"frozen", "exitCode":7, "groupExited":true
+        })).unwrap();
+        assert!(historical.payload_launch.is_none());
+        let mut frozen = historical.clone();
+        frozen.payload_launch = Some(crate::PayloadLaunchSnapshot::capture(
+            &crate::Launch::Argv(vec!["proof".into(), "--head=one".into()]), root.path()));
+        frozen.retirement_repository = Some(crate::RepositoryObservation { head: Some("head-one".into()), clean: Some(true) });
+        runtime.write_generation("proof", &frozen).unwrap();
+        // A stale observer cannot erase a launch binding or retirement observation.
+        runtime.update_generation("proof", &historical).unwrap();
+        let restarted = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(restarted.read_generation_path(&restarted.record_path("proof")).unwrap(), Some(frozen.clone()));
+        let mut changed = frozen.clone();
+        changed.payload_launch.as_mut().unwrap().argv.push("--head=two".into());
+        assert!(restarted.update_generation("proof", &changed).is_err());
+        runtime.write_generation("historical", &historical).unwrap();
+        assert!(runtime.update_generation("historical", &frozen).is_err(),
+            "current desired argv must never fill a historical launch binding");
+    }
+
+    #[test]
+    fn payload_snapshot_excludes_daemon_wrapper_and_credentials_before_release() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = crate::Launch::Argv(vec!["proof".into(), "--head=one".into()]);
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_payload_launch(payload);
+        let lane = FiniteLane { name: "payload_snapshot".into(), capacity: None,
+            member_capacity: None, memory_high_bytes: None, require_enforced: false };
+        let mut environment: BTreeMap<_, _> = std::env::vars().collect();
+        environment.insert("ST_RUN_CREDENTIAL".into(), "private-environment-value".into());
+        let generation = runtime.spawn_in_lane_authorized("wrapped",
+            &crate::Launch::Shell("exit 7".into()), root.path(), &environment,
+            FiniteExecutionAuthorization { lane: &lane, binding: &fixture_resource_binding(), guard: &|| Ok(()),
+                authorize: &|generation, release| {
+                    let persisted = runtime.read_generation_path(&runtime.record_path("wrapped"))?.unwrap();
+                    assert_eq!(persisted.payload_launch, generation.payload_launch);
+                    assert_eq!(persisted.payload_launch.as_ref().unwrap().argv, ["proof", "--head=one"]);
+                    assert!(!serde_json::to_string(&persisted)?.contains("private-environment-value"));
+                    release()?;
+                    Ok(())
+                }
+            }).unwrap();
+        assert_eq!(runtime.wait_for_exit("wrapped", &generation.generation_id).unwrap().exit_code, Some(7));
+    }
+
+    #[test]
     fn finite_authorization_wraps_actual_release_and_observes_durable_receipt() {
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "authorization_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let authorized = std::cell::Cell::new(false);
         let generation = runtime.spawn_in_lane_authorized(
@@ -1618,6 +1828,9 @@ mod tests {
                 assert_eq!(bound.generation_id, execution.generation_id);
                 assert_eq!(bound.payload_released_at_unix_ms, None);
                 assert_eq!(bound.resource_membership, Some(fixture_resource_binding()));
+                let snapshot = bound.payload_launch.as_ref().expect("payload snapshot precedes release");
+                assert_eq!(snapshot.argv, ["sh", "-c", "touch payload-started; exit 9"]);
+                assert_eq!(snapshot.argv_sha256, crate::argv_sha256(&snapshot.argv));
                 assert!(!root.path().join("payload-started").exists());
                 let timestamp = release()?;
                 let receipt = runtime.read_generation_path(&runtime.record_path("authorized"))?.unwrap();
@@ -1640,6 +1853,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "omitted_release_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let error = runtime.spawn_in_lane_authorized(
             "omitted", &crate::Launch::Shell("touch unauthorized-payload".into()),
@@ -1701,6 +1915,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "output_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let generation = runtime.spawn_in_lane_checked(
             "output", &crate::Launch::Shell("printf stdout-value; printf stderr-value >&2; exit 7".into()),
@@ -1732,6 +1947,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "wait_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let generation = runtime.spawn_in_lane_checked(
             "wait", &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
@@ -1771,6 +1987,8 @@ mod tests {
         let policy = FiniteLane {
             name: format!("fixture_{}", std::process::id()),
             capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            memory_high_bytes: None,
             require_enforced: true,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1798,6 +2016,108 @@ mod tests {
         assert!(runtime.retired_if("finite-tree", &generation.generation_id).unwrap());
         crate::lane::end(&format!("finite:{}", policy.name));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_generations_keep_frozen_limits_under_the_same_aggregate_lane() {
+        if crate::isolation_mode() != crate::Isolation::Scope || !crate::isolate::systemd_254() {
+            return;
+        }
+        let _switch = crate::lane::TEST_SWITCH.lock().unwrap();
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) { crate::lane::set_enforced(self.0); }
+        }
+        let _restore = Restore(crate::lane::enforced());
+        crate::lane::set_enforced(true);
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let name = lane_test_id("finite-members");
+        struct Cleanup(ExecRuntime, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for id in ["finite-small", "finite-nested", "finite-large"] {
+                    let _ = self.0.kill(id);
+                    let _ = self.0.end_leftovers(id);
+                }
+                crate::lane::end(&format!("finite:{}", self.1));
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone(), name.clone());
+        let aggregate = crate::lane::Capacity { cores: 2, memory: 768 * 1024 * 1024 };
+        let mut policy = FiniteLane {
+            name,
+            capacity: Some(aggregate),
+            member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            memory_high_bytes: Some(128 * 1024 * 1024),
+            require_enforced: true,
+        };
+        let spawn = |id: &str, policy: &FiniteLane, binding: &ResourceExecutionBinding| {
+            runtime.spawn_in_lane_authorized(
+                id, &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
+                root.path(), &std::env::vars().collect(), FiniteExecutionAuthorization {
+                    lane: policy, binding, guard: &|| Ok(()),
+                    authorize: &|_, release| { release()?; Ok(()) },
+                },
+            ).unwrap()
+        };
+        let binding = fixture_resource_binding();
+        let first = spawn("finite-small", &policy, &binding);
+        let nested = spawn("finite-nested", &policy, &binding);
+        policy.member_capacity = Some(crate::lane::Capacity { cores: 1, memory: 512 * 1024 * 1024 });
+        policy.memory_high_bytes = Some(384 * 1024 * 1024);
+        let mut other_binding = binding.clone();
+        other_binding.membership_id = "other-membership".into();
+        let second = spawn("finite-large", &policy, &other_binding);
+        let placement = |generation: &ExecGeneration| {
+            let value = fs::read_to_string(format!("/proc/{}/cgroup", generation.pid)).unwrap();
+            let path = value.lines().find_map(|line| line.strip_prefix("0::")).unwrap();
+            PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/'))
+        };
+        let first_scope = placement(&first);
+        let nested_scope = placement(&nested);
+        let second_scope = placement(&second);
+        let first_child = first_scope.parent().unwrap();
+        let nested_child = nested_scope.parent().unwrap();
+        let second_child = second_scope.parent().unwrap();
+        assert_ne!(first_child, nested_child);
+        assert_ne!(first_child, second_child);
+        let first_member = first_child.parent().unwrap();
+        let second_member = second_child.parent().unwrap();
+        assert_eq!(Some(first_member), nested_child.parent());
+        assert_ne!(first_member, second_member);
+        assert_eq!(first_member.parent(), second_member.parent());
+        let parent = first_member.parent().unwrap();
+        let proof = runtime.member_scope("finite-small", &binding).unwrap();
+        assert_eq!(proof.generation, first.generation_id);
+        assert_eq!(format!("/sys/fs/cgroup{}", proof.cgroup_path), first_scope.display().to_string());
+        assert!(runtime.member_scope("finite-small", &other_binding).is_err());
+        for (path, memory, high) in [
+            (parent, aggregate.memory, None),
+            (first_member, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (first_child, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (nested_child, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (second_member, 512 * 1024 * 1024, Some(384 * 1024 * 1024)),
+            (second_child, 512 * 1024 * 1024, Some(384 * 1024 * 1024)),
+        ] {
+            assert_eq!(fs::read_to_string(path.join("memory.max")).unwrap().trim(), memory.to_string());
+            let expected_high = high.map_or_else(|| "max".to_owned(), |value: u64| value.to_string());
+            assert_eq!(fs::read_to_string(path.join("memory.high")).unwrap().trim(), expected_high);
+            assert!(fs::read_to_string(path.join("io.stat")).is_ok());
+            assert_eq!(systemctl_show(path.file_name().unwrap().to_str().unwrap(), "IOAccounting"), "yes");
+        }
+        runtime.kill_if("finite-small", Some(&first.generation_id)).unwrap();
+        runtime.retire_if("finite-small", &first.generation_id).unwrap();
+        assert!(runtime.member_scope("finite-small", &binding).is_err());
+        assert!(matches!(runtime.observe("finite-nested").unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(fs::read_to_string(first_member.join("memory.max")).unwrap().trim(), "268435456");
+        runtime.retire_if("finite-nested", &nested.generation_id).unwrap();
+        assert!(matches!(runtime.observe("finite-large").unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(fs::read_to_string(parent.join("memory.max")).unwrap().trim(), aggregate.memory.to_string());
+        runtime.kill_if("finite-large", Some(&second.generation_id)).unwrap();
+        runtime.retire_if("finite-large", &second.generation_id).unwrap();
+    }
+
     #[test]
     fn finite_final_guard_failure_never_releases_payload() {
         let root = tempfile::tempdir().unwrap();
@@ -1806,6 +2126,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let error = runtime.spawn_in_lane_checked(
@@ -1830,6 +2151,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1856,6 +2178,7 @@ mod tests {
         let mut policy = FiniteLane {
             name: "fixture".into(),
             capacity: Some(crate::lane::Capacity::DEFAULT),
+            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None,
             require_enforced: false,
         };
         assert_eq!(policy.coverage().unwrap(), ResourceCoverage::LogicalOnly);
@@ -1876,6 +2199,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "fixture".into(), capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1996,6 +2320,8 @@ mod tests {
                     start_operation: None,
                     payload_released_at_unix_ms: None,
                     resource_membership: None,
+                    payload_launch: None,
+                    retirement_repository: None,
                 };
                 control.write_generation("control", &generation).unwrap();
                 let before = fs::read(control.record_path("control")).unwrap();
@@ -2153,6 +2479,8 @@ mod tests {
             start_operation: None,
             payload_released_at_unix_ms: None,
             resource_membership: None,
+            payload_launch: None,
+            retirement_repository: None,
         };
         fs::create_dir_all(&runtime.state_dir).unwrap();
         runtime.write_generation("completed", &generation).unwrap();
@@ -2166,9 +2494,10 @@ mod tests {
     #[test]
     fn launch_operation_is_bound_to_the_persisted_exec_generation() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_launch_operation(Some(crate::LaunchOperation("operation-one".into())));
         let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        environment.insert("ST3_START_OPERATION".into(), "untrusted-payload-value".into());
         let launched = runtime
             .spawn(
                 "operation-proof",
@@ -2186,6 +2515,8 @@ mod tests {
             reopened.observe("operation-proof").unwrap(),
             Some(ExecObservation::Exited(exited))
         );
+        let bytes = fs::read(root.path().join("exec").join("operation-proof.json")).unwrap();
+        assert!(!bytes.windows(b"untrusted-payload-value".len()).any(|bytes| bytes == b"untrusted-payload-value"));
     }
 
     fn wait_for_exit(runtime: &ExecRuntime, id: &str) -> ExecGeneration {

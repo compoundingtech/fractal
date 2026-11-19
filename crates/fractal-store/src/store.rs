@@ -25,6 +25,8 @@ pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+#[cfg(test)]
+mod resource_profile_policy_tests;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -849,10 +851,14 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfc9ed02b4ad7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2b3b79aad3be owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_resource_exec_owner_attempt_index
+ON claims(json_extract(body,'$.fields.owner.step'), json_extract(body,'$.fields.owner.attempt'),
+          json_extract(body,'$.fields.runtime_generation'))
+WHERE kind='resource.exec-receipt';
 CREATE INDEX IF NOT EXISTS claims_terminal_history_index ON claims(store_index)
 WHERE kind IN ('mission-run.state','step-run.state','work.failed')
   AND json_extract(body,'$.fields.status') IN ('failed','cancelled','completed');
@@ -2449,6 +2455,8 @@ const TRIM_SCAN_PAGE: i64 = 5_000;
 pub struct Store {
     /// Identity of this open, including same-process reopen or restore.
     membership_lifetime: uuid::Uuid,
+    /// Live shell launch values never enter durable executions or claims.
+    shell_environments: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2550,6 +2558,8 @@ pub struct ChildMissionContext {
     /// program starts. Its creation claims are written as this actor, and run authority takes it
     /// as the child's starter (docs/st3/program-engine.md §3).
     pub started_by: Option<String>,
+    /// Verified internal derivation on this parent's behalf, independent of requester.
+    pub system_parent_run: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -2971,6 +2981,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3005,6 +3016,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3040,6 +3052,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3498,6 +3511,7 @@ impl Store {
                 guard: Some(guard),
                 force: None,
                 source_map: None,
+                initiating_principal: None,
             },
         )
     }
@@ -3523,6 +3537,7 @@ impl Store {
                 guard: None,
                 force: Some(reason),
                 source_map: None,
+                initiating_principal: None,
             },
         )
     }
@@ -3610,7 +3625,7 @@ impl Store {
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
-        let publication::CommitChecks { owned, guard, force, source_map } = checks;
+        let publication::CommitChecks { owned, guard, force, source_map, initiating_principal } = checks;
         if source_map.is_some() && owned.is_none() {
             return Err(FractalError::new("invalid-source-map", "a source map needs an owned-set publication"));
         }
@@ -4286,7 +4301,7 @@ impl Store {
                 }
                 for declaration in intent.mission_runs.values() {
                     let created =
-                        create_declared_mission_run_tx(transaction, &self.origin, declaration, &batch_id)?;
+                        create_declared_mission_run_tx(transaction, &self.origin, declaration, &batch_id, initiating_principal)?;
                     if !created.is_empty() {
                         operation_receipts.push(PlannedAction {
                             subject: declaration.subject.clone(),
@@ -8003,6 +8018,7 @@ fn create_declared_mission_run_tx(
     origin: &str,
     declaration: &MissionRunDeclaration,
     batch_id: &str,
+    initiating_principal: Option<&str>,
 ) -> Result<Vec<String>, FractalError> {
     let Some(creation) = &declaration.creation else {
         return Ok(Vec::new());
@@ -8191,6 +8207,9 @@ fn create_declared_mission_run_tx(
             "deadline_at_unix_ms": deadline_at_unix_ms,
         }
     });
+    if let Some(principal) = missions::resolve_initiating_principal_tx(transaction, initiating_principal)? {
+        body["fields"]["initiating_principal"] = json!(principal);
+    }
     if let Some(after) = &creation.after {
         body["fields"]["after"] = json!(after);
     }

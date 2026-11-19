@@ -50,6 +50,7 @@ export const ResourceError = Schema.TaggedStruct('ResourceError', {
     // Persisted program results retain historical refusal codes.
     'impossible-capacity',
     'cancelled', 'retired', 'retiring', 'uncertain', 'invalid-state',
+    'unauthorized-landing',
     'resource-operation-refused', 'execution-timeout', 'stale-membership', 'execution-refused',
   ]),
   message: Schema.String,
@@ -105,6 +106,16 @@ export interface HostContextV1 {
     readonly key: string
     readonly mission: string
     readonly input: Readonly<Record<string, string>>
+    readonly mode?: 'run' | 'start'
+    readonly runId?: string
+    /** Optional agent-subject report routing for start; never changes inherited authority. */
+    readonly reportTo?: string
+  } | {
+    readonly key: string
+    readonly mode: 'await'
+    readonly run: string
+    readonly mission?: never
+    readonly input?: never
   }): Promise<ProgramExit>
   /** Opens or adopts the person ask for `key` on the program step; journaled under `key`. */
   ask(request: {

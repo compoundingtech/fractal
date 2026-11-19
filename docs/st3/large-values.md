@@ -98,6 +98,27 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Shell environment scrub
+
+The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
+reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
+
+- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+  checked integer `complete=1`. The conservative catalog still makes no size proof.
+- `lv-h9abbf1dff207` rewrites historical `shell_resources_v1.body` JSON to remove
+  environments while preserving all other command/result fields. Those bodies
+  remain unbounded inline values; changing their representation requires the
+  owning producer's chunk/reference work, not changing this security scrub.
+- `lv-h017f6a53ca41` is the literal `VACUUM` reclamation sink. It binds no value,
+  but its physical cleanup cost covers the database. Trace that cost into the
+  bounded representation and reclamation work before removing the exception.
+- `lv-haceef5fded64` inserts the fixed completion key only after physical erasure.
+  Keep its cleanup/transaction costs in the same producer's representation review.
+
+These registrations do not change the scrub or claim that its UPDATE or VACUUM
+has bounded work. A bounded body representation and keyed reclamation would be
+the structural improvement; this registration preserves current behavior.
+
 ### GitHub capture rebuildable projection
 
 The `fractal_reconcile::reconcile::github_capture` maintainer owns the
@@ -980,3 +1001,61 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+### Shell request identity and cancellation (#6762)
+
+The `fractal_store::store::shell_resources` maintainer owns
+`lv-h319ba7a29fc7`, replacing `lv-h379f0157342b`: request submission now
+uses conflict-preserving insertion. Execution ID, host and state TEXT keys and
+the serialized command/result body remain inline to preserve atomic request
+identity and replay. Neither one row per command nor conflict suppression bounds
+encoded bytes. The `bound-or-reference-values-and-reclamation` obligation remains:
+reference or physically bound the complete execution values and keys, preserving
+request identity and cleanup semantics.
+
+The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
+`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
+so cancellation-before-submission is atomic with request lookup. The 36-character
+check and seven-day retention are not general encoded-size or statement-cost
+proofs: an expiry can delete an unbounded number of rows inside submission.
+Values remain inline to retain the existing cancellation authority transition.
+The schema's `chunk-or-reference-variable-columns` task covers the identifier
+and index representation; the insertion/expiry
+`bound-or-reference-values-and-reclamation` tasks must bound physical storage
+and incremental reclamation without weakening cancellation tombstones or replay.
+This review records transitional debt, not a permanent exemption or size proof.
+
+### Authenticated Landing ancestry (#6834)
+
+The `fractal_store::store::missions` maintainer owns `lv-h1945b7eb9ba4`,
+the canonical creation-receipt lookup for an initiating principal. It binds the
+mission-run subject TEXT key and reads the original principal from claim JSON,
+ordered by canonical claim identity. These values remain inline to preserve the
+immutable ancestry authority used by Landing admission; one selected row is not
+a bound on encoded bytes or query cost. The
+`trace-statement-and-value-representation` task is to trace the canonical SQL
+expansion, subject key and extracted principal through a bounded/reference
+representation without substituting requester attribution for creation authority.
+
+### Native retirement receipt lookup (#6842)
+
+The `fractal_store::store` maintainer owns revised schema site
+`lv-h2b3b79aad3be`, replacing `lv-hfc9ed02b4ad7`. Its added
+`claims_resource_exec_owner_attempt_index` indexes owner step TEXT, attempt and
+runtime-generation values extracted from immutable receipt JSON, restricted to
+`resource.exec-receipt`. Existing schema columns/indexes remain covered by the
+revised whole-template identity; the owned-set subject index is unchanged.
+These keys remain inline to preserve exact owner/attempt/generation lookup, not
+because their encoded size or index-build cost is proved bounded. The
+`chunk-or-reference-variable-columns` task must retain those exact selector and
+partial-index semantics when moving variable keys to bounded units or references.
+
+The `fractal_store::store::resource_exec_receipts` maintainer owns
+`lv-h3b485fbfd664`, the cached-query sink selecting at most two authoritative
+claims for ambiguity detection. Both templates read subject/identity/origin,
+body and predecessor values; a row limit is not a bound on their encoded bytes.
+They remain inline to validate immutable host-owned retirement authority without
+substituting desired state. The `trace-statement-and-value-representation` task
+must follow both generation selectors and their bound owner/attempt values into
+a bounded/reference representation while preserving missing, stale-generation
+and ambiguous-receipt refusals.

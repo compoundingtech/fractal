@@ -50,6 +50,27 @@ enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
     Declaration(MissionWorkspaceDeclaration),
+    NamedProgram {
+        report_to: Option<&'a str>,
+        resource: Option<(&'a resource_membership::Grant, &'a resource_membership::Owner)>,
+    },
+}
+
+/// The first canonical creation receipt is immutable authority; requester is attribution only.
+fn initiating_principal_tx(connection: &Connection, subject: &str) -> Result<Option<String>, FractalError> {
+    // Canonical ancestry remains inline; trace its principal value and claim ordering before changing representation.
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-h1945b7eb9ba4 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT json_extract(body,'$.fields.initiating_principal') FROM claims
+         WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+        [subject], |row| row.get(0)).optional().map(Option::flatten).map_err(internal)
+}
+
+pub(super) fn resolve_initiating_principal_tx(connection: &Connection, principal: Option<&str>) -> Result<Option<String>, FractalError> {
+    match principal {
+        Some(run) if run.starts_with("mission-run/") => initiating_principal_tx(connection, run),
+        Some(actor) => identities::resolve_reference_conn(connection, actor).map(Some),
+        None => Ok(None),
+    }
 }
 pub(super) fn continuity_step_paths_tx(
     connection: &Connection,
@@ -467,6 +488,11 @@ pub(super) fn mission_spec_at(
 }
 
 impl Store {
+    pub fn mission_run_initiating_principal(&self, subject: &str) -> Result<Option<String>, FractalError> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        initiating_principal_tx(&self.readers.get(), subject)
+    }
+
     /// Incoming named edges, using the target index rather than scanning declaration bodies.
     /// While a preexisting store's edge index is still being folded in bounded background
     /// steps, the same answer comes straight from the selected declarations.
@@ -567,6 +593,15 @@ impl Store {
         run: &str,
         options: &MissionRunRetryRequest,
     ) -> Result<MissionRunView, FractalError> {
+        self.retry_mission_run_as(run, options, None)
+    }
+
+    pub fn retry_mission_run_as(
+        &self,
+        run: &str,
+        options: &MissionRunRetryRequest,
+        principal: Option<&str>,
+    ) -> Result<MissionRunView, FractalError> {
         let source = self.mission_run(run).map_err(internal)?.ok_or_else(|| {
             FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist"))
         })?;
@@ -582,7 +617,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, None, None, None,
-            Some(RunCreationSource::Retry(&source, options)), None,
+            Some(RunCreationSource::Retry(&source, options)), None, principal,
         )
     }
 
@@ -598,7 +633,30 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, FractalError> {
-        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None, None)
+    }
+
+    /// Explicit program-child publication uses the ordinary writer fence, but never adopts
+    /// another creation merely because its public name matches.
+    pub fn create_named_program_mission_run(
+        &self,
+        request: &MissionRunRequest,
+        child: ChildMissionContext,
+        run_id: &str,
+        report_to: Option<&str>,
+        resource: Option<(&resource_membership::Grant, &resource_membership::Owner)>,
+    ) -> Result<MissionRunView, FractalError> {
+        let subject = if run_id.starts_with("mission-run/") {
+            run_id.to_owned()
+        } else {
+            format!("mission-run/{run_id}")
+        };
+        crate::declaration_syntax::validate_full_subject(&subject)?;
+        if let Some(report_to) = report_to {
+            crate::mission::validate_report_to(report_to)?;
+        }
+        self.create_mission_run_context(request, Some(child), Some(&subject), None,
+            Some(RunCreationSource::NamedProgram { report_to, resource }), None, None)
     }
 
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
@@ -611,7 +669,7 @@ impl Store {
         workspace_declaration: MissionWorkspaceDeclaration,
     ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref,
-            Some(RunCreationSource::Declaration(workspace_declaration)), None)
+            Some(RunCreationSource::Declaration(workspace_declaration)), None, None)
     }
 
     /// Complete an authorized revision cutover inside its approval transaction.
@@ -691,6 +749,7 @@ impl Store {
                 default_selector: selector.as_deref()
                     .map(serde_json::from_str).transpose().map_err(internal)?,
                 started_by: starter.clone(),
+                system_parent_run: Some(source.subject.clone()),
             })
         }).transpose()?;
         let request = MissionRunRequest {
@@ -705,7 +764,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, child, None, None,
-            Some(RunCreationSource::Supersession(source, publication)), Some(transaction),
+            Some(RunCreationSource::Supersession(source, publication)), Some(transaction), None,
         )
     }
 
@@ -717,11 +776,22 @@ impl Store {
         latest_ref: Option<(&str, &str)>,
         source: Option<RunCreationSource<'_>>,
         provided_transaction: Option<&Transaction<'_>>,
+        principal: Option<&str>,
     ) -> Result<MissionRunView, FractalError> {
+        let explicit_program_id = matches!(&source, Some(RunCreationSource::NamedProgram { .. }));
+        let report_to = match &source {
+            Some(RunCreationSource::NamedProgram { report_to, .. }) => *report_to,
+            _ => None,
+        };
+        let resource = match &source {
+            Some(RunCreationSource::NamedProgram { resource, .. }) => *resource,
+            _ => None,
+        };
         let (retry, supersession, workspace_declaration) = match source {
             Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
             Some(RunCreationSource::Supersession(source, publication)) => (None, Some((source, publication)), None),
             Some(RunCreationSource::Declaration(declaration)) => (None, None, Some(declaration)),
+            Some(RunCreationSource::NamedProgram { .. }) => (None, None, None),
             None => (None, None, None),
         };
         let mission_identity = match provided_transaction {
@@ -758,6 +828,12 @@ impl Store {
                 "default_selector": child.default_selector,
             })),
         });
+        if explicit_program_id {
+            request_identity["public_subject"] = json!(occurrence_subject);
+            if let Some(report_to) = report_to {
+                request_identity["report_to"] = json!(report_to);
+            }
+        }
         if let Some((source, options)) = retry {
             request_identity["retry"] = json!((&source.subject, options));
         }
@@ -785,6 +861,19 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
+            if explicit_program_id {
+                let stored_hash: Option<String> = transaction.query_row(
+                    "SELECT r.request_hash FROM mission_run_requests r JOIN idempotency i
+                     ON i.operation_id=r.operation_id
+                     WHERE r.operation_id=?1 AND json_extract(i.response,'$.subject')=?2",
+                    params![opaque_cache_key(&request.idempotency_key), subject],
+                    |row| row.get(0),
+                ).optional().map_err(internal)?;
+                if stored_hash.as_deref() != Some(request_hash.as_str()) {
+                    return Err(FractalError::new("child-conflict",
+                        format!("public child `{subject}` belongs to a different creation contract")));
+                }
+            }
             let view = mission_run_view_tx(transaction, &run).map_err(internal)?;
             return Ok(view);
         }
@@ -807,6 +896,12 @@ impl Store {
             }
             let view = serde_json::from_str(&response).map_err(internal)?;
             return Ok(view);
+        }
+        // A public name and its custody become visible in the same owner-fenced commit.
+        // Conflicts/replays above never add custody, and any later refusal rolls it back.
+        if let Some((grant, owner)) = resource {
+            self.attach_resource_child_tx(transaction, grant, owner, &subject)
+                .map_err(smallclaims::error::typed)?;
         }
         stages.enter("admission");
         owned_sets::guard_mission_start(transaction, mission_id)?;
@@ -944,8 +1039,18 @@ impl Store {
             "person",
         );
         // Retrying preserves the requester's semantic binding but authenticates the retry author.
+        let initiating_principal = if principal.is_some() {
+            resolve_initiating_principal_tx(transaction, principal)?
+        } else if let Some((source, _)) = supersession {
+            initiating_principal_tx(transaction, &source.subject)?
+        } else if let Some(parent) = child.as_ref().and_then(|child| child.system_parent_run.as_deref()) {
+            initiating_principal_tx(transaction, parent)?
+        } else {
+            None
+        };
         let starter = retry.map(|(_, options)| options.actor.clone())
             .or_else(|| child.as_ref().and_then(|child| child.started_by.clone()))
+            .or_else(|| initiating_principal.clone())
             .unwrap_or_else(|| requester.clone());
         let mode = request.mode.as_deref().unwrap_or("run");
         if !matches!(mode, "run" | "eval") {
@@ -1077,6 +1182,9 @@ impl Store {
             }
         });
         let mut body = body;
+        if let Some(principal) = initiating_principal {
+            body["fields"]["initiating_principal"] = json!(principal);
+        }
         let workspace_declaration = match workspace_declaration {
             Some(declaration) => Some(declaration),
             None => match retry.map(|(source, _)| source).or_else(|| supersession.map(|(source, _)| source)) {
@@ -1087,7 +1195,7 @@ impl Store {
         if let Some(declaration) = workspace_declaration {
             body["fields"]["workspace_declaration"] = serde_json::to_value(declaration).map_err(internal)?;
         }
-        add_run_report_fields(&mut body, &mission, None, false);
+        add_run_report_fields(&mut body, &mission, report_to, false);
         append_receipt_claim_tx(
             transaction,
             &self.origin,

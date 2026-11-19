@@ -113,6 +113,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             None
         };
+        if resource_lanes::request(&prepared.launch_member)?.is_some() {
+            resource_lanes::set_authority_endpoint(&mut prepared.launch_member.environment, &self.endpoint);
+        }
         let id = uuid::Uuid::now_v7().to_string();
         prepared
             .launch_member
@@ -285,10 +288,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .map(|claim| claim.id);
                 }
                 backend_entered = true;
+                let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
-                    runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, &prepared.member.launch, Some(&operation), &guard)?;
                 } else {
-                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                    runtime.start_guarded(&prepared.launch_member, Some(&operation), &guard)?;
                 }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),

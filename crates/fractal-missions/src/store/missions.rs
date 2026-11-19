@@ -252,6 +252,7 @@ fn child_context(
         parent_step_run: normalize_step_run(parent_step_run),
         default_selector,
         started_by,
+        system_parent_run: Some(parent.subject.clone()),
     }
 }
 
@@ -1661,6 +1662,15 @@ pub trait MissionsStore {
             parent: &MissionRunView,
             parent_step_run: &str,
         ) -> Result<MissionRunView, FractalError>;
+    fn create_named_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+            run_id: &str,
+            report_to: Option<&str>,
+            resource: Option<(&fractal_store::store::resource_membership::Grant, &fractal_store::store::resource_membership::Owner)>,
+        ) -> Result<MissionRunView, FractalError>;
     /// An occurrence belongs to its schedule, regardless of the requesting member or revision.
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String;
     fn create_scheduled_mission_run(
@@ -3043,6 +3053,24 @@ impl MissionsStore for Store {
         )
     }
 
+    fn create_named_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+            run_id: &str,
+            report_to: Option<&str>,
+            resource: Option<(&fractal_store::store::resource_membership::Grant, &fractal_store::store::resource_membership::Owner)>,
+        ) -> Result<MissionRunView, FractalError> {
+        self.create_named_program_mission_run(
+            request,
+            child_context(parent, parent_step_run, None, Some(parent.subject.clone())),
+            run_id,
+            report_to,
+            resource,
+        )
+    }
+
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String {
         format!(
             "mission-run/{}",
@@ -3074,6 +3102,7 @@ impl MissionsStore for Store {
             parent_step_run: normalize_step_run(schedule),
             default_selector: None,
             started_by: None,
+            system_parent_run: Some(parent.subject.clone()),
         });
         self.create_declared_workspace_mission_run(request, child, Some(&subject), None,
             fractal_store::store::missions::MissionWorkspaceDeclaration {

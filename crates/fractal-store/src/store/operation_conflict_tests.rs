@@ -701,6 +701,7 @@ mission "pending-conflict" state="ready" {
             root_run_id: parent.id.clone(),
             parent_step_run: parent.steps[0].subject.clone(),
             default_selector: None, started_by: Some(parent.subject.clone()),
+            system_parent_run: Some(parent.subject.clone()),
         });
         store.create_mission_run_inner(&crate::model::MissionRunRequest {
             mission: "pending-conflict".into(), revision: None, workspace: "/tmp".into(),

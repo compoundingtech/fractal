@@ -42,6 +42,37 @@ pub struct LaneRequest {
     pub disk: Option<DiskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io: Option<IoClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_estimate: Option<fractal_runtime::ResourceProfileEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+}
+
+/// Historical tuple policies remain authoritative. Keyed policy identity deliberately excludes
+/// the immutable estimate carried by each membership.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(untagged)]
+enum InstalledPolicy {
+    Keyed {
+        version: u32,
+        #[serde(rename = "maxMembers")]
+        max_members: u32,
+        profile: String,
+        coverage: Coverage,
+    },
+    Declared((u32, Option<Capacity>, Coverage)),
+}
+
+impl InstalledPolicy {
+    fn for_request(request: &LaneRequest) -> Self {
+        match &request.profile {
+            Some(profile) => Self::Keyed { version: 1, max_members: request.max_members,
+                profile: profile.clone(), coverage: request.coverage },
+            None => Self::Declared((request.max_members, request.capacity, request.coverage)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -72,6 +103,7 @@ pub enum RefusalCode {
     Retiring,
     Uncertain,
     InvalidState,
+    UnauthorizedLanding,
 }
 
 impl RefusalCode {
@@ -87,6 +119,7 @@ impl RefusalCode {
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+            Self::UnauthorizedLanding => "unauthorized-landing",
         }
     }
 }
@@ -126,6 +159,7 @@ pub struct Fit {
     /// Fresh mount observations for queued predecessors, keyed by reservation path.
     pub disk_mounts: BTreeMap<String, DiskFit>,
     pub heavy_io_slots: Option<u32>,
+    pub landing: fractal_runtime::host::LandingPolicy,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -281,7 +315,14 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         rusqlite::params![request.host,request.id], |row| row.get(0))?;
     let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
     let outside_free = holder_free.saturating_sub(fit.outside_bytes);
-    let free = outside_free.saturating_sub(fit.reserve_bytes);
+    let landing_reserve = if request.class == RequestClass::Landing || fit.landing.memory_bytes == 0 { 0 } else {
+        let landing_held: u64 = connection.query_row("SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
+            WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')
+            AND json_extract(body,'$.request.class')='landing'",
+            rusqlite::params![request.host,request.id], |row| row.get(0))?;
+        fit.landing.memory_bytes.saturating_sub(landing_held)
+    };
+    let free = outside_free.saturating_sub(fit.reserve_bytes).saturating_sub(landing_reserve);
     if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
         return Ok(Some((BlockedBy::Holder, "holder footprint prevents admission".into())));
     }
@@ -293,16 +334,25 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         }));
     }
     if request.capacity.is_some_and(|capacity| capacity.memory > free) {
-        return Ok(Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes))));
+        let reason = if landing_reserve == 0 {
+            format!("host reserve prevents admission: {} bytes", fit.reserve_bytes)
+        } else {
+            format!("host reserve prevents admission: {} bytes; landing reserve: {landing_reserve} bytes", fit.reserve_bytes)
+        };
+        return Ok(Some((BlockedBy::Reserve, reason)));
     }
     let mut disk_held = 0_u64;
     let mut io_held = 0_u32;
+    let mut landing_io_held = 0_u32;
     if request.disk.is_some() || request.io.is_some() {
         let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
             WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
         for body in statement.query_map(rusqlite::params![request.host,request.id], |row| row.get::<_, String>(0))? {
             let holder: Membership = serde_json::from_str(&body?)?;
             if holder.request.io == Some(IoClass::Heavy) { io_held = io_held.saturating_add(1); }
+            if holder.request.io == Some(IoClass::Heavy) && holder.request.class == RequestClass::Landing {
+                landing_io_held = landing_io_held.saturating_add(1);
+            }
             if let (Some(disk), Some(mount)) = (&holder.request.disk, disk_fit)
                 && holder.disk_filesystem == Some(mount.filesystem)
             { disk_held = disk_held.saturating_add(disk.bytes); }
@@ -312,13 +362,25 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         u128::from(mount.available) < u128::from(mount.floor) + u128::from(disk_held) + u128::from(disk.bytes))) {
         return Ok(Some((BlockedBy::Disk, "mount free-space floor or peak disk reservations prevent admission".into())));
     }
-    if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held >= slots) {
+    let io_reserve = if request.class == RequestClass::Landing { 0 }
+        else { fit.landing.heavy_io_slots.saturating_sub(landing_io_held) };
+    if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held.saturating_add(io_reserve) >= slots) {
         return Ok(Some((BlockedBy::Io, "host heavy IO slots occupied".into())));
     }
     Ok(None)
 }
 
 impl Store {
+    /// Seats share ordinary headroom: unused landing room is not available to seat starts/raises.
+    pub fn unused_landing_memory(&self, host: &str, reserved: u64) -> Result<u64> {
+        if reserved == 0 { return Ok(0); }
+        smallclaims::touched::note_read(|| format!("resource-membership/{host}"));
+        let held: u64 = self.readers.get().query_row("SELECT coalesce(sum(memory),0)
+            FROM resource_memberships_v1 WHERE host=?1
+            AND state IN ('admitted','launched','retiring','uncertain')
+            AND json_extract(body,'$.request.class')='landing'", [host], |row| row.get(0))?;
+        Ok(reserved.saturating_sub(held))
+    }
     pub fn resource_membership_record(&self, id: &str, owner: &Owner) -> Result<Membership> {
         let member = read(&self.readers.get(), id)?;
         authorized(&member, owner)?;
@@ -345,6 +407,32 @@ impl Store {
         smallclaims::touched::note_read(|| dependency(&member.request.host, &member.request.name));
         Ok(member)
     }
+    /// Reconciliation reuses the host's first durable estimate, including while queued.
+    pub fn resource_profile_request(&self, id: &str) -> Result<Option<LaneRequest>> {
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT body FROM resource_memberships_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+        body.map(|body| serde_json::from_str::<Membership>(&body).map(|member| member.request))
+            .transpose().map_err(Into::into)
+    }
+
+    /// The parent containment covers every live frozen member, not latest-estimate × slots.
+    pub fn resource_lane_aggregate(&self, host: &str, lane: &str) -> Result<Option<Capacity>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
+            WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
+        let rows = statement.query_map(rusqlite::params![host, lane], |row| row.get::<_, String>(0))?;
+        let mut aggregate: Option<Capacity> = None;
+        for row in rows {
+            let member: Membership = serde_json::from_str(&row?)?;
+            if let Some(capacity) = member.request.capacity {
+                let current = aggregate.get_or_insert(Capacity { cores: 0, memory: 0 });
+                current.cores = current.cores.checked_add(capacity.cores).context("aggregate lane cores overflow")?;
+                current.memory = current.memory.checked_add(capacity.memory).context("aggregate lane memory overflow")?;
+            }
+        }
+        Ok(aggregate)
+    }
+
 
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
@@ -354,12 +442,34 @@ impl Store {
         bodies.into_iter().map(|body| Ok(serde_json::from_str(&body)?)).collect()
     }
 
+    /// Resolve an exact physical root from existing custody, including retired records so that
+    /// callers can refuse stale roots rather than silently selecting another live generation.
+    pub fn resource_membership_for_runtime_root(&self, runtime_id: &str) -> Result<Option<Membership>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT body FROM resource_memberships_v1
+             WHERE EXISTS (SELECT 1 FROM json_each(resource_memberships_v1.body, '$.roots') root
+                           WHERE json_extract(root.value, '$.runtimeId')=?1)
+             LIMIT 2")?;
+        let mut rows = statement.query_map([runtime_id], |row| row.get::<_, String>(0))?;
+        let Some(body) = rows.next().transpose()? else { return Ok(None) };
+        anyhow::ensure!(rows.next().transpose()?.is_none(), "runtime root has ambiguous membership custody");
+        Ok(Some(serde_json::from_str(&body)?))
+    }
+
     pub fn attach_resource_child(&self, grant: &Grant, owner: &Owner, child: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        let mut member = read(&transaction, &grant.membership_id)?;
+        self.attach_resource_child_tx(&transaction, grant, owner, child)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Attach custody in the same writer transaction that publishes a named child.
+    pub fn attach_resource_child_tx(&self, transaction: &Transaction<'_>, grant: &Grant, owner: &Owner, child: &str) -> Result<()> {
+        let mut member = read(transaction, &grant.membership_id)?;
         authorized(&member, owner)?;
-        fenced(&transaction, &member, grant)?;
+        fenced(transaction, &member, grant)?;
         anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched"), "resource scope is closing");
         if member.child_runs.iter().any(|run| run == child) { return Ok(()); }
         let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1)",
@@ -370,7 +480,6 @@ impl Store {
         // events wake readers; emitting a lane event here self-wakes a capacity-refused parent.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h32081bb17f3d owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
             rusqlite::params![member.request.id,serde_json::to_string(&member)?])?;
-        transaction.commit()?;
         Ok(())
     }
 
@@ -491,26 +600,49 @@ impl Store {
         Ok(uncertain)
     }
 
+    /// Resolve authority from native ownership facts, never request environment or class labels.
+    fn resource_owner_actor(&self, owner: &Owner) -> Result<Option<String>> {
+        if let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) {
+            let receipts = self.invocation_receipts(invocation)?;
+            let Some(receipt) = receipts.last() else { return Ok(None); };
+            let owns = match (&receipt.owner_run, &receipt.owner_step, receipt.owner_attempt) {
+                (Some(run), Some(step), Some(attempt)) =>
+                    *run == owner.run && *step == owner.step && attempt == owner.attempt,
+                (None, None, None) => owner.run == invocation && owner.step == invocation && owner.attempt == 1,
+                _ => false,
+            };
+            return Ok(owns.then(|| receipt.agent.clone()));
+        }
+        if owner.run.starts_with("mission-run/") {
+            return Ok(self.mission_run_initiating_principal(&owner.run)?);
+        }
+        Ok(owner.run.starts_with("person/").then(|| owner.run.clone()))
+    }
+
     pub fn request_resource_membership(&self, request: &LaneRequest, fit: Fit, now_ms: u64) -> Result<Admission> {
         anyhow::ensure!(!request.id.is_empty() && !request.name.is_empty() && !request.host.is_empty(), "empty resource identity");
         anyhow::ensure!(request.host == self.origin, "only the execution host may grant resource membership");
         anyhow::ensure!(request.max_members > 0, "maxMembers must be positive");
         anyhow::ensure!(!request.owner.run.is_empty() && !request.owner.step.is_empty() && request.owner.attempt > 0, "resource execution owner required");
+        let landing_authorized = request.class != RequestClass::Landing
+            || self.resource_owner_actor(&request.owner)?.is_some_and(|actor| fit.landing.allowed_actors.contains(&actor));
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
-            let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
+            let expected = InstalledPolicy::for_request(request);
+            let policy = serde_json::to_string(&expected)?;
             let installed: Option<String> = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                 rusqlite::params![request.host,request.name], |row| row.get(0)).optional()?;
-            if let Some(installed) = installed.filter(|installed| *installed != policy) {
-                let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
-                anyhow::ensure!(previous == (request.max_members, None, request.coverage),
-                    "resource lane policy differs from host-installed policy");
-                // Earlier writers installed profile-less policies. Define the missing profile
-                // without changing their custody; resource_blocking drains those holders first.
+            if let Some(installed) = installed {
+                let previous: InstalledPolicy = serde_json::from_str(&installed)?;
+                if previous != expected {
+                    anyhow::ensure!(previous == InstalledPolicy::Declared((request.max_members, None, request.coverage)),
+                        "resource lane policy differs from host-installed policy");
+                    // Only the historical profile-less policy may acquire its first footprint.
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                     rusqlite::params![request.host,request.name])?;
+                }
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
                 rusqlite::params![request.host,request.name,policy])?;
@@ -536,7 +668,9 @@ impl Store {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let (queue_elapsed, uncertain) = self.resource_admission_elapsed(&request.id, member.queued_at, now_ms);
         member.clock_uncertain |= uncertain || member.clock_epoch != epoch;
-        let refused = if request.capacity.is_none() {
+        let refused = if !landing_authorized {
+            Some((RefusalCode::UnauthorizedLanding, "landing admission requires an actor authorized by this host's finite_resources.landing.allowedActors".to_owned()))
+        } else if request.capacity.is_none() {
             Some((RefusalCode::MissingProfile, "finite execution requires an explicit resource profile".to_owned()))
         } else if request.coverage == Coverage::Enforced && !cfg!(target_os = "linux") {
             Some((RefusalCode::UnsupportedCoverage, "whole-tree resource enforcement requires Linux".to_owned()))
@@ -569,7 +703,7 @@ impl Store {
                 let earlier: Membership = serde_json::from_str(&body?)?;
                 if earlier.request.id == request.id { break; }
                 let (elapsed, uncertain) = self.resource_admission_elapsed(&earlier.request.id, earlier.queued_at, now_ms);
-                if earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
+                if request.class == RequestClass::Landing || earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
                     predecessor = Some((BlockedBy::Fifo, format!("class or aged predecessor: {}", earlier.request.id)));
                     break;
                 }
@@ -797,6 +931,7 @@ impl Store {
         let mut empty = true;
         let mut uncertain = false;
         let mut retirement_errors = Vec::new();
+        let mut retired_roots = Vec::new();
         for child in &member.child_runs {
             smallclaims::touched::note_read(|| child.clone());
             let status = self.readers.get().query_row("SELECT status FROM mission_runs WHERE id=?1",
@@ -814,10 +949,13 @@ impl Store {
         }
         for root in &member.roots {
             if let Some(execution) = &root.execution {
-                if let Err(error) = self.retire_resource_root(grant, runtime, &root.runtime_id, &execution.generation_id) {
-                    empty = false;
-                    uncertain = true;
-                    retirement_errors.push(format!("{}: {error:#}", root.runtime_id));
+                match self.retire_resource_root(grant, runtime, &root.runtime_id, &execution.generation_id) {
+                    Ok(generation) => retired_roots.push((root, generation)),
+                    Err(error) => {
+                        empty = false;
+                        uncertain = true;
+                        retirement_errors.push(format!("{}: {error:#}", root.runtime_id));
+                    }
                 }
             } else {
                 empty = false; // A prepared generation with unknown launch outcome retains custody.
@@ -825,20 +963,40 @@ impl Store {
             }
         }
         let teardown_error = (!retirement_errors.is_empty()).then(|| retirement_errors.join("; "));
-        self.update_resource_membership(grant, |member| {
-            if empty { member.state = "retired".into(); member.retired_at = Some(now_ms); member.reason = "execution tree confirmed empty".into(); }
-            else if uncertain { member.state = "uncertain".into(); member.reason = teardown_error.clone()
-                .unwrap_or_else(|| "execution retirement unconfirmed; custody retained".into()); }
-            else { member.state = "retiring".into(); member.reason = "awaiting linked child termination; custody retained".into(); }
-            Ok(())
-        })?;
+        // Membership retirement and its existing terminal receipts commit together. Restart
+        // cannot publish a retired membership while losing its immutable command binding.
+        let mut connection = self.connection.write();
+        let tx = connection.transaction()?;
+        let mut current = read(&tx, &grant.membership_id)?;
+        fenced(&tx, &current, grant)?;
+        if current.state == "retired" { return Ok(true); }
+        let previous = current.state.clone();
+        if empty {
+            current.state = "retired".into();
+            current.retired_at = Some(now_ms);
+            current.reason = "execution tree confirmed empty".into();
+        } else if uncertain {
+            current.state = "uncertain".into();
+            current.reason = teardown_error.clone().unwrap_or_else(|| "execution retirement unconfirmed; custody retained".into());
+        } else {
+            current.state = "retiring".into();
+            current.reason = "awaiting linked child termination; custody retained".into();
+        }
+        write(&tx, &current)?;
+        if empty && (current.request.id.starts_with("dsl:") || current.request.id.starts_with("program:")) {
+            for (root, generation) in retired_roots {
+                super::resource_exec_receipts::append_root_tx(&tx, &self.origin, &current, root, &generation)?;
+            }
+        }
+        tx.commit()?;
+        self.observe_resource_transition(&connection, &current, Some(&previous), now_ms, false);
         if let Some(error) = teardown_error { anyhow::bail!("resource tree retirement failed: {error}"); }
         Ok(empty)
     }
 
-    fn retire_resource_root(&self, grant: &Grant, runtime: &ExecRuntime, id: &str, generation: &str) -> Result<()> {
+    fn retire_resource_root(&self, grant: &Grant, runtime: &ExecRuntime, id: &str, generation: &str) -> Result<ExecGeneration> {
         match runtime.retire_if(id, generation) {
-            Ok(_) => Ok(()),
+            Ok(execution) => Ok(execution),
             Err(error) => {
                 self.update_resource_membership(grant, |member| {
                     member.state = "uncertain".into();
@@ -871,11 +1029,173 @@ mod tests {
         LaneRequest { id: id.into(), name: "executor/activation".into(), host: "host-a".into(),
             max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: RequestClass::Agent, disk: None, io: None,
+            profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: format!("mission-run/{id}"), step: format!("step-run/{id}"),
                 attempt: 1, invocation: Some(format!("invocation/{id}")) } }
     }
     fn test_fit() -> Fit {
-        Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
+        Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }),
+            landing: fractal_runtime::host::LandingPolicy {
+                allowed_actors: BTreeSet::from(["person/operator".into()]), ..Default::default()
+            }, ..Fit::default() }
+    }
+    fn landing_request(id: &str, memory: u64) -> LaneRequest {
+        let mut request = sized_request(id, memory);
+        request.class = RequestClass::Landing;
+        request.owner.run = "person/operator".into();
+        request.owner.invocation = None;
+        request
+    }
+
+    #[test]
+    fn exact_runtime_root_lookup_retains_retired_custody_and_refuses_ambiguity() {
+        let store = Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "root-lookup").unwrap();
+        let first = request("dsl-root");
+        let Admission::Admitted(grant) = store.request_resource_membership(&first, test_fit(), 1).unwrap()
+            else { panic!("first root must be admitted") };
+        store.prepare_resource_membership(&grant, "native-runtime").unwrap();
+        let found = store.resource_membership_for_runtime_root("native-runtime").unwrap().unwrap();
+        assert_eq!(found.request.id, first.id);
+        assert!(store.resource_membership_for_runtime_root("native-runtime-suffix").unwrap().is_none());
+        store.update_resource_membership(&grant, |member| {
+            member.state = "retired".into();
+            member.retired_at = Some(2);
+            Ok(())
+        }).unwrap();
+        let retired = store.resource_membership_for_runtime_root("native-runtime").unwrap().unwrap();
+        assert_eq!(retired.state, "retired");
+        let second = request("program-root");
+        let Admission::Admitted(other) = store.request_resource_membership(&second, test_fit(), 3).unwrap()
+            else { panic!("second root must be admitted") };
+        store.prepare_resource_membership(&other, "native-runtime").unwrap();
+        assert!(store.resource_membership_for_runtime_root("native-runtime").is_err());
+    }
+
+    #[test]
+    fn landing_jumps_a_queued_normal_head_and_is_strict_fifo() {
+        let store = fixture();
+        let normal = sized_request("normal", 80);
+        let landing = landing_request("landing", 80);
+        let later = landing_request("later-landing", 20);
+        let blocked = Fit { outside_bytes: 50, ..small_room() };
+        assert!(matches!(store.request_resource_membership(&normal, blocked.clone(), 1).unwrap(), Admission::Queued { .. }));
+        store.advance_resource_admission_clock(&normal.id, BACKFILL_AGING_MS);
+        assert!(matches!(store.request_resource_membership(&landing, blocked.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&later, blocked, 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&later.id, &later.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        assert!(matches!(store.request_resource_membership(&landing, small_room(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 80);
+    }
+
+    #[test]
+    fn landing_reserves_existing_memory_and_io_without_double_charging() {
+        let store = fixture();
+        let mut fit = small_room();
+        fit.heavy_io_slots = Some(2);
+        fit.landing.memory_bytes = 40;
+        fit.landing.heavy_io_slots = 1;
+        let mut normal = sized_request("normal", 60);
+        normal.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&normal, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        let mut extra = sized_request("extra", 1);
+        assert!(matches!(store.request_resource_membership(&extra, fit.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&extra.id, &extra.owner).unwrap().blocked_by, Some(BlockedBy::Reserve));
+        // Isolate the IO reservation from memory headroom.
+        extra.io = Some(IoClass::Heavy);
+        extra.id = "extra-io".into();
+        let mut io_fit = fit.clone();
+        io_fit.room.as_mut().unwrap().memory = 200;
+        assert!(matches!(store.request_resource_membership(&extra, io_fit, 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&extra.id, &extra.owner).unwrap().blocked_by, Some(BlockedBy::Io));
+        let mut landing = landing_request("landing", 40);
+        landing.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&landing, fit.clone(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 100);
+        assert_eq!(store.unused_landing_memory("host-a", 40).unwrap(), 0);
+        assert!(matches!(store.request_resource_membership(&landing_request("full", 1), fit, 5).unwrap(), Admission::Queued { .. }));
+    }
+
+    #[test]
+    fn landing_authorization_is_visible_and_defaults_to_deny() {
+        let store = fixture();
+        let landing = landing_request("unauthorized", 20);
+        let fit = Fit { room: small_room().room, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&landing, fit, 1).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, reason } if reason.contains("allowedActors")));
+        let record = store.resource_membership_record(&landing.id, &landing.owner).unwrap();
+        assert_eq!(record.state, "refused");
+        assert_eq!(record.request.class, RequestClass::Landing);
+        assert!(record.grant.is_none());
+        // An invocation label without native evidence cannot borrow an authorized operator.
+        let mut forged = landing_request("forged", 20);
+        forged.owner.invocation = Some("invocation/forged".into());
+        assert!(matches!(store.request_resource_membership(&forged, small_room(), 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn landing_authorization_uses_the_bound_native_invocation_actor() {
+        use crate::store::invocation_receipts::{append_receipt_tx, native_receipt};
+        use fractal_schema::invocation::InvocationPhase;
+        let store = fixture();
+        let agent = "agent/example/lander";
+        let receipt = native_receipt("landing", agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            InvocationPhase::Started, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        store.connection.batched(|transaction| append_receipt_tx(transaction, store.origin(), &receipt)).unwrap().unwrap();
+        let mut landing = landing_request("native-landing", 20);
+        landing.owner = Owner { run: receipt.invocation_id.clone(), step: receipt.invocation_id.clone(),
+            attempt: 1, invocation: Some(receipt.invocation_id.clone()) };
+        let mut fit = small_room();
+        fit.landing.allowed_actors = BTreeSet::from([agent.into()]);
+        assert!(matches!(store.request_resource_membership(&landing, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        let mut forged = landing.clone();
+        forged.id = "forged-owner".into();
+        forged.owner.step = "other-step".into();
+        assert!(matches!(store.request_resource_membership(&forged, fit, 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn queued_landing_reauthorizes_after_restart_and_on_a_new_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("landing.db");
+        let landing = landing_request("queued-landing", 20);
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            assert!(matches!(store.request_resource_membership(&landing,
+                Fit { outside_bytes: 100, ..small_room() }, 1).unwrap(), Admission::Queued { .. }));
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let denied = Fit { room: small_room().room, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&landing, denied.clone(), 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        let mut retry = landing.clone();
+        retry.id = "denied-retry".into();
+        retry.owner.attempt = 2;
+        assert!(matches!(store.request_resource_membership(&retry, denied, 3).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        retry.id = "authorized-retry".into();
+        assert!(matches!(store.request_resource_membership(&retry, small_room(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.resource_membership_record(&landing.id, &landing.owner).unwrap().refusal_code,
+            Some(RefusalCode::UnauthorizedLanding));
+    }
+
+    #[test]
+    fn zero_landing_reservation_preserves_ordinary_capacity() {
+        let store = fixture();
+        let fit = Fit { room: small_room().room, heavy_io_slots: Some(2), ..Fit::default() };
+        let mut first = sized_request("first", 60);
+        first.io = Some(IoClass::Heavy);
+        let mut second = sized_request("second", 40);
+        second.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&first, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        assert!(matches!(store.request_resource_membership(&second, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 100);
+        assert_eq!(store.unused_landing_memory("host-a", 0).unwrap(), 0);
     }
     fn fixture() -> Store {
         let store = Store::open_memory("host-a").unwrap();
@@ -965,8 +1285,7 @@ mod tests {
     fn backfill_never_crosses_class_priority() {
         for lower in [RequestClass::Check, RequestClass::Agent] {
             let store = fixture();
-            let mut head = sized_request("landing-head", 80);
-            head.class = RequestClass::Landing;
+            let head = landing_request("landing-head", 80);
             let mut later = sized_request("later", 20);
             later.class = lower;
             let fit = Fit { outside_bytes: 50, ..small_room() };
@@ -1057,7 +1376,7 @@ mod tests {
             ("landing-first", RequestClass::Landing), ("landing-next", RequestClass::Landing),
             ("check-next", RequestClass::Check),
         ].into_iter().map(|(id, class)| {
-            let mut candidate = request(id);
+            let mut candidate = if class == RequestClass::Landing { landing_request(id, 80) } else { request(id) };
             candidate.name = id.into();
             candidate.class = class;
             candidate.capacity = Some(Capacity { cores: 1, memory: if class == RequestClass::Landing { 80 } else { 20 } });
@@ -1471,6 +1790,56 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn direct_dsl_and_program_receipts_publish_only_after_whole_tree_retirement() {
+        if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+            eprintln!("native receipt retirement requires a systemd user manager");
+            return;
+        }
+        for kind in ["dsl", "program"] {
+            let store = fixture();
+            let root = tempfile::tempdir().unwrap();
+            let runtime = runtime(root.path());
+            let mut request = request(&format!("{kind}:proof"));
+            request.name = format!("receipt-{}", uuid::Uuid::new_v4().simple());
+            request.coverage = Coverage::Enforced;
+            let grant = grant(&store, &request, 1);
+            let policy = fractal_runtime::FiniteLane { name: request.name.clone(), capacity: request.capacity,
+                member_capacity: request.capacity, memory_high_bytes: None, require_enforced: true };
+            let binding = fractal_runtime::ResourceExecutionBinding {
+                membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                authority_epoch: grant.authority_epoch.clone(),
+            };
+            store.prepare_resource_membership(&grant, "proof-root").unwrap();
+            let argv = vec!["sh".into(), "-c".into(), "sleep 60 & exit 7".into()];
+            let generation = runtime.spawn_in_lane_authorized("proof-root", &fractal_runtime::Launch::Argv(argv.clone()),
+                root.path(), &std::env::vars().collect(), fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &policy, binding: &binding, guard: &|| Ok(()),
+                    authorize: &|execution, release| store.release_resource_payload(&grant, "proof-root", execution, release),
+                }).unwrap();
+            store.launch_resource_membership(&grant, "proof-root", &generation, 2).unwrap();
+            let selector = super::super::resource_exec_receipts::ReceiptQuery {
+                step_run: request.owner.step.clone(), attempt: request.owner.attempt,
+                generation: Some(generation.generation_id.clone()),
+            };
+            assert!(store.resource_exec_receipt(&selector).is_err());
+            let ended = runtime.wait_for_exit("proof-root", &generation.generation_id).unwrap();
+            store.end_resource_execution(&grant, "proof-root", 3).unwrap();
+            assert!(store.resource_exec_receipt(&selector).is_err(), "leader exit is not tree retirement");
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 4).unwrap());
+            assert!(runtime.retired_if("proof-root", &generation.generation_id).unwrap());
+            let receipt = store.resource_exec_receipt(&selector).unwrap();
+            assert_eq!(receipt.fields.argv, argv);
+            assert_eq!(receipt.fields.exit_code, ended.exit_code);
+            assert_eq!(receipt.fields.exit_signal, ended.exit_signal);
+            assert_eq!(receipt.fields.retired_at, 4);
+            assert_eq!(receipt.fields.owner, request.owner);
+            assert!(store.retire_resource_membership(&grant, &request.owner, &runtime, 5).unwrap());
+            assert_eq!(store.resource_exec_receipt(&selector).unwrap().claim_id, receipt.claim_id);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn native_contention_cancel_and_eight_payload_handoffs() {
         if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
             eprintln!("native resource benchmark requires a systemd user manager");
@@ -1483,7 +1852,8 @@ mod tests {
         let mut holder = request("native-holder");
         holder.name = format!("resource-test-{}", uuid::Uuid::new_v4().simple());
         let current = grant(&store, &holder, wall());
-        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity, require_enforced: false };
+        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity,
+            member_capacity: holder.capacity, memory_high_bytes: None, require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: current.membership_id.clone(), generation: current.generation.clone(),

@@ -25,6 +25,115 @@ const reportTo: AgentRef = {
 const meta = { url: 'file:///tree/factory/test/mission.ts' }
 const Change = Schema.Struct({ change: Schema.String })
 
+describe('start-only linked children', () => {
+  it.effect('journals a published handle separately from its terminal await and replays both', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish, release locks, then observe.',
+          reportTo, input: Change, output: Schema.String },
+        ({ change }) => Effect.gen(function* () {
+          const handle = yield* Fractal.start('factory/landing', { change },
+            { id: 'publish', runId: 'pr-42-head12' })
+          const result = yield* Fractal.await(handle)
+          return result.run
+        }),
+      )
+      const resolutions: Record<string, ProgramExit> = {
+        publish: { _tag: 'Success', value: { run: 'mission-run/pr-42-head12' } },
+        'await:mission-run/pr-42-head12': {
+          _tag: 'Success', value: { run: 'mission-run/pr-42-head12', status: 'completed' },
+        },
+      }
+      const host = fakeHost({ child: async (request) => {
+        requests.push(request)
+        return resolutions[request.key]!
+      } })
+      const expected = { _tag: 'Success', value: 'mission-run/pr-42-head12' }
+      expect(yield* start(controller, host)).toEqual(expected)
+      expect(requests).toEqual([
+        { key: 'publish', mode: 'start', runId: 'pr-42-head12',
+          mission: 'factory/landing', input: { change: 'abc' } },
+        { key: 'await:mission-run/pr-42-head12', mode: 'await', run: 'mission-run/pr-42-head12' },
+      ])
+      expect(yield* start(controller, fakeHost({ journal: Object.entries(resolutions) }))).toEqual(expected)
+    }),
+  )
+
+  it.effect('passes an explicit report target when starting a mission by string', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
+          output: Schema.String },
+        ({ change }) => Fractal.start('factory/landing', { change },
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
+      )
+      const exit: ProgramExit = { _tag: 'Success', value: { run: 'mission-run/pr-42-head12' } }
+      const host = fakeHost({ child: async (request) => {
+        requests.push(request)
+        return exit
+      } })
+      expect(yield* start(controller, host)).toEqual({
+        _tag: 'Success', value: 'mission-run/pr-42-head12',
+      })
+      expect(requests).toEqual([
+        { key: 'publish', mode: 'start', runId: 'pr-42-head12',
+          mission: 'factory/landing', input: { change: 'abc' }, reportTo: 'agent/landing-reporter' },
+      ])
+    }),
+  )
+
+  it.effect('encodes typed mission input and passes its explicit report target', () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const landing = Fractal.mission(
+        { meta, id: 'factory/landing', goal: 'Land.', reportTo,
+          input: Schema.Struct({ count: Schema.NumberFromString }), output: Schema.String },
+        ({ count }) => Effect.succeed(String(count)),
+      )
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
+          output: Schema.String },
+        () => Fractal.start(landing, { count: 42 },
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
+      )
+      const exit: ProgramExit = { _tag: 'Success', value: { run: 'mission-run/pr-42-head12' } }
+      const host = fakeHost({ child: async (request) => {
+        requests.push(request)
+        return exit
+      } })
+      expect(yield* start(controller, host)).toEqual({
+        _tag: 'Success', value: 'mission-run/pr-42-head12',
+      })
+      expect(requests).toEqual([
+        { key: 'publish', mode: 'start', runId: 'pr-42-head12',
+          mission: 'factory/landing', input: { count: '42' }, reportTo: 'agent/landing-reporter' },
+      ])
+    }),
+  )
+
+  it.effect('delivers a typed public-ID conflict rather than a child handle', () =>
+    Effect.gen(function* () {
+      const controller = Fractal.mission(
+        { meta, id: 'factory/controller', goal: 'Publish.', reportTo, input: Change,
+          output: Schema.String },
+        ({ change }) => Fractal.start('factory/landing', { change },
+          { id: 'publish', runId: 'pr-42-head12', reportTo: 'agent/landing-reporter' })
+          .pipe(Effect.map((handle) => handle.run)),
+      )
+      const exit: ProgramExit = { _tag: 'Failure', error: {
+        _tag: 'ChildConflict', run: 'mission-run/pr-42-head12',
+        reason: 'different creation contract',
+      } }
+      expect(yield* start(controller, fakeHost({ child: async () => exit }))).toEqual(exit)
+      expect(yield* start(controller, fakeHost({ journal: [['publish', exit]] }))).toEqual(exit)
+    }),
+  )
+})
+
 describe('program replay', () => {
   const effects: string[] = []
   const land = Fractal.mission(
