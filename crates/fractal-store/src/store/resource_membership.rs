@@ -950,6 +950,7 @@ mod tests {
         let later = landing_request("later-landing", 20);
         let blocked = Fit { outside_bytes: 50, ..small_room() };
         assert!(matches!(store.request_resource_membership(&normal, blocked.clone(), 1).unwrap(), Admission::Queued { .. }));
+        store.advance_resource_admission_clock(&normal.id, BACKFILL_AGING_MS);
         assert!(matches!(store.request_resource_membership(&landing, blocked.clone(), 2).unwrap(), Admission::Queued { .. }));
         assert!(matches!(store.request_resource_membership(&later, blocked, 3).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&later.id, &later.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
@@ -1024,6 +1025,33 @@ mod tests {
         forged.owner.step = "other-step".into();
         assert!(matches!(store.request_resource_membership(&forged, fit, 2).unwrap(),
             Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn queued_landing_reauthorizes_after_restart_and_on_a_new_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("landing.db");
+        let landing = landing_request("queued-landing", 20);
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            assert!(matches!(store.request_resource_membership(&landing,
+                Fit { outside_bytes: 100, ..small_room() }, 1).unwrap(), Admission::Queued { .. }));
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let denied = Fit { room: small_room().room, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&landing, denied.clone(), 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        let mut retry = landing.clone();
+        retry.id = "denied-retry".into();
+        retry.owner.attempt = 2;
+        assert!(matches!(store.request_resource_membership(&retry, denied, 3).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        retry.id = "authorized-retry".into();
+        assert!(matches!(store.request_resource_membership(&retry, small_room(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.resource_membership_record(&landing.id, &landing.owner).unwrap().refusal_code,
+            Some(RefusalCode::UnauthorizedLanding));
     }
 
     #[test]

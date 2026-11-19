@@ -339,13 +339,18 @@ mod tests {
                 exec "land" { command "true"; }
             }
         }"#;
-        for (requester, allowed) in [("agent/example/lander", true), ("agent/example/background", false)] {
+        for (requester, allowed, authorize_default) in [
+            (Some("agent/example/lander"), true, false),
+            (Some("agent/example/background"), false, false),
+            (None, false, false),
+            (None, true, true),
+        ] {
             let store = Arc::new(Store::open_memory("node").unwrap());
             apply_source(&store, source, "landing-source");
             store.start_resource_authority("node", "epoch").unwrap();
             let run = store.create_mission_run(&crate::model::MissionRunRequest {
                 mission: "landing".into(), revision: None, workspace: "/work".into(),
-                requester: Some(requester.into()), mode: Some("run".into()),
+                requester: requester.map(str::to_owned), mode: Some("run".into()),
                 inputs: BTreeMap::new(), idempotency_key: "landing-run".into(),
             }).unwrap();
             let intent = crate::graph::parse_intent(source, "node").unwrap();
@@ -355,6 +360,7 @@ mod tests {
             let exec = declarations.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
             assert!(!exec.environment.contains_key("ST_AGENT"));
             assert!(!exec.environment.contains_key("FRACTAL_AGENT"));
+            assert!(!exec.tags.contains_key("st3.agent"));
             let lane = lower_request(spec.resource_lane.as_ref().unwrap(), "landing-exec".into(), Owner {
                 run: run.subject.clone(), step: run.steps[0].subject.clone(),
                 attempt: run.steps[0].attempt, invocation: Some("exec/landing/land".into()),
@@ -362,7 +368,9 @@ mod tests {
             let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
                 .with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
                     landing: fractal_runtime::host::LandingPolicy {
-                        allowed_actors: BTreeSet::from(["agent/example/lander".into()]), ..Default::default()
+                        allowed_actors: BTreeSet::from([if authorize_default {
+                            "person/requester".into()
+                        } else { "agent/example/lander".into() }]), ..Default::default()
                     }, ..Default::default()
                 }));
             let mut fit = reconciler.resource_lane_fit(&lane).unwrap();
@@ -379,6 +387,35 @@ mod tests {
             assert_eq!(record.request.class, fractal_runtime::RequestClass::Landing);
             assert_eq!(record.state, if allowed { "admitted" } else { "refused" });
         }
+    }
+
+    #[test]
+    fn shell_landing_refusal_is_persisted_through_the_real_reconciler() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        store.submit_shell_resource(crate::store::shell_resources::Command {
+            id: "denied-landing".into(),
+            lane: LaneRequest {
+                id: "shell:denied-landing".into(), name: "landing".into(), host: "node".into(), max_members: 1,
+                capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }),
+                class: fractal_runtime::RequestClass::Landing, coverage: Coverage::Logical,
+                disk: None, io: None, admission_timeout_ms: None,
+                owner: Owner { run: "person/operator".into(), step: "shell:denied-landing".into(),
+                    attempt: 1, invocation: Some("shell:denied-landing".into()) },
+            },
+            argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(),
+            timeout_ms: None, parent: None,
+        }, 1).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("denied-landing").unwrap();
+        assert_eq!(execution.state, "refused");
+        assert_eq!(execution.refusal_code, Some(crate::store::resource_membership::RefusalCode::UnauthorizedLanding));
+        assert!(execution.reason.contains("unauthorized-landing"));
+        assert!(execution.started_at.is_none());
+        let record = store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner).unwrap();
+        assert_eq!(record.state, "refused");
+        assert!(record.grant.is_none());
     }
 
     #[test]

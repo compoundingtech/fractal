@@ -3478,7 +3478,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_at", integer()),
             ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
             ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
-                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state", "unauthorized-landing"])),
             ("finite", required_boolean()),
             ("admission_timeout_ms", integer()),
             ("clock_uncertain", required_boolean()),

@@ -21,6 +21,24 @@ describe('scoped native resource lanes', () => {
     }
   }))
 
+  it.effect('decodes unauthorized landing as a typed lane failure, including replay', () => Effect.gen(function* () {
+    const error = { _tag: 'ResourceError', code: 'unauthorized-landing', message: 'Landing actor is not authorized by this host.' }
+    const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('landing', {
+      host: 'executor', class: 'landing',
+    })))
+    const requests: ResourceRequest[] = []
+    const resource = async (request: ResourceRequest): Promise<ProgramExit> => {
+      requests.push(request)
+      return { _tag: 'Failure', error }
+    }
+    const host = fakeHost({ resource })
+    expect(yield* start(program, host)).toEqual({ _tag: 'Failure', error })
+    expect(requests.map((request) => request.operation)).toEqual(['resource.lane.acquire'])
+    expect(requests[0]?.payload).toMatchObject({ name: 'landing', class: 'landing' })
+    expect(yield* start(program, fakeHost({ journal: journalOf(host.recorded), resource }))).toEqual({ _tag: 'Failure', error })
+    expect(requests.map((request) => request.operation)).toEqual(['resource.lane.acquire', 'resource.lane.acquire'])
+  }))
+
   it.effect('acquires and executes through the native boundary, then awaits release', () => Effect.gen(function* () {
     const operations: ResourceRequest[] = []
     const program = Fractal.mission(intent, () => Effect.scoped(Effect.gen(function* () {
