@@ -2020,7 +2020,7 @@ version 2
     let request = MissionRunRequest {
         mission: "inputs".into(),
         revision: None,
-        workspace: ".".into(),
+        workspace: "/tmp".into(),
         requester: Some("person/test".into()),
         mode: None,
         inputs: BTreeMap::from([
@@ -2144,7 +2144,7 @@ version 2
         store.create_mission_run(&MissionRunRequest {
             mission: "pinned".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: None,
             inputs: BTreeMap::from([("source".into(), source)]),
@@ -2191,7 +2191,7 @@ version 2
         .create_mission_run(&MissionRunRequest {
             mission: "parent".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -2203,7 +2203,7 @@ version 2
             &MissionRunRequest {
                 mission: "child".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::from([("message".into(), "hello".into())]),
@@ -2234,7 +2234,7 @@ version 2
         .create_mission_run(&MissionRunRequest {
             mission: original.id,
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::from([("message".into(), "hello".into())]),
@@ -2370,7 +2370,7 @@ fn mission_run_capacity_uses_the_strictest_active_revision() {
             .create_mission_run(&MissionRunRequest {
                 mission: "bounded".into(),
                 revision: Some(first.revision.clone()),
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -2395,7 +2395,7 @@ fn mission_run_capacity_uses_the_strictest_active_revision() {
         .create_mission_run(&MissionRunRequest {
             mission: "bounded".into(),
             revision: Some(second.revision),
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -2417,7 +2417,7 @@ fn mission_run_capacity_uses_the_strictest_active_revision() {
             .create_mission_run(&MissionRunRequest {
                 mission: "unlimited".into(),
                 revision: Some(mission.revision.clone()),
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -11464,7 +11464,7 @@ version 2
         .create_mission_run(&MissionRunRequest {
             mission: "cancel".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: None,
             inputs: BTreeMap::new(),
@@ -11549,7 +11549,7 @@ version 2
             &MissionRunRequest {
                 mission: "cancel-child".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: Some("person/test".into()),
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -12154,7 +12154,7 @@ mission "queue-revision" state="ready" {{
         .create_mission_run(&MissionRunRequest {
             mission: initial.id,
             revision: Some(initial.revision),
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -12242,7 +12242,7 @@ mission "review-current" state="ready" revision-cutover="restart-active" {{
         .create_mission_run(&MissionRunRequest {
             mission: first.id.clone(),
             revision: Some(first.revision),
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -12369,7 +12369,7 @@ mission "asked-again" state="ready" {
         .create_mission_run(&MissionRunRequest {
             mission: "asked-again".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -12456,7 +12456,7 @@ mission "{mission}" state="ready" {{
         .create_mission_run(&MissionRunRequest {
             mission: mission.into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/alex".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -12481,7 +12481,7 @@ mission "typecase" state="ready" {
         .create_mission_run(&MissionRunRequest {
             mission: "typecase".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/alex".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),

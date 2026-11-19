@@ -12,35 +12,31 @@ fn validate_run_workspace(workspace: &std::path::Path) -> Result<(), FractalErro
         "mission-workspace-unavailable",
         format!("cannot inspect mission workspace {}: {error}", workspace.display()),
     );
-    if workspace.components().any(|component| component == Component::ParentDir) {
-        return Err(FractalError::new(
-            "mission-workspace-unavailable",
-            "mission workspace must not contain parent-directory traversal",
-        ));
-    }
     let absolute = if workspace.is_absolute() {
         workspace.to_path_buf()
     } else {
         std::env::current_dir().map_err(&unavailable)?.join(workspace)
     };
-    let mut ancestor = absolute.as_path();
-    let mut missing = Vec::new();
-    let mut resolved = loop {
-        match std::fs::canonicalize(ancestor) {
-            Ok(path) => break path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // A dangling symlink is not an absent directory we can safely append.
-                if std::fs::symlink_metadata(ancestor).is_ok() {
-                    return Err(unavailable(error));
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => { resolved.pop(); }
+            _ => {
+                resolved.push(component);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // Missing descendants are safe to inspect without creating them,
+                        // but a dangling symlink must not hide its unresolved target.
+                        if std::fs::symlink_metadata(&resolved).is_ok() {
+                            return Err(unavailable(error));
+                        }
+                    }
+                    Err(error) => return Err(unavailable(error)),
                 }
-                missing.push(ancestor.file_name().ok_or_else(|| unavailable(error))?);
-                ancestor = ancestor.parent().expect("a path with a filename has a parent");
             }
-            Err(error) => return Err(unavailable(error)),
         }
-    };
-    for component in missing.into_iter().rev() {
-        resolved.push(component);
     }
     for directory in resolved.ancestors() {
         match std::fs::symlink_metadata(directory.join(".git")) {
@@ -103,10 +99,25 @@ mod workspace_tests {
     }
 
     #[test]
-    fn run_scratch_rejects_parent_traversal() {
+    fn run_scratch_resolves_parent_components_without_creating_missing_directories() {
         let root = tempfile::tempdir().unwrap();
-        let error = validate_run_workspace(&root.path().join("missing/../run")).unwrap_err();
-        assert_eq!(error.code, "mission-workspace-unavailable");
+        validate_run_workspace(&root.path().join("missing/../run")).unwrap();
+        assert!(!root.path().join("missing").exists());
+        assert!(!root.path().join("run").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_scratch_cannot_hide_a_checkout_behind_missing_and_parent_components() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let alias = root.path().join("seat");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        let error = validate_run_workspace(&root.path().join("missing/../seat/run")).unwrap_err();
+        assert_eq!(error.code, "mission-workspace-in-worktree");
+        assert!(!root.path().join("missing").exists());
+        assert!(!checkout.join("run").exists());
     }
 }
 

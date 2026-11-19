@@ -8528,11 +8528,12 @@ mission "task" state="ready" {{
             ),
             "running-render-failure",
         );
+        let run_scratch = tempfile::tempdir().unwrap();
         store
             .create_mission_run(&MissionRunRequest {
                 mission: "task".into(),
                 revision: None,
-                workspace: workspace_path.clone(),
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
                 requester: Some("person/test".into()),
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -16032,7 +16033,7 @@ mission "collision" state="ready" {
         let mut request = MissionRunRequest {
             mission: "collision".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -26371,7 +26372,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "resource-input".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::from([("source".into(), "resource/source".into())]),
@@ -26426,7 +26427,7 @@ version 2
         let request = |mission: &str| MissionRunRequest {
             mission: mission.into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -26500,7 +26501,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "restart".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),
