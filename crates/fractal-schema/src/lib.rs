@@ -5530,6 +5530,7 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("step.execution-phase").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
@@ -5572,8 +5573,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "exec_exited_at_unix_ms", "start_operation"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }

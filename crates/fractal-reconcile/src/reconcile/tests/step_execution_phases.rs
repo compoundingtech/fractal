@@ -625,3 +625,55 @@ fn retry_does_not_relabel_a_previous_physical_start_as_current_execution() {
     fixture.at(START + 1_101);
     assert!(fixture.reconciler.expire_native_dispatch_budget(&fixture.view(), TIMEOUT).unwrap());
 }
+
+#[test]
+fn explicit_wait_is_excluded_from_executor_attestation_and_completed_duration() {
+    let fixture = Fixture::new();
+    let (executor, desired, observation) = executor(&fixture, START);
+    let member = desired.member.as_ref().unwrap();
+    executor.record_native_exec_observation(&desired, member, &observation).unwrap();
+    let progress = |clock: &str, at: u128| {
+        fixture.at(at);
+        fixture.store.append_claim(&ClaimInput {
+            subject: fixture.view().subject, kind: "work.progress".into(), actor: None,
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(fixture.view().attempt)),
+                ("clock".into(), json!(clock)),
+                ("wait_until_unix_ms".into(), json!(START + 2_000)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    progress("paused", START + 100);
+    fixture.at(START + 1_500);
+    executor.record_native_exec_observation(&desired, member, &observation).unwrap();
+    assert!(!fixture.timed_out(), "a live declared wait must not attest overrun");
+    assert_eq!(fixture.view().execution_elapsed_ms, 100);
+    assert_eq!(fixture.view().execution_waited_ms, 1_400);
+    progress("running", START + 1_600);
+    fixture.at(START + 1_800);
+    fixture.phase(fixture.view().attempt, "exec-exited", START + 1_800);
+    assert!(!fixture.timed_out(), "completed duration must also exclude declared waits");
+    assert_eq!(fixture.view().execution_elapsed_ms, 300);
+    assert_eq!(fixture.view().execution_waited_ms, 1_500);
+}
+
+#[test]
+fn unresumed_native_wait_expires_and_execution_can_still_time_out() {
+    let fixture = Fixture::new();
+    let (executor, desired, observation) = executor(&fixture, START);
+    executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+    fixture.at(START + 100);
+    fixture.store.append_claim(&ClaimInput {
+        subject: fixture.view().subject, kind: "work.progress".into(), actor: None,
+        fields: BTreeMap::from([
+            ("attempt".into(), json!(fixture.view().attempt)),
+            ("clock".into(), json!("paused")),
+            ("wait_until_unix_ms".into(), json!(START + 1_500)),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    fixture.at(START + 2_401);
+    executor.record_native_exec_observation(&desired, desired.member.as_ref().unwrap(), &observation).unwrap();
+    assert!(fixture.timed_out(), "only the bounded wait is free, not subsequent execution");
+}

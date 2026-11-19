@@ -111,10 +111,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && payload == Some(fractal_runtime::payload_receipt::PayloadState::Running)
                 && let Some(timeout) = view.timeout_ms
             {
-                let deadline = started.saturating_add(u128::from(timeout.saturating_add(view.timeout_extension_ms)));
-                if now_ms() >= deadline {
-                    self.record_step_exec_phase(&view, desired, "execution-timeout", now_ms(), Some(incarnation), None)?;
+                let now = now_ms();
+                let (waited, paused_until) = self.native_exec_wait(&view, started, now)?;
+                let budget = u128::from(timeout.saturating_add(view.timeout_extension_ms));
+                if now.saturating_sub(started).saturating_sub(waited) >= budget {
+                    self.record_step_exec_phase(&view, desired, "execution-timeout", now, Some(incarnation), None)?;
                 } else {
+                    let deadline = paused_until.unwrap_or_else(|| started.saturating_add(budget).saturating_add(waited));
                     self.arm_deadline_at(&format!("native-executor:{}", desired.subject), deadline,
                         crate::reconcile_telemetry::WakeCause::TimerStepTimeout);
                 }
@@ -128,6 +131,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             claim.body["fields"]["exec_exited_at_unix_ms"].as_u64()
                 .is_some_and(|at| u128::from(at) >= started)
         })?.and_then(|claim| claim.body["fields"]["exec_exited_at_unix_ms"].as_u64().map(u128::from)))
+    }
+
+    fn native_exec_wait(&self, view: &StepRunView, started: u128, end: u128) -> Result<(u128, Option<u128>)> {
+        let claims = self.store.claims_for(&view.subject, Some("work.progress"))?;
+        Ok(fractal_store::store::native_execution_wait(claims.iter().map(|claim|
+            (claim.kind.as_str(), &claim.body, claim.accepted_at_unix_ms)), view.attempt, started, end))
     }
 
     pub(super) fn native_step_execs(&self, view: &StepRunView) -> Result<Vec<DesiredSubject>> {
@@ -158,8 +167,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(started) = phase_at(&claims, view.attempt, &desired.subject, "exec-started") else { continue; };
             let ended = phase_at(&claims, view.attempt, &desired.subject, "exec-exited")
                 .or(self.native_exec_payload_exit(&desired.subject, started)?);
-            if ended.is_some_and(|ended| ended.saturating_sub(started) >= u128::from(timeout)) {
-                return Ok(Some(true));
+            if let Some(ended) = ended {
+                let (waited, _) = self.native_exec_wait(view, started, ended)?;
+                if ended.saturating_sub(started).saturating_sub(waited) >= u128::from(timeout) {
+                    return Ok(Some(true));
+                }
             }
             // Absence of an exit on the coordinator is not proof of a live remote process.
             // Only the executor can report that its physical registry is still running.
@@ -234,8 +246,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             if now >= deadline {
                 // Known execution overrun belongs to the execution fault path, not this guard.
                 if view.timeout_ms.is_some() && (timeout_observed(&claims, view, &desired.subject)
-                    || started.zip(exited).is_some_and(|(started, exited)| exited.saturating_sub(started)
-                        >= budget.saturating_add(u128::from(view.timeout_extension_ms)))) {
+                    || if let Some((started, exited)) = started.zip(exited) {
+                        let (waited, _) = self.native_exec_wait(view, started, exited)?;
+                        exited.saturating_sub(started).saturating_sub(waited)
+                            >= budget.saturating_add(u128::from(view.timeout_extension_ms))
+                    } else { false }) {
                     continue;
                 }
                 let reason = format!("dispatch-stalled: `{}` exceeded its {timeout}ms {waiting} budget (overall guard {overall_budget}ms); no execution timeout was observed",

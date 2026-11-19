@@ -509,3 +509,20 @@ after the old build was excused and the cut advanced (`trimmed=false`,
 The shard passed 6,487 tests and failed only the stale seed-34 trim expectation.
 The measured v37 never-trim set is `[34, 179]`; exact per-seed equality,
 old-build-excusal continuation, the three-seed cap and majority coverage remain enforced.
+
+`claims-v38.json` adds the durable `step.execution-phase` kind and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed`.
+Versions 1 through 37 remain frozen. The simulation, diagnostics and audit reports
+select v38. The focused execution-phase corpus regression checks both specs
+against the registry and validates a generated phase input.
+
+The snapshot was derived from v37 and the exact native registry additions without
+building locally. Its authoritative regeneration command is
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v38.json`.
+The schema document is rendered by the separate `schema_markdown` example; neither
+generator uses client-v0 schema inputs or codegen.
+
+Adding kinds shifts the shared seeded schedule. The v37 `[34, 179]` trim baseline
+is retained for hosted characterization, not claimed as a measured v38 result.
+Exact per-seed trim equality, old-build-excusal continuation, the three-seed cap
+and majority trim coverage remain enforced.

@@ -4,6 +4,45 @@ use super::StepTiming;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Declared waits clipped to one physical execution interval. A wait automatically ends
+/// at its declared deadline, so a missing resume cannot stop execution accounting forever.
+pub fn execution_wait<'a>(
+    events: impl Iterator<Item = (&'a str, &'a Value, u128)>,
+    attempt: u32,
+    start: u128,
+    end: u128,
+) -> (u128, Option<u128>) {
+    let mut paused: Option<(u128, u128)> = None;
+    let mut waited = 0_u128;
+    for (kind, body, at) in events {
+        if at > end { continue; }
+        let fields = body.get("fields").unwrap_or(body);
+        if fields["attempt"].as_u64() != Some(u64::from(attempt)) { continue; }
+        if let Some((began, deadline)) = paused
+            && at >= deadline
+        {
+            waited = waited.saturating_add(deadline.saturating_sub(began.max(start)));
+            paused = None;
+        }
+        let clock = (kind == "work.progress").then(|| fields["clock"].as_str()).flatten();
+        let closes = matches!(kind, "work.claimed" | "work.submitted" | "work.failed" | "work.released")
+            || clock == Some("running") || clock == Some("paused");
+        if closes && let Some((began, deadline)) = paused.take() {
+            waited = waited.saturating_add(at.min(deadline).saturating_sub(began.max(start)));
+        }
+        if clock == Some("paused")
+            && let Some(deadline) = fields["wait_until_unix_ms"].as_u64().map(u128::from)
+            && deadline > at
+        {
+            paused = Some((at, deadline));
+        }
+    }
+    if let Some((began, deadline)) = paused {
+        waited = waited.saturating_add(end.min(deadline).saturating_sub(began.max(start)));
+    }
+    (waited, paused.filter(|(_, deadline)| *deadline > end).map(|(_, deadline)| deadline))
+}
+
 pub(super) fn fold(events: &[(String, Value, u128)], attempt: u32, snapshot: u128,
     active: bool) -> Option<StepTiming> {
     let mut execs = BTreeMap::<&str, (Option<u128>, Option<u128>)>::new();
@@ -51,7 +90,9 @@ pub(super) fn fold(events: &[(String, Value, u128)], attempt: u32, snapshot: u12
     let closing_boundary = |start: u128| {
         closures.get(closures.partition_point(|at| *at < start)).copied()
     };
-    let started = if active { execs.values().filter_map(|(start, end)|
+    let (_, paused_until) = execution_wait(events.iter().map(|(kind, body, at)|
+        (kind.as_str(), body, *at)), attempt, 0, snapshot);
+    let started = if active && paused_until.is_none() { execs.values().filter_map(|(start, end)|
         start.filter(|start| end.is_none() && closing_boundary(*start).is_none())).min() } else { None };
     let mut intervals = execs.values().filter_map(|(start, end)| {
         let start = (*start)?;
@@ -64,12 +105,17 @@ pub(super) fn fold(events: &[(String, Value, u128)], attempt: u32, snapshot: u12
     }).collect::<Vec<_>>();
     intervals.sort_unstable();
     let mut elapsed: u128 = 0;
+    let mut waited = 0_u128;
     let mut through = 0;
     for (start, end) in intervals {
-        elapsed = elapsed.saturating_add(end.saturating_sub(start.max(through)));
+        let start = start.max(through);
+        let (interval_waited, _) = execution_wait(events.iter().map(|(kind, body, at)|
+            (kind.as_str(), body, *at)), attempt, start, end);
+        waited = waited.saturating_add(interval_waited);
+        elapsed = elapsed.saturating_add(end.saturating_sub(start).saturating_sub(interval_waited));
         through = through.max(end);
     }
-    Some(StepTiming { started, elapsed, paused_until: None, waited: 0 })
+    Some(StepTiming { started, elapsed, paused_until: paused_until.filter(|_| active), waited })
 }
 
 #[cfg(test)]
@@ -178,5 +224,45 @@ mod tests {
         let timing = fold(&events, 1, 10_000, false).unwrap();
         assert_eq!(timing.elapsed, 50);
         assert_eq!(timing.started, None);
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn progress(clock: &str, at: u128, deadline: u64) -> (String, Value, u128) {
+        ("work.progress".into(), json!({"fields": {
+            "attempt": 1, "clock": clock, "wait_until_unix_ms": deadline
+        }}), at)
+    }
+
+    #[test]
+    fn native_waits_pause_live_and_completed_execution_without_charging_dispatch() {
+        let mut events = vec![
+            ("step.execution-phase".into(), json!({"fields": {
+                "attempt": 1, "exec": "exec/test", "phase": "exec-started", "at_unix_ms": 100
+            }}), 100),
+            progress("paused", 200, 2_000),
+        ];
+        let live = fold(&events, 1, 1_500, true).unwrap();
+        assert_eq!((live.elapsed, live.waited, live.started, live.paused_until),
+            (100, 1_300, None, Some(2_000)));
+        events.push(progress("running", 1_700, 0));
+        events.push(("step.execution-phase".into(), json!({"fields": {
+            "attempt": 1, "exec": "exec/test", "phase": "exec-exited", "at_unix_ms": 1_900
+        }}), 1_950));
+        let completed = fold(&events, 1, 5_000, false).unwrap();
+        assert_eq!((completed.elapsed, completed.waited), (300, 1_500));
+    }
+
+    #[test]
+    fn missing_resume_restarts_clock_at_bounded_wait_deadline() {
+        let events = vec![progress("paused", 50, 500)];
+        let fold_wait = |start, end| execution_wait(events.iter().map(|(kind, body, at)|
+            (kind.as_str(), body, *at)), 1, start, end);
+        assert_eq!(fold_wait(100, 400), (300, Some(500)));
+        assert_eq!(fold_wait(100, 1_000), (400, None));
     }
 }

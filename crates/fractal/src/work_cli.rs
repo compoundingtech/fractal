@@ -966,19 +966,22 @@ mod wait_lease_tests {
             assert!(query.contains("order=asc"));
             let second = query.contains("after_index=7");
             Json(json!({
-                "claims": [{
-                    "id": if second { "claim-current" } else { "claim-old" },
-                    "store_index": if second { 8 } else { 7 }, "batch_id": "batch-test",
-                    "subject": "step-run/test/work", "kind": "step.execution-phase",
-                    "origin": "test", "actor": null, "predecessors": [],
-                    "accepted_at_unix_ms": 2000,
-                    "body": {"fields": {
-                        "attempt": if second { 2 } else { 1 },
-                        "phase": if second { "exec-started" } else { "dispatched" },
-                        "exec": "exec/test", "host": "host/test", "at_unix_ms": 1000
-                    }}
-                }],
-                "next_cursor": if second { None } else { Some(7) },
+                "api_version": "st3.v1",
+                "value": {
+                    "claims": [{
+                        "id": if second { "claim-current" } else { "claim-old" },
+                        "store_index": if second { 8 } else { 7 }, "batch_id": "batch-test",
+                        "subject": "step-run/test/work", "kind": "step.execution-phase",
+                        "origin": "test", "actor": null, "predecessors": [],
+                        "accepted_at_unix_ms": 2000,
+                        "body": {"fields": {
+                            "attempt": if second { 2 } else { 1 },
+                            "phase": if second { "exec-started" } else { "dispatched" },
+                            "exec": "exec/test", "host": "host/test", "at_unix_ms": 1000
+                        }}
+                    }],
+                    "next_cursor": if second { None } else { Some(7) },
+                },
             }))
         });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1030,7 +1033,10 @@ mod wait_lease_tests {
             recorded.lock().unwrap().push(uri.path().to_owned());
             async move {
                 if uri.path() == "/v1/claims" {
-                    return (StatusCode::OK, Json(json!({"claims": [], "next_cursor": null})));
+                    return (StatusCode::OK, Json(json!({
+                        "api_version": "st3.v1",
+                        "value": {"claims": [], "next_cursor": null}
+                    })));
                 }
                 if fractal_client::fabric::FabricEndpoint::validate_path(uri.path()).is_err() {
                     return (StatusCode::FORBIDDEN, Json(json!({"error": "client routes only"})));

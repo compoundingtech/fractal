@@ -2220,6 +2220,10 @@ its exit claim. Reconciliation checks that receipt before attesting an overrun;
 a wrapper waiting to deliver a completed result is not a running payload.
 A missing legacy receipt or exit timestamp remains unknown, never observation time.
 Result delivery does not lengthen a completed execution interval.
+Declared `work wait` intervals are excluded from both executor overrun evidence
+and known-exit duration, and appear as waited time in the native display clock.
+`work resume` ends the pause; otherwise its declared deadline resumes accounting
+automatically. The overall guard below remains wall-clock bounded, including waits.
 
 Native declared execs have a dispatch/replication/admission budget equal to the
 step's declared timeout and a separate result-replication budget of the same size.
