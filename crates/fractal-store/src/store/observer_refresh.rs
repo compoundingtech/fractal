@@ -63,7 +63,7 @@ pub(super) fn append_observer_refresh_tx(
 pub fn pending_attempt(connection: &Connection, observer: &str) -> rusqlite::Result<Option<String>> {
     connection
         .query_row(
-            &pending_requests_sql(true),
+            /* sqlite-large-value: allow-for-now lv-hf930998a9bf2 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &pending_requests_sql(true),
             params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)],
             |row| row.get(0),
         )
@@ -94,7 +94,7 @@ pub fn coalesced_attempt(connection: &Connection, observer: &str, attempt: &str)
 /// webhook refresh is no longer pending once a later webhook refresh from the same member is
 /// answered.
 fn pending_requests(connection: &Connection, observer: &str) -> rusqlite::Result<Vec<(String, Option<String>)>> {
-    let mut statement = connection.prepare(&pending_requests_sql(false))?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h76ad4685e6b9 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &pending_requests_sql(false))?;
     statement
         .query_map(params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)], |row| {
             Ok((row.get(0)?, row.get(1)?))

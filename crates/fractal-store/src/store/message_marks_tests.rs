@@ -594,14 +594,14 @@ fn freshness_membership_fixture() -> Store {
             ("agent/invalid", Some(r#"{"host":"node","kind":"future-kind"}"#)),
         ] {
             connection.execute(
-                "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+                /* sqlite-large-value: allow-for-now lv-hb36605174032 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
                  SELECT ?1,'agent',revision,claim_id,'{}',?2 FROM desired WHERE subject=?3",
                 params![subject, member, RECIPIENT],
             ).unwrap();
         }
         // Authorization has never imposed a subject-prefix or kind restriction.
         connection.execute(
-            "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+            /* sqlite-large-value: allow-for-now lv-h589820728542 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
              SELECT 'person/avery','person',revision,claim_id,body,member
              FROM desired WHERE subject=?1", [RECIPIENT],
         ).unwrap();
@@ -648,7 +648,7 @@ fn freshness_membership_cost_does_not_scale_with_unrequested_declarations() {
     let store = freshness_membership_fixture();
     let cost = || {
         let connection = store.readers.get();
-        let mut statement = connection.prepare(Store::HOSTED_SUBJECTS_SQL).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h69df54db0d63 owner=fractal_store::store::message_marks_tests TODO=trace-statement-and-value-representation */ Store::HOSTED_SUBJECTS_SQL).unwrap();
         let rows = statement.query_map([serde_json::to_string(&[RECIPIENT]).unwrap()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
@@ -658,7 +658,7 @@ fn freshness_membership_cost_does_not_scale_with_unrequested_declarations() {
     };
     let before = cost();
     store.connection.write().execute_batch(
-        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<4096)
+        /* sqlite-large-value: allow-for-now lv-h7208898d4e69 owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<4096)
          INSERT INTO desired(subject,kind,revision,claim_id,body,member)
          SELECT 'agent/unrequested-' || i,'agent',source.revision,source.claim_id,
                 json_object('unrelated', printf('%16384s','')),NULL
