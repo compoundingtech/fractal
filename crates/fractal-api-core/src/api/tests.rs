@@ -13935,7 +13935,7 @@ async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
     let app = router(state.clone())
         .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for sender in ["agent/other", "person/example"] {
-        for path in ["/v1/claims", "/v1/messages"] {
+        for path in ["/v1/claims", "/v1/messages", "/v1/messages/"] {
             let before = state.store.index().unwrap();
             let body = if path == "/v1/claims" {
                 json!({"subject":"message/writer-binding-other", "kind":"message.sent",
@@ -13949,12 +13949,12 @@ async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
             let (status, refusal) = writer_binding_request(
                 app.clone(), path, Some("agent/own"), None, body,
             ).await;
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {sender}: {refusal}");
             assert_eq!(refusal["code"], "foreign-agent-actor");
             assert_eq!(state.store.index().unwrap(), before);
         }
     }
-    for path in ["/v1/claims", "/v1/messages"] {
+    for path in ["/v1/claims", "/v1/messages", "/v1/messages/"] {
         let body = if path == "/v1/claims" {
             json!({"subject":"message/writer-binding-own", "kind":"message.sent",
                 "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
@@ -14055,9 +14055,117 @@ async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
             assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
             assert_eq!(claims[0].body["fields"]["from"], sender);
         } else {
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{sender}: {receipt}");
             assert_eq!(receipt["code"], "foreign-agent-actor");
             assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_routes_preserve_authenticated_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "message-sender-pairing";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.messages"]);
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let mut callers = vec![
+        (app.clone(), Some("agent/own"), None, "agent/own", "cli"),
+        (app.clone(), None, Some(credential), "person/example", "paired"),
+        (app.clone().layer(Extension(HarnessAncestry::Person)), None, None, "person/example", "operator"),
+        (app.clone().layer(Extension(HarnessAncestry::Person)), None, None, "daemon/example", "daemon"),
+    ];
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        callers.push((app.clone().layer(Extension(NativeDeliveryPeer {
+            agent: "agent/own".into(), transport, pid: 37, archives_inbox: false,
+        })), None, None, "agent/own", transport));
+    }
+    for (app, bound, bearer, sender, caller) in callers {
+        for (index, path) in ["/v1/messages", "/v1/messages/"].into_iter().enumerate() {
+            let (status, receipt) = writer_binding_request(
+                app.clone(), path, bound, bearer,
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":format!("sender-{caller}-{index}")}),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{caller}/{path}: {receipt}");
+            assert_eq!(receipt["from"], sender, "{caller}: {receipt}");
+            if caller != "operator" && caller != "daemon" {
+                let before = state.store.index().unwrap();
+                let (status, refusal) = writer_binding_request(
+                    app.clone(), path, bound, bearer,
+                    json!({"from":"agent/other", "to":"agent/receiver", "content":"hello",
+                        "idempotency_key":format!("other-{caller}-{index}")}),
+                ).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{caller}/{path}: {refusal}");
+                assert_eq!(refusal["code"], "foreign-agent-actor");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_accept_requires_the_connected_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let (status, sent) = writer_binding_request(
+        app.clone(), "/v1/messages", None, None,
+        json!({"from":"person/example", "to":"agent/receiver", "content":"hello",
+            "idempotency_key":"accept-connected-actor"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let subject = sent["subject"].as_str().unwrap();
+    let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+    for (route, body) in [
+        (path.as_str(), json!({"lifecycle":"read", "actor":"agent/receiver",
+            "idempotency_key":"foreign-accept"})),
+        ("/v1/claims", json!({"subject":subject, "kind":"message.read",
+            "actor":"agent/receiver", "fields":{"status":"read"},
+            "idempotency_key":"foreign-generic-accept"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), route, Some("agent/other"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let (status, delivered) = writer_binding_request(
+        app.clone(), &path, Some("agent/receiver"), None,
+        json!({"lifecycle":"delivered", "actor":"agent/receiver",
+            "idempotency_key":"own-delivery"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{delivered}");
+    let (status, accepted) = writer_binding_request(
+        app, &path, Some("agent/receiver"), None,
+        json!({"lifecycle":"read", "actor":"agent/receiver",
+            "idempotency_key":"own-accept"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["actor"], "agent/receiver");
+}
+
+#[tokio::test]
+async fn writer_binding_message_guard_matches_only_the_path_segment() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, guarded) in [
+        ("/v1/messages", true), ("/v1/messages/", true),
+        ("/v1/messages/example/claims", true), ("/v1/messages-extra", false),
+    ] {
+        let request = Request::builder().method("POST").uri(path)
+            .body(Body::from(r#"{"actor":"agent/other","from":"agent/other"}"#)).unwrap();
+        let result = guard_bound_request(request, Some("agent/own"), &state.store).await;
+        if guarded {
+            let error = result.unwrap_err();
+            assert_eq!(error.status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(error.code, "foreign-agent-actor");
+        } else {
+            assert!(result.is_ok(), "{path}");
         }
     }
 }
@@ -14241,9 +14349,9 @@ async fn writer_binding_json_media_types_and_missing_message_sender() {
     let state = state(root.path());
     let app = router(state.clone());
     for (media_type, sender, expected) in [
-        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
-        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
-        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::FORBIDDEN),
+        ("Application/JSON", Some("person/other"), StatusCode::FORBIDDEN),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::FORBIDDEN),
         ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
     ] {
         let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
