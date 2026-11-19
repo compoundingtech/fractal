@@ -197,6 +197,39 @@ impl PtyRuntime {
         &self, directory: &Path, ownership: &mut ProducerOwnership,
         observe_scope: impl Fn(&str) -> Result<Option<crate::ScopeRetirementProof>>,
     ) -> Result<bool> {
+        // Closure is the durable authority, including after a reboot. Rechecking a
+        // closed server's PID/boot would turn completed work back into an error.
+        // A pending owner with this proof is the crash gap in close_producer.
+        match File::open(directory.join("closure.json")) {
+            Ok(file) => {
+                let closure: ClosureRecord = serde_json::from_reader(file)?;
+                if let ClosureRecord::Current(closure) = closure {
+                    anyhow::ensure!(closure.version == 1 && !closure.publication_pending,
+                        "invalid producer closure");
+                    let (work, servers) = closure.scopes.split_first()
+                        .context("empty producer closure")?;
+                    work.validate(&ownership.scope)?;
+                    for server in servers {
+                        let pid = server.unit.strip_suffix(".scope")
+                            .and_then(|unit| unit.rsplit_once('-'))
+                            .and_then(|(_, pid)| pid.parse::<u32>().ok())
+                            .filter(|pid| *pid > 0)
+                            .context("invalid closed server scope")?;
+                        server.validate_ending(
+                            &crate::server_unit(&ownership.runtime_id, pid), true)?;
+                    }
+                    if ownership.publication_pending {
+                        ownership.publication_pending = false;
+                        durable_json(&directory.join("owner.json"), ownership)?;
+                    }
+                    return Ok(true);
+                }
+                // Legacy closure records lack the complete publication marker;
+                // retain their existing live-evidence reconciliation.
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let Some(work) = observe_scope(&ownership.scope)? else { return Ok(false); };
         let mut proofs = vec![work];
         let mut vanished = false;
@@ -301,6 +334,88 @@ impl PtyRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_producer_closure_survives_old_boot_and_repairs_owner_crash_gap() {
+        for pending_owner in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = PtyRuntime::new(root.path().join("registry"));
+            let directory = runtime.producer_directory("worker", "op");
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut owner = ProducerOwnership {
+                version: 1, runtime_id: "worker".into(), operation: "op".into(),
+                scope: "st3-worker-op.scope".into(), launcher_acknowledged: true,
+                publication_pending: pending_owner,
+            };
+            durable_json(&directory.join("owner.json"), &owner).unwrap();
+            durable_json(&directory.join("server-123.json"), &ServerOwnership {
+                version: 1, unit: crate::server_unit("worker", 123), pid: 123,
+                start_token: 1, boot_id: "linux:previous-boot".into(),
+            }).unwrap();
+            let proof = |unit| crate::ScopeRetirementProof {
+                version: 1, unit, load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            };
+            let closure = ProducerClosure {
+                version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
+                scopes: vec![proof(owner.scope.clone()), proof(crate::server_unit("worker", 123))],
+            };
+            durable_json(&directory.join("closure.json"), &closure).unwrap();
+            let before = std::fs::read(directory.join("closure.json")).unwrap();
+            for _ in 0..2 {
+                assert!(runtime.reconcile_producer(&directory, &mut owner, |_| {
+                    panic!("a durable closure must not re-probe live scopes or old boot identity")
+                }).unwrap());
+                assert!(!owner.publication_pending);
+                let persisted: ProducerOwnership = serde_json::from_reader(
+                    File::open(directory.join("owner.json")).unwrap()).unwrap();
+                assert!(!persisted.publication_pending);
+                assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_durable_producer_closure_never_authorizes_completion() {
+        for invalid in ["pending", "version", "empty", "wrong-work", "wrong-server", "populated", "corrupt"] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = PtyRuntime::new(root.path().join("registry"));
+            let directory = runtime.producer_directory("worker", "op");
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut owner = ProducerOwnership {
+                version: 1, runtime_id: "worker".into(), operation: "op".into(),
+                scope: "st3-worker-op.scope".into(), launcher_acknowledged: true,
+                publication_pending: false,
+            };
+            durable_json(&directory.join("owner.json"), &owner).unwrap();
+            let original = std::fs::read(directory.join("owner.json")).unwrap();
+            let proof = |unit| crate::ScopeRetirementProof {
+                version: 1, unit, load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            };
+            let mut closure = ProducerClosure {
+                version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
+                scopes: vec![proof(owner.scope.clone()), proof(crate::server_unit("worker", 123))],
+            };
+            match invalid {
+                "pending" => closure.publication_pending = true,
+                "version" => closure.version = 2,
+                "empty" => closure.scopes.clear(),
+                "wrong-work" => closure.scopes[0].unit = "st3-other.scope".into(),
+                "wrong-server" => closure.scopes[1].unit = crate::server_unit("other", 123),
+                "populated" => closure.scopes[1].active_state = "active".into(),
+                _ => {}
+            }
+            durable_json(&directory.join("closure.json"), &closure).unwrap();
+            if invalid == "corrupt" {
+                std::fs::write(directory.join("closure.json"), b"{").unwrap();
+            }
+            assert!(runtime.reconcile_producer(&directory, &mut owner, |_| {
+                panic!("malformed durable authority must fail closed")
+            }).is_err(), "{invalid}");
+            assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), original);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     fn startup_fixture(runtime: &PtyRuntime, operation: &str, pid: u32, token: u64) -> PathBuf {
@@ -414,7 +529,7 @@ mod tests {
             let runtime = PtyRuntime::new(root.path().join("registry"));
             let mut owner = ProducerOwnership {
                 version: 1, runtime_id: "worker".into(), operation: "op".into(),
-                scope: "work.scope".into(), launcher_acknowledged: true,
+                scope: "st3-work.scope".into(), launcher_acknowledged: true,
                 publication_pending: true,
             };
             let directory = runtime.producer_directory("worker", "op");
