@@ -136,8 +136,9 @@ only its pending successor, so the newest pending source starts after the active
 finishes. PR release validation replaces its own obsolete head; independent tag/manual
 identities remain intact. A cancelled pending run is not evidence of active-run
 cancellation; the run-level concurrency state distinguishes them. Required PR checks
-use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
-priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
+use priority 2, including the required `bundled-sqlite-packages` package-link check;
+that check retains priority 1 for merge groups. Optional benchmarks, main upkeep
+and manual Workspace work use priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
 and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
 existing artifacts and need no build runner. Priorities order waiting jobs, without
 preempting active jobs or reserving capacity. PR picking, Namespace shapes/affinity, tests
