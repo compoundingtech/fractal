@@ -341,9 +341,14 @@ mod tests {
     static WRITE_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_800_000_000_000);
 
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) -> ClaimRecord {
-        // Claims in one test must not share a wall-clock millisecond: epochs and deadlines
-        // derive from acceptance times.
-        store.set_write_clock_at(WRITE_CLOCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst).into()).unwrap();
+        // Keep acceptance order distinct while honoring an explicitly advanced lease clock.
+        let now = u64::try_from(smallclaims::store::now_ms()).unwrap();
+        let previous = WRITE_CLOCK.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |previous| Some(previous.max(now).saturating_add(1)),
+        ).unwrap();
+        store.set_write_clock_at(previous.max(now).into()).unwrap();
         store.append_claim(&ClaimInput {
             subject: subject.into(), kind: kind.into(), actor: Some(SEAT.into()),
             fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
