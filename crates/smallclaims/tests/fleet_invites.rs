@@ -524,19 +524,37 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     let peer = Store::open_memory("birch", Arc::new(Plain)).unwrap();
     peer.bind_fleet(FLEET).unwrap();
     peer.pin_fleet_anchor(&store.fleet_anchor().unwrap().unwrap()).unwrap();
-    peer.set_member_key(Some(key)).unwrap();
+    peer.set_member_key(Some(key.clone())).unwrap();
     let exchange = store.export_replication_exchange_answering(
         FLEET, &peer.replication_inventory().unwrap(), &peer.replication_signature_requests().unwrap(),
     ).unwrap();
     peer.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
     peer.validate_replication_backlog().unwrap();
+    peer.apply_replication_repairs().unwrap();
     peer.project_replication_backlog().unwrap();
-    peer.leave_fleet("person/example", &Default::default()).unwrap();
+    // Plain has no product hook that replaces leave_fleet's zero high-water
+    // placeholder with the signed envelope sequence. Match the production
+    // leave claim explicitly, as the worker's LeaveFixture does.
+    let high_water = peer.replication_inventory().unwrap().envelopes.iter()
+        .filter(|envelope| envelope.writer == "birch")
+        .map(|envelope| envelope.sequence).max().unwrap_or(0) + 1;
+    peer.append_claim(&smallclaims::ClaimInput {
+        subject: "host/birch".into(),
+        kind: "fleet.member-left".into(),
+        actor: Some("person/example".into()),
+        fields: serde_json::from_value(serde_json::json!({
+            "member_key": key.public(), "high_water": high_water,
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
     let exchange = peer.export_replication_exchange_answering(
         FLEET, &store.replication_inventory().unwrap(), &store.replication_signature_requests().unwrap(),
     ).unwrap();
     store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
     store.validate_replication_backlog().unwrap();
+    store.apply_replication_repairs().unwrap();
     store.project_replication_backlog().unwrap();
     let view = store.fleet_view_sealed().unwrap();
     assert!(view.members.iter().any(|member| member.name == "birch"

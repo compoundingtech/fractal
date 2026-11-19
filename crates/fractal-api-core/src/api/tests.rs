@@ -6675,8 +6675,8 @@ async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
     state
         .store
         .append_claim(&ClaimInput {
-            subject: "note/sample".into(),
-            kind: "example.note".into(),
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
             actor: None,
             fields: BTreeMap::new(),
             evidence: vec![],
@@ -6684,6 +6684,7 @@ async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
             idempotency_key: None,
         })
         .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
     state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
     let app = router(state);
     let (status, doctor) = get_request(app, "/v1/doctor").await;
