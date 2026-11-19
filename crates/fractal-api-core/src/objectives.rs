@@ -75,6 +75,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             )),
             "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
+            "database-archive" => rows.push(database_archive(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
             _ => {
                 rows.push(p99(name, about, "requests", target["p99_ms"].as_f64(), &target["windows"]));
@@ -362,6 +363,38 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
     ]
 }
 
+/// The inactive archive gauge has observations, not a configured allowance or health verdict.
+fn database_archive(about: &str, target: &Value) -> Value {
+    let size = &target["size"];
+    let (status, current) = if size.is_null() {
+        ("no-data", "not measured yet".to_owned())
+    } else if target["fresh"] != true {
+        ("stale", "stale measurement; current archive size and growth unknown".to_owned())
+    } else {
+        match target["status"].as_str() {
+            Some("not-activated") => ("not-eligible", "not activated; archive size and growth unknown".to_owned()),
+            Some("available") => {
+                let bytes = size["archive_bytes"].as_u64()
+                    .map_or_else(|| "archive bytes unknown".to_owned(), |bytes| format!("archive {bytes} bytes"));
+                let capacity = size["capacity_bytes"].as_u64()
+                    .map_or_else(|| "capacity bytes unknown".to_owned(), |bytes| format!("capacity {bytes} bytes"));
+                let growth = size["growth_bytes_per_day"].as_i64()
+                    .map_or_else(|| "growth unknown (daily baseline not available)".to_owned(), |bytes| format!("growth {bytes:+} bytes a day"));
+                ("not-eligible", format!("{bytes}, {capacity}, {growth}"))
+            }
+            _ => ("no-data", "measurement unavailable; archive size and growth unknown".to_owned()),
+        }
+    };
+    json!({
+        "id": "database-archive", "kind": "objective", "about": about,
+        "target": "observational only; no configured target", "current": current, "window": "1d",
+        "remaining_percent": null, "status": status, "budget": null,
+        "fresh": target["fresh"], "measurement_status": target["status"], "size": size,
+        "integrity": target["integrity"], "catalogue_coverage": target["catalogue_coverage"],
+        "explain": format!("{about}. {current}. No configured target or budget; these bytes do not prove hot-store savings or durability. Integrity is not assessed and catalogue coverage is unknown."),
+    })
+}
+
 fn database(about: &str, target: &Value) -> Value {
     let max_live = target["max_live_gb"].as_f64().unwrap_or_default();
     let max_growth = target["max_growth_mb_per_day"].as_f64().unwrap_or_default();
@@ -642,7 +675,7 @@ mod tests {
     fn native_row_corpus_covers_every_shipped_row() {
         use crate::objective::Indicator;
 
-        let targets: Vec<_> = crate::slo::shipped().iter()
+        let mut targets: Vec<_> = crate::slo::shipped().iter()
             .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
             .map(|objective| {
                 let mut target = json!({"name": objective.name});
@@ -652,6 +685,9 @@ mod tests {
                 target
             })
             .collect();
+        // The observational archive gauge is emitted by the native report, not a configured objective.
+        targets.push(json!({"name": "database-archive", "kind": "gauge", "fresh": false,
+            "size": null, "integrity": "not-assessed", "catalogue_coverage": null, "budget": null}));
         let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
         emitted.push(divergence(0));
         let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
@@ -659,6 +695,48 @@ mod tests {
         let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
         let expected: Vec<_> = corpus["rows"].as_array().unwrap().iter().map(|row| row.as_str().unwrap()).collect();
         assert_eq!(actual, expected, "update the shared Rust/TypeScript native row corpus when emitted rows change");
+    }
+
+    #[test]
+    fn archive_objectives_preserve_unknown_observations_without_a_latency_target() {
+        let available = json!({"name": "database-archive", "kind": "gauge", "about": "Archive capacity",
+            "fresh": true, "status": "available", "size": {"archive_bytes": 42, "capacity_bytes": 64,
+                "growth_bytes_per_day": null}, "integrity": "not-assessed",
+            "catalogue_coverage": null, "budget": null});
+        let mut missing = available.clone();
+        missing["fresh"] = json!(false);
+        missing["status"] = Value::Null;
+        missing["size"] = Value::Null;
+        let mut stale = available.clone();
+        stale["fresh"] = json!(false);
+        stale["status"] = Value::Null;
+        let mut inactive = available.clone();
+        inactive["status"] = json!("not-activated");
+        inactive["size"] = json!({"archive_bytes": null, "capacity_bytes": null, "growth_bytes_per_day": null});
+        let mut unavailable = inactive.clone();
+        unavailable["status"] = json!("unavailable");
+        for (target, status, current) in [
+            (missing, "no-data", "not measured yet"),
+            (stale, "stale", "stale measurement"),
+            (available, "not-eligible", "archive 42 bytes, capacity 64 bytes, growth unknown"),
+            (inactive, "not-eligible", "not activated"),
+            (unavailable, "no-data", "measurement unavailable"),
+        ] {
+            let report = json!({"targets": [target]});
+            let emitted = rows(&report, &[], 0, 0);
+            assert_eq!(emitted.len(), 1);
+            let row = by_id(&emitted, "database-archive");
+            assert_eq!(row["status"], status);
+            assert!(row["current"].as_str().unwrap().contains(current), "{row}");
+            assert_eq!(row["target"], "observational only; no configured target");
+            assert!(row["remaining_percent"].is_null());
+            assert!(row["budget"].is_null());
+            assert_eq!(row["integrity"], "not-assessed");
+            assert!(row["catalogue_coverage"].is_null());
+            assert_eq!(row["size"], report["targets"][0]["size"]);
+            assert_eq!(row["measurement_status"], report["targets"][0]["status"]);
+            assert!(!row["explain"].as_str().unwrap().contains("p99"));
+        }
     }
 
     fn window(count: u64, p99: f64, over: u64) -> Value {
@@ -1133,7 +1211,7 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "database-archive"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
