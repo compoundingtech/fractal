@@ -15717,10 +15717,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         if public_run_id.is_some() {
             crate::declaration_syntax::validate_full_subject(&child)?;
         }
-        if let Some(context) = context {
-            let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
-            self.store.attach_resource_child(grant, &context.request.owner, &child).map_err(smallclaims::error::typed)?;
-        }
         let request = MissionRunRequest {
                 mission: mission.to_owned(),
                 revision: None,
@@ -15730,11 +15726,27 @@ impl<R: RuntimeControl> Reconciler<R> {
                 inputs: input.clone(),
                 idempotency_key,
             };
+        if let Some(context) = context {
+            let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
+            if let Err(error) = self.store.attach_resource_child(grant, &context.request.owner, &child) {
+                // An explicit name may already belong to another publication. Let the same
+                // creation transaction decide that contract; never rewrite its resource custody.
+                if let Some(id) = public_run_id
+                    && self.store.mission_run_status(&child).map_err(smallclaims::error::typed)?.is_some()
+                {
+                    return self.store.create_named_program_child_mission_run(&request, run, step, id);
+                }
+                return Err(smallclaims::error::typed(error));
+            }
+        }
         let result = match public_run_id {
             Some(id) => self.store.create_named_program_child_mission_run(&request, run, step, id),
             None => self.store.create_program_child_mission_run(&request, run, step),
         };
-        if let (Some(context), Err(error)) = (context, &result) {
+        if let (Some(context), Err(error)) = (context, &result)
+            && !(public_run_id.is_some()
+                && self.store.mission_run_status(&child).map_err(smallclaims::error::typed)?.is_some())
+        {
             let grant = context.grant.as_ref().expect("context grant checked before child creation");
             self.store.reject_resource_child(grant, &context.request.owner, &child, error).map_err(smallclaims::error::typed)?;
         }

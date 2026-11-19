@@ -749,3 +749,45 @@ fn start_validates_public_id_with_declaration_rules_before_publication() {
     assert_eq!(error["_tag"], "ChildConflict");
     assert!(fixture.children(&parent.step).is_empty());
 }
+
+#[test]
+fn explicit_child_conflicts_never_rebind_or_release_existing_resource_custody() {
+    use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+    let fixture = fixture();
+    let a = fixture.start("resource-creator-a", "start");
+    let b = fixture.start("resource-creator-b", "start");
+    let parent_a = fixture.store.mission_run(&a.run).unwrap().unwrap();
+    let parent_b = fixture.store.mission_run(&b.run).unwrap().unwrap();
+    fixture.store.start_resource_authority("node", "named-child-test").unwrap();
+    let membership = |id: &str, parent: &MissionRunView, step: &str| {
+        let request = LaneRequest {
+            id: id.into(), name: id.into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
+            profile: None, profile_estimate: None, disk_path: None,
+            class: fractal_runtime::RequestClass::Agent, coverage: Coverage::Logical,
+            disk: None, io: None, admission_timeout_ms: None,
+            owner: Owner { run: parent.subject.clone(), step: step.into(), attempt: 1,
+                invocation: Some(id.into()) },
+        };
+        assert!(matches!(fixture.store.request_resource_membership(&request, Fit {
+            room: Some(fractal_runtime::Capacity { cores: 8, memory: 8 }), ..Fit::default()
+        }, 1).unwrap(), Admission::Admitted(_)));
+        fixture.store.resource_membership_record(id, &request.owner).unwrap()
+    };
+    let lane_a = membership("lane-a", &parent_a, &a.step);
+    let lane_b = membership("lane-b", &parent_b, &b.step);
+    let input = BTreeMap::from([("head".into(), "h1".into())]);
+    let child = fixture.reconciler.start_program_child(&parent_a, &a.step, "program-child",
+        &input, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12")).unwrap();
+    let conflict = fixture.reconciler.start_program_child(&parent_b, &b.step, "program-child",
+        &input, "resource-creator-b".into(), Some(&lane_b), Some("pr-42-head12")).unwrap_err();
+    assert_eq!(conflict.code, "child-conflict");
+    let changed = BTreeMap::from([("head".into(), "h2".into())]);
+    let conflict = fixture.reconciler.start_program_child(&parent_a, &a.step, "program-child",
+        &changed, "resource-creator-a".into(), Some(&lane_a), Some("pr-42-head12")).unwrap_err();
+    assert_eq!(conflict.code, "child-conflict");
+    let original = fixture.store.resource_membership_record("lane-a", &lane_a.request.owner).unwrap();
+    let rejected = fixture.store.resource_membership_record("lane-b", &lane_b.request.owner).unwrap();
+    assert_eq!(original.child_runs, vec![child.subject]);
+    assert!(rejected.child_runs.is_empty());
+}
