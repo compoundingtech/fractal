@@ -2239,6 +2239,18 @@ pub trait MissionsStore {
     /// Returns true only when durable runtime evidence proves that a claimed work incarnation is
     /// no longer the actor's live incarnation. Absence of runtime evidence is unknown, not death.
     fn work_claim_is_orphaned(&self, work: &StepRunView) -> Result<bool>;
+    /// Rebind every work lease `actor` holds from the incarnation that last bound the native
+    /// session to `incarnation`, once the runtime proves that incarnation resumed the same
+    /// native session (`harness`, `session_id`) with no fresh-session or fresh-context request
+    /// since that binding. Each moved lease records one durable `work.rebound` fact. The steps
+    /// whose lease moved are returned; an empty answer is final, not a retry condition.
+    fn rebind_work_leases_to_resumed_session(
+        &self,
+        actor: &str,
+        harness: &str,
+        session_id: &str,
+        incarnation: &str,
+    ) -> Result<Vec<String>>;
     /// Once per store, before a replay from nothing first decides its graph. Earlier replays
     /// re-applied claims over the rows a projection had left and could re-apply a run's old
     /// terminal state over the revision that reopened it, so this node's reconciler treated the
@@ -8598,6 +8610,152 @@ impl MissionsStore for Store {
             fractal_store::store::runtime_incarnation_state(&connection, actor, incarnation)?,
             fractal_store::store::IncarnationRuntime::Ended
         ))
+    }
+
+    fn rebind_work_leases_to_resumed_session(
+        &self,
+        actor: &str,
+        harness: &str,
+        session_id: &str,
+        incarnation: &str,
+    ) -> Result<Vec<String>> {
+        let field = |claim: &ClaimRecord, name: &str| {
+            claim
+                .body
+                .pointer(&format!("/fields/{name}"))
+                .and_then(Value::as_str)
+        };
+        smallclaims::touched::note_read(|| actor.to_owned());
+        // The session, not the process incarnation, is the continuity unit: a lease follows the
+        // native session only when this report proves the new incarnation resumed the exact
+        // session its predecessor bound, and only while that incarnation is the live one.
+        let mut bindings = self
+            .claims_for(actor, Some("harness.session-file"))?
+            .into_iter()
+            .filter(|claim| field(claim, "harness") == Some(harness))
+            .rev();
+        let Some(current) = bindings.next() else {
+            return Ok(Vec::new());
+        };
+        if field(&current, "incarnation_id") != Some(incarnation)
+            || field(&current, "session_id") != Some(session_id)
+        {
+            return Ok(Vec::new());
+        }
+        let Some(prior) = bindings.find(|claim| {
+            field(claim, "incarnation_id").is_some_and(|id| !id.is_empty())
+                && field(claim, "session_id").is_some_and(|id| !id.is_empty())
+        }) else {
+            return Ok(Vec::new());
+        };
+        let Some(from) = field(&prior, "incarnation_id") else {
+            return Ok(Vec::new());
+        };
+        if from == incarnation || field(&prior, "session_id") != Some(session_id) {
+            return Ok(Vec::new());
+        }
+        // A fresh-session or fresh-context request after the predecessor's binding ended that
+        // session's continuity by intent; whatever session id the harness next reports, the
+        // leases of the old session stay orphaned for the reclaim path.
+        let connection = self.readers.get();
+        let prior_key = canonical::claim_key(&connection, &prior.id).map_err(internal)?;
+        for claim in self
+            .claims_for(actor, Some("runtime.action.requested"))?
+            .into_iter()
+        {
+            if matches!(field(&claim, "action"), Some("fresh-context" | "fresh-session"))
+                && canonical::claim_key(&connection, &claim.id)
+                    .map_err(internal)?
+                    .gt(&prior_key)
+            {
+                return Ok(Vec::new());
+            }
+        }
+        drop(connection);
+        if !self
+            .current_harness(actor)
+            .map_err(internal)?
+            .is_some_and(|harness| {
+                harness.state != "ended" && harness.incarnation_id == incarnation
+            })
+        {
+            return Ok(Vec::new());
+        }
+        let now = now_ms();
+        let origin = self.origin.clone();
+        let actor = normalize_actor(actor, "agent");
+        let moved = self
+            .connection
+            .batched(move |transaction| -> Result<Vec<String>, anyhow::Error> {
+                let actor = physical_actor(transaction, &actor)?;
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT subject, attempt FROM step_runs
+                         WHERE lease_owner=?1 AND lease_incarnation=?2
+                           AND status NOT IN ('completed','failed','cancelled')
+                         ORDER BY subject",
+                    )
+                    .map_err(internal)?;
+                let held = statement
+                    .query_map(params![actor, from], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                    })
+                    .map_err(internal)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(internal)?;
+                drop(statement);
+                let mut moved = Vec::new();
+                for (subject, attempt) in held {
+                    let changed = transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-h633e7faa5696 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_incarnation=?3, updated_at_unix_ms=?4
+                             WHERE subject=?1 AND attempt=?2 AND lease_owner=?5 AND lease_incarnation=?6
+                               AND status NOT IN ('completed','failed','cancelled')",
+                            params![
+                                subject,
+                                attempt,
+                                incarnation,
+                                now.to_string(),
+                                actor,
+                                from
+                            ],
+                        )
+                        .map_err(internal)?;
+                    if changed == 0 {
+                        continue;
+                    }
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-h6fff8d4411ab owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_lease_renewals SET lease_incarnation=?2
+                             WHERE subject=?1 AND lease_owner=?3 AND lease_incarnation=?4",
+                            params![subject, incarnation, actor, from],
+                        )
+                        .map_err(internal)?;
+                    append_receipt_claim_tx(
+                        transaction,
+                        &origin,
+                        &subject,
+                        "work.rebound",
+                        Some(&actor),
+                        &json!({"fields": {
+                            "attempt": attempt,
+                            "claimant": actor.as_str(),
+                            "from_incarnation": from,
+                            "to_incarnation": incarnation,
+                            "session_id": session_id,
+                            "harness": harness,
+                        }}),
+                        &[],
+                        None,
+                        &format!("work-rebound:{subject}:{attempt}:{from}:{incarnation}"),
+                    )
+                    .map_err(claim_append_error)?;
+                    moved.push(subject);
+                }
+                Ok(moved)
+            })
+            .map_err(internal)??;
+        Ok(moved)
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {

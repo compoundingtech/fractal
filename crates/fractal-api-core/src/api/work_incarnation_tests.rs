@@ -140,6 +140,59 @@ mission "catalog" state="ready" {
             .unwrap();
     }
 
+    /// The native session a seat's driver bound for one incarnation, as `/v1/agents/native-session`
+    /// records it.
+    fn binding(&self, incarnation: &str, session: &str) {
+        self.state
+            .store
+            .append_claim(&ClaimInput {
+                subject: SEAT.into(),
+                kind: "harness.session-file".into(),
+                actor: Some(SEAT.into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("claude")),
+                    ("session_id".into(), json!(session)),
+                    ("agent".into(), json!(SEAT)),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("status".into(), json!("active")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+
+    /// An operator's request that the next launch start a new native session.
+    fn fresh_session_requested(&self) {
+        self.state
+            .store
+            .append_claim(&ClaimInput {
+                subject: SEAT.into(),
+                kind: "runtime.action.requested".into(),
+                actor: Some("person/ada".into()),
+                fields: BTreeMap::from([("action".into(), json!("fresh-session"))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+
+    async fn report_native_session(&self, incarnation: &str, session: &str) {
+        let _: ClaimRecord = self
+            .client
+            .post(
+                "/v1/agents/native-session",
+                &json!({
+                    "subject": SEAT, "actor": SEAT, "incarnation_id": incarnation,
+                    "harness": "claude", "session_id": session,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
     fn ask(&self) -> Value {
         json!({"person":"person/ada", "title":"Choose a format", "reason":"The catalog needs a format.",
             "actor":SEAT, "step":self.step, "idempotency_key":"format",
@@ -620,4 +673,181 @@ async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
     unknown.body["fields"]["submitted_incarnation"] = Value::Null;
     assert!(!crate::model::work_submission_matches(&unknown, &read.subject, read.attempt, SEAT, Some("chooser:one"), &evidence));
 
+}
+
+#[tokio::test]
+async fn a_seat_that_resumes_its_native_session_keeps_its_claim() {
+    let fixture = Fixture::new(false).await;
+    fixture.binding("chooser:one", "native-one");
+    // A restart without a fresh session: a new incarnation continues the same native session.
+    fixture.runtime("chooser:two");
+    fixture.report_native_session("chooser:two", "native-one").await;
+
+    let step = fixture
+        .state
+        .store
+        .step_run(&fixture.step)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.claimant.as_deref(), Some(SEAT));
+    assert_eq!(step.claim_incarnation.as_deref(), Some("chooser:two"));
+    assert!(!fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+
+    // The resumed incarnation renews and reports progress on the lease it still holds.
+    let renewed: StepRunView = fixture
+        .client
+        .post(
+            &format!("/v1/work/renew/{}", fixture.step),
+            &json!({"actor":SEAT, "incarnation":"chooser:two", "idempotency_key":"rebind-renew"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renewed.claim_incarnation.as_deref(), Some("chooser:two"));
+    let progressed: StepRunView = fixture
+        .client
+        .post(
+            &format!("/v1/work/progress/{}", fixture.step),
+            &json!({"actor":SEAT, "incarnation":"chooser:two",
+                "summary":"Resumed where the session left off.", "idempotency_key":"rebind-progress"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(progressed.claim_incarnation.as_deref(), Some("chooser:two"));
+
+    // The incarnation that ended is still fenced out: the fence moved, it did not open.
+    let refused = fixture
+        .state
+        .store
+        .work_action(
+            &fixture.step,
+            "renew",
+            &WorkRequest {
+                wait_ms: None,
+                actor: Some(SEAT.into()),
+                incarnation: Some("chooser:one".into()),
+                summary: None,
+                reason: None,
+                evidence: Vec::new(),
+                idempotency_key: "rebind-stale".into(),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("wrong-work-incarnation"),
+        "{refused:#}"
+    );
+
+    // One durable fact records the rebind, and a replay keeps the new incarnation.
+    let fact = fixture
+        .state
+        .store
+        .latest_claim(&fixture.step, Some("work.rebound"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fact.body["fields"]["from_incarnation"], "chooser:one");
+    assert_eq!(fact.body["fields"]["to_incarnation"], "chooser:two");
+    assert_eq!(fact.body["fields"]["session_id"], "native-one");
+    fixture.state.store.replay_replication_graph().unwrap();
+    let replayed = fixture
+        .state
+        .store
+        .step_run(&fixture.step)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replayed.claim_incarnation.as_deref(), Some("chooser:two"));
+
+    // And the resumed incarnation can complete the work.
+    let document = fixture
+        .state
+        .store
+        .put_document("doc/garden/resume", b"resumed", &None, "resumed")
+        .unwrap();
+    let submitted: StepRunView = fixture
+        .client
+        .post(
+            &format!("/v1/work/complete/{}", fixture.step),
+            &json!({"actor":SEAT, "incarnation":"chooser:two",
+                "evidence":[format!("{}@{}", document.name, document.hash)],
+                "idempotency_key":"rebind-complete"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted.submitted_incarnation.as_deref(),
+        Some("chooser:two")
+    );
+    assert!(submitted.claim_incarnation.is_none());
+}
+
+#[tokio::test]
+async fn a_fresh_session_restart_still_orphans_the_held_lease() {
+    let fixture = Fixture::new(false).await;
+    fixture.binding("chooser:one", "native-one");
+    fixture.fresh_session_requested();
+    fixture.runtime("chooser:two");
+    // Even a report naming the old session id cannot rebind across a fresh-session request.
+    fixture.report_native_session("chooser:two", "native-one").await;
+
+    let step = fixture
+        .state
+        .store
+        .step_run(&fixture.step)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.claim_incarnation.as_deref(), Some("chooser:one"));
+    assert!(fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+    assert!(
+        fixture
+            .state
+            .store
+            .latest_claim(&fixture.step, Some("work.rebound"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_restart_on_a_new_native_session_orphans_the_held_lease() {
+    let fixture = Fixture::new(false).await;
+    fixture.binding("chooser:one", "native-one");
+    fixture.runtime("chooser:two");
+    fixture.report_native_session("chooser:two", "native-two").await;
+
+    let step = fixture
+        .state
+        .store
+        .step_run(&fixture.step)
+        .unwrap()
+        .unwrap();
+    assert_eq!(step.claim_incarnation.as_deref(), Some("chooser:one"));
+    assert!(fixture.state.store.work_claim_is_orphaned(&step).unwrap());
+    let refused = fixture
+        .state
+        .store
+        .work_action(
+            &fixture.step,
+            "renew",
+            &WorkRequest {
+                wait_ms: None,
+                actor: Some(SEAT.into()),
+                incarnation: Some("chooser:two".into()),
+                summary: None,
+                reason: None,
+                evidence: Vec::new(),
+                idempotency_key: "new-session-renew".into(),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("wrong-work-incarnation"),
+        "{refused:#}"
+    );
+    assert!(
+        fixture
+            .state
+            .store
+            .latest_claim(&fixture.step, Some("work.rebound"))
+            .unwrap()
+            .is_none()
+    );
 }
