@@ -8151,6 +8151,18 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
     )));
+    if let Some(dir) = std::env::var_os("FRACTAL_GATE_ADMISSION_SPOOL").map(PathBuf::from) {
+        let store = store.clone();
+        let notify = notify.clone();
+        let event_notify = event_notify.clone();
+        tokio::spawn(async move {
+            if let Err(error) = fractal_daemon::gate_admission_receipts::run(
+                store, dir, notify, event_notify,
+            ).await {
+                eprintln!("gate admission receipt source stopped: {error:#}");
+            }
+        });
+    }
     fractal_daemon::slo_history::set_ui_url(config.observations.otlp.as_ref().and_then(|otlp| otlp.ui_url.clone()));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?;
@@ -9152,7 +9164,7 @@ fn started_revision_note(
 async fn follow_mission_run(
     client: &Client,
     run: MissionRunView,
-    _cursor: u64,
+    cursor: u64,
     json_output: bool,
     limit: usize,
 ) -> Result<()> {
@@ -9163,13 +9175,15 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+        client, run, cursor, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
     ).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow_mission_run_to(
     client: &Client,
     mut run: MissionRunView,
+    mut cursor: u64,
     json_output: bool,
     interactive: bool,
     limit: usize,
@@ -9179,6 +9193,7 @@ async fn follow_mission_run_to(
     let client = client.clone().with_follow_retry();
     let client = &client;
     let mut prior = String::new();
+    let mut event_feed = LocalEventFeed::default();
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9233,7 +9248,29 @@ async fn follow_mission_run_to(
         if cli_output::closed() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // The tree can gain children beyond the rendered page, so follow lifecycle
+        // events globally rather than filtering to the currently visible subjects.
+        // Empty long-poll responses and unrelated graph activity do not reread it.
+        loop {
+            let page = event_feed
+                .read(
+                    client,
+                    &format!("after={cursor}&wait=true&timeout_ms=30000"),
+                )
+                .await?;
+            if let Some(scanned) = page.next_after {
+                cursor = cursor.max(scanned);
+            }
+            if page.items.iter().any(|event| {
+                event.kind.starts_with("mission-run.") || event.kind.starts_with("step-run.")
+            }) {
+                break;
+            }
+            client.follow_recovered();
+            if cli_output::closed() {
+                return Ok(());
+            }
+        }
         run = client
             .get(&format!(
                 "/v1/mission-runs/{}",
@@ -18695,6 +18732,7 @@ fn pi_family_message_frame(
     message: &fractal_daemon::model::MessageView,
     body: &str,
     identity: &str,
+    incarnation: &str,
     attachments: &[fractal_drivers::ding::AttachmentNotice],
 ) -> Value {
     json!({
@@ -18717,6 +18755,7 @@ fn pi_family_message_frame(
             "messageId": message.subject,
             "threadId": message.in_reply_to.clone().unwrap_or_else(|| message.subject.clone()),
             "identity": identity,
+            "inputIncarnation": incarnation,
         },
     })
 }
@@ -18730,6 +18769,31 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        if frame["type"] == "delivered"
+            && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                == Some(state.incarnation.as_str())
+            && let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            && let Some(timestamp) = frame["acceptedAtUnixMs"].as_u64()
+            && let Some(dir) = &state.pending.input_source_dir
+        {
+            let first = fractal_drivers::native_channel::record_input_acceptance(
+                dir, message, timestamp)?;
+            state.pending.input_acceptances.entry(message.to_owned()).or_insert(first);
+        }
+        if frame["type"] == "ready" && frame["inputAcceptanceClock"] == true {
+            state.pending.input_source_ready = true;
+        }
+        if let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            && let Some(dir) = &state.pending.input_source_dir
+            && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                .is_none_or(|incarnation| incarnation == state.incarnation)
+        {
+            if frame["type"] == "delivered" && frame["acceptedAtUnixMs"].as_u64().is_none() {
+                fractal_drivers::native_channel::record_input_attempt(dir, message, None)?;
+            } else if frame["type"] == "failed" {
+                fractal_drivers::native_channel::resolve_input_attempt(dir, message)?;
+            }
+        }
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivery_ready" | "delivered" | "read" | "failed" | "todo" => true,
@@ -18877,6 +18941,14 @@ struct PiChannelResume {
 }
 
 impl PiChannelResume {
+    fn record_input_attempt(&self, message: &str) -> Result<()> {
+        let dir = self.pending.input_source_dir.as_deref()
+            .context("native input source has no durable journal")?;
+        fractal_drivers::native_channel::record_input_attempt(
+            dir, message, Some(u64::try_from(current_unix_ms()?)?),
+        )
+    }
+
     fn record_pending_todo(&mut self) -> Result<()> {
         if let Some(fields) = &self.todo_pending
             && let Some(dir) = &self.todo_outbox
@@ -19053,6 +19125,9 @@ struct PiFamilyReports {
     #[serde(default)]
     reason: Option<String>,
     acknowledgements: BTreeSet<String>,
+    /// Durable native clocks, independent of delivered/read acknowledgement.
+    #[serde(default)]
+    input_acceptances: BTreeMap<String, u64>,
     #[serde(default)]
     reads: BTreeSet<String>,
     #[serde(default)]
@@ -19060,6 +19135,10 @@ struct PiFamilyReports {
     /// The native session the harness reported, with its transcript, until the daemon has it.
     #[serde(default)]
     native_session: Option<(String, Option<String>)>,
+    #[serde(default)]
+    input_source_dir: Option<PathBuf>,
+    #[serde(default)]
+    input_source_ready: bool,
 }
 
 impl PiFamilyReports {
@@ -19071,6 +19150,7 @@ impl PiFamilyReports {
         incarnation: &str,
         session: &str,
     ) -> Result<()> {
+        let source_cut = u64::try_from(current_unix_ms()?)?;
         if let Some((status, sequence)) = self.state.clone() {
             let _: ClaimRecord = client
                 .post(
@@ -19118,6 +19198,25 @@ impl PiFamilyReports {
                 )
                 .await?;
             self.state = None;
+        }
+        while let Some((message, timestamp)) = self.input_acceptances.first_key_value()
+            .map(|(message, timestamp)| (message.clone(), *timestamp))
+        {
+            if let Some(fence) = &self.fence {
+                mailbox_input_acceptance(client, fence, &message, timestamp).await?;
+                if let Some(dir) = &self.input_source_dir {
+                    fractal_drivers::native_channel::resolve_input_attempt(dir, &message)?;
+                }
+            }
+            self.input_acceptances.remove(&message);
+        }
+        let frontier = if self.input_source_ready {
+            if let Some(dir) = &self.input_source_dir {
+                fractal_drivers::native_channel::recipient_input_acceptance_frontier(dir, source_cut)?
+            } else { None }
+        } else { None };
+        if let (Some(fence), Some(through)) = (&self.fence, frontier) {
+            mailbox_input_acceptance_frontier(client, fence, through).await?;
         }
         while let Some(message) = self.acknowledgements.first().cloned() {
             match &self.fence {
@@ -20849,25 +20948,32 @@ impl NativeMailbox {
         if !self.replayed {
             return Ok(());
         }
-        let consumed = match receipts {
+        let source_cut = u64::try_from(current_unix_ms()?)?;
+        let sealed_source = !matches!(&receipts, NativeDeliveryReceipts::ClaudeChannel { .. });
+        let evidence = match receipts {
             NativeDeliveryReceipts::Codex {
                 state_dir,
                 identity,
                 runtime_id,
-            } => fractal_drivers::codex_app_server::consumed_delivery_filenames(
+            } => fractal_drivers::codex_app_server::delivery_receipts(
                 state_dir, identity, runtime_id,
             )?,
             NativeDeliveryReceipts::OpenCode {
                 session_dir,
                 identity,
                 runtime_id,
-            } => fractal_drivers::opencode_session::consumed_delivery_paths(
+            } => fractal_drivers::opencode_session::delivery_receipts(
                 session_dir,
                 identity,
                 runtime_id,
             )?,
-            _ => BTreeSet::new(),
+            _ => fractal_drivers::delivery_ledger::ReceiptSnapshot::default(),
         };
+        let frontier = evidence.input_acceptance_frontier(&self.fence.incarnation, source_cut);
+        let evidence = evidence.entries;
+        let consumed: BTreeSet<_> = evidence.iter()
+            .filter(|entry| entry.phase == fractal_drivers::delivery_ledger::Phase::Consumed)
+            .map(|entry| entry.filename.clone()).collect();
         let active: BTreeSet<_> = self
             .messages
             .iter()
@@ -20876,11 +20982,20 @@ impl NativeMailbox {
             .collect();
         self.queued.retain(|key, _| active.contains(key));
         let mut first_error = None;
+        for entry in &evidence {
+            for acceptance in &entry.input_acceptances {
+                if acceptance.incarnation == self.fence.incarnation {
+                    mailbox_input_acceptance(client, &self.fence,
+                        &entry.filename, acceptance.accepted_at_unix_ms).await?;
+                }
+            }
+        }
         for view in &self.messages {
             if !active.contains(&view.subject) {
                 continue;
             }
             let result: Result<()> = async {
+                // Native acceptance is drained independently of generic mailbox status above.
                 if consumed.contains(&view.subject) {
                     if view.status != "delivered" {
                         mailbox_receipt(client, &self.fence, &view.subject, "delivered").await?;
@@ -20928,6 +21043,9 @@ impl NativeMailbox {
         fractal_drivers::push_mailbox::replace_active(agent_dir, queued, active);
         if let Some(error) = first_error {
             return Err(error);
+        }
+        if sealed_source && let Some(through) = frontier {
+            mailbox_input_acceptance_frontier(client, &self.fence, through).await?;
         }
         Ok(())
     }
@@ -20985,6 +21103,32 @@ async fn mailbox_receipt(
     lifecycle: &str,
 ) -> Result<()> {
     mailbox_receipt_claim(client, fence, message, lifecycle).await?;
+    Ok(())
+}
+
+/// Publish only a clock captured at the native input boundary, never from generic lifecycle.
+async fn mailbox_input_acceptance(
+    client: &Client,
+    fence: &fractal_daemon::mailbox::Fence,
+    message: &str,
+    accepted_at_unix_ms: u64,
+) -> Result<()> {
+    let mut receipt = serde_json::to_value(fence)?;
+    receipt["message"] = json!(message);
+    receipt["lifecycle"] = json!("accepted");
+    receipt["input_acceptance"] = json!({"accepted_at_unix_ms": accepted_at_unix_ms});
+    let _: ClaimRecord = client.post("/v1/mailbox/receipts", &receipt).await?;
+    Ok(())
+}
+
+async fn mailbox_input_acceptance_frontier(
+    client: &Client,
+    fence: &fractal_daemon::mailbox::Fence,
+    observed_through_unix_ms: u64,
+) -> Result<()> {
+    let mut receipt = serde_json::to_value(fence)?;
+    receipt["observed_through_unix_ms"] = json!(observed_through_unix_ms);
+    let _: Value = client.post("/v1/mailbox/acceptance-frontier", &receipt).await?;
     Ok(())
 }
 

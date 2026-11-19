@@ -47,6 +47,8 @@ pub struct Execution {
     pub state: String,
     pub reason: String,
     pub blocked_by: Option<resource_membership::BlockedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_code: Option<resource_membership::RefusalCode>,
     pub queued_at: u64,
     pub revision: u64,
     pub queue_wait_ms: u64,

@@ -103,6 +103,7 @@ pub enum RefusalCode {
     Retiring,
     Uncertain,
     InvalidState,
+    UnauthorizedLanding,
 }
 
 impl RefusalCode {
@@ -118,6 +119,7 @@ impl RefusalCode {
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+            Self::UnauthorizedLanding => "unauthorized-landing",
         }
     }
 }
@@ -157,6 +159,7 @@ pub struct Fit {
     /// Fresh mount observations for queued predecessors, keyed by reservation path.
     pub disk_mounts: BTreeMap<String, DiskFit>,
     pub heavy_io_slots: Option<u32>,
+    pub landing: fractal_runtime::host::LandingPolicy,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -246,6 +249,7 @@ fn write(connection: &Transaction<'_>, member: &Membership) -> Result<()> {
         rusqlite::params![member.request.id,member.request.host,member.request.name,member.state,member.queued_at,
             member.request.capacity.map_or(0, |c| c.memory),serde_json::to_string(member)?])?;
     if changed == 0 { return Ok(()); }
+    super::resource_admission_objectives::observe(connection, member)?;
     // Durable feed invalidation commits with custody; a diagnostic note alone cannot wake IVM.
     // This observation references custody, never carries a replayable grant.
     insert_local_observation_tx(connection, &member.request.host, &ClaimInput {
@@ -311,7 +315,14 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         rusqlite::params![request.host,request.id], |row| row.get(0))?;
     let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
     let outside_free = holder_free.saturating_sub(fit.outside_bytes);
-    let free = outside_free.saturating_sub(fit.reserve_bytes);
+    let landing_reserve = if request.class == RequestClass::Landing || fit.landing.memory_bytes == 0 { 0 } else {
+        let landing_held: u64 = connection.query_row("SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
+            WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')
+            AND json_extract(body,'$.request.class')='landing'",
+            rusqlite::params![request.host,request.id], |row| row.get(0))?;
+        fit.landing.memory_bytes.saturating_sub(landing_held)
+    };
+    let free = outside_free.saturating_sub(fit.reserve_bytes).saturating_sub(landing_reserve);
     if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
         return Ok(Some((BlockedBy::Holder, "holder footprint prevents admission".into())));
     }
@@ -323,16 +334,25 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         }));
     }
     if request.capacity.is_some_and(|capacity| capacity.memory > free) {
-        return Ok(Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes))));
+        let reason = if landing_reserve == 0 {
+            format!("host reserve prevents admission: {} bytes", fit.reserve_bytes)
+        } else {
+            format!("host reserve prevents admission: {} bytes; landing reserve: {landing_reserve} bytes", fit.reserve_bytes)
+        };
+        return Ok(Some((BlockedBy::Reserve, reason)));
     }
     let mut disk_held = 0_u64;
     let mut io_held = 0_u32;
+    let mut landing_io_held = 0_u32;
     if request.disk.is_some() || request.io.is_some() {
         let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
             WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
         for body in statement.query_map(rusqlite::params![request.host,request.id], |row| row.get::<_, String>(0))? {
             let holder: Membership = serde_json::from_str(&body?)?;
             if holder.request.io == Some(IoClass::Heavy) { io_held = io_held.saturating_add(1); }
+            if holder.request.io == Some(IoClass::Heavy) && holder.request.class == RequestClass::Landing {
+                landing_io_held = landing_io_held.saturating_add(1);
+            }
             if let (Some(disk), Some(mount)) = (&holder.request.disk, disk_fit)
                 && holder.disk_filesystem == Some(mount.filesystem)
             { disk_held = disk_held.saturating_add(disk.bytes); }
@@ -342,13 +362,25 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
         u128::from(mount.available) < u128::from(mount.floor) + u128::from(disk_held) + u128::from(disk.bytes))) {
         return Ok(Some((BlockedBy::Disk, "mount free-space floor or peak disk reservations prevent admission".into())));
     }
-    if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held >= slots) {
+    let io_reserve = if request.class == RequestClass::Landing { 0 }
+        else { fit.landing.heavy_io_slots.saturating_sub(landing_io_held) };
+    if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held.saturating_add(io_reserve) >= slots) {
         return Ok(Some((BlockedBy::Io, "host heavy IO slots occupied".into())));
     }
     Ok(None)
 }
 
 impl Store {
+    /// Seats share ordinary headroom: unused landing room is not available to seat starts/raises.
+    pub fn unused_landing_memory(&self, host: &str, reserved: u64) -> Result<u64> {
+        if reserved == 0 { return Ok(0); }
+        smallclaims::touched::note_read(|| format!("resource-membership/{host}"));
+        let held: u64 = self.readers.get().query_row("SELECT coalesce(sum(memory),0)
+            FROM resource_memberships_v1 WHERE host=?1
+            AND state IN ('admitted','launched','retiring','uncertain')
+            AND json_extract(body,'$.request.class')='landing'", [host], |row| row.get(0))?;
+        Ok(reserved.saturating_sub(held))
+    }
     pub fn resource_membership_record(&self, id: &str, owner: &Owner) -> Result<Membership> {
         let member = read(&self.readers.get(), id)?;
         authorized(&member, owner)?;
@@ -466,9 +498,14 @@ impl Store {
     pub fn start_resource_authority(&self, host: &str, epoch: &str) -> Result<()> {
         anyhow::ensure!(!host.is_empty() && !epoch.is_empty(), "empty resource authority identity");
         anyhow::ensure!(host == self.origin, "only the execution host may own resource authority");
-        let connection = self.connection.write();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
+        super::resource_admission_objectives::recover(&transaction, host, epoch)?;
+        transaction.commit()?;
+        self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -542,11 +579,32 @@ impl Store {
         Ok(uncertain)
     }
 
+    /// Resolve authority from native ownership facts, never request environment or class labels.
+    fn resource_owner_actor(&self, owner: &Owner) -> Result<Option<String>> {
+        if let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) {
+            let receipts = self.invocation_receipts(invocation)?;
+            let Some(receipt) = receipts.last() else { return Ok(None); };
+            let owns = match (&receipt.owner_run, &receipt.owner_step, receipt.owner_attempt) {
+                (Some(run), Some(step), Some(attempt)) =>
+                    *run == owner.run && *step == owner.step && attempt == owner.attempt,
+                (None, None, None) => owner.run == invocation && owner.step == invocation && owner.attempt == 1,
+                _ => false,
+            };
+            return Ok(owns.then(|| receipt.agent.clone()));
+        }
+        if owner.run.starts_with("mission-run/") {
+            return Ok(self.mission_run_initiating_principal(&owner.run)?);
+        }
+        Ok(owner.run.starts_with("person/").then(|| owner.run.clone()))
+    }
+
     pub fn request_resource_membership(&self, request: &LaneRequest, fit: Fit, now_ms: u64) -> Result<Admission> {
         anyhow::ensure!(!request.id.is_empty() && !request.name.is_empty() && !request.host.is_empty(), "empty resource identity");
         anyhow::ensure!(request.host == self.origin, "only the execution host may grant resource membership");
         anyhow::ensure!(request.max_members > 0, "maxMembers must be positive");
         anyhow::ensure!(!request.owner.run.is_empty() && !request.owner.step.is_empty() && request.owner.attempt > 0, "resource execution owner required");
+        let landing_authorized = request.class != RequestClass::Landing
+            || self.resource_owner_actor(&request.owner)?.is_some_and(|actor| fit.landing.allowed_actors.contains(&actor));
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
@@ -589,7 +647,9 @@ impl Store {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let (queue_elapsed, uncertain) = self.resource_admission_elapsed(&request.id, member.queued_at, now_ms);
         member.clock_uncertain |= uncertain || member.clock_epoch != epoch;
-        let refused = if request.capacity.is_none() {
+        let refused = if !landing_authorized {
+            Some((RefusalCode::UnauthorizedLanding, "landing admission requires an actor authorized by this host's finite_resources.landing.allowedActors".to_owned()))
+        } else if request.capacity.is_none() {
             Some((RefusalCode::MissingProfile, "finite execution requires an explicit resource profile".to_owned()))
         } else if request.coverage == Coverage::Enforced && !cfg!(target_os = "linux") {
             Some((RefusalCode::UnsupportedCoverage, "whole-tree resource enforcement requires Linux".to_owned()))
@@ -622,7 +682,7 @@ impl Store {
                 let earlier: Membership = serde_json::from_str(&body?)?;
                 if earlier.request.id == request.id { break; }
                 let (elapsed, uncertain) = self.resource_admission_elapsed(&earlier.request.id, earlier.queued_at, now_ms);
-                if earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
+                if request.class == RequestClass::Landing || earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
                     predecessor = Some((BlockedBy::Fifo, format!("class or aged predecessor: {}", earlier.request.id)));
                     break;
                 }
@@ -929,7 +989,143 @@ mod tests {
                 attempt: 1, invocation: Some(format!("invocation/{id}")) } }
     }
     fn test_fit() -> Fit {
-        Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
+        Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }),
+            landing: fractal_runtime::host::LandingPolicy {
+                allowed_actors: BTreeSet::from(["person/operator".into()]), ..Default::default()
+            }, ..Fit::default() }
+    }
+    fn landing_request(id: &str, memory: u64) -> LaneRequest {
+        let mut request = sized_request(id, memory);
+        request.class = RequestClass::Landing;
+        request.owner.run = "person/operator".into();
+        request.owner.invocation = None;
+        request
+    }
+
+    #[test]
+    fn landing_jumps_a_queued_normal_head_and_is_strict_fifo() {
+        let store = fixture();
+        let normal = sized_request("normal", 80);
+        let landing = landing_request("landing", 80);
+        let later = landing_request("later-landing", 20);
+        let blocked = Fit { outside_bytes: 50, ..small_room() };
+        assert!(matches!(store.request_resource_membership(&normal, blocked.clone(), 1).unwrap(), Admission::Queued { .. }));
+        store.advance_resource_admission_clock(&normal.id, BACKFILL_AGING_MS);
+        assert!(matches!(store.request_resource_membership(&landing, blocked.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&later, blocked, 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&later.id, &later.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        assert!(matches!(store.request_resource_membership(&landing, small_room(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 80);
+    }
+
+    #[test]
+    fn landing_reserves_existing_memory_and_io_without_double_charging() {
+        let store = fixture();
+        let mut fit = small_room();
+        fit.heavy_io_slots = Some(2);
+        fit.landing.memory_bytes = 40;
+        fit.landing.heavy_io_slots = 1;
+        let mut normal = sized_request("normal", 60);
+        normal.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&normal, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        let mut extra = sized_request("extra", 1);
+        assert!(matches!(store.request_resource_membership(&extra, fit.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&extra.id, &extra.owner).unwrap().blocked_by, Some(BlockedBy::Reserve));
+        // Isolate the IO reservation from memory headroom.
+        extra.io = Some(IoClass::Heavy);
+        extra.id = "extra-io".into();
+        let mut io_fit = fit.clone();
+        io_fit.room.as_mut().unwrap().memory = 200;
+        assert!(matches!(store.request_resource_membership(&extra, io_fit, 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&extra.id, &extra.owner).unwrap().blocked_by, Some(BlockedBy::Io));
+        let mut landing = landing_request("landing", 40);
+        landing.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&landing, fit.clone(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 100);
+        assert_eq!(store.unused_landing_memory("host-a", 40).unwrap(), 0);
+        assert!(matches!(store.request_resource_membership(&landing_request("full", 1), fit, 5).unwrap(), Admission::Queued { .. }));
+    }
+
+    #[test]
+    fn landing_authorization_is_visible_and_defaults_to_deny() {
+        let store = fixture();
+        let landing = landing_request("unauthorized", 20);
+        let fit = Fit { room: small_room().room, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&landing, fit, 1).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, reason } if reason.contains("allowedActors")));
+        let record = store.resource_membership_record(&landing.id, &landing.owner).unwrap();
+        assert_eq!(record.state, "refused");
+        assert_eq!(record.request.class, RequestClass::Landing);
+        assert!(record.grant.is_none());
+        // An invocation label without native evidence cannot borrow an authorized operator.
+        let mut forged = landing_request("forged", 20);
+        forged.owner.invocation = Some("invocation/forged".into());
+        assert!(matches!(store.request_resource_membership(&forged, small_room(), 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn landing_authorization_uses_the_bound_native_invocation_actor() {
+        use crate::store::invocation_receipts::{append_receipt_tx, native_receipt};
+        use fractal_schema::invocation::InvocationPhase;
+        let store = fixture();
+        let agent = "agent/example/lander";
+        let receipt = native_receipt("landing", agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            InvocationPhase::Started, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        store.connection.batched(|transaction| append_receipt_tx(transaction, store.origin(), &receipt)).unwrap().unwrap();
+        let mut landing = landing_request("native-landing", 20);
+        landing.owner = Owner { run: receipt.invocation_id.clone(), step: receipt.invocation_id.clone(),
+            attempt: 1, invocation: Some(receipt.invocation_id.clone()) };
+        let mut fit = small_room();
+        fit.landing.allowed_actors = BTreeSet::from([agent.into()]);
+        assert!(matches!(store.request_resource_membership(&landing, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        let mut forged = landing.clone();
+        forged.id = "forged-owner".into();
+        forged.owner.step = "other-step".into();
+        assert!(matches!(store.request_resource_membership(&forged, fit, 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+    }
+
+    #[test]
+    fn queued_landing_reauthorizes_after_restart_and_on_a_new_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("landing.db");
+        let landing = landing_request("queued-landing", 20);
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            assert!(matches!(store.request_resource_membership(&landing,
+                Fit { outside_bytes: 100, ..small_room() }, 1).unwrap(), Admission::Queued { .. }));
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch-b").unwrap();
+        let denied = Fit { room: small_room().room, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&landing, denied.clone(), 2).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        let mut retry = landing.clone();
+        retry.id = "denied-retry".into();
+        retry.owner.attempt = 2;
+        assert!(matches!(store.request_resource_membership(&retry, denied, 3).unwrap(),
+            Admission::Refused { code: RefusalCode::UnauthorizedLanding, .. }));
+        retry.id = "authorized-retry".into();
+        assert!(matches!(store.request_resource_membership(&retry, small_room(), 4).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.resource_membership_record(&landing.id, &landing.owner).unwrap().refusal_code,
+            Some(RefusalCode::UnauthorizedLanding));
+    }
+
+    #[test]
+    fn zero_landing_reservation_preserves_ordinary_capacity() {
+        let store = fixture();
+        let fit = Fit { room: small_room().room, heavy_io_slots: Some(2), ..Fit::default() };
+        let mut first = sized_request("first", 60);
+        first.io = Some(IoClass::Heavy);
+        let mut second = sized_request("second", 40);
+        second.io = Some(IoClass::Heavy);
+        assert!(matches!(store.request_resource_membership(&first, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+        assert!(matches!(store.request_resource_membership(&second, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 100);
+        assert_eq!(store.unused_landing_memory("host-a", 0).unwrap(), 0);
     }
     fn fixture() -> Store {
         let store = Store::open_memory("host-a").unwrap();
@@ -1019,8 +1215,7 @@ mod tests {
     fn backfill_never_crosses_class_priority() {
         for lower in [RequestClass::Check, RequestClass::Agent] {
             let store = fixture();
-            let mut head = sized_request("landing-head", 80);
-            head.class = RequestClass::Landing;
+            let head = landing_request("landing-head", 80);
             let mut later = sized_request("later", 20);
             later.class = lower;
             let fit = Fit { outside_bytes: 50, ..small_room() };
@@ -1111,7 +1306,7 @@ mod tests {
             ("landing-first", RequestClass::Landing), ("landing-next", RequestClass::Landing),
             ("check-next", RequestClass::Check),
         ].into_iter().map(|(id, class)| {
-            let mut candidate = request(id);
+            let mut candidate = if class == RequestClass::Landing { landing_request(id, 80) } else { request(id) };
             candidate.name = id.into();
             candidate.class = class;
             candidate.capacity = Some(Capacity { cores: 1, memory: if class == RequestClass::Landing { 80 } else { 20 } });

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Record native harness input acceptance independently of delivered and read",
+  "replay": {
+    "status": "changed",
+    "detail": "Codex and OpenCode retain the first successful native input transport timestamp per runtime incarnation in their delivery ledger. Pi and OMP timestamp successful sendUserMessage handoffs in the extension, retain that timestamp on channel replay, and fsync an incarnation-scoped acceptance journal before publishing it. Claude retains the native transcript timestamp of its exact correlated queue enqueue or stronger native input receipt, together with the original handoff incarnation. Replaying a receipt does not replace its first timestamp."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Delivery-ledger entries, Claude handoff records and pi-family replacement state gain optional acceptance evidence. Native RPC attempts receive a durable ledger-local generation so a rejection can resolve exactly that retained attempt after recipient pruning. Existing aggregated retained bounds remain readable as unidentified uncertainty and cannot be erased by an unrelated rejection. An absent source clock is unknown and is never synthesized from delivered/read status, stdout staging or receipt-pump time."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Native acceptance receipts use the owner-fenced mailbox accepted lifecycle and preserve the source runtime incarnation. After acceptance POSTs are acknowledged, drivers publish an independently fenced acceptance-frontier cut captured before source inspection. Durable pre-transport attempt markers bound that cut strictly before unresolved native handoffs, including buffered or lost native responses; missing historical attempt clocks keep coverage unknown. This is not a receipt-pump heartbeat. Existing delivered and read semantics remain unchanged. Claude releases without an earlier correlated queue event can certify only the stronger native input receipt, not an unobserved earlier transport edge."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Updated pi-family hook assets add acceptedAtUnixMs only after the typed harness handoff succeeds; older hook frames without that source timestamp still deliver normally but do not certify acceptance. Every Pi/OMP channel independently initializes its mandatory acceptance journal, including Pi and OMP with an existing event observer. Optional todo-observation startup, shutdown and cleanup do not own or remove this journal."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No stored-state reset is required. New certificates require the updated producer and mailbox receipt endpoint."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No historical timestamps should be backfilled from generic lifecycle status."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Durable acceptance evidence is replayed after producer restart. A different runtime incarnation cannot relabel an earlier native acceptance or discard an unresolved native handoff. Pi/OMP retain recipient-scoped incarnation journals until native rejection or receipt acknowledgement resolves pending attempts. Native delivery ledgers retain abandoned-attempt bounds independently of transport entries, so retry, rebind and recipient settlement cannot silently advance completeness past uncertainty. Definitive RPC rejection resolves its matching generation even after prune/reopen, without erasing older unresolved handoffs."
+  }
+}

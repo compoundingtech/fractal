@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod launch_freeze;
 pub mod resource_membership;
+pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
 #[cfg(test)]
@@ -319,6 +320,8 @@ pub mod subagents;
 pub mod idle_mail;
 pub mod wake_demand;
 pub mod message_marks;
+pub mod mail_input_acceptance;
+pub mod mail_delivery_source;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -2538,6 +2541,8 @@ pub struct ChildMissionContext {
     /// program starts. Its creation claims are written as this actor, and run authority takes it
     /// as the child's starter (docs/st3/program-engine.md §3).
     pub started_by: Option<String>,
+    /// Verified internal derivation on this parent's behalf, independent of requester.
+    pub system_parent_run: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -3489,6 +3494,7 @@ impl Store {
                 guard: Some(guard),
                 force: None,
                 source_map: None,
+                initiating_principal: None,
             },
         )
     }
@@ -3514,6 +3520,7 @@ impl Store {
                 guard: None,
                 force: Some(reason),
                 source_map: None,
+                initiating_principal: None,
             },
         )
     }
@@ -3601,7 +3608,7 @@ impl Store {
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
-        let publication::CommitChecks { owned, guard, force, source_map } = checks;
+        let publication::CommitChecks { owned, guard, force, source_map, initiating_principal } = checks;
         if source_map.is_some() && owned.is_none() {
             return Err(FractalError::new("invalid-source-map", "a source map needs an owned-set publication"));
         }
@@ -4277,7 +4284,7 @@ impl Store {
                 }
                 for declaration in intent.mission_runs.values() {
                     let created =
-                        create_declared_mission_run_tx(transaction, &self.origin, declaration, &batch_id)?;
+                        create_declared_mission_run_tx(transaction, &self.origin, declaration, &batch_id, initiating_principal)?;
                     if !created.is_empty() {
                         operation_receipts.push(PlannedAction {
                             subject: declaration.subject.clone(),
@@ -7990,6 +7997,7 @@ fn create_declared_mission_run_tx(
     origin: &str,
     declaration: &MissionRunDeclaration,
     batch_id: &str,
+    initiating_principal: Option<&str>,
 ) -> Result<Vec<String>, FractalError> {
     let Some(creation) = &declaration.creation else {
         return Ok(Vec::new());
@@ -8178,6 +8186,9 @@ fn create_declared_mission_run_tx(
             "deadline_at_unix_ms": deadline_at_unix_ms,
         }
     });
+    if let Some(principal) = missions::resolve_initiating_principal_tx(transaction, initiating_principal)? {
+        body["fields"]["initiating_principal"] = json!(principal);
+    }
     if let Some(after) = &creation.after {
         body["fields"]["after"] = json!(after);
     }

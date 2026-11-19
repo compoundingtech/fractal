@@ -61,6 +61,7 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("profile_key", request.profile.as_ref().map(|key| json!(key))),
         ("profile_estimate", request.profile_estimate.as_ref().map(|estimate| json!(estimate))),
         ("disk_path", request.disk.as_ref().map(|disk| json!(disk.path))),
+        ("refusal_reason", execution.refusal_code.map(|_| json!(execution.reason))),
         ("io", request.io.as_ref().map(|io| json!(io))),
         ("head_start", head_start.map(|head| json!(head))),
         ("head_end", result.and_then(|result| result.head_end.as_ref()).map(|head| json!(head))),
@@ -120,6 +121,31 @@ mod tests {
     fn claims(store: &Store, prefix: Option<&str>) -> Vec<ClaimRecord> {
         store.claims_page_matching(ClaimsFilter { kind: Some(KIND), subject_prefix: prefix,
             ..ClaimsFilter::default() }, None, 0, None, false, 100).unwrap().claims
+    }
+
+    #[test]
+    fn landing_refusal_remains_typed_in_the_durable_terminal_receipt() {
+        use super::super::resource_membership::{Admission, Fit, RefusalCode};
+        let store = Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let mut command = command("denied-landing");
+        command.lane.class = RequestClass::Landing;
+        let mut execution = store.submit_shell_resource(command, 10).unwrap();
+        let admission = store.request_resource_membership(&execution.command.lane,
+            Fit { room: Some(fractal_runtime::Capacity { cores: 2, memory: 4096 }), ..Fit::default() }, 10).unwrap();
+        let Admission::Refused { code, reason } = admission else { panic!("landing must be refused") };
+        assert_eq!(code, RefusalCode::UnauthorizedLanding);
+        execution.state = "refused".into();
+        execution.refusal_code = Some(code);
+        execution.reason = reason;
+        execution.ended_at = Some(11);
+        store.update_shell_resource(&execution).unwrap();
+        let receipt = claims(&store, None);
+        assert_eq!(receipt.len(), 1);
+        assert_eq!(receipt[0].body["fields"]["class"], "landing");
+        assert_eq!(receipt[0].body["fields"]["refusal_code"], "unauthorized-landing");
+        assert!(receipt[0].body["fields"]["refusal_reason"].as_str().unwrap().contains("allowedActors"));
+        assert_eq!(store.shell_resource("denied-landing").unwrap().refusal_code, Some(code));
     }
 
     #[test]
