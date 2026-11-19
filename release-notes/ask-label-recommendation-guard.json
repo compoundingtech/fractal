@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "New asks reject recommendation prose in answer labels; use the native recommendation field instead.",
+  "replay": {
+    "status": "unchanged",
+    "detail": "Stored asks remain readable and answerable without revalidating historical labels."
+  },
+  "schema": {
+    "status": "unchanged",
+    "detail": "No schema, code generation or UI changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Shared creation validation rejects any case-insensitive word beginning recommend in answer labels, even when a native recommendation is present. Other request text is unaffected."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Producers must put preferences only in request.recommendation with an answer id and reason. The error points to fractal work ask --request and its help."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No coordinated downtime is needed."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No stored asks need migration."
+  },
+  "recovery": {
+    "status": "unchanged",
+    "detail": "Historical request and answer labels are preserved without stripping or inference."
+  }
+}
