@@ -11480,6 +11480,9 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
+    state.store.record_idle_unrouted(&subject,
+        crate::store::idle_residency::UnroutedKind::ExplicitResume)
+        .map_err(ApiError::internal)?;
     let (claim, _) = state
         .store
         .append_source_gated(
