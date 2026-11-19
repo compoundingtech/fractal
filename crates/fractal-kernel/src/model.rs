@@ -698,6 +698,51 @@ pub struct ProductSpec {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// An inert, daemon-owned finite work request. The durable program key identifies the
+/// episode; none of these strings are graph templates, commands, or environment variables.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeTurn {
+    pub agent: String,
+    pub instructions: String,
+    pub context: String,
+    #[serde(default)]
+    pub products: Vec<NativeTurnProduct>,
+    #[serde(default)]
+    pub fresh_context: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurnProduct {
+    pub path: String,
+    pub kind: String,
+    pub fields: BTreeMap<String, Value>,
+}
+
+impl NativeTurn {
+    pub fn validate(&self) -> Result<(), FractalError> {
+        if !self.agent.starts_with("agent/") || self.agent.split('/').skip(1).any(str::is_empty)
+            || self.instructions.trim().is_empty()
+        {
+            return Err(FractalError::new("invalid-native-turn", "a turn needs a literal agent/<id> and nonempty instructions"));
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        for product in &self.products {
+            if product.path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || product.path.contains(['@', '\\', '\0'])
+                || product.kind.trim().is_empty()
+                || !paths.insert(&product.path)
+                || product.fields.values().any(|value| value.is_array() || value.is_object())
+                || product.fields.get("kind").is_some_and(|kind| kind.as_str() != Some(product.kind.as_str()))
+            {
+                return Err(FractalError::new("invalid-native-turn", "turn products need unique relative resource paths, a kind, and scalar fields"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", rename_all = "kebab-case")]
 pub enum UsedMissionSpec {

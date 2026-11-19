@@ -22,6 +22,10 @@ export class GraphGateFailed extends Schema.TaggedError<GraphGateFailed>()('Grap
 export interface WorkerBinding {
   readonly mission: string
   readonly goalInput: string
+  /** With contextInput, graph inputs and product specs are encoded instead of spread. */
+  readonly contextInput?: string
+  readonly agentInput?: string
+  readonly report?: boolean
 }
 
 export interface LowerOptions {
@@ -29,13 +33,19 @@ export interface LowerOptions {
   readonly id: string
   /** The program's execution host; remote gate commands are not supported. */
   readonly host: string
-  /** Explicit routing from graph agent id to a published seat-turn mission. */
-  readonly workers: Readonly<Record<string, WorkerBinding>>
+  /** Optional per-agent overrides; absent agents use the published standard seat-turn mission. */
+  readonly workers?: Readonly<Record<string, WorkerBinding>>
+  /** Disable the standard resolver and require an explicit binding for every worker. */
+  readonly strictWorkers?: boolean
   /** Resolve imported agent references using the same tree as the graph renderer. */
   readonly resolveAgent?: (value: unknown) => AgentReference
 }
 
 const Product = Schema.Record(Schema.String, Schema.Unknown)
+export const standardWorkerBinding: WorkerBinding = {
+  mission: 'fractal/seat-turn', goalInput: 'instructions', contextInput: 'context', agentInput: 'agent', report: true,
+}
+
 const Products = Schema.Record(Schema.String, Product)
 const refuse = (step: string, construct: string, reason = 'Not supported by W1 graph lowering'): never => {
   throw new GraphCompileRefusal({ step, construct, reason })
@@ -96,9 +106,14 @@ export const lower = (
     }
     const agent = step.assignedTo ?? mission.assignedTo
     if (step.agentless !== true && (agent === undefined || !('id' in agent))) refuse(step.id, 'assignedTo')
-    const worker = step.agentless === true || agent === undefined || !('id' in agent) ? undefined : options.workers[agent.id]
+    const worker = step.agentless === true || agent === undefined || !('id' in agent) ? undefined
+      : options.workers?.[agent.id] ?? (options.strictWorkers === true ? undefined : standardWorkerBinding)
     if (step.agentless !== true && worker === undefined) refuse(step.id, 'worker binding', 'No seat-turn mission bound to the assigned agent')
-    if (worker !== undefined && mission.inputs?.some((input) => input.name === worker.goalInput)) refuse(step.id, 'worker input binding', `Instruction input ${worker.goalInput} collides with a declared graph input; bind an unused child input key`)
+    if (worker !== undefined && worker.contextInput === undefined && mission.inputs?.some((input) => input.name === worker.goalInput || input.name === worker.agentInput)) refuse(step.id, 'worker input binding', `Instruction or agent input collides with a declared graph input; bind an unused child input key or use contextInput`)
+    if (worker !== undefined) {
+      const names = [worker.goalInput, worker.contextInput, worker.agentInput].filter((name) => name !== undefined)
+      if (new Set(names).size !== names.length) refuse(step.id, 'worker input binding', 'Instruction, context and agent input keys must differ')
+    }
     for (const product of step.produces ?? []) {
       if (!product.subject.startsWith('resource/mission-run/${ST_MISSION_RUN}/')) refuse(step.id, 'product.resource subject')
     }
@@ -115,7 +130,7 @@ export const lower = (
       } else refuse(step.id, `gate.${gate.kind}`)
     }
     if (step.agentless === true && step.produces !== undefined) refuse(step.id, 'agentless product')
-    return { ...step, worker }
+    return { ...step, worker, agent }
   })
   const readySets: (typeof steps)[] = []
   const scheduled = new Set<string>()
@@ -168,7 +183,21 @@ export const lower = (
       const declaredProducts = step.produces ?? []
       if (step.worker !== undefined) {
         const paths = declaredProducts.map((product) => expand(product.subject.slice('resource/mission-run/${ST_MISSION_RUN}/'.length)))
-        const worker = Native.Worker.layer({ mission: step.worker.mission, input: { ...values, [step.worker.goalInput]: expand((step.goal ?? []).join('\n') + policy) }, ...(paths.length === 0 ? {} : { product: paths }) })
+        const instructions = expand((step.goal ?? []).join('\n') + policy)
+        const specs = declaredProducts.map((product, index) => ({
+          path: paths[index]!, kind: expand(product.fields.kind as string),
+          fields: Object.fromEntries(Object.entries(product.fields).map(([key, value]) => [key, typeof value === 'string' ? expand(value) : value])),
+        }))
+        const input = step.worker.contextInput === undefined ? { ...values } : {
+          [step.worker.contextInput]: JSON.stringify({ inputs: values, products: specs }),
+        }
+        input[step.worker.goalInput] = instructions
+        if (step.worker.agentInput !== undefined && step.agent !== undefined && 'id' in step.agent) input[step.worker.agentInput] = `agent/${step.agent.id}`
+        const worker = Native.Worker.layer({
+          mission: step.worker.mission, input,
+          ...(step.worker.report === undefined ? {} : { report: step.worker.report }),
+          ...(paths.length === 0 ? {} : { product: paths }),
+        })
         if (paths.length === 0) yield* Native.step({ id: step.id }).pipe(Effect.provide(worker))
         else {
           const values = yield* Native.step({ id: step.id, success: Products }).pipe(Effect.provide(worker))

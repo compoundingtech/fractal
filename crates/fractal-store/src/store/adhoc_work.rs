@@ -142,3 +142,42 @@ pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), Fr
         params![subject, run, generation, step.definition_hash, claim.actor, fields["ad_hoc_title"].as_str(), serde_json::to_string(&vec![fields["ad_hoc_title"].as_str().unwrap_or_default()]).map_err(internal)?, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
     Ok(())
 }
+
+/// A native turn uses the ordinary finite-work rows, but has no mission declaration or
+/// published revision. Its creation claim is the authority for its one literal leaf.
+pub fn project_native_turn(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), FractalError> {
+    let fields = &claim.body["fields"];
+    let turn: crate::model::NativeTurn = serde_json::from_value(fields["native_turn"].clone()).map_err(internal)?;
+    turn.validate()?;
+    let text = |name: &str| fields[name].as_str().ok_or_else(||
+        FractalError::new("invalid-mission-run-claim", format!("native turn lacks {name}")));
+    let run = claim.subject.trim_start_matches("mission-run/");
+    let generation = text("current_generation")?.trim_start_matches("run-generation/");
+    let root = text("root_mission_run")?.trim_start_matches("mission-run/");
+    let revision = text("revision")?;
+    let at = claim.accepted_at_unix_ms.to_string();
+    tx.execute(
+        "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,parent_step_run,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+         VALUES(?1,'native-turn',?2,?3,?4,?5,?6,?7,?8,'{}',?9,'running','normal',?10,?10)",
+        params![run, revision, generation, text("root_revision")?, root, text("parent_step_run")?,
+            text("workspace")?, text("requester")?, text("mode")?, at],
+    ).map_err(internal)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+         VALUES(?1,?2,?3,'running',?4,'native agent turn',?5,?5)",
+        params![generation, run, revision, claim.actor, at],
+    ).map_err(internal)?;
+    let mut constraints = vec![format!("Context (inert text):\n{}", turn.context)];
+    for product in &turn.products {
+        constraints.push(format!("Required resource: resource/{}/{}\nKind: {}\nFields: {}",
+            claim.subject, product.path, product.kind, serde_json::to_string(&product.fields).map_err(internal)?));
+    }
+    let constraints = serde_json::to_string(&constraints).map_err(internal)?;
+    let goals = serde_json::to_string(&vec![turn.instructions]).map_err(internal)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
+         VALUES(?1,?2,?3,'turn',?4,'ready',1,?5,'[]',0,'Native agent turn',?6,?7,?7,?8)",
+        params![format!("step-run/{generation}/turn"), run, generation, revision, turn.agent, goals, at, constraints],
+    ).map_err(internal)?;
+    Ok(())
+}

@@ -234,6 +234,41 @@ pub struct HandoffReturnRequest {
     pub idempotency_key: String,
 }
 
+pub fn native_turn_subject(key: &str) -> String {
+    format!("mission-run/native-turn/{}", hex::encode(Sha256::digest(key.as_bytes())))
+}
+
+fn native_parent_live(tx: &Transaction<'_>, owner: &StepRunView, attempt: u64) -> Result<bool, FractalError> {
+    if u64::from(owner.attempt) != attempt
+        || !matches!(owner.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
+        || !step_generation_is_current(tx, owner).map_err(internal)?
+        || step_owner_is_terminal_tx(tx, &owner.subject)?
+    {
+        return Ok(false);
+    }
+    tx.query_row("SELECT status IN ('running','standing','blocked') AND phase='normal' FROM mission_runs WHERE id=?1",
+        [owner.run.trim_start_matches("mission-run/")], |row| row.get(0)).map_err(internal)
+}
+
+/// Every worker mutation is fenced by the native episode's parent, not just its final report.
+pub(super) fn admit_native_turn_work(tx: &Transaction<'_>, step: &StepRunView) -> Result<(), FractalError> {
+    if !step.run.starts_with("mission-run/native-turn/") { return Ok(()); }
+    let created = latest_claim_of_kind_tx(tx, &step.run, "mission-run.created").map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-native-turn", "native turn creation is missing"))?;
+    let fields = &created.body["fields"];
+    let owner = fields["parent_step_run"].as_str()
+        .map(|parent| person_work::step(tx, parent)).transpose().map_err(internal)?.flatten();
+    let valid = match (owner, fields["parent_attempt"].as_u64()) {
+        (Some(owner), Some(attempt)) => created.actor.as_deref() == Some(owner.run.as_str())
+            && native_parent_live(tx, &owner, attempt)?,
+        _ => false,
+    };
+    if !valid {
+        return Err(FractalError::new("stale-native-turn-parent", "native turn parent left its exact live attempt"));
+    }
+    Ok(())
+}
+
 pub trait AdhocWorkStore {
     fn handoff_retry(
             &self,
@@ -241,6 +276,11 @@ pub trait AdhocWorkStore {
             input: &WorkHandoffRequest,
         ) -> Result<Option<StepRunView>, FractalError>;
     fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, FractalError>;
+    fn create_native_turn(
+        &self, parent: &MissionRunView, step: &str, attempt: u32, key: &str,
+        turn: &crate::model::NativeTurn,
+    ) -> Result<MissionRunView, FractalError>;
+    fn complete_native_turn(&self, run: &str, executions: &[fractal_kernel::StepExecution]) -> Result<bool>;
     fn return_handoff(&self, subject: &str, input: &HandoffReturnRequest) -> Result<ClaimRecord, FractalError>;
     fn acknowledge_work(
             &self,
@@ -250,6 +290,106 @@ pub trait AdhocWorkStore {
 }
 
 impl AdhocWorkStore for Store {
+    fn create_native_turn(
+        &self, parent: &MissionRunView, step: &str, attempt: u32, key: &str,
+        turn: &crate::model::NativeTurn,
+    ) -> Result<MissionRunView, FractalError> {
+        turn.validate()?;
+        let run = native_turn_subject(key);
+        let payload = serde_json::to_value(turn).map_err(internal)?;
+        self.with_run_fence(&parent.subject, |tx| {
+            let owner = person_work::step(tx, step).map_err(internal)?
+                .ok_or_else(|| FractalError::new("missing-step-run", "native turn parent step is missing"))?;
+            if owner.run != parent.subject || !native_parent_live(tx, &owner, u64::from(attempt))?
+            {
+                return Err(FractalError::new("stale-program-attempt", "native turn parent left its exact live attempt"));
+            }
+            let existing = tx.query_row(
+                &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                    FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+                [&run], claim_from_row,
+            ).optional().map_err(internal)?;
+            if let Some(existing) = existing {
+                let fields = &existing.body["fields"];
+                if fields["native_turn"] != payload || fields["parent_step_run"] != step
+                    || fields["parent_attempt"].as_u64() != Some(u64::from(attempt))
+                    || existing.actor.as_deref() != Some(parent.subject.as_str())
+                {
+                    return Err(FractalError::new("idempotency-conflict", "native turn durable key already owns another request"));
+                }
+                return Ok(());
+            }
+            if !person_work::declaration_live(tx, &turn.agent).map_err(internal)? {
+                return Err(FractalError::new("missing-work-actor", "native turn target needs a live literal seat declaration"));
+            }
+            if super::stop_intake::stop_cut(tx, &turn.agent).map_err(internal)?.is_some() {
+                return Err(super::stop_intake::stopping(&turn.agent));
+            }
+            let hash = hex::encode(Sha256::digest(key.as_bytes()));
+            let claim = append_claim_tx(tx, &self.origin, &run, "mission-run.created", Some(&parent.subject),
+                &json!({"fields": {
+                    "native_turn": payload, "native_turn_key": key, "parent_attempt": attempt,
+                    "status": "running", "mission": "mission/native-turn", "revision": hash,
+                    "current_generation": format!("run-generation/native-turn-{hash}"),
+                    "root_revision": parent.root_revision, "root_mission_run": parent.root_mission_run,
+                    "parent_step_run": step, "workspace": parent.workspace, "requester": parent.requester,
+                    "inputs": {}, "mode": parent.mode
+                }}), &[], None).map_err(claim_append_error)?;
+            fractal_store::store::adhoc_work::project_native_turn(tx, &claim)
+        })?;
+        self.mission_run(&run).map_err(internal)?
+            .ok_or_else(|| FractalError::new("missing-mission-run", "native turn creation did not project"))
+    }
+
+    fn complete_native_turn(&self, run: &str, executions: &[fractal_kernel::StepExecution]) -> Result<bool> {
+        self.with_all_runs_fenced_internal(|tx| {
+            let created = latest_claim_of_kind_tx(tx, run, "mission-run.created")?
+                .ok_or_else(|| anyhow::anyhow!("native turn creation is missing"))?;
+            let fields = &created.body["fields"];
+            let turn: crate::model::NativeTurn = serde_json::from_value(fields["native_turn"].clone())?;
+            let parent = fields["parent_step_run"].as_str().ok_or_else(|| anyhow::anyhow!("native turn parent is missing"))?;
+            let Some(owner) = person_work::step(tx, parent)? else { return Ok(false); };
+            if !native_parent_live(tx, &owner, fields["parent_attempt"].as_u64().unwrap_or(0))?
+            {
+                return Ok(false);
+            }
+            let generation = fields["current_generation"].as_str().ok_or_else(|| anyhow::anyhow!("native turn generation is missing"))?
+                .trim_start_matches("run-generation/");
+            let subject = format!("step-run/{generation}/turn");
+            let Some(step) = person_work::step(tx, &subject)? else { return Ok(false); };
+            if step.status != "verifying" || !step.worker_reported || step_owner_is_terminal_tx(tx, &subject)? {
+                return Ok(false);
+            }
+            let report = latest_claim_of_kind_tx(tx, &subject, "work.submitted")?
+                .filter(|report| report.actor.as_deref() == Some(turn.agent.as_str())
+                    && report.body["fields"]["attempt"].as_u64() == Some(u64::from(step.attempt)))
+                .ok_or_else(|| anyhow::anyhow!("native turn has no current literal worker report"))?;
+            let mut products = BTreeMap::new();
+            for product in &turn.products {
+                let resource = format!("resource/{run}/{}", product.path);
+                let Some(value) = fractal_store::store::latest_actual(tx, &resource)? else { return Ok(false); };
+                let actual = value.get("fields").unwrap_or(&value);
+                let field = |name: &str| name.split('.').try_fold(actual, |value, part| value.get(part));
+                if field("kind").and_then(Value::as_str) != Some(product.kind.as_str())
+                    || !product.fields.iter().all(|(name, expected)| field(name) == Some(expected))
+                {
+                    return Ok(false);
+                }
+                products.insert(product.path.clone(), value);
+            }
+            let claim = append_claim_tx(tx, &self.origin, run, "program.turn.report", created.actor.as_deref(),
+                &json!({"fields": {"report": {
+                    "run": run, "step": subject, "summary": report.body["fields"]["summary"].as_str().unwrap_or_default(),
+                    "evidence": report.body.get("evidence").cloned().unwrap_or_else(|| json!([])),
+                    "products": products, "executions": executions
+                }}}), &[report.id], None)?;
+            let terminal = append_claim_tx(tx, &self.origin, &subject, "step-run.state", None,
+                &json!({"fields": {"status": "completed", "attempt": step.attempt}}), &[claim.id], None)?;
+            project_mission_run_update(tx, &terminal)?;
+            super::missions::set_mission_run_state_tx(tx, &self.origin, run, "completed", "terminal", None)
+        })
+    }
+
 
     fn handoff_retry(
             &self,

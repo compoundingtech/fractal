@@ -292,6 +292,8 @@ impl Store {
         if current.generation != run.generation {
             return Ok(true);
         }
+        // Native finite work has no mission head and cannot be revised into graph work.
+        if current.subject.starts_with("mission-run/native-turn/") { return Ok(false); }
         let mission_id = missions::mission_storage_id(connection, &current.mission)?;
         let head = connection.query_row(
             "SELECT d.revision,d.claim_id,c.store_index
