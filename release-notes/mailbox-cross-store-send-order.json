@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Native agent mailboxes merge graph and message-shard mail in canonical send order instead of placing every graph message before shard messages.",
-  "replay": { "status": "none", "detail": "No replay or backfill. Existing pending mail uses canonical send order on its next mailbox update." },
+  "summary": "Native agent mailboxes preserve canonical send order across graph and message-shard mail and replay pending offers when the same incarnation reconnects.",
+  "replay": { "status": "changed", "detail": "A transport reconnect reoffers this incarnation's pending messages, including staged recovery mail. It no longer treats socket-open time as a new harness boot. Earlier-incarnation offers remain historical." },
   "schema": { "status": "none", "detail": "No published schema or contract digest change." },
   "rules": { "status": "none", "detail": "No authority, retention or claim-admission change." },
-  "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use the same canonical send keys across both stores. Index namespaces remain pagination identities, not delivery priority." },
+  "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use canonical send keys across both stores. Pagination namespaces are not delivery priority. Socket epochs and durable boot floors are logged on open and close; delivery-assessment transitions log their cause." },
   "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no data conversion." },
   "manual": { "status": "none", "detail": "No manual action required." },
-  "recovery": { "status": "none", "detail": "Existing receipt and recovery admission policies are unchanged." }
+  "recovery": { "status": "changed", "detail": "Pending offers remain owned by their harness incarnation across transport reconnects. Message IDs and existing receipt idempotency preserve deduplication; no durable format changes." }
 }
