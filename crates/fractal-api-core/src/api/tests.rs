@@ -1306,7 +1306,7 @@ async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
         "action":"suspend", "cause":"idle", "incarnation_id":"incumbent"
     }), vec![token.clone()], None);
     append("runtime.action.succeeded", json!({
-        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place"
+        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place", "source_host":"node"
     }), vec![suspend.id.clone()], Some(crate::suspension::suspend_snapshot_key(&suspend.id)));
     append("runtime.action.succeeded", json!({"action":"suspend"}),
         vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
@@ -1341,9 +1341,17 @@ async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
     let shown = client_suspension(&after);
     assert_eq!(shown["cause"], "manual");
     assert_eq!(shown["mode"], "in-place");
-
-    let resume = append("runtime.action.requested", json!({"action":"resume"}),
-        vec![token, suspend.id], None);
+    let (status, refused) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "host":"other", "idempotency_key":"move"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "snapshot-in-place");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "suspended");
+    let (status, resumed) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"same-host"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let resume = state.store.claim_by_id(resumed["id"].as_str().unwrap()).unwrap().unwrap();
     append("runtime.action.succeeded", json!({"action":"resume", "incarnation_id":"resumed"}),
         vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
     append("runtime.observed", json!({"status":"running", "runtime_id":"seat", "incarnation_id":"resumed"}), vec![], None);
