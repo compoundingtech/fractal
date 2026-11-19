@@ -2,11 +2,14 @@
 """scripts/ci-local-web: the web lane runs as one shard that covers everything, in a home of its own on the account's disk, with no
 st, GitHub or SSH agent variable and none of the account's tool wrappers. The two lane scripts are stubs that record what they saw."""
 import json
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -16,10 +19,6 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 '''
 
 
-def cores():
-    """The cores the script divides: nproc's, which counts a CPU quota on the caller's cgroup (a seat's lane), where the
-    affinity mask still names every core of the host."""
-    return int(subprocess.run(['nproc'], capture_output=True, text=True, check=True).stdout)
 
 
 class CiLocalWeb(unittest.TestCase):
@@ -44,17 +43,53 @@ class CiLocalWeb(unittest.TestCase):
         self.wrappers = self.home / '.local/bin'
         self.wrappers.mkdir(parents=True)
         self.log = root / 'log.jsonl'
+        native = self.wrappers / 'fractal'
+        native.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CI_LOCAL_WEB_TEST_LOG.admission"\n'
+                          'while [ "$1" != -- ]; do shift; done\nshift\n'
+                          'export FRACTAL_RESOURCE_PARENT=fixture FRACTAL_RESOURCE_EXEC_ID=fixture-root\n'
+                          'export ST3_ENDPOINT=unix:/fixture-native FRACTAL_ENDPOINT=unix:/fixture-native\nexec "$@"\n')
+        native.chmod(0o755)
 
-    def run_web(self, **extra):
+    def run_web(self, command=None, **extra):
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.wrappers}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_WEB_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'ST_AGENT': 'agent/x', 'FRACTAL_AGENT': 'agent/x', 'GH_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x',
                'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_WALL_GUARD_SECONDS': '268', 'APP_TEST_SET': 'related',
                'FRACTAL_WEB_BUCK_ROOT': '/nix/store/x-buck-root', 'FRACTAL_WEB_OTHER': '/var/elsewhere', **extra}
-        done = subprocess.run(['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
+        done = subprocess.run(command or ['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(0o002))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires the real Darwin shell platform')
+    def test_darwin_fractal_web_command_runs_the_lane_without_native_admission(self):
+        (self.wrappers / 'fractal').write_text('#!/bin/sh\necho unexpected-native-admission >&2\nexit 99\n')
+        nix = self.wrappers / 'nix'
+        nix.write_text('#!/bin/sh\nwhile [ "$1" != -c ]; do shift; done\nshift\nexec "$@"\n')
+        nix.chmod(0o755)
+        loader = importlib.machinery.SourceFileLoader('darwin_web_st_test', str(ROOT / 'scripts/st-test'))
+        runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(runner)
+        command = runner.governed(runner.LOCAL[runner.WEB], runner.WEB)
+        self.assertEqual(command, runner.LOCAL[runner.WEB])
+        done, calls = self.run_web(command=command)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(calls), 2, 'the fractal-web command must reach both web lane stages')
+        self.assertFalse(Path(str(self.log) + '.admission').exists())
+        for call in calls:
+            self.assertNotIn('FRACTAL_RESOURCE_PARENT', call['env'])
+            self.assertEqual(call['env']['KIT_PLAY_SET'], 'all')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires the real Linux shell platform')
+    def test_caller_uname_and_ostype_cannot_select_the_darwin_bypass(self):
+        (self.wrappers / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (self.wrappers / 'uname').chmod(0o755)
+        done, calls = self.run_web(OSTYPE='darwin99', **{'BASH_FUNC_uname%%': "() { printf 'Darwin\\n'; }"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        argv = Path(str(self.log) + '.admission').read_text().splitlines()
+        self.assertEqual(argv[argv.index('resources'):argv.index('resources') + 2], ['resources', 'exec'])
+        self.assertEqual(calls[0]['env']['FRACTAL_RESOURCE_PARENT'], 'fixture')
+        self.assertEqual(len(calls), 2)
 
     def test_its_scratch_is_removed_unless_kept_and_a_kept_one_is_named_where_fractal_test_reads_it(self):
         done, calls = self.run_web()
@@ -93,42 +128,24 @@ class CiLocalWeb(unittest.TestCase):
             self.assertEqual(call['umask'], 0o022)
         self.assertEqual(list((self.home / '.cache/ci-local').glob('web.*')), [], 'the scratch is removed afterwards')
 
-    def test_on_a_host_with_build_admission_the_plays_wait_for_a_heavy_slot_and_take_their_share_of_the_cores(self):
-        admission = self.wrappers / 'build-admission'
-        admission.write_text('#!/usr/bin/env bash\nexec "$@"\n')
-        admission.chmod(0o755)
-        (self.home / '.config').mkdir(parents=True, exist_ok=True)
-        (self.home / '.config/cargo-heavy-slots').write_text('2\n')
-        done, calls = self.run_web(KIT_PLAY_WORKERS='99')  # the caller's own value never reaches the plays
-        self.assertEqual(done.returncode, 0, done.stderr)
-        env = calls[-1]['env']
-        self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], str(admission))
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, cores() // 2)))
-        # The admission program reads its limits and queue under the account's home, which the stages' HOME hides.
-        self.assertEqual(env['BUILD_ADMISSION_CONFIG'], f'{self.home}/.config/build-admission')
-        self.assertEqual(env['BUILD_ADMISSION_STATE'], f'{self.home}/.local/state/st3/operations')
-
-    def test_without_build_admission_the_plays_run_as_ci_runs_them(self):
-        done, calls = self.run_web(KIT_PLAY_WORKERS='99')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        env = calls[-1]['env']
-        self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], '')
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(cores()))  # one heavy slot when the host names none
-        self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
-
-    def test_nested_kit_admission_does_not_wait_under_the_lanes_held_stage(self):
+    def test_native_profile_replaces_nested_kit_and_host_slot_admission(self):
         admission = self.wrappers / 'build-admission'
         admission.write_text('#!/bin/sh\necho nested-admission-would-wait >&2\nexit 75\n')
         admission.chmod(0o755)
-        # Run the production nested invocation after ci-local-web has scrubbed the environment and changed HOME.
-        source = (ROOT / 'scripts/ci-fractal-web').read_text()
-        start = source.index('kit_plays() (')
-        kit_plays = source[start:source.index('\n)\n', start) + 3]
-        with (self.work / 'scripts/ci-fractal-web').open('a') as script:
-            script.write(kit_plays + '\nnode() { :; }\nkit_receipt_dir=$KIT_RECEIPT_DIRECTORY\nkit_plays\n')
-        done, calls = self.run_web(CARGO_SLOT_HELD='stage:123', BUILD_ADMISSION_HELD='1')
+        (self.home / '.config').mkdir(parents=True, exist_ok=True)
+        (self.home / '.config/cargo-heavy-slots').write_text('2\n')
+        done, calls = self.run_web(KIT_PLAY_WORKERS='99')
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(calls[-1]['env']['KIT_PLAY_ADMISSION_BIN'], str(admission))
+        env = calls[-1]['env']
+        self.assertNotIn('KIT_PLAY_ADMISSION_BIN', env)
+        self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
+        self.assertEqual(env['KIT_PLAY_WORKERS'], '4')
+        self.assertEqual(env['FRACTAL_RESOURCE_EXEC_ID'], 'fixture-root')
+        argv = Path(str(self.log) + '.admission').read_text().splitlines()
+        self.assertEqual(argv[:11], ['--json', 'resources', 'exec', '--as', 'agent/x',
+                                     '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        self.assertIn('--request-id', argv)
+        self.assertIn('--receipt-file', argv)
         self.assertNotIn('nested-admission-would-wait', done.stderr)
 
     def test_the_host_watchman_service_is_named_by_its_socket(self):

@@ -15,12 +15,11 @@
 # directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
 # nothing they start can read or write this account's st state, harness configuration or credentials, and no PATH entry
 # inside the account's st state (a seat's command recorder) stays. Two things are kept:
-# the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
-# admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+# the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus.
+# RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
 #
-# Every time is measured and printed: the setup before the stages, each stage's start, end and seconds, and the time each stage spent
-# waiting in the build admission queue (the shim's "cargo: waiting in order" ... "cargo: got build slot" lines, which also get a UTC
-# stamp of their own; for the setup, the admission gate's waits too: queue_times), in a table at the end. Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
+# Setup and stage payload times are measured independently of the enclosing native phase's admission wait.
+# Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
 # ~/.cache/ci-local-logs/run-TIME-PID/STAGE.log; the latest 10 runs stay), after the scratch above is gone.
 set -euo pipefail
 real_home=$HOME  # the account's own, before the stages get a home of their own
@@ -34,34 +33,35 @@ for stage in "$@"; do
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
-# A host-local load limit, as scripts/fractal-test has: the 1-minute load average above which no heavy work starts. The limit is a number in
-# ~/.config/st-test/max-load (or ST_TEST_MAX_LOAD); none means no limit. While the load is above it this WAITS, says why every minute, and
-# after ST_TEST_LOAD_WAIT_MINUTES (default 30) exits non-zero with that reason: never silently. Whoever runs the host sets it, not the repo.
-load_limit=${ST_TEST_MAX_LOAD:-}
-if [ -z "$load_limit" ] && [ -r "$real_home/.config/st-test/max-load" ]; then
-  read -r load_limit _ < "$real_home/.config/st-test/max-load" || true
+# Direct callers enter the same native phase as st-test; an inherited native
+# phase already owns setup and every stage. Profile flags are provisional until
+# the native profile contract merges. No legacy admission fallback is permitted.
+platform=unknown
+if [[ -r /proc/sys/kernel/ostype ]]; then
+  builtin read -r platform < /proc/sys/kernel/ostype
+elif [[ -x /usr/bin/uname ]]; then
+  platform=$(/usr/bin/uname -s)
 fi
-if [ -n "$load_limit" ]; then
-  if ! awk -v v="$load_limit" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/) }'; then
-    echo "ci-local: the host load limit '$load_limit' must be a number (a load average)" >&2
-    exit 2
+if [[ $platform != Darwin ]] && [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
+  receipt_root=$real_home/.cache/st-test/admission
+  mkdir -p "$receipt_root"
+  request=$(uuidgen)
+  receipt=$receipt_root/ci-local-$(date +%s)-$$-$request.json
+  echo "ci-local: admission receipt: $receipt" >&2
+  if [ -n "${CI_LOCAL_QUEUE_LOG:-}" ]; then
+    printf 'wait %s resources\n' "$(date +%s)" >> "$CI_LOCAL_QUEUE_LOG"
   fi
-  load_deadline=$(( $(date +%s) + $(awk -v m="${ST_TEST_LOAD_WAIT_MINUTES:-30}" 'BEGIN { printf "%d", m * 60 }') ))
-  load_announced=0
-  while :; do
-    load_now=$(awk '{ print $1 }' "${CI_LOCAL_LOADAVG_FILE:-/proc/loadavg}")
-    awk -v l="$load_now" -v m="$load_limit" 'BEGIN { exit !(l <= m) }' && break
-    now=$(date +%s)
-    if [ $(( now - load_announced )) -ge 60 ]; then
-      echo "ci-local: waiting: load1 $load_now > $load_limit (host limit)" >&2
-      load_announced=$now
-    fi
-    if [ "$now" -ge "$load_deadline" ]; then
-      echo "ci-local: the host stayed above its load limit: load1 $load_now > $load_limit (host limit) for ${ST_TEST_LOAD_WAIT_MINUTES:-30} min; nothing was started" >&2
-      exit 3
-    fi
-    sleep "${CI_LOCAL_LOAD_POLL:-10}"
-  done
+  native=(fractal --json)
+  native_endpoint=${ST3_ENDPOINT:-${FRACTAL_ENDPOINT:-}}
+  if [ -n "$native_endpoint" ]; then native+=(--endpoint "$native_endpoint"); fi
+  native+=(resources exec)
+  native_owner=${ST_AGENT:-${FRACTAL_AGENT:-}}
+  if [ -n "$native_owner" ]; then native+=(--as "$native_owner"); fi
+  exec "${native[@]}" --lane st-test --class check --profile st-test-build \
+    --receipt-file "$receipt" --request-id "$request" -- bash "$0" "$@"
+fi
+if [ -n "${CI_LOCAL_QUEUE_LOG:-}" ]; then
+  printf 'slot %s resources\n' "$(date +%s)" >> "$CI_LOCAL_QUEUE_LOG"
 fi
 # The scratch, and the stages' TMPDIR inside it, are on the account's disk as a CI runner's temporary directory is, never the
 # caller's TMPDIR: a dev shell puts that under /tmp, which on some build hosts is a small tmpfs (tests that need tens of GB of
@@ -88,10 +88,8 @@ tmp=$(mktemp -d "$tmp_root/cl.XXXXXX")
 trap 'rm -rf "$scratch" "$tmp"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
-# The cargo the stages build with is the dev shell's own, handed to the build admission shim as CARGO_REAL: CI_LOCAL_CARGO
-# when set, otherwise the first cargo on PATH outside the account's home that is not the shim itself (the shim exports
-# CARGO_SHIM_DEPTH). A build host's default real cargo may source a saved dev shell environment from another day, whose tools
-# (an older pty) are not the tree's, and the stages would test those.
+# Use the dev shell's cargo, not a home-installed tool wrapper: CI_LOCAL_CARGO
+# when set, otherwise the first cargo on PATH outside the account's home.
 cargo_real=${CI_LOCAL_CARGO:-}
 if [ -z "$cargo_real" ]; then
   IFS=':' read -r -a entries <<< "$PATH"
@@ -110,6 +108,7 @@ while IFS='=' read -r -d '' name value; do
     # The dev shell's own test settings (flake.nix): the collector CI's OTLP export tests run against. Kept when they name a store
     # path, so a seat's own setting of the same name still leaves.
     ST3_OTELITE_BIN|FRACTAL_OTELITE_BIN) [[ "$value" == /nix/store/* && "$value" != *..* ]] || unset "$name" ;;
+    FRACTAL_RESOURCE_PARENT|FRACTAL_RESOURCE_EXEC_ID|ST3_ENDPOINT|FRACTAL_ENDPOINT) ;; # native custody, not seat credentials
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
@@ -118,33 +117,14 @@ st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 kept=()
 IFS=':' read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
+  case "$entry" in "$HOME/.local/bin"|"$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 # Cargo looks for a subcommand (clippy, fmt) in $CARGO_HOME/bin before PATH unless PATH names that directory, and an account's
 # ~/.cargo/bin holds rustup's proxies: `cargo clippy` would then run rustup's toolchain, not the dev shell's. Named last, the
 # directory comes after the dev shell's.
 case ":$PATH:" in *":$cargo_home/bin:"*) ;; *) PATH="$PATH:$cargo_home/bin" ;; esac
-# The host's build admission (the nix and cargo shims in ~/.local/bin and the build-admission program) finds its program, limits,
-# priorities and queue state under the account's home. The stages' HOME below would hide them: every nix and cargo command inside
-# a stage then found no admission program and took the shims' fallback cap, under a lock of its own per run, so a stage was admitted
-# by nothing the host's other builds wait in. They are named here, from the account's home, by the variables the shims read; a
-# value the caller set is kept, and a host without them is unchanged.
-account_home=$HOME
-if [ -x "$account_home/.local/bin/build-admission" ]; then
-  export BUILD_ADMISSION_BIN="${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}"
-  export BUILD_ADMISSION_CONFIG="${BUILD_ADMISSION_CONFIG:-$account_home/.config/build-admission}"
-  export BUILD_ADMISSION_STATE="${BUILD_ADMISSION_STATE:-$account_home/.local/state/st3/operations}"
-  # The cargo shim writes its slot waits to the admission log, which it finds under $HOME unless this names it: under the stages' HOME
-  # every write failed (No such file or directory), and a day's waits inside ci-local went unrecorded (2026-10-27).
-  export BUILD_ADMISSION_LOG="${BUILD_ADMISSION_LOG:-$BUILD_ADMISSION_STATE/build-admission.log}"
-  export BUILD_ADMISSION_FALLBACK_LOCK="${BUILD_ADMISSION_FALLBACK_LOCK:-$account_home/.local/state/st3/operations/build-admission-fallback.lock}"
-fi
-[ -r "$account_home/.config/cargo-priority" ] && export CARGO_PRIORITY_FILE="${CARGO_PRIORITY_FILE:-$account_home/.config/cargo-priority}"
-if [ -z "${CARGO_HEAVY_SLOTS:-}" ] && [ -r "$account_home/.config/cargo-heavy-slots" ]; then
-  CARGO_HEAVY_SLOTS=$(tr -d '[:space:]' < "$account_home/.config/cargo-heavy-slots")
-  export CARGO_HEAVY_SLOTS
-fi
+PATH="$(dirname "$cargo_real"):$PATH"
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$tmp"
@@ -281,9 +261,6 @@ export CI_TEST_THREADS=${CI_TEST_THREADS:-12}
 # untracked file the evidence signer then sees as a changed checkout ("the checkout changed while the command ran; nothing was signed"), so one
 # flaky property test voided a whole signing run. The stages persist no failures.
 export PROPTEST_DISABLE_FAILURE_PERSISTENCE=1
-low=()
-if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
-if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
 # One stage: its output stamped and tallied (queue_times), kept in its log and, for a stage in the foreground, passed on to this terminal.
 # Its exit code and its row of the closing table go to files, so a stage run in the background lane reports the same way.
 run_stage() {
@@ -303,9 +280,9 @@ run_stage() {
   # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
   set +e
   if [ "$stage" = isolation-vm ]; then
-    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+    { bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   else
-    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+    { bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" "" gates | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   fi
   code=${PIPESTATUS[0]}
   set -e
@@ -334,6 +311,7 @@ in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done
 # long to exit. Each process found is frozen (SIGSTOP) at once, so it cannot start another, and /proc is read again until a pass
 # finds no one new: a stage that forks while the tree is read is caught on the next pass. Then every frozen process is sent
 # SIGTERM and let go, so it ends. A process that ended before it was read has no status left and is skipped.
+# shellcheck disable=SC2329 # Called by the EXIT trap's cleanup_lanes.
 stop_tree() {
   local found=" $1 " grew=1 status key value child pid
   kill -STOP "$1" 2>/dev/null || true
@@ -354,6 +332,7 @@ stop_tree() {
   for pid in $found; do kill -CONT "$pid" 2>/dev/null || true; done
 }
 lane_pids=()
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
 cleanup_lanes() {
   local pid
   # Stop every lane before removing the scratch they use; an interrupted wait also takes this path.
@@ -361,7 +340,7 @@ cleanup_lanes() {
   for pid in "${lane_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
   rm -rf "$scratch" "$tmp"
 }
-trap cleanup_lanes EXIT
+trap 'cleanup_lanes' EXIT
 # For prompt cancellation while a foreground pipeline runs, signal this process group: Bash defers a PID-only trap until
 # that pipeline ends. st-test's runner signals the group. The EXIT path then stops all buffered lanes before scratch cleanup.
 trap 'exit 129' HUP
