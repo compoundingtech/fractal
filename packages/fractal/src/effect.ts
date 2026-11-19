@@ -38,3 +38,13 @@ export {
   ReviewerSeat,
   type ReviewOptions,
 } from './review.ts'
+export {
+  ReviewError,
+  ReviewFinding,
+  ReviewResult,
+  ReviewRubric,
+  ReviewSubject,
+  ReviewVerdict,
+  ReviewerSeat,
+  type ReviewOptions,
+} from './review.ts'

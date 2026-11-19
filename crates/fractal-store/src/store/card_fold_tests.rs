@@ -77,6 +77,9 @@ fn runtime_membership_decodes_only_the_status_it_needs_as_history_grows() {
             subject.clone(), runtime_view_entry(&connection, subject, index, true).unwrap(),
         )).collect::<HashMap<_, _>>();
 
+        // Measure a cold full fold at each history size, not the suffix left after
+        // the previous iteration's retained actual-state reduction.
+        store.fractal.card_actuals.lock().unwrap().clear();
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
         let mut full = card_fold::CardReads::new(index);
         store.agent_card_statuses(&connection, &subjects, index, &mut full).unwrap();
