@@ -49,6 +49,26 @@ objective "ops/change-rollout" {
 A missing, unknown, repeated or nonsensical child is refused, never defaulted. An objective is a root
 declaration; it cannot sit inside a mission.
 
+Fault owners can be declared without a harness or command. Their declared `host` selects the
+single member that appends the durable `message.sent`; delivery does not require a running
+agent. Host-block placement, default placement and `host "local"` are resolved when the
+declaration is published. Reapply older no-launch declarations that omitted an explicit host
+to persist that resolved placement. Repeated reconciliation retains one message per episode;
+a recovered objective that burns again opens a new episode and message.
+
+```kdl
+agent "ops/budget-owner" {
+  host "monitor"
+  name "Budget owner"
+  description "Own service budget episodes without starting a runtime"
+}
+```
+
+This inert top-level agent needs no task children. A run-owned agent still needs a launch;
+invalid or conflicting explicitly declared launches are rejected as before.
+Its agent card has no runtime or current session. Changing a previously launched root to an
+inert declaration does not reuse historical runtime or harness observations as current state.
+
 ## Indicators
 
 ### Native telemetry
@@ -109,6 +129,69 @@ in the new process rather than mislabeled as no qualifying events.
 Synthetic probes are not organic attachment or fresh-read traffic. Any future availability
 probe must have its own separately named objective rather than filling these sparse rows.
 
+### CPU populations and commissioning
+
+Production `cpu` remains ≤1 core over **all 60 closed UTC minutes**, including daemon and
+replication-worker process CPU. Unknown minutes never become zero or a shorter denominator.
+The sampler requires the exact expected fresh worker cohort at both boundaries. In production's
+singleton-worker topology, the newest reported process birth supersedes older births; the changed
+minute stays unknown, but the following stable minute recovers without waiting for the old report
+to age out. Equal-birth competing identities remain ambiguous, and a delayed older report cannot
+revive a superseded worker. Multi-worker topologies retain the entire exact cohort check.
+The CPU target in `/v1/client/request-latency` includes at most one hour of `minute_evidence`:
+CPU/wall nanoseconds, expected worker count, idle/seat evidence,
+busy reasons and a bounded `missing_reason` (`worker-missing`, `worker-stale`,
+`worker-cohort-extra`, `worker-topology-changed`, `worker-incarnation-changed`,
+`worker-counter-regressed`, `daemon-counter-regressed`). An omitted minute is an unobserved
+boundary, not a known zero. These are current local diagnostics, not durable historical
+attribution: an older receipt without them cannot prove which condition caused its unknown CPU.
+
+Production `cpu/idle` remains conditional: ≤0.5 core over at least ten confirmed idle minutes
+in a complete hour. `not eligible: busy` means productive seat activity alone rules out ten
+idle minutes; the row stays no-data with no error-budget credit. Missing CPU/seat evidence
+remains distinct and visible, even when reasons overlap. A live session's same-incarnation
+runtime heartbeat is not productive work: matching harness `ready`, `idle`, `blocked` or
+`ended` with no background jobs can prove it quiet only while the source `observed_at_ms`
+is fresh under the existing harness stale/future-skew bounds. Starts, new incarnations,
+work, and missing or expired matching harness observations cannot. Receiving an old report
+again does not refresh its source evidence.
+Freshness is checked before each admitted replacement as well as at minute boundaries;
+a later fresh observation cannot erase an earlier intra-minute gap of expired evidence.
+
+The separately labeled **representative isolated controlled quiet reference** is commissioned
+with the real daemon/worker sampler, never synthetic CPU values and never by pausing live seats.
+Prepare a network/state-isolated member using the same binary and configuration as the reference
+member, with instance-specific isolation supplied as launch overrides. Retain the launch,
+network/state isolation and configuration provenance in an operator receipt. Do not connect its
+worker to production peers. Then run:
+
+```sh
+python3 scripts/commission-cpu-quiet-reference \
+  --socket /isolated/member.sock --reference-socket /reference/member.sock \
+  --config /isolated/config.toml --reference-config /reference/config.toml \
+  --binary /isolated/fractal --reference-binary /reference/fractal \
+  --expected-workers 1 --isolation-evidence '<launch-and-isolation-receipt>'
+```
+
+The command only reads both members; it requires equal nonempty `build.commit` strings in
+both health responses, checks byte-identical
+binary/configuration inputs and reference worker topology, then collects exactly ten **new consecutive**
+closed minutes and waits for seat settlement. The operator's isolation receipt, not the socket
+name, establishes that launch overrides really isolate the member and that these are the files
+actually used. Unknown CPU, missing boundaries, busy/unsettled seats, topology changes or a
+changed build cannot pass. The measured verdict is published only after the final health read
+confirms the same nonempty build commit; a failed final health check leaves the receipt `no-data`.
+Its JSON stdout carries binary/configuration SHA-256, build, worker topology, isolation provenance,
+measured CPU/wall totals and per-minute evidence. Save that stdout as the
+commissioning artifact; a miss/no-data exits nonzero. This is `cpu/quiet-reference`, explicitly
+`production_objective=false`, not a third production objective or evidence of the busy host's
+idle behavior. Production `cpu` and conditional `cpu/idle` are unchanged by commissioning.
+
+Regression commands (not substitutes for a measured commissioning receipt):
+`cargo test -p smallclaims windows::cpu_minutes`,
+`cargo test -p fractal-store runtime_heartbeats_do_not_make_a_quiet_live_session_productive`,
+`cargo test -p fractal-api-core the_cpu_rows_are_met_missed_or_no_data_never_met_without_the_facts`,
+and `python3 scripts/commission-cpu-quiet-reference-test`.
 
 ### Source-backed GitHub measurements
 
@@ -362,6 +445,76 @@ Native episode failures persist the exact declaring objective name. Cleanup read
 from the claims, so changing the bound native family or restarting the member still recovers
 obsolete children without prefix-matching an independent nested declaration. A wholly unavailable
 source keeps its previously open owned rows unknown, including after restart.
+
+### GO-to-merged completion ratios
+
+[`slo/dotfiles-merge-latency.kdl`](../../slo/dotfiles-merge-latency.kdl) declares
+`landing/merge-latency/dotfiles/p50` and `landing/merge-latency/dotfiles/p95` through
+the existing native `ratio` evaluator. These are ratio row IDs, not diagnostic percentile
+estimates: at least 50% of qualifying completions must take at most 600 seconds, and at
+least 95% at most 1800 seconds. Both use the half-open merged-completion cohort
+`[now - 30d, now)`. Admission or GO before that horizon does not exclude a merge inside it.
+Equality at either duration is good; equality at the bad-event allowance satisfies the
+rendered `≤` target with zero remaining budget. Exhaustion requires exceeding that
+allowance. This inclusive boundary applies to the shared native budget classifier;
+unknown evidence and paired-burn decisions are unchanged.
+
+The source is an explicitly published declaration, not an automatically activated observer
+or a second configuration reader. Include it in the owning fleet's governed declaration
+source and publish through that source's existing `fractal apply --set` lane. Preview with
+`fractal apply --as "$FRACTAL_AGENT" --dry-run slo/dotfiles-merge-latency.kdl`.
+This file neither starts acquisition nor changes the merge queue. It declares no breach
+owner; fleet policy may author `on-breach` through its normal ownership lane.
+
+The queue-derived producer ingests existing custom claims through `fractal claim` /
+`POST /v1/claims`, not a new API or schema kind:
+
+- Kind: `custom.landing.dotfiles-merged`.
+- Subject: `custom/landing/dotfiles/merged/DIGEST`, where `DIGEST` is SHA-256 of the
+  UTF-8 compact JSON array `[repo,pr,head,admission,merge]`. Preserve producer-normalized
+  tuple values on retries; do not derive identity from ingestion time.
+- Fields: `schema: "fractal.merge-latency/v1"`, `repo`, `pr`, `head`, `admission`,
+  `merge`, `admittedAt`, `mergedAt`, `goAt`, `goSource`, `goEvidence`, `durationSeconds`.
+  `head` is the admitted full head; `merge` is the completed merge commit. Times are
+  RFC 3339 or Unix milliseconds. `durationSeconds = (mergedAt - goAt) / 1000`
+  must be finite and nonnegative, without rounding at the threshold.
+- `goSource: "route-a-exact-head"` requires an unedited exact-full-head
+  `q19-go v1 head=<40hex> verdict=GO` comment with one valid v3 footer identifying
+  a reviewer different from the PR body's owner; `goEvidence` is its durable URL.
+  These are self-asserted footer semantics, not independent authentication.
+  Preparation/candidate timestamps and free-form review prose are not promoted to GO.
+  Without qualifying evidence, `goSource: "admission-proxy"` uses admission time and
+  `goEvidence` holds the admission ID; both objectives explicitly exclude it.
+- Pass each field as `--field KEY=JSON`, plus `--actor "$FRACTAL_AGENT"` and a stable
+  `--idempotency-key`. The command parses JSON before its raw-string fallback, so encode
+  strings as JSON too. Retry the identical accepted fact, including its original
+  completion time and provenance, rather than inventing a new event timestamp.
+
+The producer owns validating durable completed admission/merge pairs and GO evidence;
+custom fields are not a new registered claim schema. The native reader incrementally
+reconstructs rows from replicated claims after restart or declaration revision and
+deduplicates repeated claims by subject and event timestamp. A missing or malformed
+duration is unknown, never good. Producer output/journal remains the replay source.
+No new schema registry, generated schema, projection, reconstruction kind, route,
+or acquisition cost probe is introduced.
+The integration tests compile this exact KDL source rather than duplicating its policy.
+It is therefore an explicit `fractal-api-core` extra in `.st/rust-test-inputs.json`
+and an input to both `linux-clippy` and `linux-fleet-compat` in the evidence policy
+and lane manifest, alongside the other compile-time SLO sources.
+The included KDL is also registered as source site `lv-ha5695af111aa` in the existing
+SQLite source inventory, with its adjacent owner/action marker. This accounts for
+test-source provenance only; it does not assert a SQLite value-size proof or add a
+runtime database path.
+
+Only exact-GO completions form the denominator. A proxy-only cohort reads
+`no-qualifying-events`, not met; unobserved or proxy merges cannot prove fleet-wide
+compliance. One qualifying completion makes the 30d budget eligible, but recent paired
+burn windows retain their independent evidence gates: an eligible historical cohort
+without recent evidence can read `not-eligible`, not an invented healthy burn verdict.
+Inspect `fractal slo explain landing/merge-latency/dotfiles/p50` (and `/p95`) for
+qualifying/excluded/unknown counts and remaining budget; use
+`fractal claims ls --kind custom.landing.dotfiles-merged` for provenance and producer
+coverage. These native ratios do not assert that the producer has observed every merge.
 
 ### Interval over claims
 

@@ -422,7 +422,6 @@ mod tests {
         server.await??;
         Ok(())
     }
-
     #[test]
     fn parses_launchd_disabled_boolean_and_named_states() -> Result<()> {
         let label = "com.compoundingtech.fractal";
