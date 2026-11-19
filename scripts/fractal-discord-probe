@@ -100,7 +100,7 @@ def probe(action, route, discord, after_message=None):
         result['status'] = 'application_and_channel_access_confirmed'
     elif action == 'send':
         sent = discord.request('POST', channel_path + '/messages', {
-            'content': 'st Discord connectivity probe. Agent routing is not enabled. '
+            'content': 'Fractal Discord connectivity probe. Agent routing is not enabled. '
                        'Please type "st probe hello" here so we can check reading too.',
             'allowed_mentions': {'parse': []},
             'nonce': route['nonce'], 'enforce_nonce': True,

@@ -4,7 +4,7 @@
 One isolated daemon (private HOME, XDG dirs, PATH and sockets) runs three Claude seats whose
 `claude` is ./claude, a stand-in selected through a private managed runtime profile that reports
 subagents through the real hooks. The eval checks,
-from outside the seats, that st records one `subagent.appeared` and one `subagent.ended` per
+from outside the seats, that Fractal records one `subagent.appeared` and one `subagent.ended` per
 subagent on its parent seat, and lease renewals only while one runs:
 - appear then end, with the subagent's type, one-line description, session and held step, and
   its tokens at the end; the tokens also count in the parent's usage;
@@ -12,7 +12,7 @@ subagent on its parent seat, and lease renewals only while one runs:
 - a subagent the turn ended without a stop (interrupted) and one whose session ended;
 - a daemon restart in between: ends and starts while the daemon is down are recorded after it
   returns, and a subagent running across the restart stays open;
-- a frozen seat: the lease runs out and st ends the subagent as expired;
+- a frozen seat: the lease runs out and Fractal ends the subagent as expired;
 - a killed seat: its lease runs out or its restart closes its subagent, whichever comes first;
   with the default lease, the restart closes it; a killed harness: its driver closes it;
 - a stopped seat and a removed (cancelled mission) seat: their subagents end.
@@ -141,7 +141,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         result = subprocess.run([str(self.binary), "--endpoint", str(self.endpoint), *args], env=self.env,
                                 capture_output=True, text=True, timeout=60)
         if check and result.returncode:
-            raise RuntimeError(f"st {' '.join(args)}: {result.stderr.strip()}")
+            raise RuntimeError(f"fractal {' '.join(args)}: {result.stderr.strip()}")
         return result.stdout
 
     def api(self, path):
@@ -307,16 +307,16 @@ def expect(condition, message):
 
 
 def shown(node, seat, subagent, description):
-    """A running subagent shows on its agent: in the client API, `st agents show` and the tree."""
+    """A running subagent shows on its agent: in the client API, `fractal agents show` and the tree."""
     def listed():
         agent = node.api("/v1/client/agents/" + seat.subject) or {}
         return [row for row in agent.get("subagents", []) if row.get("id") == subagent]
     row = until(listed, 30, f"{subagent} never showed on {seat.subject}")[0]
     expect(row.get("description") == description and row.get("lease_expires_at"), f"{subagent}: {row}")
     card = node.cli("agents", "show", seat.subject)
-    expect(f"SUBAGENT     {description}" in card, f"st agents show:\n{card}")
+    expect(f"SUBAGENT     {description}" in card, f"fractal agents show:\n{card}")
     tree = node.cli("agents", "tree")
-    expect(f"─ {description}" in tree, f"st agents tree:\n{tree}")
+    expect(f"─ {description}" in tree, f"fractal agents tree:\n{tree}")
     return {"subagent": row, "card": card, "tree": tree}
 
 
@@ -454,14 +454,14 @@ def worker_scenarios(node, worker, run, checks):
 
     # A daemon restart in between.
     worker.control("spawn", id="w4", description="runs across the restart")
-    worker.control("spawn", id="w5", description="ends while st is down")
+    worker.control("spawn", id="w5", description="ends while Fractal is down")
     worker.appeared("w4")
     worker.appeared("w5")
     worker.control("turn-end", running=["w4", "w5"])
     worker.applied()
     node.stop_daemon()
     worker.control("finish", id="w5", responses=[{"output": 7}])
-    worker.control("spawn", id="w6", description="starts while st is down")
+    worker.control("spawn", id="w6", description="starts while Fractal is down")
     worker.control("turn-end", running=["w4", "w6"])
     worker.applied()
     node.start()
@@ -563,7 +563,7 @@ def killed_scenarios(node, seat, checks):
         "card": node.cli("agents", "show", seat.subject), "tree": node.cli("agents", "tree"),
     }
 
-    # A frozen seat renews nothing: the lease runs out and st ends the subagent.
+    # A frozen seat renews nothing: the lease runs out and Fractal ends the subagent.
     seat.control("spawn", id="frozen", description="lease expires while its driver is frozen")
     seat.appeared("frozen")
     harness = ("driver claude", "/bin/claude")
@@ -575,7 +575,7 @@ def killed_scenarios(node, seat, checks):
         for part in harness:
             seat.node.signal_seat(KILLED, signal.SIGCONT, only=part)
     expect(ended.get("outcome") == "expired", f"frozen end: {ended}")
-    # Thawed, the harness still runs it and then stops it: st records nothing more for it.
+    # Thawed, the harness still runs it and then stops it: Fractal records nothing more for it.
     seat.control("finish", id="frozen", responses=[{"output": 1}])
     time.sleep(3)
     expect(len(seat.of("subagent.ended", "frozen")) == 1,

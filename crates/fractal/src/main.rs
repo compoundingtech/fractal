@@ -2775,6 +2775,11 @@ enum BackupCommand {
 
 #[derive(Subcommand)]
 enum ReplicationCommand {
+    /// Build both 30-day and 14-day wire archive candidates from an explicit offline copy.
+    ///
+    /// Analysis only: never activates a candidate or contacts the daemon. Candidate stores
+    /// are incomplete for default hot readers and must not be used by a daemon or deployment.
+    ArchiveCandidates(replication_cli::ArchiveCandidatesArgs),
     /// Show fleet receipt, validation, projection, and peer health.
     Status,
     /// Estimate a local graph replay; --confirm runs it while holding the daemon writer.
@@ -6359,6 +6364,12 @@ async fn run(cli: Cli) -> Result<()> {
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
+    // Archive construction uses only explicit offline paths, before config or client discovery.
+    if let Command::Replication {
+        command: ReplicationCommand::ArchiveCandidates(args),
+    } = cli.command {
+        return replication_cli::run_archive_candidates(args).await;
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = fractal_daemon::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
@@ -7945,7 +7956,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "mission_resource_lane": 2,
                     "idle_residency": 1,
                     "per_run_missions": 1,
-                    "shell_resource_exec": 1,
+                    "shell_resource_exec": 2,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It

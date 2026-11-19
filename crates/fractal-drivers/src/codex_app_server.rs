@@ -59,7 +59,7 @@ const REQUIRED_CODEX_SERVER_NOTIFICATIONS: &[&str] = &[
     "turn/started",
 ];
 // The control observer answers only an approval request for its own thread, and only with the
-// answer the seat's person gave in st (`CodexApprovalAnswer`). A listed request is reviewed and
+// answer the seat's person gave in Fractal (`CodexApprovalAnswer`). A listed request is reviewed and
 // safe to ignore otherwise. An unlisted request creates a delivery hold until the thread reports
 // a safe status.
 const CLASSIFIED_CODEX_SERVER_REQUESTS: &[&str] = &[
@@ -458,7 +458,7 @@ impl CodexObservedState {
     /// Driver-side projection into the generic observed-harness-state vocabulary (#162). `Held` is
     /// a delivery predicate — the complement of steerable — and never leaks into the published
     /// record: holds Codex positively reported as work project to `active` (with the human-blocking
-    /// ones setting the blocked axis), while holds that only mean "st cannot currently prove
+    /// ones setting the blocked axis), while holds that only mean "Fractal cannot currently prove
     /// anything" project to `None`, the indeterminate observation that writes nothing.
     pub fn harness_observation(&self) -> Option<harness_state::Observation> {
         use crate::harness_state::{Activity, Ask, BlockedOn, InputBuffer, Observation};
@@ -676,7 +676,7 @@ struct CodexInboxDelivery {
     /// heartbeat may re-stamp the contradicted on-disk state.
     pending_observation: Option<harness_state::Observation>,
     /// The approval request the last projection waited on. Each request's wait is its own
-    /// transition, so st's answer binds to exactly that request, never an earlier one's.
+    /// transition, so Fractal's answer binds to exactly that request, never an earlier one's.
     approval_request: Option<Value>,
     /// The numeric axis's producer, beside the categorical one. `None` only where the record has
     /// nowhere safe to stage — observability never blocks a launch.
@@ -755,7 +755,7 @@ impl CodexInboxDelivery {
                 Ok(claimed_seq) => writer.with_ownership(runtime.incarnation(), claimed_seq),
                 Err(error) => {
                     tracing::warn!(
-                        "st codex: observed-state claim failed; degrading to token-only: {error:#}"
+                        "fractal codex: observed-state claim failed; degrading to token-only: {error:#}"
                     );
                     writer.with_session(runtime.incarnation())
                 }
@@ -777,7 +777,7 @@ impl CodexInboxDelivery {
             )),
             Err(error) => {
                 tracing::warn!(
-                    "st codex: harness-context writer unavailable; context stays unpublished: {error:#}"
+                    "fractal codex: harness-context writer unavailable; context stays unpublished: {error:#}"
                 );
                 None
             }
@@ -865,7 +865,7 @@ impl CodexInboxDelivery {
             .get("result")
             .and_then(crate::account::codex_account_from_read);
         if account.is_none() {
-            tracing::debug!("st codex: account/read named no account; usage stays unattributed");
+            tracing::debug!("fractal codex: account/read named no account; usage stays unattributed");
         }
         if let Some(context) = self.context.as_mut() {
             context.set_account(account.clone());
@@ -955,7 +955,7 @@ impl CodexInboxDelivery {
                     Ok(Some(model)) => self.timeline.remember_turn_model(turn_id, &model),
                     Ok(None) => {}
                     Err(error) => {
-                        tracing::debug!("st codex: bounded turn model read failed: {error:#}")
+                        tracing::debug!("fractal codex: bounded turn model read failed: {error:#}")
                     }
                 }
             }
@@ -964,13 +964,13 @@ impl CodexInboxDelivery {
             if let Err(error) =
                 crate::harness_timeline::observe_codex(&mut self.timeline, message, thread_id)
             {
-                tracing::warn!("st codex: harness-timeline write failed: {error:#}");
+                tracing::warn!("fractal codex: harness-timeline write failed: {error:#}");
             }
         }
         if let Some(context) = self.context.as_mut()
             && let Err(error) = context.observe(message, thread_id)
         {
-            tracing::warn!("st codex: harness-context write failed: {error:#}");
+            tracing::warn!("fractal codex: harness-context write failed: {error:#}");
         }
     }
 
@@ -992,17 +992,17 @@ impl CodexInboxDelivery {
                     && let Err(error) = context.observe_transcript(&frames, thread_id)
                 {
                     tracing::warn!(
-                        "st codex: transcript harness-context recovery failed: {error:#}"
+                        "fractal codex: transcript harness-context recovery failed: {error:#}"
                     );
                 }
                 if let Err(error) = self.accept_transcript_receipts(&frames, thread_id) {
                     tracing::warn!(
-                        "st codex: transcript delivery receipt recovery failed: {error:#}"
+                        "fractal codex: transcript delivery receipt recovery failed: {error:#}"
                     );
                 }
             }
             Err(error) => {
-                tracing::warn!("st codex: bounded transcript context discovery failed: {error:#}")
+                tracing::warn!("fractal codex: bounded transcript context discovery failed: {error:#}")
             }
             _ => {}
         }
@@ -1112,7 +1112,7 @@ impl CodexInboxDelivery {
         // `systemError` describes the failed turn, not the app-server's lifetime. A turn that
         // failed on a typed connection cause, including a 429 after Codex used up its own few
         // retries, leaves a thread that takes the next turn (Codex 0.160.1): the incarnation stays
-        // idle with its cause, and st's provider backoff resumes it. While Codex still owns an
+        // idle with its cause, and Fractal's provider backoff resumes it. While Codex still owns an
         // active retry or a hold, leave the activity alone.
         if matches!(
             observed,
@@ -1216,7 +1216,7 @@ impl CodexInboxDelivery {
                     codex_error_info = codex_word,
                     will_retry = will_retry,
                     reason = reason.as_str(),
-                    "st codex: the provider failed this turn"
+                    "fractal codex: the provider failed this turn"
                 );
             }
             "turn/completed" => {
@@ -1378,7 +1378,7 @@ impl CodexInboxDelivery {
         // unavailable — and the raw reason stays in tracing, so no unbounded prose reaches the
         // record. Restating it is coalesced by the publisher, so a held pass costs no write.
         if let Some(reason) = self.ledger.quarantined().map(str::to_string) {
-            tracing::warn!("st codex: delivery ledger is quarantined: {reason}");
+            tracing::warn!("fractal codex: delivery ledger is quarantined: {reason}");
             self.diagnostics.publish(
                 driver_diagnostic::Stage::Delivery,
                 driver_diagnostic::Reason::DeliveryUnavailable,
@@ -1584,7 +1584,7 @@ impl CodexInboxDelivery {
             match observed_from_thread_snapshot(message, state.thread_id(), &state.observed) {
                 Ok(observed) => observed,
                 Err(error) => {
-                    tracing::warn!("st codex: invalid thread/read response; retrying: {error:#}");
+                    tracing::warn!("fractal codex: invalid thread/read response; retrying: {error:#}");
                     self.finish_failed_snapshot(pending, state, "was invalid");
                     return Ok(true);
                 }
@@ -1602,7 +1602,7 @@ impl CodexInboxDelivery {
         reason: &str,
     ) {
         tracing::warn!(
-            "st codex: thread/read request {} {reason} (attempt {}/{}); delivery remains fenced until retry or bounded fallback",
+            "fractal codex: thread/read request {} {reason} (attempt {}/{}); delivery remains fenced until retry or bounded fallback",
             pending.request_id,
             self.snapshot_attempts,
             SNAPSHOT_REQUEST_ATTEMPTS,
@@ -1983,7 +1983,7 @@ impl CodexControlState {
 
     /// The generic observed-harness-state projection of this state. A wait on an approval names
     /// the request it waits on (`commandExecution`, `fileChange`, `permissions`) when this
-    /// connection saw it, so st can answer exactly that request; one known only from the thread's
+    /// connection saw it, so Fractal can answer exactly that request; one known only from the thread's
     /// `waitingOnApproval` flag keeps that reason and is answered in the terminal.
     pub fn harness_observation(&self) -> Option<harness_state::Observation> {
         let observation = self.observed.harness_observation()?;
@@ -2137,7 +2137,7 @@ impl CodexControlState {
             | "item/permissions/requestApproval"
                 if message.get("id").is_some() =>
             {
-                // Observing a request answers nothing; only a person's answer from st does
+                // Observing a request answers nothing; only a person's answer from Fractal does
                 // (`CodexApprovalAnswer`). Modern requests carry threadId; older ones use
                 // conversationId. The socket can broadcast requests for other threads, so an
                 // unattributed request proves no block here.
@@ -2178,7 +2178,7 @@ impl CodexControlState {
                     });
                 }
             }
-            // Answered anywhere: the TUI, or st. The thread's status says whether it still waits;
+            // Answered anywhere: the TUI, or Fractal. The thread's status says whether it still waits;
             // the next request, if one waits, is the prompt now.
             "serverRequest/resolved" => {
                 let request = message.pointer("/params/requestId");
@@ -2670,7 +2670,7 @@ fn required_string<'a>(message: &'a Value, pointer: &str, method: &str) -> Resul
 /// Run the native Codex driver with explicit private state paths.
 ///
 /// The claims-graph runtime uses this entry point without an st2 catalog. The driver keeps the
-/// app-server protocol, delivery receipts, and harness records. Each st3 seat
+/// app-server protocol, delivery receipts, and harness records. Each Fractal seat
 /// launch starts a new Codex thread, except a resumed seat's: `resume_thread` names the thread it
 /// suspended on, and the TUI and control connection resume exactly that thread or fail.
 #[allow(clippy::too_many_arguments)]
@@ -2770,7 +2770,7 @@ pub fn run_controlled_paths(
     }
 }
 
-/// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
+/// Defaults apply only at the Fractal launch entry point, before fresh/resume policy projection.
 #[cfg(test)]
 fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>) -> Result<Vec<String>> {
     managed_codex_argv_with(mode, endpoint, workspace, argv, crate::access::Permissions::default())
@@ -5090,9 +5090,9 @@ fn resume_permission_overrides_applied(
         })
 }
 
-/// How often a waiting approval request asks st whether the seat's person answered it.
+/// How often a waiting approval request asks Fractal whether the seat's person answered it.
 const APPROVAL_ANSWER_POLL: Duration = Duration::from_secs(1);
-const APPROVAL_DENIED_FROM_ST: &str = "The person denied this from st.";
+const APPROVAL_DENIED_FROM_FRACTAL: &str = "The person denied this from st.";
 
 /// An approval request Codex waits on for this seat's thread.
 #[derive(Debug, Clone, PartialEq)]
@@ -5101,18 +5101,18 @@ struct PendingCodexApproval {
     method: String,
     params: Value,
     /// The state record's (ownership, transition) sequences of the observation this wait wrote:
-    /// the exact prompt st's answer must be for.
+    /// the exact prompt Fractal's answer must be for.
     prompt: Option<(u64, u64)>,
     polled: Option<Instant>,
 }
 
-/// Lets the seat's person answer an approval request from st (`prompt.respond`). The app-server
+/// Lets the seat's person answer an approval request from Fractal (`prompt.respond`). The app-server
 /// broadcasts the request to every client and takes the first response, so the TUI's prompt and
-/// st race; `serverRequest/resolved` or the thread moving on forgets the request, and st's answer
+/// Fractal race; `serverRequest/resolved` or the thread moving on forgets the request, and Fractal's answer
 /// is sent at most once. A request for another thread is never remembered or answered.
 ///
 /// Like Claude's prompt hook, the request binds to the observation its wait wrote, named by the
-/// seat's state record, and st answers only that observation (or a restatement of it). Requests
+/// seat's state record, and Fractal answers only that observation (or a restatement of it). Requests
 /// wait in the order they came, and only the oldest is the prompt: a later one binds once the
 /// earlier ones are resolved and its own wait is written as a new transition (see
 /// `CodexInboxDelivery::observe_control`). A request never binds to an observation another
@@ -5177,9 +5177,9 @@ impl CodexApprovalAnswer {
         }
     }
 
-    /// The response to send once st reports the person's answer, checked at most once a second.
+    /// The response to send once Fractal reports the person's answer, checked at most once a second.
     /// `record` reads the seat's state record, which the request's wait has written by the time
-    /// this runs; `read` asks st about the bound observation.
+    /// this runs; `read` asks Fractal about the bound observation.
     fn answer_if_due(
         &mut self,
         now: Instant,
@@ -5246,7 +5246,7 @@ fn approval_decision(method: &str, params: &Value, answer: &str) -> Option<Value
     Some(match method {
         "execCommandApproval" | "applyPatchApproval" if allow => json!({ "decision": "approved" }),
         "execCommandApproval" | "applyPatchApproval" => {
-            json!({ "decision": { "denied": { "rejection": APPROVAL_DENIED_FROM_ST } } })
+            json!({ "decision": { "denied": { "rejection": APPROVAL_DENIED_FROM_FRACTAL } } })
         }
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             json!({ "decision": if allow { "accept" } else { "decline" } })
@@ -5356,7 +5356,7 @@ fn pump_control(
                 )
             {
                 write_json_message(&mut websocket, &response)
-                    .context("answering a Codex approval request from st")?;
+                    .context("answering a Codex approval request from Fractal")?;
             }
             if let Some((answers, _)) = prompt_answers.as_ref()
                 && let Some((ownership, transition, call)) = approval_answer.bound_call.take()
@@ -5568,7 +5568,7 @@ fn pump_control(
                     &message,
                     state.thread_id(),
                 ) {
-                    tracing::warn!("st codex: subagent ledger write failed: {error:#}");
+                    tracing::warn!("fractal codex: subagent ledger write failed: {error:#}");
                 }
                 // The credential axis, taken here for the same reason: it reads a typed turn
                 // result no branch below looks at, and every one of them may `continue`.
@@ -5730,7 +5730,7 @@ fn recover_transcript_turn_if_due(
         Ok(Some(frames)) => frames,
         Ok(None) => return Ok(()),
         Err(error) => {
-            tracing::warn!("st codex: bounded transcript turn recovery failed: {error:#}");
+            tracing::warn!("fractal codex: bounded transcript turn recovery failed: {error:#}");
             return Ok(());
         }
     };
@@ -6303,7 +6303,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 /// The incarnation of the Codex runtime this state directory currently holds. Its records, such
-/// as the harness timeline, are stamped with this ID rather than st's runtime incarnation.
+/// as the harness timeline, are stamped with this ID rather than Fractal's runtime incarnation.
 pub fn current_runtime_incarnation(
     state_dir: &Path,
     agent: &str,

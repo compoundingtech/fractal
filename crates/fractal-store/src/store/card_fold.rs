@@ -266,6 +266,10 @@ impl CardReads {
         // Each body is parsed once, for the fold and for source selection both.
         let mut parsed = Vec::with_capacity(rows.len());
         for (id, kind, origin, body, folded) in rows {
+            #[cfg(any(test, feature = "test-support"))]
+            if folded || kind == "runtime.observed" {
+                ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
+            }
             let value = if folded {
                 serde_json::from_str::<Value>(&body)?
             } else if kind == "runtime.observed" {
@@ -315,6 +319,21 @@ impl CardReads {
         match self.actual.get(subject) {
             Some(actual) => Ok(actual.latest.clone()),
             None => latest_actual_at(connection, subject, Some(self.index)),
+        }
+    }
+
+    /// Membership needs status, not the full actual state or source selection.
+    /// Match the single-subject view reader and stop once its fields are resolved.
+    fn view_actual(&self, connection: &Connection, subject: &str) -> Result<Option<Value>> {
+        match self.actual.get(subject) {
+            Some(actual) => Ok(actual.latest.clone()),
+            None => latest_actual_fields_filtered_at(
+                connection,
+                subject,
+                Some(self.index),
+                if subject.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+                self.hide_reserved,
+            ),
         }
     }
 
@@ -399,13 +418,6 @@ impl Store {
                 .collect::<Vec<_>>();
             reads.load_desired(connection, &candidates)?;
             let owner_subjects = if owners { reads.owners(&candidates) } else { Vec::new() };
-            // Owners are runs and generations. Their actual states are read before any
-            // declaration of theirs, so their selected source ignores a declared host; that holds
-            // only because no owner is itself a runtime this fold shows.
-            debug_assert!(owner_subjects.iter().all(|owner| !runtime_subject(owner)));
-            let mut actual = candidates.clone();
-            actual.extend(owner_subjects.iter().cloned());
-            reads.load_actual(connection, &actual)?;
             let owner_heads = heads(connection, &owner_subjects, store_index)?;
             for (subject, head, candidate) in read {
                 let reads = &*reads;
@@ -417,7 +429,7 @@ impl Store {
                     head,
                     candidate,
                     &mut || reads.desired(connection, &subject),
-                    &mut |of| reads.latest(connection, of),
+                    &mut |of| reads.view_actual(connection, of),
                     &mut |owner| match owner_heads.get(owner) {
                         Some(head) => Ok(*head),
                         None => subject_head_at(connection, owner, store_index),

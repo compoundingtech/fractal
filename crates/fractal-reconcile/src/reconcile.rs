@@ -580,12 +580,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
         Ok(None)
     }
     fn start(&self, member: &MemberSpec) -> Result<()>;
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_guarded(&self, member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
         self.start(member)
     }
     /// A finite resource grant must never silently fall back to an ordinary detached start.
-    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
     }
     fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
@@ -983,7 +983,7 @@ impl RuntimeControl for NativeRuntime {
             .and_then(|item| item.tags.get("st3.rollout").cloned()))
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
-        self.start_checked(member, None)
+        self.start_checked(member, None, None)
     }
     fn start_operation(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<Option<String>> {
         if terminal {
@@ -999,13 +999,13 @@ impl RuntimeControl for NativeRuntime {
             })
         }
     }
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
-        self.start_checked(member, Some(guard))
+    fn start_guarded(&self, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        self.start_checked(member, operation, Some(guard))
     }
-    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
         let mut backend_entered = false;
-        self.start_checked_inner(member, Some(guard), &mut backend_entered, Some((store, &request)))
+        self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request)))
     }
     fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
@@ -1199,18 +1199,19 @@ impl NativeRuntime {
     fn start_checked(
         &self,
         member: &MemberSpec,
+        operation: Option<&fractal_runtime::LaunchOperation>,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
         // The backend owns its launch boundary and returns an exact StartRejected
         // witness when it can prove that no producer was created.
         let mut backend_entered = false;
-        self.start_checked_inner(member, guard, &mut backend_entered, None)
+        self.start_checked_inner(member, operation, guard, &mut backend_entered, None)
             .map_err(|error| {
                 if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
-                        operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
+                        operation: operation.map(|operation| operation.0.clone()),
                     })
                 }
             })
@@ -1219,10 +1220,12 @@ impl NativeRuntime {
     fn start_checked_inner(
         &self,
         member: &MemberSpec,
+        operation: Option<&fractal_runtime::LaunchOperation>,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
         resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
     ) -> Result<()> {
+        let exec = self.exec.clone().with_launch_operation(operation.cloned());
         let executable = launch_executable()?;
         let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
@@ -1265,6 +1268,7 @@ impl NativeRuntime {
             let runtime = self
                 .pty()?
                 .clone()
+                .with_launch_operation(operation.cloned())
                 .with_binary(pty_binary.to_string_lossy());
             if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
                 let predecessor = member
@@ -1360,7 +1364,7 @@ impl NativeRuntime {
                         release()
                     })
                 };
-                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                let execution = match exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
                     lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
                 }) {
                     Ok(execution) => execution,
@@ -1376,13 +1380,12 @@ impl NativeRuntime {
             }
             if let Some(guard) = guard {
                 *backend_entered = true;
-                return self
-                    .exec
+                return exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
             *backend_entered = true;
-            self.exec
+            exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
         }
@@ -2892,6 +2895,57 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .1 = false;
+        Ok(())
+    }
+
+    /// Raise one host item while the current replication worker is missing, stale, or has not
+    /// exchanged with a current peer past the grace period. Stored envelope history is not
+    /// evidence: only what this daemon has observed about the live worker is.
+    fn reconcile_replication_health(&self) -> Result<()> {
+        let configured = self.store.bound_fleet()?.is_some();
+        let health = self.store.replication_health(configured)?;
+        let daemon = format!("daemon/{}", self.host);
+        let title = format!("Replication is not healthy on {}", self.host);
+        let pending = self
+            .store
+            .pending_operational_failures(RECONCILER_ACTOR, &self.host)?
+            .into_iter()
+            .filter(|request| request.title == title && request.targets == [daemon.as_str()])
+            .collect::<Vec<_>>();
+        if health.status() == "fail" {
+            if pending.is_empty() {
+                let key = format!("replication-unhealthy:{}:{}", self.host, self.store.index()?);
+                let digest = hex::encode(sha2::Sha256::digest(key.as_bytes()));
+                self.store.record_operational_failure(
+                    &format!("attention/{}", &digest[..32]),
+                    &AttentionRequest {
+                        reviewer: "person/operator".into(),
+                        title,
+                        reason: format!(
+                            "On {}, {}: {}. This item closes once a live worker exchanges \
+                             successfully with a current peer again.",
+                            self.host,
+                            health,
+                            health.message(),
+                        ),
+                        severity: "error".into(),
+                        targets: vec![daemon],
+                        actor: RECONCILER_ACTOR.into(),
+                        idempotency_key: key,
+                    },
+                )?;
+                self.signal_changed();
+            }
+            return Ok(());
+        }
+        for request in pending {
+            self.store.recover_operational_failure(
+                &request.subject,
+                "the replication worker is live and a current peer exchanged successfully",
+                &format!("replication-recovered:{}", request.request),
+            )?;
+            self.signal_changed();
+        }
         Ok(())
     }
 
@@ -4425,6 +4479,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
+        });
+        self.isolate("stage/replication-health", &daemon, || {
+            self.reconcile_replication_health()
         });
         self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
@@ -6959,8 +7016,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         if selected != *subject {
             return Ok(());
         }
+        let reason = self.store.latest_actual_value(&subject.subject)?
+            .as_ref().and_then(runtime_exit_reason)
+            .unwrap_or_else(|| format!("{}-without-exit-evidence", observation.status));
         let mut intent = crate::graph::parse_internal_intent(
-            &format!("version 2\nstop {:?}\n", subject.subject),
+            &format!("version 2\nstop {:?} {{ reason {:?}; }}\n", subject.subject, reason),
             &self.host,
         )?;
         let stopped = intent.subjects.get_mut(&subject.subject)
@@ -6981,15 +7041,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         match result {
             Ok(_) => {
                 self.signal_changed();
-                if let Some(actual) = self.store.latest_actual_value(&subject.subject)?
-                    && let Some(reason) = runtime_exit_reason(&actual)
-                {
-                    self.record_once(&subject.subject, "runtime.reconcile-decision", BTreeMap::from([
-                        ("key".into(), Value::String("one-shot-retirement".into())),
-                        ("decision".into(), Value::String("retire".into())),
-                        ("reason".into(), Value::String(reason)),
-                    ]))?;
-                }
+                self.record_once(&subject.subject, "runtime.reconcile-decision", BTreeMap::from([
+                    ("key".into(), Value::String("one-shot-retirement".into())),
+                    ("decision".into(), Value::String("retire".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]))?;
             }
             Err(error) if error.code == "stale-subject" => {}
             Err(error) => return Err(error.into()),
@@ -10895,8 +10951,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if matches!(fields.get("status").and_then(Value::as_str), Some("running" | "starting")) {
             return Ok(());
         }
-        let Some(incarnation) = incarnation else { return Ok(()); };
+        let previous = self.store.latest_observation(subject, "runtime.observed")?
+            .filter(|claim| claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == incarnation);
         if terminal
+            && let Some(incarnation) = incarnation
             && let Some(evidence) = self.runtime.exit_evidence(runtime_id, incarnation)?
             && evidence.incarnation == incarnation
         {
@@ -10906,12 +10964,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(signal) = evidence.signal {
                 fields.insert("exit_signal".into(), Value::from(signal));
             }
-            fields.insert("exit_evidence".into(), serde_json::to_value(evidence)?);
+            let mut evidence = serde_json::to_value(evidence)?;
+            evidence["observedAtUnixMs"] = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/exit_evidence/observedAtUnixMs"))
+                .cloned().unwrap_or_else(|| serde_json::json!(now_ms()));
+            evidence["lastObservedState"] = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/exit_evidence/lastObservedState"))
+                .cloned().unwrap_or_else(|| fields.get("status").cloned().unwrap_or(Value::Null));
+            fields.insert("exit_evidence".into(), evidence);
             return Ok(());
         }
-        if let Some(previous) = self.store.latest_observation(subject, "runtime.observed")?
-            && previous.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == Some(incarnation)
-        {
+        if let Some(previous) = previous {
             for key in ["exit_code", "exit_signal", "exit_evidence"] {
                 if fields.get(key).is_none_or(Value::is_null)
                     && let Some(value) = previous.body["fields"].get(key)
@@ -10919,6 +10982,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     fields.insert(key.into(), value.clone());
                 }
             }
+        }
+        if matches!(fields.get("status").and_then(Value::as_str), Some("exited" | "vanished"))
+            && fields.get("exit_evidence").is_none_or(Value::is_null)
+        {
+            let status = fields.get("status").and_then(Value::as_str).unwrap();
+            let unknown = fields.get("exit_code").is_none_or(Value::is_null)
+                && fields.get("exit_signal").is_none_or(Value::is_null);
+            fields.insert("exit_evidence".into(), serde_json::json!({
+                "incarnation": incarnation,
+                "observedAtUnixMs": now_ms(),
+                "lastObservedState": status,
+                "exitStatus": if unknown { "unknown" } else { "known" },
+                "reason": if unknown { Some(format!("{status}-without-exit-evidence")) } else { None },
+            }));
         }
         Ok(())
     }
@@ -12847,15 +12924,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             supersession_cleanup = parent.superseded_by.is_some();
             parent_step = parent.parent_step_run;
         }
-        let owner_runs = if run.mode == "eval" {
-            self.store
-                .mission_runs_for_root(&run.id)?
-                .into_iter()
-                .map(|owned_run| owned_run.subject)
-                .collect::<BTreeSet<_>>()
-        } else {
-            BTreeSet::from([run.subject.clone()])
-        };
+        // Descendants are terminalized by the same traversal during cancellation.
+        // Include their owners here so ordinary cleanup emits the existing exact stops.
+        let mut owner_runs = BTreeSet::from([run.subject.clone()]);
+        owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
+        smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
         let mut owned = owner_runs
             .iter()
             .map(|owner| self.store.desired_subjects_for_owner_run(owner))
@@ -22674,9 +22747,17 @@ fn runtime_exit_reason(actual: &Value) -> Option<String> {
     let code = actual_field(actual, "exit_code").and_then(Value::as_i64);
     let signal = actual_field(actual, "exit_signal").and_then(Value::as_i64);
     if evidence.is_none() && code.is_none() && signal.is_none() {
-        return None;
+        return match actual_field(actual, "status").and_then(Value::as_str) {
+            Some(status @ ("exited" | "vanished")) => Some(format!("{status}-without-exit-evidence")),
+            _ => actual_field(actual, "reason").and_then(Value::as_str)
+                .filter(|reason| reason.ends_with("-without-exit-evidence")).map(str::to_owned),
+        };
     }
-    let mut reason = String::from("exited");
+    let mut reason = if code.is_none() && signal.is_none() {
+        evidence.and_then(|value| value.get("reason")).and_then(Value::as_str).unwrap_or("exited")
+    } else {
+        "exited"
+    }.to_owned();
     if let Some(code) = code {
         reason.push_str(&format!(" with code {code}"));
     }

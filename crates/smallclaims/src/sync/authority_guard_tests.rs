@@ -97,6 +97,7 @@ impl Backend for GuardBackend {
         _exchange: &ReplicationExchange,
         _trip: Option<Duration>,
         _carrier: crate::replication::ReplicationCarrier,
+        _authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
         unreachable!()
     }

@@ -19,6 +19,7 @@ pub const OPERATION_AUTHORIZED: &str = "client.operation-authorized";
 pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     anyhow::ensure!(claim.kind.starts_with("custom.client.pairing")
         || claim.kind.starts_with("custom.client.terminal")
+        || claim.kind == crate::store::observation_minutes::KIND
         || matches!(claim.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed"),
         "a client operation record is required");
     let hash = record_hash(&claim.origin, claim.actor.as_deref(), &claim.body["fields"])?;

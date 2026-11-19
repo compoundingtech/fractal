@@ -1461,6 +1461,7 @@ class CommittedPolicy(unittest.TestCase):
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
+            'apps/ios/fixtures/observation-minute.json',  # included by crates/fractal-api-core/src/api/client_observations.rs
             'packages/fractal/fixtures',  # included by crates/fractal/tests/validate.rs
             'slo', 'templates', 'vendor', 'wit']), 'typescript-client': sorted([
             'apps/fractal-web/package.json', 'packages/fractal-sdk/package.json',

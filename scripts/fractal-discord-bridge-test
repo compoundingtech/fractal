@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Credential-free bridge scenarios, plus optional isolated native st API verification."""
+"""Credential-free bridge scenarios, plus optional isolated native Fractal API verification."""
 
 import contextlib
 import hashlib
@@ -110,7 +110,7 @@ class FakeDiscord:
         return candidates[:int(query.get('limit', ['100'])[0])]
 
 
-class FakeSt:
+class FakeFractal:
     actor = AGENT
     def __init__(self):
         self.sent = {}
@@ -148,12 +148,12 @@ class BridgeScenarios(unittest.TestCase):
             with self.subTest(contract=contract):
                 self.state.put('outbound_cursor', '0')
                 page = {'contract': contract, 'items': [], 'cursor': 1, 'host': 'orchid'}
-                with patch.object(self.st, 'deliveries', return_value=page, create=True):
+                with patch.object(self.fractal, 'deliveries', return_value=page, create=True):
                     self.assertTrue(self.link.watch_replies())
                 self.assertEqual(self.state.get('outbound_cursor'), '1')
         self.state.put('outbound_cursor', '0')
         page = {'contract': 'fractal.adapter.delivery.v1', 'items': [], 'cursor': 1, 'host': 'orchid'}
-        with patch.object(self.st, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
+        with patch.object(self.fractal, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
             self.link.watch_replies()
         self.assertEqual(self.state.get('outbound_cursor'), '0')
 
@@ -162,8 +162,8 @@ class BridgeScenarios(unittest.TestCase):
         self.path = Path(self.folder.name) / 'state.sqlite'
         self.state = bridge.State(self.path, ROUTE, AGENT)
         self.state.put('cursor', '100')
-        self.discord, self.st, self.logs = FakeDiscord(), FakeSt(), []
-        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.st, self.logs.append)
+        self.discord, self.fractal, self.logs = FakeDiscord(), FakeFractal(), []
+        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.fractal, self.logs.append)
 
     def tearDown(self):
         self.state.close()
@@ -172,7 +172,7 @@ class BridgeScenarios(unittest.TestCase):
     def restart(self):
         self.state.close()
         self.state = bridge.State(self.path, ROUTE, AGENT)
-        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.st, self.logs.append)
+        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.fractal, self.logs.append)
 
     def imported(self, number=101):
         self.discord.messages.append(source(number))
@@ -182,7 +182,7 @@ class BridgeScenarios(unittest.TestCase):
     def answer(self, parent, text='agent says hello', **changes):
         message = {'subject': 'message/' + hashlib.sha256((parent + text).encode()).hexdigest()[:16],
                    'from': AGENT, 'to': self.link.sender, 'in_reply_to': parent, 'content': text, **changes}
-        self.st.mailbox.append(message)
+        self.fractal.mailbox.append(message)
         return message['subject']
 
     def test_only_allowlisted_human_is_imported_with_a_distinct_native_sender(self):
@@ -190,18 +190,18 @@ class BridgeScenarios(unittest.TestCase):
                                  source(103, author={'id': '404', 'bot': True}), source(104, webhook_id='808'),
                                  source(105, type=21)]
         self.link.tick()
-        self.assertEqual(len(self.st.sent), 1)
-        sent = next(iter(self.st.sent.values()))
+        self.assertEqual(len(self.fractal.sent), 1)
+        sent = next(iter(self.fractal.sent.values()))
         self.assertEqual(sent['from'], 'external/discord/user/404')
         self.assertEqual(sent['to'], AGENT)
         self.assertIn('no native-person link', sent['content'])
         self.assertEqual(self.state.get('cursor'), '105')
 
     def test_two_enrolled_legacy_accounts_keep_distinct_senders_and_reply_routes(self):
-        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.st, self.logs.append, allowed_users=['606'], legacy_text=True)
+        self.link = bridge.Bridge(ROUTE, AGENT, self.state, self.discord, self.fractal, self.logs.append, allowed_users=['606'], legacy_text=True)
         self.discord.messages = [source(101), source(102, author={'id': '606'}), source(103, author={'id': '999'})]
         self.link.tick()
-        sent = list(self.st.sent.values())
+        sent = list(self.fractal.sent.values())
         self.assertEqual({item['from'] for item in sent}, {'person/discord-404', 'person/discord-606'})
         for item in sent:
             parent = 'message/' + hashlib.sha256(item['idempotency_key'].encode()).hexdigest()[:16]
@@ -232,7 +232,7 @@ class BridgeScenarios(unittest.TestCase):
         self.discord.messages = [source(101, channel_id='999')]
         with self.assertRaises(bridge.Stop):
             self.link.tick()
-        self.assertEqual(len(self.st.sent), 0)
+        self.assertEqual(len(self.fractal.sent), 0)
         self.assertEqual(self.state.get('cursor'), '100')
 
     def test_restart_and_edits_never_repeat_an_import(self):
@@ -240,19 +240,19 @@ class BridgeScenarios(unittest.TestCase):
         self.discord.messages[0]['content'] = 'edited instruction'
         self.restart()
         self.link.tick()
-        self.assertEqual(len(self.st.attempts), 1)
-        self.assertNotIn('edited instruction', next(iter(self.st.sent.values()))['content'])
+        self.assertEqual(len(self.fractal.attempts), 1)
+        self.assertNotIn('edited instruction', next(iter(self.fractal.sent.values()))['content'])
 
     def test_native_timeout_reuses_the_same_key_payload_and_sender(self):
         self.discord.messages = [source(101)]
-        self.st.lose_receipt = True
+        self.fractal.lose_receipt = True
         with self.assertRaises(bridge.Later):
             self.link.tick()
         self.restart()
         self.link.tick()
-        self.assertEqual(len(self.st.attempts), 2)
-        self.assertEqual(self.st.attempts[0], self.st.attempts[1])
-        self.assertEqual(len(self.st.sent), 1)
+        self.assertEqual(len(self.fractal.attempts), 2)
+        self.assertEqual(self.fractal.attempts[0], self.fractal.attempts[1])
+        self.assertEqual(len(self.fractal.sent), 1)
 
     def test_reply_round_trip_and_discord_reply_preserve_correlation(self):
         original = self.imported()
@@ -264,7 +264,7 @@ class BridgeScenarios(unittest.TestCase):
         self.discord.messages.append(source(9100, 'follow-up', message_reference={'message_id': posted['id'], 'channel_id': '303'}))
         self.link.tick()
         follow_up = self.state.db.execute("SELECT st_id FROM inbox WHERE discord_id='9100'").fetchone()[0]
-        self.assertEqual(self.st.sent[follow_up]['in_reply_to'], answer)
+        self.assertEqual(self.fractal.sent[follow_up]['in_reply_to'], answer)
         self.answer(follow_up, 'second answer')
         self.link.tick()
         self.assertEqual(self.discord.posts[-1]['message_reference']['message_id'], '9100')
@@ -328,7 +328,7 @@ class BridgeScenarios(unittest.TestCase):
         self.discord.messages[0]['content'] = 'hello after enabling intent'
         self.restart()
         self.link.tick()
-        self.assertEqual(len(self.st.sent), 1)
+        self.assertEqual(len(self.fractal.sent), 1)
 
     def test_crash_checkpoint_is_uncertain_on_restart(self):
         original = self.imported()
@@ -357,9 +357,9 @@ class BridgeScenarios(unittest.TestCase):
         self.state.db.commit()
         self.discord.messages = [source(101, 'older message')]
         self.link.tick()
-        self.assertEqual(self.st.sent, {})
+        self.assertEqual(self.fractal.sent, {})
         self.imported(102)
-        self.assertEqual(len(self.st.sent), 1)
+        self.assertEqual(len(self.fractal.sent), 1)
 
     def test_changed_route_and_two_processes_cannot_share_state(self):
         with self.assertRaises(bridge.Stop):
@@ -372,7 +372,7 @@ class BridgeScenarios(unittest.TestCase):
     def test_credentials_and_oversized_input_are_never_saved_or_imported(self):
         self.discord.messages = [source(101, TOKEN), source(102, '😀' * 1000), source(103, '', attachments=[{'id': '505'}])]
         self.link.tick()
-        self.assertEqual(len(self.st.sent), 0)
+        self.assertEqual(len(self.fractal.sent), 0)
         self.assertEqual(self.state.db.execute('SELECT count(*) FROM inbox').fetchone()[0], 0)
         self.assertNotIn(TOKEN, '\n'.join(self.logs))
 
@@ -389,10 +389,10 @@ class BridgeScenarios(unittest.TestCase):
         item = attachment()
         self.discord.images[item['url']] = PNG
         self.discord.messages.append(source(101, '', attachments=[item]))
-        with patch.object(self.st, 'upload', wraps=self.st.upload) as uploaded:
+        with patch.object(self.fractal, 'upload', wraps=self.fractal.upload) as uploaded:
             self.link.tick()
             self.assertEqual(uploaded.call_args.args, (PNG, 'image/png', AGENT))
-        sent = next(iter(self.st.sent.values()))
+        sent = next(iter(self.fractal.sent.values()))
         self.assertEqual(len(sent['attachments']), 1)
         parent = self.state.db.execute('SELECT st_id FROM inbox').fetchone()[0]
         image = {'sha256': hashlib.sha256(PNG).hexdigest(), 'size': len(PNG), 'media_type': 'image/png'}
@@ -407,7 +407,7 @@ class BridgeScenarios(unittest.TestCase):
     def test_image_receipt_timeout_recovers_by_hash_without_duplicate_upload(self):
         parent = self.imported()
         digest = hashlib.sha256(PNG).hexdigest()
-        self.st.blobs[digest] = PNG
+        self.fractal.blobs[digest] = PNG
         self.answer(parent, 'picture', attachments=[{'sha256': digest, 'size': len(PNG), 'media_type': 'image/png'}])
         self.discord.lose_receipt = True
         self.link.tick()
@@ -419,7 +419,7 @@ class BridgeScenarios(unittest.TestCase):
     def test_impostor_image_receipt_with_wrong_bytes_stays_uncertain(self):
         parent = self.imported()
         digest = hashlib.sha256(PNG).hexdigest()
-        self.st.blobs[digest] = PNG
+        self.fractal.blobs[digest] = PNG
         self.answer(parent, 'picture', attachments=[{'sha256': digest, 'size': len(PNG), 'media_type': 'image/png'}])
         self.discord.lose_receipt = True
         self.link.tick()
@@ -435,15 +435,15 @@ class BridgeScenarios(unittest.TestCase):
         self.discord.messages[0]['attachments'] = []
         with self.assertRaises(bridge.Stop):
             self.link.imports()
-        self.assertEqual(self.st.sent, {})
+        self.assertEqual(self.fractal.sent, {})
         self.assertIsNone(self.state.db.execute('SELECT st_id FROM inbox').fetchone()[0])
 
     def test_delivery_watch_checkpoints_after_queueing_and_replays_without_duplicates(self):
         parent = self.imported()
         self.answer(parent, 'streamed reply')
-        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.st.mailbox, 'cursor': 707, 'host': 'orchid', 'more': False}
-        with patch.object(self.st, 'deliveries', return_value=page, create=True), \
-                patch.object(self.st, 'replies', side_effect=AssertionError('mailbox scan')):
+        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.fractal.mailbox, 'cursor': 707, 'host': 'orchid', 'more': False}
+        with patch.object(self.fractal, 'deliveries', return_value=page, create=True), \
+                patch.object(self.fractal, 'replies', side_effect=AssertionError('mailbox scan')):
             self.link.watch_replies()
             self.assertEqual(self.state.get('outbound_cursor'), '707')
             self.restart()
@@ -454,8 +454,8 @@ class BridgeScenarios(unittest.TestCase):
     def test_delivery_watch_does_not_advance_when_reply_queueing_fails(self):
         parent = self.imported()
         self.answer(parent, 'x' * 9000)
-        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.st.mailbox, 'cursor': 707, 'host': 'orchid'}
-        with patch.object(self.st, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
+        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.fractal.mailbox, 'cursor': 707, 'host': 'orchid'}
+        with patch.object(self.fractal, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
             self.link.watch_replies()
         self.assertIsNone(self.state.get('outbound_cursor'))
 
@@ -463,8 +463,8 @@ class BridgeScenarios(unittest.TestCase):
         incoming = self.imported()
         parent = self.answer(incoming, 'first reply')
         self.answer(parent, 'nested reply')
-        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.st.mailbox, 'cursor': 707, 'host': 'orchid'}
-        with patch.object(self.st, 'deliveries', return_value=page, create=True):
+        page = {'contract': 'st3.adapter.delivery.v0', 'items': self.fractal.mailbox, 'cursor': 707, 'host': 'orchid'}
+        with patch.object(self.fractal, 'deliveries', return_value=page, create=True):
             self.assertFalse(self.link.watch_replies())
             self.assertIsNone(self.state.get('outbound_cursor'))
             self.restart()
@@ -481,7 +481,7 @@ class BridgeScenarios(unittest.TestCase):
         self.state.put('outbound_host', 'orchid')
         self.state.put('outbound_cursor', '606')
         page = {'contract': 'st3.adapter.delivery.v0', 'items': [], 'cursor': 707, 'host': 'iris'}
-        with patch.object(self.st, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
+        with patch.object(self.fractal, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
             self.link.watch_replies()
         self.assertEqual(self.state.get('outbound_cursor'), '606')
 
@@ -505,14 +505,14 @@ class TransportScenarios(unittest.TestCase):
         ]
         for environment, expected in cases:
             with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
-                self.assertEqual(bridge.St(Path('/unused')).actor, expected)
+                self.assertEqual(bridge.Fractal(Path('/unused')).actor, expected)
 
     def test_environment_identity_conflicts_refuse_without_disclosing_values(self):
         for legacy in ('private-legacy', ''):
             with self.subTest(legacy=legacy), patch.dict(os.environ, {
                     'FRACTAL_AGENT': 'private-preferred', 'ST_AGENT': legacy}, clear=True):
                 with self.assertRaises(bridge.Stop) as error:
-                    bridge.St(Path('/unused'))
+                    bridge.Fractal(Path('/unused'))
                 self.assertEqual(str(error.exception),
                                  'Conflicting identity environment variables: FRACTAL_AGENT and ST_AGENT')
                 self.assertNotIn('private-preferred', str(error.exception))
@@ -521,9 +521,9 @@ class TransportScenarios(unittest.TestCase):
     def test_explicit_actor_still_overrides_environment_even_when_aliases_conflict(self):
         with patch.dict(os.environ, {'FRACTAL_AGENT': 'private-preferred',
                                      'ST_AGENT': 'private-legacy'}, clear=True):
-            self.assertEqual(bridge.St(Path('/unused'), actor=AGENT).actor, AGENT)
+            self.assertEqual(bridge.Fractal(Path('/unused'), actor=AGENT).actor, AGENT)
         with patch.dict(os.environ, {'FRACTAL_AGENT': AGENT}, clear=True):
-            self.assertEqual(bridge.St(Path('/unused'), actor='').actor, AGENT)
+            self.assertEqual(bridge.Fractal(Path('/unused'), actor='').actor, AGENT)
 
     def test_resolve_accepts_preferred_and_legacy_message_options(self):
         for option in ('--fractal-message', '--st-message'):
@@ -543,7 +543,7 @@ class TransportScenarios(unittest.TestCase):
     def test_local_api_envelopes_accept_old_and_fractal_transport_labels(self):
         path = Mock()
         path.lstat.return_value = Mock(st_mode=bridge.stat.S_IFSOCK | 0o600, st_uid=os.geteuid())
-        client = bridge.St(path)
+        client = bridge.Fractal(path)
         for version in ('st3.v1', 'fractal.v1', 'st3.client.v0', 'fractal.client.v0', 'future.v9'):
             with self.subTest(version=version):
                 wire = {'api_version': version, 'value': {'accepted': True}}
@@ -707,7 +707,7 @@ class TokenFileScenarios(unittest.TestCase):
         self.assertIn('Text bridge running', output.getvalue())
 
 
-@unittest.skipUnless(os.environ.get('ST3_BRIDGE_NATIVE_TEST_BIN'), 'Set ST3_BRIDGE_NATIVE_TEST_BIN for the isolated real st API test.')
+@unittest.skipUnless(os.environ.get('ST3_BRIDGE_NATIVE_TEST_BIN'), 'Set ST3_BRIDGE_NATIVE_TEST_BIN for the isolated real Fractal API test.')
 class NativeContract(unittest.TestCase):
     def test_distinct_sender_idempotency_pagination_and_native_reply_contract(self):
         binary = os.environ['ST3_BRIDGE_NATIVE_TEST_BIN']
@@ -729,10 +729,10 @@ class NativeContract(unittest.TestCase):
             try:
                 deadline = time.monotonic() + 30
                 while not sock.exists():
-                    self.assertIsNone(daemon.poll(), 'Isolated st daemon did not start.')
-                    self.assertLess(time.monotonic(), deadline, 'Isolated st daemon startup timed out.')
+                    self.assertIsNone(daemon.poll(), 'Isolated Fractal daemon did not start.')
+                    self.assertLess(time.monotonic(), deadline, 'Isolated Fractal daemon startup timed out.')
                     time.sleep(0.1)
-                native = bridge.St(sock)
+                native = bridge.Fractal(sock)
                 actor = os.environ.get('ST_AGENT', AGENT)
                 declaration = root / 'bridge.kdl'
                 declaration.write_text('version 2\nagent ' + json.dumps(actor.removeprefix('agent/')) + ' { workspace ' + json.dumps(str(root)) + '; argv "true"; restart "never"; tags st3.adapter.source="external/discord/user/404" st3.adapter.target=' + json.dumps(actor) + ' }\n')

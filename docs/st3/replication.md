@@ -11,6 +11,30 @@ or replica. Devices read and act through a member's client gateway and are not s
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
 
+## Replication health
+
+Fleet admission and a running daemon do not establish replication health. The
+daemon and `fractal replication-worker` are separately supervised; both must
+actually be running. A saved join receipt or stored envelopes are not evidence
+of a fresh exchange. Fleet status, doctor/health and alerts report missing worker
+or stale exchange evidence as degraded, including a dial-out join whose imported
+membership and peer lists are still empty.
+
+Daemon/store startup has a bounded 60-second grace for the worker's first
+heartbeat and exchange. After that grace, missing worker evidence fails health;
+an observed heartbeat expires after 25 seconds and exchange evidence after
+60 seconds. Exchange evidence belongs to the authenticated sender incarnation,
+not whichever member key has the same name when processing finishes. Ended
+incarnations do not prevent a live sole current creator from being healthy.
+
+Before membership arrives, the worker uses the sponsor routes saved by the join.
+An empty member list therefore does not mean the node has no bootstrap target.
+If synchronization never begins, inspect the worker's supervisor state and logs,
+not just the daemon or carrier's reachability. With externally managed services,
+complete that manager's activation and verify its worker job rather than
+installing a second set of native services.
+
+
 ## Automatic transport selection
 
 The local `fleet.toml` `transports` list is both an enablement filter and a

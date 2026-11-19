@@ -11,24 +11,24 @@ version 2
 // The GitHub provider reads GH_TOKEN, then GITHUB_TOKEN, then `gh auth token`, from the daemon's
 // environment.
 //
-//   st apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
-//   st apply examples/fractal/github-intake-work.kdl --as person/operator
-//   st apply examples/fractal/github-intake.kdl --as person/operator
-//   st missions start example/app/intake --id example/app/intake/main \
+//   fractal apply --no-gate-check examples/fractal/seats/omp.kdl --as person/operator
+//   fractal apply examples/fractal/github-intake-work.kdl --as person/operator
+//   fractal apply examples/fractal/github-intake.kdl --as person/operator
+//   fractal missions start example/app/intake --id example/app/intake/main \
 //     --workspace /srv/example/intake --as person/operator
 //
 // The observer and subscriptions belong to the intake run and stop when it ends. A mission with
 // no step would complete at once and stop them, so `retire` keeps the run open until the operator
-// approves it in `st attention ls --as person/operator`, or cancels the run:
+// approves it in `fractal attention ls --as person/operator`, or cancels the run:
 //
-//   st missions cancel mission-run/example/app/intake/main \
+//   fractal missions cancel mission-run/example/app/intake/main \
 //     --reason "the project moved to another repository" --as person/operator
 //
 // Inspect what the intake started:
 //
-//   st missions show mission-run/example/app/intake/main
-//   st missions ls
-//   st agents queue agent/example/worker
+//   fractal missions show mission-run/example/app/intake/main
+//   fractal missions ls
+//   fractal agents queue agent/example/worker
 
 resource "example/app/repository" { kind "vcs.repository" }
 

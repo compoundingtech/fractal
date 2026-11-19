@@ -582,7 +582,7 @@ checkouts, object import, replacement-object resistance and provenance mismatche
 
 ## Protected CI observer
 
-The internal `st3 evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
+The internal `fractal evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
 command accepts numeric selectors only. It reads its operator-owned configuration
 from the profile's private HOME at `.config/st/evidence-ci.json`. A sekrets grant
 must allow only that installed command prefix, after review and binary pinning.

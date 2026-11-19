@@ -127,6 +127,27 @@ frontiers retain only unresolved run obligations rather than rewalking history.
 Initial capture and authority/source-lifetime changes reconstruct those
 obligations from canonical signed inputs.
 
+### Shell environment scrub
+
+The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
+reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
+
+- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+  checked integer `complete=1`. The conservative catalog still makes no size proof.
+- `lv-h9abbf1dff207` rewrites historical `shell_resources_v1.body` JSON to remove
+  environments while preserving all other command/result fields. Those bodies
+  remain unbounded inline values; changing their representation requires the
+  owning producer's chunk/reference work, not changing this security scrub.
+- `lv-h017f6a53ca41` is the literal `VACUUM` reclamation sink. It binds no value,
+  but its physical cleanup cost covers the database. Trace that cost into the
+  bounded representation and reclamation work before removing the exception.
+- `lv-haceef5fded64` inserts the fixed completion key only after physical erasure.
+  Keep its cleanup/transaction costs in the same producer's representation review.
+
+These registrations do not change the scrub or claim that its UPDATE or VACUUM
+has bounded work. A bounded body representation and keyed reclamation would be
+the structural improvement; this registration preserves current behavior.
+
 ### GitHub capture rebuildable projection
 
 The `fractal_reconcile::reconcile::github_capture` maintainer owns the
@@ -1009,3 +1030,21 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+
+### Durable phone service minutes
+
+The `fractal_store::store::observation_minutes` maintainer owns the summary
+report, exact-minute, once-only cardinality and live-window sinks (`lv-hfcc0104f3a41`,
+`lv-h8d4d7e936cfe`, `lv-h0b3749d94a8e`, `lv-h9b74750ad85e`). They read canonical
+claim bodies through source/report, subject and numeric-minute seek indexes. The phone
+producer limits a report to 32 validated samples and canonical bounded histogram
+bins, but these producer limits do not establish a general physical value-size
+proof. The tracing TODO retains exact source, report and minute identities while
+resolving body/key representation; it is not permission to scan retained history.
+
+The schema site's `lv-ha5268709f026` identity includes the additive
+`claims_observation_report_index` and `claims_observation_minute_time_index`.
+The first uses source/report strings as variable index keys; the second combines
+a numeric minute with a variable subject key. Both index existing canonical
+claims without adding authoritative tables. Any later reference conversion must
+preserve exact retry, conflict exclusion, minute range and replication semantics.

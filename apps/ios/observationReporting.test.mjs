@@ -5,7 +5,6 @@ import ts from 'typescript';
 import { MINUTE_MS, Observations, toObservationReport } from './observations.ts';
 
 // Execute the production callback without importing React Native's StoreProvider into Node.
-// The actual Observations instance synchronously calls ready while nextReport sweeps a minute.
 const source = ts.createSourceFile('store.tsx', readFileSync(new URL('./store.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const callbacks = [];
 const visit = node => {
@@ -15,108 +14,102 @@ const visit = node => {
 visit(source);
 assert.equal(callbacks.length, 1);
 const callback = ts.transpile(`return (${callbacks[0].getText(source)});`, { target: ts.ScriptTarget.ES2022 });
-// A stand-in with the client's shape: the callback only asks `instanceof` and `status`.
 class ClientError extends Error { constructor(status) { super(`status ${status}`); this.status = status; } }
-const bindSend = new Function('state', 'observations', 'toObservationReport', 'client', 'ClientError', callback);
-const setup = (stored = null) => {
-  const clock = { at: Date.UTC(2026, 9, 14, 12, 0, 5), now() { return this.at; }, id: () => 'report/demo' };
-  const observations = new Observations({ read: async () => stored, write: async () => {} }, clock, () => ({ carrier: 'tailscale' }));
+const bindSend = new Function('state', 'observations', 'toObservationReport', 'client', 'ClientError', 'setError', 'errorText', callback);
+const setup = (storage = { read: async () => null, write: async () => {} }) => {
+  const clock = { at: Date.UTC(2026, 9, 14, 12, 0, 5), now() { return this.at; }, id: () => '11111111-1111-4111-8111-111111111111' };
+  const observations = new Observations(storage, clock, () => ({ carrier: 'tailscale' }));
   const state = { busy: false, last: 0, send: undefined };
-  const sent = [];
-  const pending = Promise.withResolvers();
-  const client = { observationsReport: report => { sent.push(report); return pending.promise; } };
-  state.send = bindSend(state, observations, toObservationReport, client, ClientError);
+  const sent = [], errors = [];
+  const pending = Promise.withResolvers(), started = Promise.withResolvers();
+  const client = { observationsReport: report => { sent.push(report); started.resolve(); return pending.promise; } };
+  state.send = bindSend(state, observations, toObservationReport, client, ClientError, error => errors.push(error), error => error.message);
   observations.ready = state.send;
-  return { clock, observations, state, sent, pending };
+  return { clock, observations, state, sent, pending, started, errors };
 };
 
 test('report preparation reserves the send slot before a minute sweep reenters ready', async () => {
-  const { clock, observations, state, sent, pending } = setup();
+  const { clock, observations, state, sent, pending, started } = setup();
   observations.observe('ios-connect', 100);
   clock.at += MINUTE_MS;
-  assert.doesNotThrow(() => state.send(), 'nextReport → sweep → ready must not recursively prepare another report');
+  const sending = state.send();
+  assert.equal(state.busy, true);
+  await started.promise;
   assert.equal(sent.length, 1);
   assert.equal(sent[0].samples.length, 1);
-  assert.equal(state.busy, true);
-  state.send();
+  await state.send();
   assert.equal(sent.length, 1, 'one report is in flight');
   pending.resolve({});
-  await Promise.resolve();
-  await Promise.resolve();
+  await sending;
   assert.equal(state.busy, false);
   assert.equal(observations.waiting, 0);
 });
 
-test('a null report releases the preparation slot without throttling the next measurement', () => {
+test('a null report releases the preparation slot without throttling the next measurement', async () => {
   const { state, sent } = setup();
-  state.send();
+  await state.send();
   assert.equal(state.busy, false);
   assert.equal(state.last, 0);
   assert.equal(sent.length, 0);
 });
 
-test('an empty restored batch is acknowledged and releases the preparation slot', async () => {
-  const start = Date.UTC(2026, 9, 14, 11, 59);
-  const { observations, state, sent } = setup(JSON.stringify({ closed: [{ start, series: {}, shares: {} }] }));
-  observations.ready = undefined;
-  await observations.load();
-  observations.ready = state.send;
-  state.send();
+test('a preparation failure releases busy, surfaces the cause, and does not send', async () => {
+  const { observations, state, sent, errors } = setup();
+  observations.nextReport = async () => { throw new Error('summary storage unavailable'); };
+  await state.send();
   assert.equal(state.busy, false);
   assert.equal(state.last, 0);
-  assert.equal(observations.waiting, 0);
   assert.equal(sent.length, 0);
+  assert.deepEqual(errors, ['summary storage unavailable']);
 });
 
-test('a synchronous preparation failure releases busy and the next send still runs', async () => {
-  const { clock, observations, state, sent, pending } = setup();
-  const expected = new Error('invented preparation failure');
-  const nextReport = observations.nextReport.bind(observations);
-  observations.nextReport = () => { throw expected; };
-  assert.throws(() => state.send(), error => error === expected);
-  assert.equal(state.busy, false);
-  assert.equal(state.last, 0);
-  observations.nextReport = nextReport;
+test('transport rejection releases busy and preserves the identical durable batch', async () => {
+  const { clock, observations, state, sent, pending, started } = setup();
   observations.observe('ios-connect', 100);
   clock.at += MINUTE_MS;
-  state.send();
-  assert.equal(sent.length, 1);
-  pending.resolve({});
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(state.busy, false);
-});
-
-test('transport rejection releases busy and preserves the batch for the next send', async () => {
-  const { clock, observations, state, sent, pending } = setup();
-  observations.observe('ios-connect', 100);
-  clock.at += MINUTE_MS;
-  state.send();
-  assert.equal(state.busy, true);
-  pending.reject(new Error('invented transport failure'));
-  await Promise.resolve();
-  await Promise.resolve();
+  const sending = state.send();
+  await started.promise;
+  pending.reject(new Error('transport unavailable'));
+  await sending;
   assert.equal(state.busy, false);
   assert.equal(observations.waiting, 1);
   state.last = 0;
-  state.send();
+  await state.send();
   assert.equal(sent.length, 2);
   assert.deepEqual(sent[1], sent[0]);
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(state.busy, false);
 });
 
-test('a report the member refuses for its content is dropped, any other failure keeps it', async () => {
+test('a content refusal is durably removed, other transport failures keep the batch', async () => {
   for (const [status, kept] of [[400, 0], [413, 0], [422, 0], [404, 1], [429, 1], [503, 1]]) {
-    const { clock, observations, state, pending } = setup();
+    const { clock, observations, state, pending, started } = setup();
     observations.observe('ios-connect', 100);
     clock.at += MINUTE_MS;
-    state.send();
+    const sending = state.send();
+    await started.promise;
     pending.reject(new ClientError(status));
-    await Promise.resolve();
-    await Promise.resolve();
+    await sending;
     assert.equal(state.busy, false, `${status}`);
     assert.equal(observations.waiting, kept, `${status}: a ${kept ? 'retryable' : 'refused'} report`);
   }
+});
+
+test('upload waits for durable storage and failed acknowledgement storage retains the batch', async () => {
+  const saved = Promise.withResolvers();
+  let hold = true;
+  const { clock, observations, state, sent, pending, started, errors } = setup({
+    read: async () => null,
+    write: async () => { if (hold) await saved.promise; else throw new Error('ack storage unavailable'); },
+  });
+  observations.observe('ios-connect', 100);
+  clock.at += MINUTE_MS;
+  const sending = state.send();
+  assert.equal(sent.length, 0, 'no upload before storage completes');
+  saved.resolve();
+  await started.promise;
+  hold = false;
+  pending.resolve({});
+  await sending;
+  assert.equal(state.busy, false);
+  assert.equal(observations.waiting, 1, 'accepted server report remains replayable until durable removal');
+  assert.deepEqual(errors, ['ack storage unavailable']);
 });

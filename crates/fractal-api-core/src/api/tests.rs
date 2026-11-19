@@ -6622,6 +6622,16 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
     let mut state = state(root.path());
     state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
     state.configured_peers = vec!["cobalt".into()];
+    // A pass needs a live worker and a fresh exchange, beside the refusal under test.
+    state.store.record_replication_worker_heartbeat();
+    state
+        .store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("cobalt".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now_ms());
     let app = router(state.clone());
     let (status, recorded) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
         "peer": "cobalt", "status": "refused", "error": "refused by that member's Fabric grants (service st3-peer-v1); replication can continue through other members"
@@ -6651,6 +6661,47 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
             .as_str()
             .unwrap()
             .contains("cobalt: refused by that member's Fabric grants")
+    );
+}
+
+/// The silent dial-out incident shape: redeemed membership, stored envelopes, no worker
+/// process. Doctor must fail loudly instead of passing on persisted history.
+#[tokio::test]
+async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.store.bind_fleet("94cd11ba-c582-4558-9c84-c3bda922eb6d").unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
+    state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
+    let app = router(state);
+    let (status, doctor) = get_request(app, "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "replication")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no replication worker heartbeat"),
+        "{check}"
     );
 }
 
@@ -6770,6 +6821,8 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
         .store
         .receive_replication_exchange("alder", "fleet/waiting", &exchange)
         .unwrap();
+    // A pass needs the live-worker evidence beside the waiting claim.
+    state.store.record_replication_worker_heartbeat();
     let report = doctor_report(&state).unwrap().0;
     let check = report
         .checks

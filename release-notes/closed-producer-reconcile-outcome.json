@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stopped agents no longer alternate clean and fault decisions when their already-closed PTY producer belongs to an earlier boot. Reconciliation validates and reuses the durable closure proof instead of re-probing the ended boot generation.",
+  "replay": { "status": "none", "detail": "Existing claim history and fault readers are unchanged." },
+  "schema": { "status": "none", "detail": "No database, claim, or producer sidecar format changes." },
+  "rules": { "status": "none", "detail": "A current-format durable closure is honored only when every recorded server identity belongs to an ended boot generation, and it must validate its publication marker, exact work scope, and complete server scope coverage. Current-boot, identityless, or zero-server producers keep the existing live identity and scope checks. Pending or malformed closure records cannot authorize completion." },
+  "compatibility": { "status": "none", "detail": "Legacy closure records retain their existing live-evidence path. A crash after durable closure but before the owner update is repaired from that closure." },
+  "downtime": { "status": "none", "detail": "No downtime is required." },
+  "manual": { "status": "none", "detail": "No producer sidecar edits or history rewrites are required." },
+  "recovery": { "status": "none", "detail": "Genuine unresolved producer faults remain visible. Closure proof still gates transcript capture and runtime-start retirement." }
+}

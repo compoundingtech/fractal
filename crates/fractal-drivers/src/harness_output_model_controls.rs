@@ -1,6 +1,6 @@
 //! Test-only output model for the atomic spool prototype.
 //! No native callback or runtime publisher is installed. Model controls were
-//! verified separately in st3; this module supplies types to transaction controls.
+//! verified separately in Fractal; this module supplies types to transaction controls.
 //!
 //! The producer must commit this image together with its timeline operation under
 //! the exact provider token and ownership sequence. Publication time is never output

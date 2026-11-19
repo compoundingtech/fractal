@@ -4419,6 +4419,7 @@ mod tests {
         crate::store::mailbox_tests::ready(&source, "session-1");
         let request = || ReplicationReceiveRequest {
             carrier: Default::default(),
+            authenticated_member_key: None,
             peer: "source".into(),
             fleet_id: FLEET.into(),
             exchange: source
