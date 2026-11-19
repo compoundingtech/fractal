@@ -3031,6 +3031,13 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
+        Self::replication_signatures_on(&connection, requests)
+    }
+
+    fn replication_signatures_on(
+        connection: &Connection,
+        requests: &[ReplicaEnvelopeId],
+    ) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
         let mut statement = connection.prepare(
             "SELECT member_key, signature FROM replica_envelope_signatures
              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 ORDER BY member_key",

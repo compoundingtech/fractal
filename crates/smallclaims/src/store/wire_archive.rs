@@ -37,16 +37,23 @@ impl Store {
         Ok(result)
     }
 
-    /// Resolve signature requests through the same pinned evidence, including cold originals.
+    /// Union hot signatures independently of envelope presence with pinned cold signatures.
     pub fn replication_signatures_with_archive(&self, requests: &[ReplicaEnvelopeId], archive: &mut ArchiveReaders) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
         let connection = self.readers.get();
         let transaction = connection.unchecked_transaction()?;
-        let mut signatures = Vec::new();
+        let mut signatures = Self::replication_signatures_on(&transaction, requests)?;
         for id in requests.iter().take(REPLICATION_SIGNATURE_LIMIT) {
-            if let Some(evidence) = evidence(&transaction, archive, id)? {
+            if let Some(evidence) = archive.evidence(id)? {
                 signatures.extend(evidence.into_replication_signatures()?);
             }
         }
+        fn key(signature: &crate::claim::ReplicaEnvelopeSignature) -> (&str, u64, &str, &str) {
+            (&signature.writer, signature.sequence, &signature.hash, &signature.member_key)
+        }
+        signatures.sort_unstable_by(|left, right| key(left).cmp(&key(right)));
+        anyhow::ensure!(signatures.windows(2).all(|pair| key(&pair[0]) != key(&pair[1])
+            || pair[0].signature == pair[1].signature), "contradictory hot/archive envelope signatures");
+        signatures.dedup();
         Ok(signatures)
     }
 

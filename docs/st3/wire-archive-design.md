@@ -26,6 +26,8 @@ There is **no daemon default archive writer**, no age selector, no hot deletion,
 
 The merged inventory preserves all fork hashes and payloadless checkpoint identities; authoritative retirement still prevents serving archived payloads. Exact hot/cold duplicates collapse, while differing receipt/repair/signature snapshots fail closed pending the overlay-aware stage rather than silently selecting one tier. Repair reads do not mutate cold state or perform repair. The temporary merged inventory is not persisted or fed back into the hot inventory cache. Tests relocate wire rows only inside offline fixtures and exercise bounded empty-peer catch-up, byte-identical payload transfer, native repair witnesses, signature ordering, conflict refusal, retired non-resurrection and unchanged default readers.
 
+Signature responses independently read the hot signature table even when its envelope is absent: follow-up receipt legitimately retains signature-only rows. They union those rows with cold signatures by full envelope identity plus member key, collapse identical signatures and refuse contradictory signature text. Envelope presence is never a prerequisite for exporting a retained hot signature.
+
 
 ### Later production scope
 
