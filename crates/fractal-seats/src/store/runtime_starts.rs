@@ -2779,7 +2779,7 @@ mission "launch-publication" state="ready" {
     }
 
     #[test]
-    fn signature_storage_19_to_21_upgrade_preserves_runtime_operation_and_format_boundary() {
+    fn signature_storage_19_to_20_upgrade_preserves_runtime_operation_and_format_boundary() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("claims.db");
         let store = Store::open(&path, "node").unwrap();
@@ -2845,7 +2845,7 @@ mission "launch-publication" state="ready" {
             reader
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            21
+            20
         );
         assert_eq!(roots(&reader, true), before_roots);
         assert_eq!(generation(&reader), before_generation);

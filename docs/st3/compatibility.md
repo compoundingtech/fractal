@@ -278,34 +278,41 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
 
-### Compact claim-signature references (storage version 21)
+### Reader-first compact claim-signature references
 
-The selected-signature facade, carrying-writer provenance, and judgment cursors
-store 32-byte SHA-256 references instead of repeated signature JSON. Exact UTF-8
-text remains authoritative: canonical candidate rows are unchanged, and a
-claim-scoped dictionary provides bounded reference lookup and preserves any
-legacy-only selected signature. Hash collisions, missing targets, changed
-dictionary bytes, or missing canonical candidates fail closed.
+This release keeps the default storage version at **20** and continues writing
+inline signature TEXT, so the previous published release can reopen and write
+the same member store. Installing the reader does not activate compaction or
+claim production byte savings. Empty additive dictionary/progress tables are
+local representation infrastructure, not a format flip.
 
-First open installs empty dictionary and progress tables and commits storage
-version 21 atomically; it does not build a history-sized index. Older binaries
-refuse the version before interpreting BLOB references as inline text. Writers
-emit references immediately. One boundary still reads old inline text while the
-existing paced maintenance job converts at most 64 rows per writer loan, with
-durable primary-key cursors and a 10 ms cooperative budget checked between rows.
-A single SQLite operation, row decode, or commit can exceed that budget; no
-statement is aborted. Authorization bootstrap finishes before compaction;
-the complete legacy authorization model continues serving until its existing
-activation gate passes. Reference compaction does not require projection replay,
-change signed bytes, reorder candidate pagination, or expire nonce evidence.
+The reader additionally supports explicitly activated **version 21** stores.
+It preserves their version marker rather than relabeling reference-bearing
+data as version 20. The selected-signature facade, carrying-writer provenance,
+and judgment cursors in that format use 32-byte SHA-256 references. Exact UTF-8
+text remains authoritative: canonical candidates and their ordering are
+unchanged, and a claim-scoped dictionary preserves legacy-only evidence.
+Collisions, changed/missing targets and missing canonical authority fail closed.
+
+The default writer may move to version 21 only in a later release whose N-1
+published binary already contains this reader arm. Do not manually change
+`user_version` to activate it on a fleet store. The v21 fixture explicitly
+exercises the later cutover, not a deployment-ready operator activation path.
+Within that format, conversion runs after authorization bootstrap, at most
+64 rows per writer loan with durable cursors and a 10 ms cooperative budget
+checked between rows. A single SQLite operation, row decode, or commit can
+exceed that budget; no statement is aborted. The complete legacy authorization
+model serves until its existing activation gate passes. Conversion preserves
+signed bytes, lexical judging pagination and global nonce replay evidence.
 
 The dictionary deliberately repeats candidate text as an incrementally built
 lookup index. Include that overhead when measuring net savings; replacing four
 inline copies with four references is not the net database reduction. Deleted
 inline payloads free SQLite pages for reuse, not immediate filesystem shrinkage.
 No automatic VACUUM, checkpoint, or production-store rewrite is part of this
-upgrade. A rollback to binaries supporting at most version 20 requires an
-appropriate pre-upgrade store restoration, not decrementing `user_version`.
+reader-first release. Default v20 stores retain N-1 rollback compatibility.
+Once a later release activates v21, roll back only to a published binary with
+this v21 reader, never by decrementing `user_version`.
 
 ### Additive assistant admission index
 

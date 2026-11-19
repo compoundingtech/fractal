@@ -68,10 +68,61 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 }
 
 #[test]
-fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
-    // Runtime operations own 19, candidate authority owns 20, compact references own 21.
-    // Advance this assertion with the shared storage version when queue order changes.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 21);
+fn signature_reference_reader_precedes_the_default_writer_format() {
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 21);
+}
+
+#[test]
+fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    let member = key();
+    let store = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    store.set_node_key(member.clone()).unwrap();
+    let claim = note(&store, None, "reader-first fixture");
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    assert_eq!(verdict(&store, &claim), Verdict::Verified);
+    {
+        let connection = store.connection.write();
+        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 20);
+        for table in ["claim_signatures", "claim_signature_sources"] {
+            let types: i64 = connection.query_row(&format!("SELECT count(*) FROM {table} WHERE typeof(signature)!='text'"), [], |row| row.get(0)).unwrap();
+            assert_eq!(types, 0, "{table} must stay readable by the previous release");
+        }
+        assert_eq!(connection.query_row("SELECT count(*) FROM claim_signature_originals", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+    assert!(!store.signature_migration().unwrap().references_pending);
+    drop(store);
+    // A later writer release activates v21. This earlier reader must preserve that
+    // marker, convert the old text losslessly and continue reading/writing authority.
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+    let reader = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while reader.signature_migration().unwrap().references_pending {
+        assert!(std::time::Instant::now() < deadline);
+        reader.advance_signature_migration().unwrap();
+    }
+    reader.set_node_key(member).unwrap();
+    reader.judge_claims(true).unwrap();
+    assert_eq!(verdict(&reader, &claim), Verdict::Verified);
+    {
+        let connection = reader.connection.write();
+        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
+        assert_eq!(connection.query_row("SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1", [&claim.id], |row| row.get::<_,String>(0)).unwrap(), "blob");
+    }
+    let later = note(&reader, None, "future writer fixture");
+    seal(&reader);
+    reader.judge_claims(true).unwrap();
+    assert_eq!(verdict(&reader, &later), Verdict::Verified);
+    drop(reader);
+    let reopened = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
+    assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
+    drop(reopened);
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 22).unwrap();
+    assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 
 fn key() -> Arc<MemberKey> {

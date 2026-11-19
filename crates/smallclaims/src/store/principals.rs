@@ -282,11 +282,12 @@ fn store_candidate_tx(
     let (added, reference) = references::insert_candidate(
         connection, claim_id, &text, &signature.key, &signature.nonce,
     )?;
-    // Contract an inline provenance row in the same transaction as its newest-format
-    // write, so an exact duplicate never inflates the carrying writer's count.
-    connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-hd090f46fc316 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2 AND writer=?3",
-    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, writer])?;
+    // Contract old provenance only when the writer format is explicitly activated.
+    if matches!(&reference, references::SignatureValue::Reference(_)) {
+        connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-hd090f46fc316 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2 AND writer=?3",
+        )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, writer])?;
+    }
     connection.prepare_cached(
         /* sqlite-large-value: allow-for-now lv-h8b1d8ca0d39f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
     )?.execute(/* sqlite-large-value: allow-for-now lv-h0d79b0cd4af5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,reference,writer])?;
@@ -910,11 +911,11 @@ fn write_verdict_tx(
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h5f8142f84899 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h7ddd430627d9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+        .execute(/* sqlite-large-value: allow-for-now lv-hc6a7a6c7b6d5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             signature.signer,
             signature.key,
             signature.nonce,
-            references::encode(connection, claim_id, &serde_json::to_string(signature)?)?,
+            references::write_value(connection, claim_id, &serde_json::to_string(signature)?, false)?,
             claim_id
         ])?;
     // Candidate pages have already committed their dependency links. Publishing the

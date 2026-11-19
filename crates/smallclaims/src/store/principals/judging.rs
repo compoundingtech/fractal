@@ -146,14 +146,12 @@ pub(super) fn advance(
                 )
             });
     let through = if through.is_empty() {
-        SqlValue::Text(through)
+        references::SignatureValue::Text(&through)
     } else {
-        SqlValue::Blob(references::encode_candidate(
-            connection, claim_id, &through,
-        )?)
+        references::write_value(connection, claim_id, &through, true)?
     };
     let best_signature = best_signature
-        .map(|text| references::encode_candidate(connection, claim_id, text))
+        .map(|text| references::write_value(connection, claim_id, text, true))
         .transpose()?;
     connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec805028307d owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h070bbbc92435 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
     if !finished {

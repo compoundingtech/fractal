@@ -6,6 +6,41 @@ use sha2::Sha256;
 
 const PAGE: usize = 64;
 const PAGE_TIME: std::time::Duration = std::time::Duration::from_millis(10);
+const REFERENCE_STORAGE_VERSION: u32 = 21;
+
+/// Reader support ships before the default writer format changes in a later release.
+pub(super) fn enabled(connection: &Connection) -> Result<bool> {
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    Ok(version >= REFERENCE_STORAGE_VERSION)
+}
+
+pub(super) enum SignatureValue<'a> {
+    Text(&'a str),
+    Reference(Vec<u8>),
+}
+
+impl rusqlite::ToSql for SignatureValue<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        use rusqlite::types::{ToSqlOutput, ValueRef};
+        Ok(ToSqlOutput::Borrowed(match self {
+            Self::Text(text) => ValueRef::Text(text.as_bytes()),
+            Self::Reference(reference) => ValueRef::Blob(reference),
+        }))
+    }
+}
+
+pub(super) fn write_value<'a>(
+    connection: &Connection,
+    claim_id: &str,
+    text: &'a str,
+    require_candidate: bool,
+) -> Result<SignatureValue<'a>> {
+    if enabled(connection)? {
+        Ok(SignatureValue::Reference(intern(connection, claim_id, text, require_candidate)?))
+    } else {
+        Ok(SignatureValue::Text(text))
+    }
+}
 
 pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
     let installed: bool = connection.query_row(
@@ -142,27 +177,32 @@ pub(super) fn resolve(connection: &Connection, claim_id: &str, value: SqlValue) 
 }
 
 /// Insert canonical authority and its lookup atomically in the caller's transaction.
-pub(super) fn insert_candidate(
+pub(super) fn insert_candidate<'a>(
     connection: &Connection,
     claim_id: &str,
-    text: &str,
+    text: &'a str,
     key: &str,
     nonce: &str,
-) -> Result<(usize, Vec<u8>)> {
+) -> Result<(usize, SignatureValue<'a>)> {
     // Check collisions before changing canonical authority, including for exact duplicates.
-    let reference = encode(connection, claim_id, text)?;
+    let reference = write_value(connection, claim_id, text, false)?;
     let added = connection.execute(
         /* sqlite-large-value: allow-for-now lv-h429ba6471a39 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce) VALUES(?1,?2,?3,?4)",
         params![claim_id, text, key, nonce],
     )?;
-    connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hddefb45ae629 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_originals SET candidate=1 WHERE claim_id=?1 AND reference=?2",
-        params![claim_id, reference],
-    )?;
+    if let SignatureValue::Reference(bytes) = &reference {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hddefb45ae629 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_originals SET candidate=1 WHERE claim_id=?1 AND reference=?2",
+            params![claim_id, bytes],
+        )?;
+    }
     Ok((added, reference))
 }
 
 pub(super) fn pending(connection: &Connection) -> Result<bool> {
+    if !enabled(connection)? {
+        return Ok(false);
+    }
     let phase: String = connection.query_row(
         "SELECT phase FROM claim_signature_reference_migration WHERE id=1",
         [],
@@ -198,6 +238,9 @@ fn checkpoint(
 /// Sources move in primary-key order; converted BLOBs may be visited once more, but
 /// no inline row is skipped. New writers emit references, including behind the cursor.
 pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
+    if !enabled(connection)? {
+        return Ok(0);
+    }
     let started = std::time::Instant::now();
     let (phase, claim, signature, writer): (String, String, SqlValue, String) = connection.query_row(
         "SELECT phase,claim_id,signature,writer FROM claim_signature_reference_migration WHERE id=1",
@@ -322,6 +365,7 @@ mod tests {
     fn old_schema() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
+        connection.pragma_update(None, "user_version", REFERENCE_STORAGE_VERSION).unwrap();
         connection
     }
 
@@ -605,6 +649,8 @@ mod tests {
             .pragma_update(None, "journal_mode", "WAL")
             .unwrap();
         connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
+        // Exercise the later format flip explicitly; this release defaults to v20 TEXT.
+        connection.pragma_update(None, "user_version", REFERENCE_STORAGE_VERSION).unwrap();
         {
             let tx = connection.unchecked_transaction().unwrap();
             for index in 0..CLAIMS {

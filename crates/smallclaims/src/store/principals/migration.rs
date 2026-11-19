@@ -128,10 +128,10 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
     references::initialize_schema(&transaction)?;
     initialize_selection(&transaction)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a3a869aa34 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET started_at_unix_ms=?1,advanced_at_unix_ms=?1 WHERE id=1 AND started_at_unix_ms=0",[i64::try_from(now_ms())?])?;
-    // Commit the incompatibility marker with reference-capable relations: older
-    // readers must not interpret their BLOB references as inline signature text.
+    // Reader-first rollout keeps the default v20 format. Never downgrade the marker
+    // of an explicitly activated v21 store while installing its reference reader.
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != CURRENT_SCHEMA_VERSION {
+    if version < CURRENT_SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }
     transaction.commit()?;
