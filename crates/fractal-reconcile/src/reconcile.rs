@@ -7709,19 +7709,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 {
                     Ok(provenance) => provenance.as_deref() == Some(operation.id.as_str()),
                     Err(error) => {
-                        self.record_once(
+                        self.record_start_revocation_unverified(
                             subject,
-                            "harness.diagnostic",
-                            BTreeMap::from([
-                                ("severity".into(), Value::from("error")),
-                                ("code".into(), Value::from("start-revocation-unverified")),
-                                (
-                                    "reason".into(),
-                                    Value::from(format!(
-                                        "retirement provenance is unreadable: {error:#}"
-                                    )),
-                                ),
-                            ]),
+                            &format!("retirement provenance is unreadable: {error:#}"),
                         )?;
                         false
                     }
@@ -11000,6 +10990,45 @@ impl<R: RuntimeControl> Reconciler<R> {
             Err(error) if error.code == "claim-checkpointed" => {}
             Err(error) => return Err(error.into()),
         }
+        Ok(())
+    }
+
+    fn record_start_revocation_unverified(&self, subject: &str, reason: &str) -> Result<()> {
+        let owner = if subject.starts_with("agent/") {
+            Some(subject.to_owned())
+        } else if let Ok(Some(owner)) = fractal_schema::owned_terminals::owner(subject) {
+            owner.starts_with("agent/").then(|| owner.to_owned())
+        } else {
+            self.store.desired_subject_with_writer(subject)?
+                .and_then(|(desired, _)| desired.member)
+                .and_then(|member| member.tags.get("st3.agent").cloned())
+                .filter(|owner| owner.starts_with("agent/"))
+        };
+        let Some(owner) = owner else {
+            tracing::error!(subject, reason, code = "start-revocation-unverified",
+                "revoked start has no owning agent for its harness diagnostic");
+            return Ok(());
+        };
+        let fields = BTreeMap::from([
+            ("severity".into(), Value::from("error")),
+            ("code".into(), Value::from("start-revocation-unverified")),
+            ("reason".into(), Value::from(reason)),
+        ]);
+        if self.store.latest_observation(&owner, "harness.diagnostic")?
+            .is_some_and(|claim| claim.body["fields"] == serde_json::json!(fields))
+        {
+            return Ok(());
+        }
+        self.store.append_claim(&ClaimInput {
+            subject: owner.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(owner),
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })?;
+        self.signal_changed();
         Ok(())
     }
 

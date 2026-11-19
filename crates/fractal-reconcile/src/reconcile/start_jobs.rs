@@ -805,11 +805,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.start_changed(&operation.subject);
             } else if operation.finished {
                 evidence.record("retire_revoked_start", "skip_producer_closure_unverified", false);
-                self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
-                    ("severity".into(), Value::String("error".into())),
-                    ("code".into(), Value::String("start-revocation-unverified".into())),
-                    ("reason".into(), Value::String("the revoked backend returned without proof that its producer cannot publish later".into())),
-                ]))?;
+                self.record_start_revocation_unverified(
+                    &operation.subject,
+                    "the revoked backend returned without proof that its producer cannot publish later",
+                )?;
             }
             if !operation.finished {
                 evidence.record("retire_revoked_start", "skip_absent_unfinished_producer", false);
@@ -819,11 +818,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let observation = observation.expect("observed runtime required after absence cleanup");
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
             evidence.record("retire_revoked_start", "skip_missing_incarnation", false);
-            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
-                ("severity".into(), Value::String("error".into())),
-                ("code".into(), Value::String("start-revocation-unverified".into())),
-                ("reason".into(), Value::String("the revoked runtime has no incarnation and is not terminal; producer closure cannot retire a potentially live runtime".into())),
-            ]))?;
+            self.record_start_revocation_unverified(
+                &operation.subject,
+                "the revoked runtime has no incarnation and is not terminal; producer closure cannot retire a potentially live runtime",
+            )?;
             return Ok(());
         };
         let exec_provenance;
@@ -850,23 +848,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 guard_decision = "skip_operation_provenance_mismatch",
                 "revoked start provenance guard"
             );
-            self.record_once(
+            self.record_start_revocation_unverified(
                 &operation.subject,
-                "harness.diagnostic",
-                BTreeMap::from([
-                    ("severity".into(), Value::String("error".into())),
-                    (
-                        "code".into(),
-                        Value::String("start-revocation-unverified".into()),
-                    ),
-                    (
-                        "reason".into(),
-                        Value::String(
-                            "a revoked launch cannot be matched to an exact runtime operation"
-                                .into(),
-                        ),
-                    ),
-                ]),
+                "a revoked launch cannot be matched to an exact runtime operation",
             )?;
             return Ok(());
         }
