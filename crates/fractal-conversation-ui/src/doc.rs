@@ -19,6 +19,8 @@ pub struct Doc<H = crate::PaneIntent> {
     /// The line each conversation entry starts on, so a pane read in the middle can keep its
     /// place by entry while lines are added or removed above it.
     pub entries: Vec<(String, usize)>,
+    /// Semantic body ranges available to focused keyboard/menu copy.
+    pub copy_blocks: Vec<std::ops::Range<usize>>,
 }
 
 impl<H> Doc<H> {
@@ -40,6 +42,7 @@ impl<H> Doc<H> {
     /// Append another document, shifting its lines and targets.
     pub fn append(&mut self, other: Doc<H>, indent: u16) {
         let base = self.lines.len();
+        self.copy_blocks.extend(other.copy_blocks.into_iter().map(|range| range.start + base..range.end + base));
         self.messages.extend(
             other
                 .messages
@@ -67,7 +70,7 @@ impl<H> Doc<H> {
                 other
                     .lines
                     .into_iter()
-                    .map(|line| crate::text::prefixed(vec![Span::raw(pad.clone())], line)),
+                    .map(|line| crate::text::prefixed(vec![Span::decoration(pad.clone(), ratatui::style::Style::default())], line)),
             );
         }
     }
@@ -80,6 +83,7 @@ impl<H> Default for Doc<H> {
             targets: Vec::new(),
             messages: Vec::new(),
             entries: Vec::new(),
+            copy_blocks: Vec::new(),
         }
     }
 }
