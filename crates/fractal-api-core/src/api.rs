@@ -11429,6 +11429,14 @@ pub fn request_resume(
             "resume needs a host name",
         )));
     }
+    if suspension.mode() == "in-place"
+        && suspension.source_host.as_deref() != Some(host.as_str())
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "snapshot-in-place",
+            "an in-place suspension can only resume on its source host",
+        )));
+    }
     let launch_token = if let Some((incumbent, old)) =
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
