@@ -242,7 +242,7 @@ pub fn model_fallback_observation(frame: &Value, native_session: Option<&str>) -
     digest.update(native.as_bytes());
     digest.update([0]);
     digest.update(episode_source.as_bytes());
-    let episode = hex::encode(digest.finalize());
+    let episode = format!("{:x}", digest.finalize());
     let mut body = serde_json::json!({
         "status": "waiting", "code": "model-fallback",
         "observation": observation, "native_session": native,

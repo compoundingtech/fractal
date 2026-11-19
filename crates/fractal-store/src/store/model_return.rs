@@ -15,7 +15,7 @@ fn attempt_count(connection: &Connection, agent: &str, incarnation: &str) -> Res
 
 /// Match the supported restart selector under the admission writer's snapshot.
 fn latest_restart_request(connection: &Connection, agent: &str) -> Result<Option<String>> {
-    Ok(connection.query_row(&canonical_sql(
+    Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h5004436e697c owner=fractal_store::store::model_return TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested'
          AND actor IS NOT NULL
          AND json_extract(body,'$.fields.action') IN ('restart','restart-when-idle')
