@@ -233,7 +233,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/fleet/admission-residue",
         "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
-    ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/observations", "requires a current paired session; validates at most 32 minute samples and atomically appends durable source-bound summaries plus operation receipts; paired transport, exact retry/reopen, replication and native-row producer proof in api/client_observations.rs; ingestion cost is not measured by this unpaired route probe"),
     ("POST /v1/client/pairings/renewals/stage", "explicit operator replacement staging; bounded source lookup and one append, no history-growing scan; covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/pending", "explicit key-bound pending lookup; capped current-stage scan and bounded challenge append, covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/complete", "explicit one-use replacement completion; transactionally rechecks source, stage and consumption before one grant, covered by device renewal route tests"),
