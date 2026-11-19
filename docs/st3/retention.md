@@ -12,6 +12,30 @@ fleet must apply the same rules: the rules render the rules description, whose h
 and the checkpoint waits for it, so no member drops a claim its peers keep. See
 [Checkpoints and trimming](checkpoints.md) for the agreement, the proof and the trim.
 
+## Inactive lossless claim archive readers
+
+`smallclaims::Store::write_claim_archive` exports explicitly named claims only when the native
+staged checkpoint planner permits their replacement and they precede a 14-day or 30-day hot
+window. The staging cut must match the observation time, and capture uses the checkpoint epoch
+guard. Protected latest-state/field-carrier witnesses, authority, membership, open lifecycle
+episodes and referenced evidence remain subject to all existing planner guards. The operation
+never removes a hot row or changes checkpoint policy.
+
+Segments preserve original claim-column texts, including JSON spelling, predecessor ordering,
+textual acceptance time, actor nullability and local arrival index. They are bounded to 512
+claims and 64 MiB, published without replacing existing files, and verified against an external
+SHA-256 seal before reads. `ClaimArchive::evidence` returns the exact stored evidence;
+`claim_by_id_with_archive` provides explicit historical point reads and refuses contradictory
+hot/cold or duplicate-cold evidence. A missing ID is absent only from the supplied segment set,
+not a globally proven catalogue miss. Ordinary readers stay hot-only.
+
+This is a new standalone evidence format, not a SQLite storage-version change, production
+archiver, complete backup, canonical-order range reader or admission authority. Before any hot
+retirement, ship catalogue coverage, archive-aware historical range/export readers, ordering
+and ledger restore proofs, protected-witness closure and capable N/N-1 readers. Measure both
+window candidates offline to choose the hot GB objective; do not infer capacity savings from
+the exported claim count. Nonces, signatures and idempotency remain authoritative evidence.
+
 ## Classes
 
 | Class | What it holds | How it is kept |
