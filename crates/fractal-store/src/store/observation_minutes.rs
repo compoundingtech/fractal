@@ -188,12 +188,32 @@ mod tests {
     #[test]
     fn equal_claims_collapse_and_conflicting_claims_supply_no_evidence() {
         let store = Store::open_memory("minute-fold").unwrap();
-        let fleet = "observation-fold-fleet";
+        let fleet = "11111111-1111-4111-8111-111111111112";
         store.bind_fleet(fleet).unwrap();
         let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         store.pin_fleet_anchor(key.public()).unwrap();
         store.set_member_key(Some(key.clone())).unwrap();
         store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+        let enroll = |origin: &str| {
+            let member = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+            let invite = store.create_fleet_invite(Some(origin), std::time::Duration::from_secs(600),
+                &["fabric".into()], "person/example", false).unwrap();
+            let code = smallclaims::fleet::code::JoinCode {
+                fleet_id: uuid::Uuid::parse_str(fleet).unwrap(),
+                invite: hex::decode(invite.invite).unwrap().try_into().unwrap(),
+                token: invite.token,
+                fingerprint: smallclaims::fleet::code::fingerprint(key.public()),
+                expires_at: invite.expires_at_unix_ms / 1000,
+                name: Some(origin.into()), migrate: false, endpoints: vec![], pairing: None,
+            };
+            let joiner = smallclaims::fleet::handshake::Joiner::start(
+                &code, &member, origin, "dial-out", None, "test").unwrap();
+            assert!(matches!(store.redeem_fleet_invite(joiner.request()).unwrap(),
+                smallclaims::store::FleetRedemption::Admitted { .. }));
+            member
+        };
+        let equal_key = enroll("minute-fold-equal");
+        let conflict_key = enroll("minute-fold-conflict");
         let grant = "custom/client/fold-phone";
         store.append_client_operation_claim(&ClaimInput {
             subject: grant.into(), kind: "custom.client.pairing-completed".into(),
@@ -211,14 +231,17 @@ mod tests {
         };
         let baseline = store.export_replication_exchange(fleet, &Default::default()).unwrap();
         assert!(store.accept_observation_minutes("person/example", std::slice::from_ref(&minute)).unwrap());
-        let append_independent = |origin: &str, minute: &ObservationMinute| {
+        let append_independent = |origin: &str, member: Arc<smallclaims::fleet::MemberKey>, minute: &ObservationMinute| {
             let independent = Store::open_memory(origin).unwrap();
             independent.pin_fleet_anchor(key.public()).unwrap();
-            independent.set_member_key(Some(key.clone())).unwrap();
+            independent.set_member_key(Some(member.clone())).unwrap();
             independent.receive_replication_exchange("minute-fold", fleet, &baseline).unwrap();
             independent.validate_replication_backlog().unwrap();
             independent.project_replication_backlog().unwrap();
+            assert!(matches!(independent.fleet_membership().unwrap().window(origin, 1),
+                smallclaims::fleet::Window::Keyed(keys) if keys.contains(member.public())));
             assert!(independent.accept_observation_minutes("person/example", std::slice::from_ref(minute)).unwrap());
+            assert_eq!(independent.observation_minutes(120_000).unwrap(), vec![minute.clone()]);
             let exchange = independent.export_replication_exchange(fleet, &Default::default()).unwrap();
             store.receive_replication_exchange(origin, fleet, &exchange).unwrap();
             store.validate_replication_backlog().unwrap();
@@ -226,13 +249,13 @@ mod tests {
         };
         // Disconnected receivers admit against the same pre-report graph, then send
         // independently signed batches to the receiver through normal replication.
-        append_independent("minute-fold-equal", &minute);
-        assert_eq!(store.observation_minutes(120_000).unwrap().len(), 1);
+        append_independent("minute-fold-equal", equal_key, &minute);
+        assert_eq!(store.observation_minutes(120_000).unwrap(), vec![minute.clone()]);
         let mut conflict = minute;
         conflict.report_digest = "b".repeat(64);
         conflict.count = 2;
         conflict.buckets = vec![(103, 2)];
-        append_independent("minute-fold-conflict", &conflict);
+        append_independent("minute-fold-conflict", conflict_key, &conflict);
         assert!(store.observation_minutes(120_000).unwrap().is_empty());
     }
 
