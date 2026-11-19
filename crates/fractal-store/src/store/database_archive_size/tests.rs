@@ -53,6 +53,35 @@ fn absent_empty_and_missing_previously_measured_roots_are_distinct() {
 
 #[cfg(test)]
 #[test]
+fn moved_store_does_not_inherit_activation_from_the_old_archive_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original");
+    let moved = directory.path().join("moved");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(original.join("wire-archive")).unwrap();
+    let store = Store::open(&original.join("claims.sqlite3"), "alder").unwrap();
+    let old = store.record_database_archive_size(100 * DAY);
+    assert_eq!(old.status, ArchiveSizeStatus::Available);
+    drop(store);
+    fs::rename(&original, &moved).unwrap();
+    fs::remove_dir(moved.join("wire-archive")).unwrap();
+
+    let store = Store::open(&moved.join("claims.sqlite3"), "alder").unwrap();
+    let new = store.record_database_archive_size(100 * DAY + HOUR);
+    assert_ne!(old.scope, new.scope);
+    assert_eq!(new.status, ArchiveSizeStatus::NotActivated);
+    assert_eq!(new.archive_bytes, None);
+    assert_eq!(new.growth_bytes_per_day, None);
+    assert!(!moved.join("wire-archive").exists());
+
+    fs::create_dir(moved.join("wire-archive")).unwrap();
+    assert_eq!(store.record_database_archive_size(100 * DAY + 2 * HOUR).status, ArchiveSizeStatus::Available);
+    fs::remove_dir(moved.join("wire-archive")).unwrap();
+    assert_eq!(store.record_database_archive_size(100 * DAY + 3 * HOUR).status, ArchiveSizeStatus::Unavailable);
+}
+
+#[cfg(test)]
+#[test]
 fn unknown_files_and_symlinks_refuse_partial_capacity_results() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("unknown"), b"evidence").unwrap();

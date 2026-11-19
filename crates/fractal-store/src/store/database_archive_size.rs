@@ -133,8 +133,9 @@ impl Store {
 
     fn archive_size_at(&self, root: &Path, now: u128, scope: &str) -> Result<DatabaseArchiveSize> {
         let previous: Option<String> = self.readers.get().query_row("SELECT value FROM meta WHERE key=?1", [SAMPLES], |row| row.get(0)).optional()?;
-        let known_scope = previous.is_some();
         let mut samples: Vec<Sample> = previous.map(|text| serde_json::from_str(&text)).transpose()?.unwrap_or_default();
+        // A copied/moved graph carries meta history, not activation of its new archive scope.
+        let known_scope = samples.iter().any(|sample| sample.scope == scope);
         // A moved scope or clock rollback starts a fresh derived observation series.
         if samples.iter().any(|sample| sample.at > now || sample.scope != scope) { samples.clear(); }
         samples.retain(|sample| now - sample.at <= 49 * HOUR);
