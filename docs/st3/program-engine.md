@@ -701,8 +701,10 @@ runtime inherits them into each step's work context (`flatten_run_steps` in
 `crates/fractal-store/src/store.rs`); the work CLI surfaces each as `Constraint:`.
 Lowering preserves every entry verbatim, including multiline text, under a
 `Constraints:` section in the native mission goal and in **every** worker's
-instruction input. Input/run references expand there just as they do in step goals.
-An absent or empty constraint list adds no section. This preserves instruction
+instruction input. Input/run references expand there just as they do in step goals;
+graph escapes such as `$${input.example}` produce literal `${input.example}`, even
+when no such input is declared. An absent or empty constraint list adds no section.
+This preserves instruction
 delivery; it does not claim mechanical enforcement of arbitrary authority, safety,
 review or admission prose. No natural-language interpretation creates new gates,
 resource limits or approvals.

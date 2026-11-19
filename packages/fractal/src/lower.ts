@@ -162,7 +162,7 @@ export const lower = (
   }, (values) => Effect.gen(function* () {
     const env = yield* Native.env
     const products = new Map<string, Readonly<Record<string, unknown>>>()
-    const expand = (text: string): string => text.replace(/\$\{(input\.([^}]+)|ST_MISSION_RUN)\}/gu, (_, name: string, field: string) => name === 'ST_MISSION_RUN' ? env.ST_MISSION_RUN!.replace(/^mission-run\//u, '') : values[field]!)
+    const expand = (text: string): string => text.replace(/\$\$\{|\$\{(input\.([^}]+)|ST_MISSION_RUN)\}/gu, (matched: string, name: string | undefined, field: string | undefined) => matched === '$${' ? '${' : name === 'ST_MISSION_RUN' ? env.ST_MISSION_RUN!.replace(/^mission-run\//u, '') : values[field!]!)
     const execute = (step: typeof steps[number]) => Effect.gen(function* () {
       const fail = (gate: string, reason: string) => Effect.fail(new GraphGateFailed({ step: step.id, gate, reason }))
       const declaredProducts = step.produces ?? []

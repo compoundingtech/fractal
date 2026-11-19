@@ -105,6 +105,27 @@ describe('graph lowering golden parity', () => {
     expect(seen).toEqual(['inspect', 'report'])
   }))
 
+  it.effect('preserves graph dollar escapes in policy and worker goals', () => Effect.gen(function* () {
+    const target = Fractal.input.text('target')
+    const graph = Fractal.mission({ meta, ...base, inputs: [target], constraints: [
+      'Explain $${input.example} and $${ST_MISSION_RUN} literally.',
+      'Keep $$${input.target} escaped; expand ${input.target}.',
+    ], steps: [
+      Fractal.step({ id: 'work', assignedTo: worker, goal: 'Document $${input.example}.' }),
+    ] })
+    const host = fakeHost({ payload: { target: 'fixture' }, child: async ({ key, input }) => {
+      expect(input).toEqual({ target: 'fixture', goal: [
+        'Document ${input.example}.',
+        '',
+        'Constraints:',
+        'Explain ${input.example} and ${ST_MISSION_RUN} literally.',
+        'Keep $${input.target} escaped; expand fixture.',
+      ].join('\n') })
+      return completed(key)
+    } })
+    expect(yield* start(lower(graph, bindings), host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
   it('treats empty constraints as absent and preserves native resources and completed ordering', () => {
     const resources = [{ id: 'example/repository', kind: 'vcs.repository' as const }]
     const graph = Fractal.mission({ meta, ...base, constraints: [], resources, concurrentRuns: 1, steps: [
