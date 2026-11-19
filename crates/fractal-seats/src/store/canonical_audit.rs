@@ -201,6 +201,13 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_completion_health_v1_pending",
         "local_completion_health_v1_backfill",
         "local_glass_head_pending",
+        // Retained member-local mail lifecycle/accounting projections and native harness
+        // acceptance custody; none participates in the shared projection digest.
+        "local_mail_delivery_source_v1",
+        "local_mail_delivery_steps_v1",
+        "local_mail_delivery_pending_v1",
+        "local_mail_input_acceptance_v1",
+        "local_mail_acceptance_frontier_v1",
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
