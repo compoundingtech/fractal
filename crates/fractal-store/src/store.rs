@@ -2391,20 +2391,23 @@ pub struct LocalSeats {
 }
 
 impl LocalSeats {
-    /// Fold one runtime observation's fields; true when it says the seat is live, which in a
-    /// checked span is a start or a seat still running.
+    /// Fold one runtime observation's fields; true only for a start/new incarnation, not a
+    /// heartbeat from an already-live session. Productive activity comes from the harness.
     fn fold_runtime(&mut self, subject: String, fields: &str) -> Result<bool> {
         let fields: Value = serde_json::from_str(fields)?;
         let status = fields["status"].as_str();
         let live = !matches!(status, Some("absent" | "exited" | "vanished" | "stopped"));
         let runtime = self.runtimes.entry(subject).or_default();
+        let changed = fields.get("incarnation_id").is_some_and(|incarnation| incarnation.as_str() != runtime.1.as_deref());
+        let started = live && (!runtime.0 || changed);
         runtime.0 = live;
         match fields.get("incarnation_id") {
-            Some(Value::String(incarnation)) => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(incarnation)) if changed => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(_)) => {}
             Some(_) => runtime.1 = None,
             None => {}
         }
-        Ok(live)
+        Ok(started)
     }
 
     /// Whether, as folded so far, a seat is working or not known not to be.
