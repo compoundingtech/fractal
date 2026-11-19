@@ -7,10 +7,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
 use crate::model::{
-    BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec,
-    LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec,
-    MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, FractalError, StepSpec,
-    UsedMissionSpec, WorkSelector,
+    AuthorityGrant, AuthorityVerb, BaselineSpec, CompletionSpec, DependencySpec, GateSpec,
+    LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
+    MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
+    RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -20,6 +20,42 @@ pub const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
 
 pub fn validate_mission_id(value: &str) -> Result<(), FractalError> {
     validate_id(value, "mission")
+}
+
+pub const MISSION_RUN_TEMPLATE: &str = "${ST_MISSION_RUN}";
+
+/// Resolve only the run-scoped output identity, not arbitrary environment or input variables.
+/// `run` is the durable full run ID also exported to workers as `ST_MISSION_RUN`.
+pub fn resolve_produced_mission(value: &str, run: &str) -> Result<String, FractalError> {
+    let resolved = value.replace(MISSION_RUN_TEMPLATE, run);
+    validate_id(&resolved, "mission")?;
+    if value.contains(MISSION_RUN_TEMPLATE)
+        && !resolved.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-._".contains(&byte))
+    {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "run-scoped mission IDs allow only ASCII letters, digits, '/', '-', '.', and '_'",
+        ));
+    }
+    if resolved.contains(['$', '{', '}']) {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "produces-mission supports only the ${ST_MISSION_RUN} template",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Whether this declaration needs the fleet's per-run output admission barrier.
+pub fn declares_per_run_missions(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.produces_mission.as_deref().is_some_and(|id| id.contains(MISSION_RUN_TEMPLATE))
+            || step.nested_mission.as_deref().is_some_and(declares_per_run_missions)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_per_run_missions(branch))
+            })
+    })
 }
 
 pub fn parse_missions(
@@ -269,6 +305,7 @@ fn parse_mission(
         .children()
         .ok_or_else(|| FractalError::new("empty-mission", format!("mission `{id}` has no steps")))?;
     unique_named_child(children, "provenance")?;
+    let admission = crate::declared_admission::parse(children, "mission", &format!("mission/{id}"))?;
     let mut inputs = BTreeMap::new();
     for input_node in children
         .nodes()
@@ -307,8 +344,10 @@ fn parse_mission(
     let mut revision_owners = Vec::new();
     let mut system = false;
     let mut capacity = None;
+    let mut authority = None;
     for child in children.nodes() {
         match child.name().value() {
+            "declared-priority" | "declared-lane" | "declared-budgets" => {}
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -350,6 +389,21 @@ fn parse_mission(
                     ));
                 }
                 resources.push(reference);
+            }
+            "authority" if top_level => {
+                if authority.is_some() {
+                    return Err(FractalError::new(
+                        "duplicate-mission-field",
+                        format!("mission `{id}` repeats `authority`"),
+                    ));
+                }
+                authority = Some(parse_authority(child, &id)?);
+            }
+            "authority" => {
+                return Err(FractalError::new(
+                    "nested-mission-authority",
+                    format!("mission `{id}` is nested; declare authority on the top-level mission"),
+                ));
             }
             "concurrent-runs" => {
                 if concurrent_runs_seen {
@@ -501,6 +555,12 @@ fn parse_mission(
                     format!("mission `{id}` cannot own an account"),
                 ));
             }
+            "objective" => {
+                return Err(FractalError::new(
+                    "objective-inside-mission",
+                    format!("mission `{id}` cannot own an objective"),
+                ));
+            }
             "capacity" => {
                 if capacity.is_some() {
                     return Err(FractalError::new(
@@ -554,15 +614,16 @@ fn parse_mission(
     }
     let declarations_kdl = declarations_document(declarations);
     let mut mission = MissionSpec {
-        declared_priority: None,
-        declared_lane: None,
-        declared_budgets: None,
         subject: format!("mission/{id}"),
         id,
         state,
         revision: String::new(),
         system,
+        declared_priority: admission.priority,
+        declared_lane: admission.lane,
+        declared_budgets: admission.budgets,
         resources,
+        authority: authority.unwrap_or_default(),
         inputs,
         max_active_runs,
         timeout_ms,
@@ -593,6 +654,86 @@ fn parse_mission(
     )?;
     mission.revision = hash(&mission)?;
     Ok(mission)
+}
+
+/// `authority { VERB "PATTERN" … }`: what runs of a top-level mission may do as
+/// `mission-run/RUN` (docs/st3/program-engine.md §3). The shape of an agent's `*-authority`
+/// block; `publish`, `start`, `revise` and `cancel` take mission IDs as `mission-authority` does,
+/// `write` takes a subject. The rules are kept in canonical order, so reordering is no revision.
+fn parse_authority(node: &KdlNode, id: &str) -> Result<Vec<AuthorityGrant>, FractalError> {
+    ensure_bare(node)?;
+    let empty = || {
+        FractalError::new(
+            "empty-authority",
+            format!("mission `{id}` authority needs at least one rule"),
+        )
+    };
+    let body = node.children().ok_or_else(empty)?;
+    let mut grants = BTreeSet::new();
+    for rule in body.nodes() {
+        let name = rule.name().value();
+        let verb = AuthorityVerb::ALL
+            .into_iter()
+            .find(|verb| verb.as_str() == name)
+            .ok_or_else(|| {
+                FractalError::new(
+                    "invalid-authority",
+                    format!(
+                        "mission `{id}` authority cannot contain `{name}`; its rules are publish, start, revise, cancel and write"
+                    ),
+                )
+            })?;
+        ensure_no_properties(rule)?;
+        ensure_no_children(rule)?;
+        let pattern = one_string(rule)?;
+        validate_authority_pattern(verb, &pattern)?;
+        if !grants.insert(AuthorityGrant { verb, pattern: pattern.clone() }) {
+            return Err(FractalError::new(
+                "duplicate-authority",
+                format!("mission `{id}` repeats authority `{name} {pattern}`"),
+            ));
+        }
+    }
+    if grants.is_empty() {
+        return Err(empty());
+    }
+    Ok(grants.into_iter().collect())
+}
+
+/// Exact, or a terminal `/*` namespace covering everything under it: a mission ID without
+/// `mission/` for the mission verbs, a subject (or a bare registered family before `/*`) for
+/// `write`.
+fn validate_authority_pattern(verb: AuthorityVerb, pattern: &str) -> Result<(), FractalError> {
+    let invalid = || {
+        FractalError::new(
+            "invalid-authority-pattern",
+            format!(
+                "authority `{} {pattern}` needs {} or a terminal `/*` namespace",
+                verb.as_str(),
+                if verb == AuthorityVerb::Write { "an exact subject" } else { "an exact mission ID without `mission/`" },
+            ),
+        )
+    };
+    let namespace = pattern.strip_suffix("/*");
+    let exact = namespace.unwrap_or(pattern);
+    if exact.is_empty() || exact.contains('*') {
+        return Err(invalid());
+    }
+    if verb != AuthorityVerb::Write {
+        if exact.starts_with("mission/") {
+            return Err(invalid());
+        }
+        return validate_mission_id(exact).map_err(|_| invalid());
+    }
+    // A namespace is a registered family, alone or followed by non-empty path segments.
+    let registry = fractal_schema::registry();
+    let Some(prefix) = namespace else {
+        return registry.validate_subject(exact).map(|_| ()).map_err(|_| invalid());
+    };
+    let well_formed = registry.subject(&format!("{prefix}/_")).is_some()
+        && !prefix.split('/').any(str::is_empty)
+        && !prefix.chars().any(|character| character.is_whitespace() || character.is_control());
+    well_formed.then_some(()).ok_or_else(invalid)
 }
 
 fn parse_loop_group(
@@ -824,9 +965,11 @@ fn parse_loop_group(
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
         capacity: None,
+        resource_lane: None,
         retry: RetrySpec {
             attempts: rounds as u32,
             backoff_ms: 0,
+            ..RetrySpec::default()
         },
         finally: false,
         work_selector: Some(WorkSelector::Agentless),
@@ -841,6 +984,7 @@ fn parse_loop_group(
         produces_mission: None,
         uses_mission: None,
         after_run: None,
+        program: None,
         gates: Vec::new(),
         nested_mission: None,
         loop_spec: Some(Box::new(loop_spec)),
@@ -1286,6 +1430,62 @@ fn unique_named_child<'a>(
     Ok(found.first().copied())
 }
 
+fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec, FractalError> {
+    use crate::model::{ResourceLaneCoverage, ResourceLaneSpec};
+    reject_type(node)?;
+    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout", "class", "disk", "disk-path", "io"])?;
+    let name = one_string_with_children(node)?;
+    validate_id(&name, "resource lane")?;
+    let host = property_string(node, "host")?.filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| FractalError::new("invalid-step-lane", "lane needs an explicit execution host"))?;
+    let max_members = match node.get("max-members") {
+        None => 1,
+        Some(KdlValue::Integer(value)) => u32::try_from(*value).ok().filter(|value| *value > 0)
+            .ok_or_else(|| FractalError::new("invalid-step-lane", "max-members must be a positive whole number"))?,
+        Some(_) => return Err(FractalError::new("invalid-step-lane", "max-members must be a positive whole number")),
+    };
+    let coverage = match property_string(node, "coverage")?.as_deref().unwrap_or("logical") {
+        "logical" => ResourceLaneCoverage::Logical,
+        "enforced" => ResourceLaneCoverage::Enforced,
+        _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
+    };
+    let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "landing" => fractal_runtime::RequestClass::Landing,
+        "check" => fractal_runtime::RequestClass::Check,
+        "agent" => fractal_runtime::RequestClass::Agent,
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+    };
+    let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
+        (None, None) => None,
+        (Some(bytes), Some(path)) if !path.trim().is_empty() => {
+            let bytes = fractal_runtime::parse_lane_memory(&bytes)
+                .map_err(|error| FractalError::new("invalid-step-lane", format!("invalid disk footprint: {error}")))?;
+            if bytes == 0 {
+                return Err(FractalError::new("invalid-step-lane", "disk footprint must be positive"));
+            }
+            Some(fractal_runtime::DiskRequest { bytes, path })
+        }
+        _ => return Err(FractalError::new("invalid-step-lane", "disk and nonempty disk-path must be supplied together")),
+    };
+    let io = match property_string(node, "io")?.as_deref() {
+        None => None,
+        Some("heavy") => Some(fractal_runtime::IoClass::Heavy),
+        Some(_) => return Err(FractalError::new("invalid-step-lane", "io must be heavy")),
+    };
+    let admission_timeout_ms = property_string(node, "admission-timeout")?
+        .map(|value| parse_duration(&value)).transpose()?;
+    let mut capacity = None;
+    if let Some(body) = node.children() {
+        for child in body.nodes() {
+            if child.name().value() != "capacity" || capacity.is_some() {
+                return Err(FractalError::new("invalid-step-lane", "lane accepts one capacity block"));
+            }
+            capacity = Some(parse_capacity(child)?);
+        }
+    }
+    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms, class, disk, io })
+}
+
 fn parse_step(
     node: &KdlNode,
     parent_path: &str,
@@ -1311,6 +1511,7 @@ fn parse_step(
     let mut fresh_context = false;
     let mut keep_open = false;
     let mut capacity = None;
+    let mut resource_lane = None;
     let mut goals = Vec::new();
     let mut constraints = Vec::new();
     let mut agent_constraints = BTreeMap::new();
@@ -1325,11 +1526,13 @@ fn parse_step(
     let mut produces_mission = None;
     let mut uses_mission = None;
     let mut after_run = None;
+    let mut program = None;
     let mut gates = Vec::new();
     let mut nested_mission = None;
     let mut retry = RetrySpec::default();
     let mut revision_owners = Vec::new();
     if let Some(children) = node.children() {
+        crate::declared_admission::parse(children, "step", &format!("step/{path}"))?;
         let mut names = BTreeSet::new();
         let mut baseline_names = BTreeSet::new();
         let mut gate_names = BTreeSet::new();
@@ -1402,12 +1605,13 @@ fn parse_step(
                         format!("step `{path}` cannot own an account"),
                     ));
                 }
-                "lane" => {
+                "objective" => {
                     return Err(FractalError::new(
-                        "lane-inside-step",
-                        format!("step `{path}` cannot declare a lane; declare it on the mission"),
+                        "objective-inside-mission",
+                        format!("step `{path}` cannot own an objective"),
                     ));
                 }
+                "lane" => resource_lane = Some(parse_resource_lane(child)?),
                 name if is_mission_declaration(name) => {
                     validate_deferred_declaration(child)?;
                     let child =
@@ -1423,6 +1627,7 @@ fn parse_step(
                 "produces-mission" => produces_mission = Some(parse_produced_mission(child)?),
                 "uses-mission" => uses_mission = Some(parse_used_mission(child)?),
                 "after-run" => after_run = Some(parse_after_run(child)?),
+                "program" => program = Some(parse_program(child)?),
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
@@ -1477,6 +1682,36 @@ fn parse_step(
         }
         agentless = true;
     }
+    if program.is_some() {
+        // The program engine owns the outcome: nothing else may complete or fail the step.
+        if assigned_to.is_some() || !available_to.is_empty() {
+            return Err(FractalError::new(
+                "conflicting-work-selector",
+                format!("step `{path}` runs a program, so it cannot select an agent"),
+            ));
+        }
+        if !gates.is_empty()
+            || !products.is_empty()
+            || produces_mission.is_some()
+            || uses_mission.is_some()
+            || after_run.is_some()
+            || nested_mission.is_some()
+        {
+            return Err(FractalError::new(
+                "program-step-outcome",
+                format!("step `{path}` runs a program, which alone decides its outcome; remove its gates, products, nested or used missions and after-run"),
+            ));
+        }
+        if finally {
+            // Cancellation cleanup ends agentless final work that has no runtime process; a
+            // program compensates inside its body instead.
+            return Err(FractalError::new(
+                "program-step-outcome",
+                format!("step `{path}` runs a program, so it cannot be a finally step; compensate inside the program"),
+            ));
+        }
+        agentless = true;
+    }
     if agentless
         && gates
             .iter()
@@ -1499,6 +1734,15 @@ fn parse_step(
             format!("step `{path}` is agentless, so it has no seat whose lane its capacity could raise"),
         ));
     }
+    if resource_lane.is_some() {
+        let execs = declarations.iter().filter(|node| node.name().value() == "exec").count();
+        if execs != 1 || program.is_some() || nested_mission.is_some() {
+            return Err(FractalError::new(
+                "invalid-step-lane",
+                format!("step `{path}` needs exactly one exec declaration for its lane"),
+            ));
+        }
+    }
     let declarations_kdl = declarations_document(declarations);
     let mut step = StepSpec {
         id,
@@ -1513,6 +1757,7 @@ fn parse_step(
         agent_constraints,
         timeout_ms,
         capacity,
+        resource_lane,
         retry,
         finally,
         work_selector,
@@ -1527,6 +1772,7 @@ fn parse_step(
         produces_mission,
         uses_mission,
         after_run,
+        program,
         gates,
         nested_mission,
         loop_spec: None,
@@ -2265,7 +2511,8 @@ fn parse_produced_mission(node: &KdlNode) -> Result<String, FractalError> {
         .strip_prefix("mission/")
         .unwrap_or(&values[0])
         .to_owned();
-    validate_id(&id, "mission")?;
+    // Validate the fixed syntax here; the durable run ID and final length are checked on use.
+    resolve_produced_mission(&id, "mission-run/run")?;
     Ok(id)
 }
 
@@ -2323,6 +2570,31 @@ fn parse_after_run(node: &KdlNode) -> Result<String, FractalError> {
     Ok(run)
 }
 
+/// `program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"?`: the bundle's path, the exact
+/// bytes it must have, and how long it may go without journal progress.
+fn parse_program(node: &KdlNode) -> Result<ProgramSpec, FractalError> {
+    ensure_only_properties(node, &["sha256", "stalled-after"])?;
+    let bundle = first_string(node)?;
+    if !bundle.starts_with('/') {
+        return Err(FractalError::new(
+            "invalid-program",
+            format!("program bundle `{bundle}` must be an absolute path"),
+        ));
+    }
+    let bundle_hash = property_string(node, "sha256")?.unwrap_or_default();
+    if bundle_hash.len() != 64 || !bundle_hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(FractalError::new(
+            "invalid-program",
+            "a program needs sha256=\"<64 lowercase hex digits>\" of its bundle",
+        ));
+    }
+    let stalled_after_ms = property_string(node, "stalled-after")?.map(|value| parse_duration(&value)).transpose()?;
+    if stalled_after_ms == Some(0) {
+        return Err(FractalError::new("invalid-program", "a program's stalled-after must be greater than zero"));
+    }
+    Ok(ProgramSpec { bundle, bundle_hash, stalled_after_ms })
+}
+
 /// The step that a run started with `--after RUN` waits in before its other work starts.
 pub const AFTER_RUN_STEP: &str = "after-run";
 
@@ -2358,6 +2630,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
         capacity: None,
+        resource_lane: None,
         retry: RetrySpec::default(),
         finally: false,
         work_selector: Some(WorkSelector::Agentless),
@@ -2372,6 +2645,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
         produces_mission: None,
         uses_mission: None,
         after_run: Some(after_run_subject(run)),
+        program: None,
         gates: Vec::new(),
         nested_mission: None,
         loop_spec: None,
@@ -2416,10 +2690,51 @@ fn parse_retry(node: &KdlNode) -> Result<RetrySpec, FractalError> {
         .map(|value| parse_duration(&value))
         .transpose()?
         .unwrap_or(0);
+    let schedule_ms = retry_strings(body, "delays")?
+        .iter()
+        .map(|value| positive_retry_duration(value, "delay"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let window_ms = unique_named_child(body, "within")?
+        .map(plain_string)
+        .transpose()?
+        .map(|value| positive_retry_duration(&value, "window"))
+        .transpose()?;
+    let on_error_tags = retry_strings(body, "on")?;
     Ok(RetrySpec {
         attempts: attempts as u32,
         backoff_ms,
+        schedule_ms,
+        window_ms,
+        on_error_tags,
     })
+}
+
+fn retry_strings(body: &KdlDocument, name: &str) -> Result<Vec<String>, FractalError> {
+    let Some(node) = unique_named_child(body, name)? else {
+        return Ok(Vec::new());
+    };
+    reject_type(node)?;
+    ensure_only_properties(node, &[])?;
+    ensure_no_children(node)?;
+    let values = positional_strings(node)?;
+    if values.is_empty() {
+        return Err(FractalError::new(
+            "invalid-value-count",
+            format!("`{name}` needs at least one string"),
+        ));
+    }
+    Ok(values)
+}
+
+fn positive_retry_duration(value: &str, field: &str) -> Result<u64, FractalError> {
+    let ms = parse_duration(value)?;
+    if ms == 0 {
+        return Err(FractalError::new(
+            "invalid-retry-duration",
+            format!("retry {field} must be positive"),
+        ));
+    }
+    Ok(ms)
 }
 
 fn validate_dependencies(
@@ -2698,7 +3013,7 @@ fn normalize_assignee(value: &str, default_host: &str) -> String {
     }
 }
 
-fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
+pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
     let invalid_path = kind != "mission" && value.contains('/');
     if value.is_empty()
         || value.len() > 160
@@ -3112,6 +3427,12 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
             "an account declaration must be at the root",
         ));
     }
+    if node.name().value() == "objective" {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
+        ));
+    }
     if node.name().value() == "env" {
         validate_string_map(node, true)?;
     }
@@ -3129,6 +3450,79 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whole_input_subjects_use_the_input_id_grammar() {
+        for name in [
+            "vrs-review",
+            "review_name",
+            "review.name",
+            "révision",
+            "v".repeat(160).as_str(),
+        ] {
+            assert!(super::validate_id(name, "mission input").is_ok());
+            assert!(super::validate_full_subject(&format!("${{input.{name}}}")).is_ok());
+        }
+        for name in [
+            "",
+            "review/name",
+            "review name",
+            "review\tname",
+            "v".repeat(161).as_str(),
+        ] {
+            assert!(super::validate_id(name, "mission input").is_err());
+            assert!(super::validate_full_subject(&format!("${{input.{name}}}")).is_err());
+        }
+        assert!(super::validate_full_subject("${input.kind}/${input.name}").is_ok());
+    }
+
+    #[test]
+    fn assignees_retain_main_spelling_during_expansion() {
+        for (input, expected) in [
+            ("example/worker", "example/worker"),
+            ("agent/example/worker", "agent/example/worker"),
+            ("person/reviewer", "person/reviewer"),
+            ("daemon/scheduler", "daemon/scheduler"),
+            ("worker", "agent/host.worker"),
+            ("agent/worker", "agent/host.worker"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
+    #[test]
+    fn declaration_assignees_qualify_host_relative_agent_names() {
+        let source = r#"mission "relative" state="ready" {
+          goal "Resolve host-relative declaration assignees.";
+          step "prefixed" { assigned-to "agent/worker"; }
+          step "bare" { assigned-to "worker"; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "host").unwrap();
+        for step in ["prefixed", "bare"] {
+            assert_eq!(
+                missions["relative"].steps[step].work_selector,
+                Some(super::WorkSelector::Assigned {
+                    agent: "agent/host.worker".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn stored_assignees_preserve_historical_malformed_normalization() {
+        for (input, expected) in [
+            ("agent/", "agent/host."),
+            ("", "agent/host."),
+            ("worker name", "agent/host.worker name"),
+            ("example/worker name", "example/worker name"),
+            ("agent/example/worker name", "agent/example/worker name"),
+            ("example/worker.name ", "agent/example/worker.name "),
+            ("person/reviewer name", "person/reviewer name"),
+            ("person/", "person/"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
     #[test]
     fn nested_loop_paths_follow_their_distinct_owning_steps() {
         let source = r#"mission "collision" state="ready" { goal "Keep nested histories separate.";
@@ -3226,5 +3620,96 @@ mod tests {
             .and_then(|entry| entry.value().as_string())
             .unwrap();
         assert_eq!(command, format!("printf '%s' '{message}'"));
+    }
+
+    fn authority_error(body: &str) -> String {
+        let source = format!(r#"mission "land" state="ready" {{ goal "Land."; step "work" {{ agentless; }}; {body} }}"#);
+        super::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code.to_string()
+    }
+
+    #[test]
+    fn mission_authority_parses_in_canonical_order_and_enters_the_revision() {
+        use crate::model::{AuthorityGrant, AuthorityVerb};
+        let parse = |authority: &str| {
+            let source = format!(r#"mission "land" state="ready" {{ goal "Land."; step "work" {{ agentless; }}; {authority} }}"#);
+            super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("land").unwrap()
+        };
+        let mission = parse(r#"authority { write "resource/factory/*"; publish "scratch/*"; start "factory/publish"; cancel "factory/*"; revise "factory/*"; write "custom/factory/landing"; write "resource/*" }"#);
+        let grant = |verb, pattern: &str| AuthorityGrant { verb, pattern: pattern.into() };
+        assert_eq!(mission.authority, [
+            grant(AuthorityVerb::Publish, "scratch/*"),
+            grant(AuthorityVerb::Start, "factory/publish"),
+            grant(AuthorityVerb::Revise, "factory/*"),
+            grant(AuthorityVerb::Cancel, "factory/*"),
+            grant(AuthorityVerb::Write, "custom/factory/landing"),
+            grant(AuthorityVerb::Write, "resource/*"),
+            grant(AuthorityVerb::Write, "resource/factory/*"),
+        ]);
+        let reordered = parse(r#"authority { revise "factory/*"; cancel "factory/*"; start "factory/publish"; publish "scratch/*"; write "resource/*"; write "resource/factory/*"; write "custom/factory/landing" }"#);
+        assert_eq!(reordered.revision, mission.revision);
+        let narrower = parse(r#"authority { revise "factory/*"; cancel "factory/*"; start "factory/publish"; publish "scratch/*"; write "resource/factory/*"; write "custom/factory/landing" }"#);
+        assert_ne!(narrower.revision, mission.revision);
+        let undeclared = parse("");
+        assert!(undeclared.authority.is_empty());
+        assert!(serde_json::to_value(&undeclared).unwrap().get("authority").is_none());
+    }
+
+    #[test]
+    fn mission_authority_refusals() {
+        let mut mismatches = Vec::new();
+        for (body, code) in [
+            (r#"authority"#, "empty-authority"),
+            (r#"authority {}"#, "empty-authority"),
+            (r#"authority "none""#, "invalid-node"),
+            (r#"authority { write "resource/a"; }; authority { write "resource/b"; }"#, "duplicate-mission-field"),
+            (r#"authority { write "resource/a"; write "resource/a"; }"#, "duplicate-authority"),
+            (r#"authority { move "agent/a"; }"#, "invalid-authority"),
+            (r#"authority { write "resource/a" mode="audit"; }"#, "unknown-property"),
+            (r#"authority { write "resource/*/x"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "resource/a*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "unregistered/a"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "unregistered/*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "resource"; }"#, "invalid-authority-pattern"),
+            (r#"authority { start "mission/factory"; }"#, "invalid-authority-pattern"),
+            (r#"authority { start "factory/*/land"; }"#, "invalid-authority-pattern"),
+            (r#"authority { publish "/*"; }"#, "invalid-authority-pattern"),
+            (r#"step "outer" { mission "inner" { goal "Inner."; authority { write "resource/a"; }; step "x" { agentless; }; }; }"#, "nested-mission-authority"),
+        ] {
+            let actual = authority_error(body);
+            if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+}
+
+#[cfg(test)]
+mod produced_mission_tests {
+    use super::*;
+
+    #[test]
+    fn run_scoped_identity_is_stable_and_isolated() {
+        let template = "consent/${ST_MISSION_RUN}";
+        let first = resolve_produced_mission(template, "abc123").unwrap();
+        assert_eq!(first, "consent/abc123");
+        assert_eq!(resolve_produced_mission(template, "abc123").unwrap(), first);
+        assert_ne!(resolve_produced_mission(template, "def456").unwrap(), first);
+        assert_eq!(resolve_produced_mission("consent/shared", "abc123").unwrap(), "consent/shared");
+    }
+
+    #[test]
+    fn output_templates_are_narrow_and_validate_the_expanded_identity() {
+        for invalid in ["consent/${input.id}", "consent/${HOME}", "consent/${ST_MISSION_RUN", "consent/$name"] {
+            assert!(resolve_produced_mission(invalid, "abc123").is_err(), "{invalid}");
+        }
+        for invalid in ["", "/leading", "trailing/", "double//slash", "white space", "non-ascii-é"] {
+            assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", invalid).is_err(), "{invalid}");
+        }
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(152)).is_ok());
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(153)).is_err());
+        let node: KdlDocument = r#"produces-mission "consent/${ST_MISSION_RUN}""#.parse().unwrap();
+        assert_eq!(parse_produced_mission(&node.nodes()[0]).unwrap(), "consent/${ST_MISSION_RUN}");
+        let node: KdlDocument = r#"produces-mission "consent/${input.id}""#.parse().unwrap();
+        assert!(parse_produced_mission(&node.nodes()[0]).is_err());
     }
 }

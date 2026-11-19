@@ -32,6 +32,7 @@ mod cli_output;
 mod demo_play;
 mod deploy_verify;
 mod web_cli;
+mod resources_payload;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.
@@ -76,6 +77,7 @@ mod event_waits;
 mod driver_incarnation;
 mod delivery_probe;
 mod examples;
+mod exec_clock_wait;
 mod fault_isolation;
 mod first_sync;
 mod follow_retry;

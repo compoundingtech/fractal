@@ -2,21 +2,20 @@
 //!
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
-//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`, and CI's durations
-//! and counts, which `slo/targets.toml` declares and the Workspace CI runs a repository observer
-//! read feed, held in memory on the member that observes. A budget is an
+//! `slo/objectives.kdl` and the same report as `GET /v1/client/request-latency`. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
 //! shows. Nothing here measures anything. It reads those sources and says, for each row, its
 //! target, its current value, its window, what is left of its budget and what that means.
 //!
 //! Every row has the same fields, so a terminal, the phone and the web render one shape:
 //! `id`, `kind` (`objective` or `budget`), `about`, `target`, `current`, `window`,
-//! `remaining_percent` (null when nothing was measured), `status` (`met`, `missed`, `no-data` or
-//! `stale`), `resets_at_unix_ms` (budgets only) and `explain`, the row in plain words.
+//! `remaining_percent` (null without eligible accounting), `status` (`met`, `burning`,
+//! `exhausted`, `no-data`, `not-eligible` or `no-qualifying-events` for operational budgets;
+//! legacy rows also use `missed` and `stale`), `resets_at_unix_ms` (quota budgets only) and
+//! `explain`, the row in plain words.
 
 use serde_json::{Value, json};
 
-use crate::resource::github_workflows::WorkspaceCi;
 use crate::store::AccountLimit;
 
 const WINDOWS: [&str; 3] = ["1m", "5m", "1h"];
@@ -33,6 +32,28 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
     for target in report["targets"].as_array().into_iter().flatten() {
         let Some(name) = target["name"].as_str() else { continue };
         let about = target["about"].as_str().unwrap_or_default();
+        if let Some(policy) = crate::slo::shipped().iter().find(|objective| objective.name == name).and_then(|objective| objective.budget.as_ref()) {
+            if name == "transaction" {
+                for (kind, label) in [("read", "read transactions"), ("write", "write transactions"), ("writer_hold", "holds of the store's writer")] {
+                    let diagnostic = max_latency(&format!("{name}/{kind}"), about, label, target["max_ms"].as_f64(), &target[kind]);
+                    rows.push(native_budget(diagnostic, policy, &target[kind]["budget"], 0));
+                }
+            } else if name == "database" {
+                rows.push(native_budget(database(about, target), policy, &target["budget"], 3_600_000));
+            } else {
+                rows.push(native_budget(
+                    p99(name, about, "requests", target["p99_ms"].as_f64(), &target["windows"]),
+                    policy, &target["budget"], 0,
+                ));
+                if target["remote_windows"].is_object() {
+                    rows.push(native_budget(
+                        p99(&format!("{name}/remote"), about, "requests served from another machine", target["remote_p99_ms"].as_f64(), &target["remote_windows"]),
+                        policy, &target["remote_budget"], 0,
+                    ));
+                }
+            }
+            continue;
+        }
         match name {
             "sql-statement" => rows.push(p99(name, about, "SQL statements", target["p99_ms"].as_f64(), &target["windows"])),
             "transaction" => {
@@ -45,8 +66,16 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
                     rows.push(max_latency(&format!("{name}/{kind}"), about, label, max, &target[kind]));
                 }
             }
+            "writer-hold" => rows.push(max_latency(
+                name,
+                about,
+                "holds of the store's writer",
+                target["max_ms"].as_f64(),
+                &target["windows"],
+            )),
             "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
+            "database-archive" => rows.push(database_archive(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
             _ => {
                 rows.push(p99(name, about, "requests", target["p99_ms"].as_f64(), &target["windows"]));
@@ -62,9 +91,31 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             }
         }
     }
-    rows.extend(ci(crate::slo::targets(), crate::resource::github_workflows::workspace_ci().as_ref(), now_unix_ms));
     for limit in limits {
         let name = limit.account_ref.as_deref().unwrap_or(&limit.account);
+        if !limit.windows.is_empty() {
+            for window in &limit.windows {
+                let label = if window.window == "5h" { "5-hour" } else { &window.window };
+                let stale = now_unix_ms.saturating_sub(window.measured_at_unix_ms) > stale_after_ms;
+                let mut row = budget(name, &limit.account, &window.window, label, window.used_percent,
+                    window.resets_at_unix_ms, window.measured_at_unix_ms, stale, now_unix_ms);
+                row["source"] = json!(window.source);
+                row["host"] = json!(window.host);
+                row["coverage"] = json!(window.coverage);
+                if window.coverage == "unsupported" {
+                    row["status"] = json!("unsupported");
+                    row["current"] = json!("unsupported");
+                    row["remaining_percent"] = Value::Null;
+                    row["explain"] = json!(format!("{} does not support {} quota evidence for {name}.", window.source, window.window));
+                } else if window.coverage != "reported" {
+                    row["status"] = json!(if stale { "stale" } else { "no-data" });
+                    row["current"] = json!("not reported");
+                    row["remaining_percent"] = Value::Null;
+                }
+                rows.push(row);
+            }
+            continue;
+        }
         let stale = now_unix_ms.saturating_sub(limit.measured_at_unix_ms) > stale_after_ms;
         for (period, label, percent, resets) in [
             ("weekly", "weekly", limit.weekly_percent, limit.weekly_resets_at_unix_ms),
@@ -74,6 +125,92 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
         }
     }
     rows
+}
+
+/// The diagnostic target remains visible, but only retained evidence spends the operational
+/// budget. A process restart or a missing minute never supplies an invented good observation.
+fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, evidence: &Value, cadence_ms: u64) -> Value {
+    use crate::declared_objectives::{BudgetEvidence, classify_budget};
+    let window = |width: u64| {
+        evidence["windows"].as_object().and_then(|windows| windows.values().find(|window| window["window_ms"].as_u64() == Some(width)))
+    };
+    let measured = |width: u64| {
+        let Some(window) = window(width) else {
+            return BudgetEvidence { bad: 0.0, total: 0.0, eligible: false };
+        };
+        let total = window["eligible"].as_f64().unwrap_or_default();
+        let samples = window["samples"].as_f64().unwrap_or(total);
+        BudgetEvidence {
+            bad: window["bad"].as_f64().unwrap_or_default(),
+            total,
+            eligible: evidence["available"] == true
+                && window["coverage"].as_f64().is_some_and(|coverage| coverage >= policy.min_coverage)
+                && samples >= policy.min_samples as f64,
+        }
+    };
+    let pair = |pair: crate::objective::BurnWindow| {
+        (measured(pair.long_ms.max(cadence_ms.saturating_mul(2))), measured(pair.short_ms.max(cadence_ms)))
+    };
+    let horizon = measured(policy.horizon_ms);
+    let no_events = evidence["available"] == true
+        && window(policy.horizon_ms).is_some_and(|window| window["eligible"].as_u64() == Some(0)
+            && window["coverage"].as_f64().is_some_and(|coverage| coverage >= policy.min_coverage));
+    let (status, remaining) = classify_budget(
+        policy, horizon, pair(policy.fast), pair(policy.slow),
+        if no_events { "no-qualifying-events" } else { "no-data" },
+    );
+    let diagnostic_target = row["target"].as_str().unwrap_or_default().to_owned();
+    let sparse_diagnostic_empty = matches!(row["id"].as_str(), Some("terminal-attach" | "person-read-fresh"))
+        && row["status"] == "no-data";
+    let retained_hour_events = window(3_600_000).and_then(|window| window["eligible"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let retained_hour_has_events = retained_hour_events.is_some_and(|events| events > 0.0);
+    let diagnostic_current = if let Some(events) = retained_hour_events.filter(|events| sparse_diagnostic_empty && *events > 0.0) {
+        format!("p99 unavailable in this process; {events} qualifying events retained in the last hour")
+    } else {
+        row["current"].as_str().unwrap_or_default().to_owned()
+    };
+    let sparse_empty = sparse_diagnostic_empty && !retained_hour_has_events;
+    let unit = if cadence_ms == 0 { "events" } else { "covered milliseconds" };
+    let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let coverage_text = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+        |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
+    let burn = |evidence: BudgetEvidence| if evidence.eligible && evidence.total > 0.0 {
+        format!("{:.2}×", evidence.bad / evidence.total / policy.allowance)
+    } else {
+        "unknown".into()
+    };
+    let fast = pair(policy.fast);
+    let slow = pair(policy.slow);
+    row["target"] = json!(format!("≤ {:.1}% bad {unit}; diagnostic {diagnostic_target}", policy.allowance * 100.0));
+    row["current"] = json!(format!("{} / {} bad {unit}; diagnostic {diagnostic_current}", horizon.bad, horizon.total));
+    if sparse_empty {
+        row["current"] = json!(if evidence["available"] == true
+            && window(policy.horizon_ms).is_some_and(|window|
+                window["eligible"].as_f64().is_some() && window["bad"].as_f64().is_some()) {
+            format!("No qualifying events in the last hour; {} / {} bad {unit} over the accounting horizon", horizon.bad, horizon.total)
+        } else {
+            "No qualifying events in the last hour; accounting evidence unavailable".to_owned()
+        });
+    }
+    row["window"] = json!(if policy.horizon_ms.is_multiple_of(86_400_000) {
+        format!("{}d", policy.horizon_ms / 86_400_000)
+    } else { duration(policy.horizon_ms) });
+    row["remaining_percent"] = json!(remaining);
+    row["status"] = json!(status);
+    row["coverage"] = json!(coverage);
+    if sparse_empty && horizon.total == 0.0 {
+        row["status"] = json!("no-data");
+        row["remaining_percent"] = Value::Null;
+    }
+    row["explain"] = json!(format!(
+        "{} Operational budget: {:.1}% bad {unit}, {coverage_text} over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
+        row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, duration(policy.horizon_ms),
+        burn(fast.0), burn(fast.1), policy.fast.burn_rate, burn(slow.0), burn(slow.1), policy.slow.burn_rate,
+        if cadence_ms == 0 { "" } else { " Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h." },
+    ));
+    row
 }
 
 pub fn count(window: &Value) -> u64 {
@@ -88,11 +225,11 @@ pub fn ms(value: f64) -> String {
     if value >= 10.0 { format!("{} ms", value.round()) } else { format!("{:.1} ms", value) }
 }
 
-fn clamp_percent(value: f64) -> f64 {
+pub(crate) fn clamp_percent(value: f64) -> f64 {
     (value.clamp(0.0, 100.0) * 10.0).round() / 10.0
 }
 
-fn plural(n: u64, word: &str) -> String {
+pub(crate) fn plural(n: u64, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -106,7 +243,8 @@ fn p99(id: &str, about: &str, what: &str, target_ms: Option<f64>, windows: &Valu
     if samples == 0 && WINDOWS.iter().all(|w| count(&windows[*w]) == 0) {
         return json!({
             "id": id, "kind": "objective", "about": about,
-            "target": format!("p99 ≤ {}", ms(target)), "current": "no samples", "window": "1h",
+            "target": format!("p99 ≤ {}", ms(target)),
+            "current": if matches!(id, "terminal-attach" | "person-read-fresh") { "No qualifying events" } else { "no samples" }, "window": "1h",
             "remaining_percent": null, "status": "no-data",
             "explain": format!(
                 "{about}. Goal: 99 of every 100 {what} finish within {}. Nothing has been measured in the last hour, so there is no budget to spend or save yet.",
@@ -226,7 +364,9 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
             ),
         }),
         None => json!({
-            "current": if verdict.minutes < 60 {
+            "current": if crate::slo::cpu_idle_busy(target) {
+                "not eligible: busy".to_owned()
+            } else if verdict.minutes < 60 {
                 format!("unknown: {} of 60 minutes held", verdict.minutes)
             } else {
                 format!("unknown: {}, needs {needed}", plural(verdict.idle_minutes, "idle minute"))
@@ -251,6 +391,38 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
             "explain": idle["explain"],
         }),
     ]
+}
+
+/// The inactive archive gauge has observations, not a configured allowance or health verdict.
+fn database_archive(about: &str, target: &Value) -> Value {
+    let size = &target["size"];
+    let (status, current) = if size.is_null() {
+        ("no-data", "not measured yet".to_owned())
+    } else if target["fresh"] != true {
+        ("stale", "stale measurement; current archive size and growth unknown".to_owned())
+    } else {
+        match target["status"].as_str() {
+            Some("not-activated") => ("not-eligible", "not activated; archive size and growth unknown".to_owned()),
+            Some("available") => {
+                let bytes = size["archive_bytes"].as_u64()
+                    .map_or_else(|| "archive bytes unknown".to_owned(), |bytes| format!("archive {bytes} bytes"));
+                let capacity = size["capacity_bytes"].as_u64()
+                    .map_or_else(|| "capacity bytes unknown".to_owned(), |bytes| format!("capacity {bytes} bytes"));
+                let growth = size["growth_bytes_per_day"].as_i64()
+                    .map_or_else(|| "growth unknown (daily baseline not available)".to_owned(), |bytes| format!("growth {bytes:+} bytes a day"));
+                ("not-eligible", format!("{bytes}, {capacity}, {growth}"))
+            }
+            _ => ("no-data", "measurement unavailable; archive size and growth unknown".to_owned()),
+        }
+    };
+    json!({
+        "id": "database-archive", "kind": "objective", "about": about,
+        "target": "observational only; no configured target", "current": current, "window": "1d",
+        "remaining_percent": null, "status": status, "budget": null,
+        "fresh": target["fresh"], "measurement_status": target["status"], "size": size,
+        "integrity": target["integrity"], "catalogue_coverage": target["catalogue_coverage"],
+        "explain": format!("{about}. {current}. No configured target or budget; these bytes do not prove hot-store savings or durability. Integrity is not assessed and catalogue coverage is unknown."),
+    })
 }
 
 fn database(about: &str, target: &Value) -> Value {
@@ -306,10 +478,15 @@ pub fn divergence(open: u64) -> Value {
     })
 }
 
-/// A duration in minutes once it is a minute or more: CI's targets are minutes, not milliseconds.
-fn duration(target_ms: u64) -> String {
-    if target_ms < 60_000 {
+/// A duration in seconds under a minute and in minutes from a minute on: a declared interval's
+/// targets may be seconds or minutes.
+pub(crate) fn duration(target_ms: u64) -> String {
+    if target_ms < 1_000 {
         return ms(target_ms as f64);
+    }
+    if target_ms < 60_000 {
+        let seconds = target_ms as f64 / 1_000.0;
+        return if seconds.fract() == 0.0 { format!("{seconds} s") } else { format!("{seconds:.1} s") };
     }
     let minutes = target_ms as f64 / 60_000.0;
     if minutes.fract() == 0.0 { format!("{minutes} min") } else { format!("{minutes:.1} min") }
@@ -317,112 +494,11 @@ fn duration(target_ms: u64) -> String {
 
 /// The value at `percentile` of `samples`, nearest rank: the smallest sample that at least
 /// `percentile` in 100 are at or under.
-fn nearest_rank(samples: &[u64], percentile: u64) -> u64 {
+pub(crate) fn nearest_rank(samples: &[u64], percentile: u64) -> u64 {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let rank = (percentile as usize * sorted.len()).div_ceil(100).max(1);
     sorted[rank - 1]
-}
-
-/// What a series measures, said once its runs feed it.
-fn ci_measure(path: &str) -> &'static str {
-    use crate::resource::github_workflows::{CRITICAL_PATH_SERIES, MERGE_QUEUE_SERIES};
-    match path {
-        CRITICAL_PATH_SERIES => "Each sample is a pull request's successful Workspace CI run, from its start to its last update",
-        MERGE_QUEUE_SERIES => "Each sample is a merge group's successful Workspace CI run, from its creation, when the group entered the queue, to its last update, when it went green: the wait before GitHub creates the run and the merge after it are not counted",
-        _ => "",
-    }
-}
-
-/// CI's objectives: each percentile of a duration over the last day and each count over the last
-/// hour, from the Workspace CI runs `source` holds (None when this member reads none). A series
-/// nothing feeds, or one with no sample in its window, is no-data.
-fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: u64) -> Vec<Value> {
-    const DAY_MS: u64 = 86_400_000;
-    const HOUR_MS: u64 = 3_600_000;
-    let unobserved = |path: &str| match source {
-        Some(_) => format!("Nothing feeds {path} yet"),
-        None => format!("This member reads no Workspace CI runs for {path}: only the member that runs a repository observer with main_performance_failures does"),
-    };
-    let durations = targets.duration.iter().map(|target| {
-        let (p, within) = (target.percentile, duration(target.target_ms));
-        let goal = format!("Goal: {p} of every 100 finish within {within}, so {} in 100 may run over.", 100 - p);
-        let samples = source.and_then(|ci| ci.durations(&target.path, now_unix_ms.saturating_sub(DAY_MS), now_unix_ms));
-        let fed = samples.is_some();
-        let Some(samples) = samples.filter(|samples| !samples.is_empty()) else {
-            let (current, why) = match (source, fed) {
-                (Some(_), true) => ("no samples", format!("No sample of {} finished in the last day", target.path)),
-                (Some(_), false) => ("no source yet", unobserved(&target.path)),
-                (None, _) => ("not observed", unobserved(&target.path)),
-            };
-            return json!({
-                "id": target.id(), "kind": "objective", "about": target.about,
-                "target": format!("p{p} ≤ {within}"), "current": current, "window": "1d",
-                "remaining_percent": null, "status": "no-data",
-                "explain": format!("{}. {goal} {why}, so there is no budget to spend or save.", target.about),
-            });
-        };
-        let n = samples.len() as u64;
-        let over = samples.iter().filter(|sample| **sample > target.target_ms).count() as u64;
-        let share = over as f64 / n as f64;
-        let allowed = (100 - p) as f64 / 100.0;
-        let met = share <= allowed;
-        let remaining = clamp_percent(100.0 * (1.0 - share / allowed));
-        let value = duration(nearest_rank(&samples, p));
-        json!({
-            "id": target.id(), "kind": "objective", "about": target.about,
-            "target": format!("p{p} ≤ {within}"),
-            "current": format!("p{p} {value} over {}", plural(n, "run")),
-            "window": "1d", "remaining_percent": remaining,
-            "status": if met { "met" } else { "missed" },
-            "explain": format!(
-                "{}. {goal} In the last day {over} of {} ran over ({:.1}%), against an allowance of {}%, so {remaining:.0}% of the error budget is left. The p{p} is {value}. {}. {}",
-                target.about, plural(n, "run"), share * 100.0, 100 - p, ci_measure(&target.path),
-                if met { "The goal is met." } else { "The goal is missed in the last day." },
-            ),
-        })
-    });
-    let counts = targets.count.iter().map(|target| {
-        let max = target.max_per_hour;
-        let goal = format!("Goal: at most {max} an hour{}.", if max == 0 { ", so one spends the whole allowance" } else { "" });
-        let counted = source.and_then(|ci| ci.flakes(&target.path, now_unix_ms.saturating_sub(HOUR_MS), now_unix_ms));
-        let Some(flakes) = counted.filter(|flakes| flakes.runs > 0) else {
-            let (current, why) = match (source, counted) {
-                (Some(_), Some(_)) => ("no samples", "No merge group or pull request run of Workspace CI finished in the last hour".to_owned()),
-                (Some(_), None) => ("no source yet", unobserved(&target.path)),
-                (None, _) => ("not observed", unobserved(&target.path)),
-            };
-            return json!({
-                "id": target.name, "kind": "objective", "about": target.about,
-                "target": format!("≤ {max} an hour"), "current": current, "window": "1h",
-                "remaining_percent": null, "status": "no-data",
-                "explain": format!("{}. {goal} {why}, so there is nothing to count.", target.about),
-            });
-        };
-        let count = flakes.count();
-        let met = count <= max;
-        let remaining = if max == 0 {
-            if met { 100.0 } else { 0.0 }
-        } else {
-            clamp_percent(100.0 * (1.0 - count as f64 / max as f64))
-        };
-        let ejected = match flakes.groups {
-            0 => "no merge group finished".to_owned(),
-            groups => format!("{} of {} {} ejected (their Workspace CI run failed)", flakes.ejected, plural(groups, "merge group"), if groups == 1 { "was" } else { "were" }),
-        };
-        json!({
-            "id": target.name, "kind": "objective", "about": target.about,
-            "target": format!("≤ {max} an hour"), "current": format!("{count} in the last hour"),
-            "window": "1h", "remaining_percent": remaining,
-            "status": if met { "met" } else { "missed" },
-            "explain": format!(
-                "{}. {goal} In the last hour {ejected}, and the test lanes of {} of {} had {} (tests nextest passed only on a retry): {count} in all. A pull request run is read only when it succeeded; merge group runs are read whatever their result. {}",
-                target.about, flakes.listed, plural(flakes.runs, "finished run"), plural(flakes.flaky_tests, "flaky test"),
-                if met { "The goal is met." } else { "The goal is missed in the last hour." },
-            ),
-        })
-    });
-    durations.chain(counts).collect()
 }
 
 /// A minimum share (a phone's live time over its foreground time). The budget is the allowed
@@ -625,6 +701,74 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_row_corpus_covers_every_shipped_row() {
+        use crate::objective::Indicator;
+
+        let mut targets: Vec<_> = crate::slo::shipped().iter()
+            .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
+            .map(|objective| {
+                let mut target = json!({"name": objective.name});
+                if objective.target("p99", true).is_some() {
+                    target["remote_windows"] = json!({});
+                }
+                target
+            })
+            .collect();
+        // The observational archive gauge is emitted by the native report, not a configured objective.
+        targets.push(json!({"name": "database-archive", "kind": "gauge", "fresh": false,
+            "size": null, "integrity": "not-assessed", "catalogue_coverage": null, "budget": null}));
+        let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
+        emitted.push(divergence(0));
+        let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        actual.sort_unstable();
+        let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+        let expected: Vec<_> = corpus["rows"].as_array().unwrap().iter().map(|row| row.as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the shared Rust/TypeScript native row corpus when emitted rows change");
+    }
+
+    #[test]
+    fn archive_objectives_preserve_unknown_observations_without_a_latency_target() {
+        let available = json!({"name": "database-archive", "kind": "gauge", "about": "Archive capacity",
+            "fresh": true, "status": "available", "size": {"archive_bytes": 42, "capacity_bytes": 64,
+                "growth_bytes_per_day": null}, "integrity": "not-assessed",
+            "catalogue_coverage": null, "budget": null});
+        let mut missing = available.clone();
+        missing["fresh"] = json!(false);
+        missing["status"] = Value::Null;
+        missing["size"] = Value::Null;
+        let mut stale = available.clone();
+        stale["fresh"] = json!(false);
+        stale["status"] = Value::Null;
+        let mut inactive = available.clone();
+        inactive["status"] = json!("not-activated");
+        inactive["size"] = json!({"archive_bytes": null, "capacity_bytes": null, "growth_bytes_per_day": null});
+        let mut unavailable = inactive.clone();
+        unavailable["status"] = json!("unavailable");
+        for (target, status, current) in [
+            (missing, "no-data", "not measured yet"),
+            (stale, "stale", "stale measurement"),
+            (available, "not-eligible", "archive 42 bytes, capacity 64 bytes, growth unknown"),
+            (inactive, "not-eligible", "not activated"),
+            (unavailable, "no-data", "measurement unavailable"),
+        ] {
+            let report = json!({"targets": [target]});
+            let emitted = rows(&report, &[], 0, 0);
+            assert_eq!(emitted.len(), 1);
+            let row = by_id(&emitted, "database-archive");
+            assert_eq!(row["status"], status);
+            assert!(row["current"].as_str().unwrap().contains(current), "{row}");
+            assert_eq!(row["target"], "observational only; no configured target");
+            assert!(row["remaining_percent"].is_null());
+            assert!(row["budget"].is_null());
+            assert_eq!(row["integrity"], "not-assessed");
+            assert!(row["catalogue_coverage"].is_null());
+            assert_eq!(row["size"], report["targets"][0]["size"]);
+            assert_eq!(row["measurement_status"], report["targets"][0]["status"]);
+            assert!(!row["explain"].as_str().unwrap().contains("p99"));
+        }
+    }
+
     fn window(count: u64, p99: f64, over: u64) -> Value {
         json!({"count": count, "p50_ms": 1.0, "p99_ms": p99, "max_ms": p99 + 1.0,
             "over_target": over, "over_target_share": over as f64 / count.max(1) as f64})
@@ -650,53 +794,320 @@ mod tests {
             host: "host".into(),
             seats: vec![],
             identity: None,
+            windows: vec![],
         }
+    }
+
+    #[test]
+    fn five_hour_only_harness_refresh_preserves_weekly_budget_and_its_clock() {
+        use crate::LimitsStore;
+        let store = crate::store::Store::open_memory("alder").unwrap();
+        for fields in [
+            json!({"driver":"claude", "account":"claude/example",
+                "weekly_percent":40.0, "measured_at_unix_ms":1000}),
+            json!({"driver":"claude", "account":"claude/example",
+                "five_hour_percent":20.0, "measured_at_unix_ms":2000}),
+        ] {
+            store.append_claim(&crate::model::ClaimInput {
+                subject:"agent/sample/harness".into(), actor:Some("agent/sample/harness".into()),
+                kind:"harness.limits".into(), fields:serde_json::from_value(fields).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:None,
+            }).unwrap();
+        }
+        let limits = store.account_limits().unwrap();
+        let report = rows(&json!({"targets":[]}), &limits, 2500, 1000);
+        let weekly = by_id(&report, "claude/example/weekly");
+        assert_eq!(weekly["remaining_percent"], 60.0);
+        assert_eq!(weekly["status"], "stale");
+        assert_eq!(weekly["measured_at_unix_ms"], 1000);
+        let five = by_id(&report, "claude/example/5h");
+        assert_eq!(five["remaining_percent"], 80.0);
+        assert_eq!(five["status"], "met");
+        assert_eq!(five["measured_at_unix_ms"], 2000);
+    }
+
+    #[test]
+    fn quota_coverage_and_per_window_clocks_are_visible() {
+        let mut account = limit("claude/example", None, None, None);
+        account.windows = serde_json::from_value(json!([
+            {"window":"weekly","used_percent":20.0,"resets_at_unix_ms":null,
+             "measured_at_unix_ms":1000,"coverage":"reported","source":"omp-usage","host":"cedar"},
+            {"window":"5h","used_percent":null,"resets_at_unix_ms":null,
+             "measured_at_unix_ms":2000,"coverage":"unsupported","source":"omp-usage","host":"cedar"},
+            {"window":"daily","used_percent":null,"resets_at_unix_ms":null,
+             "measured_at_unix_ms":2000,"coverage":"unreported","source":"omp-usage","host":"cedar"}
+        ])).unwrap();
+        let report = rows(&json!({"targets":[]}), &[account], 2500, 1000);
+        let weekly = by_id(&report, "claude/example/weekly");
+        assert_eq!(weekly["status"], "stale");
+        assert_eq!(weekly["source"], "omp-usage");
+        assert_eq!(weekly["host"], "cedar");
+        let five = by_id(&report, "claude/example/5h");
+        assert_eq!(five["status"], "unsupported");
+        assert_eq!(five["current"], "unsupported");
+        assert!(five["remaining_percent"].is_null());
+        assert_eq!(by_id(&report, "claude/example/daily")["status"], "no-data");
     }
 
     fn by_id<'a>(rows: &'a [Value], id: &str) -> &'a Value {
         rows.iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no row {id}"))
     }
 
+    fn retained_budget(total: u64, bad: u64) -> Value {
+        let mut windows = serde_json::Map::new();
+        for (name, width) in [("30d", 30 * 86_400_000u64), ("6h", 21_600_000), ("2h", 7_200_000), ("1h", 3_600_000), ("30m", 1_800_000), ("5m", 300_000)] {
+            windows.insert(name.into(), json!({
+                "window_ms": width, "eligible": total, "bad": bad,
+                "coverage": 1.0, "samples": total,
+            }));
+        }
+        json!({"available": true, "windows": windows})
+    }
+
     #[test]
-    fn a_p99_target_spends_a_one_percent_budget_over_the_hour() {
+    fn sparse_organic_latency_shows_no_qualifying_events_and_coverage() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            for coverage in [None, Some(0.0), Some(0.25), Some(1.0)] {
+                let mut evidence = retained_budget(0, 0);
+                for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+                    window["coverage"] = json!(coverage);
+                }
+                let report = json!({"targets": [{
+                    "name": name, "about": "Organic successful first response", "p99_ms": 200,
+                    "windows": windows(0, 0.0, 0), "budget": evidence,
+                }]});
+                let rendered = rows(&report, &[], 0, 0);
+                let row = by_id(&rendered, name);
+                assert_eq!(row["status"], "no-data");
+                assert!(row["remaining_percent"].is_null());
+                assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+                assert_eq!(row["coverage"], json!(coverage));
+                let expected = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+                    |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
+                assert!(row["explain"].as_str().unwrap().contains(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_terminal_coverage_is_unknown_without_ledger_evidence() {
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "no-data");
+        assert!(row["remaining_percent"].is_null());
+        assert!(row["coverage"].is_null());
+        assert_eq!(row["current"], "No qualifying events in the last hour; accounting evidence unavailable");
+        assert!(row["explain"].as_str().unwrap().contains("unknown observed coverage"));
+    }
+
+    #[test]
+    fn a_quiet_terminal_hour_preserves_eligible_accounting_history() {
+        let mut evidence = retained_budget(100, 0);
+        evidence["windows"]["1h"]["eligible"] = json!(0);
+        evidence["windows"]["1h"]["samples"] = json!(0);
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+            "budget": evidence,
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "met");
+        assert_eq!(row["remaining_percent"], 100.0);
+        assert_eq!(row["coverage"], 1.0);
+        assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+    }
+
+    #[test]
+    fn a_restart_does_not_erase_retained_hourly_qualifying_events() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            // The process-local histogram starts empty, but the durable hour still has events.
+            let report = json!({"targets": [{
+                "name": name, "p99_ms": 200, "windows": windows(0, 0.0, 0),
+                "budget": retained_budget(100, 0),
+            }]});
+            let rendered = rows(&report, &[], 0, 0);
+            let row = by_id(&rendered, name);
+            assert_eq!(row["status"], "met");
+            assert_eq!(row["remaining_percent"], 100.0);
+            assert_eq!(row["coverage"], 1.0);
+            for field in ["current", "explain"] {
+                let text = row[field].as_str().unwrap();
+                assert!(text.contains("100 qualifying events retained in the last hour"), "{text}");
+                assert!(!text.contains("No qualifying events"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_native_latency_budget_is_distinct_from_the_percentile_aspiration() {
         let report = json!({"targets": [
             {"name": "person-read", "about": "Reads a person waits on", "p99_ms": 100,
+             "budget": retained_budget(200, 1),
              "windows": windows(200, 80.0, 1), "remote_p99_ms": 300, "remote_windows": windows(0, 0.0, 0)},
         ]});
         let rows = rows(&report, &[], 0, 0);
         let read = by_id(&rows, "person-read");
         assert_eq!(read["kind"], "objective");
-        assert_eq!(read["target"], "p99 ≤ 100 ms");
-        assert_eq!(read["window"], "1h");
-        // One in 200 over is 0.5%: half the 1% allowance is gone.
-        assert_eq!(read["remaining_percent"], 50.0);
+        assert_eq!(read["target"], "≤ 5.0% bad events; diagnostic p99 ≤ 100 ms");
+        assert_eq!(read["window"], "30d");
+        assert_eq!(read["remaining_percent"], 90.0);
         assert_eq!(read["status"], "met");
-        assert!(read["explain"].as_str().unwrap().contains("50% of the error budget is left"));
+        assert!(read["explain"].as_str().unwrap().contains("100.0% observed coverage"));
         assert_eq!(by_id(&rows, "person-read/remote")["status"], "no-data");
     }
 
     #[test]
-    fn a_target_missed_in_any_window_is_missed_and_its_budget_is_empty() {
+    fn paired_burn_can_be_known_before_the_thirty_day_budget_and_gaps_never_recover() {
+        let policy = crate::slo::shipped().iter().find(|objective| objective.name == "person-read").unwrap().budget.as_ref().unwrap();
+        let diagnostic = p99("person-read", "Reads", "requests", Some(300.0), &windows(100, 900.0, 100));
+        let mut evidence = retained_budget(100, 100);
+        evidence["windows"]["30d"]["coverage"] = json!(0.01);
+        let burning = native_budget(diagnostic.clone(), policy, &evidence, 0);
+        assert_eq!(burning["status"], "burning");
+        assert!(burning["remaining_percent"].is_null(), "short coverage cannot stand in for 30d accounting");
+        evidence["available"] = json!(false);
+        let unknown = native_budget(diagnostic, policy, &evidence, 0);
+        assert_eq!(unknown["status"], "no-data");
+        assert!(unknown["remaining_percent"].is_null());
+    }
+
+    #[test]
+    fn hourly_native_gauge_uses_real_cadence_pairs_not_five_minute_replays() {
+        let policy = crate::slo::shipped().iter().find(|objective| objective.name == "database").unwrap().budget.as_ref().unwrap();
+        let mut evidence = retained_budget(7_200_000, 7_200_000);
+        evidence["windows"]["30d"]["coverage"] = json!(0.01);
+        evidence["windows"]["5m"]["coverage"] = json!(0.0);
+        let row = native_budget(json!({"id": "database", "about": "Capacity", "target": "≤ 8 GB", "current": "12 GB"}), policy, &evidence, 3_600_000);
+        assert_eq!(row["status"], "burning");
+        assert!(row["explain"].as_str().unwrap().contains("2h+1h and 6h+1h"));
+        assert!(row["target"].as_str().unwrap().contains("covered milliseconds"));
+    }
+
+    #[test]
+    fn a_short_window_spike_remains_diagnostic_without_paired_burn() {
         let mut slow = windows(100, 80.0, 0);
         slow["5m"] = window(100, 400.0, 5);
-        let report = json!({"targets": [{"name": "write-ack", "about": "Writes", "p99_ms": 100, "windows": slow}]});
+        let mut evidence = retained_budget(100, 0);
+        evidence["windows"]["5m"]["bad"] = json!(100);
+        let report = json!({"targets": [{"name": "write-ack", "about": "Writes", "p99_ms": 100, "windows": slow, "budget": evidence}]});
         let rows = rows(&report, &[], 0, 0);
         let row = by_id(&rows, "write-ack");
-        assert_eq!(row["status"], "missed");
-        assert!(row["explain"].as_str().unwrap().contains("missed in the 5m window"));
-        // The hour itself is clean, so the budget over the hour is whole.
+        assert_eq!(row["status"], "met");
+        assert!(row["explain"].as_str().unwrap().contains("Fast pair 0.00×/20.00×"));
+        // Neither a short diagnostic spike nor an isolated slow request empties the 30d budget.
         assert_eq!(row["remaining_percent"], 100.0);
     }
 
     #[test]
-    fn a_max_target_has_all_or_nothing_budgets_for_each_store_work() {
+    fn transaction_populations_spend_independent_nonzero_budgets() {
+        let mut read = windows(10, 4.0, 0);
+        read["budget"] = retained_budget(1000, 0);
+        let mut write = windows(10, 9.0, 2);
+        write["budget"] = retained_budget(1000, 20);
         let report = json!({"targets": [{"name": "transaction", "about": "Any transaction", "max_ms": 100,
-            "read": windows(10, 4.0, 0), "write": windows(10, 9.0, 2), "writer_hold": windows(0, 0.0, 0)}]});
+            "read": read, "write": write, "writer_hold": windows(0, 0.0, 0)}]});
         let rows = rows(&report, &[], 0, 0);
         assert_eq!(by_id(&rows, "transaction/read")["remaining_percent"], 100.0);
         assert_eq!(by_id(&rows, "transaction/write")["remaining_percent"], 0.0);
-        assert_eq!(by_id(&rows, "transaction/write")["status"], "missed");
+        assert_eq!(by_id(&rows, "transaction/write")["status"], "exhausted");
         assert_eq!(by_id(&rows, "transaction/writer_hold")["status"], "no-data");
+    }
+
+    #[test]
+    fn measured_latency_mix_needs_the_missing_accounting_and_slow_windows() {
+        let policy = crate::slo::shipped().iter().find(|objective| objective.name == "person-read").unwrap().budget.as_ref().unwrap();
+        let diagnostic = p99("person-read", "Reads", "requests", Some(300.0), &windows(5213, 5242.879, 1837));
+        let mut evidence = retained_budget(0, 0);
+        for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+            window["coverage"] = json!(0.0);
+        }
+        for (name, total, bad) in [("1h", 5213, 1837), ("5m", 477, 185)] {
+            evidence["windows"][name]["eligible"] = json!(total);
+            evidence["windows"][name]["bad"] = json!(bad);
+            evidence["windows"][name]["samples"] = json!(total);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        // Eligible hour/five-minute evidence alone cannot prove either 30d accounting or
+        // the six-hour/thirty-minute pair. A 7x burn is below the fast 14.4x threshold.
+        let partial = native_budget(diagnostic.clone(), policy, &evidence, 0);
+        assert_eq!(partial["status"], "no-data");
+        assert!(partial["remaining_percent"].is_null());
+        assert!(partial["explain"].as_str().unwrap().contains("Fast pair 7.05×/7.76×"));
+        assert!(partial["explain"].as_str().unwrap().contains("slow pair unknown/unknown"));
+
+        // This is a sustained-load scenario, not reconstructed history: if independent
+        // covered slow windows have the same >30% slow mix, the slow pair burns.
+        for name in ["6h", "30m"] {
+            evidence["windows"][name]["eligible"] = json!(5213);
+            evidence["windows"][name]["bad"] = json!(1837);
+            evidence["windows"][name]["samples"] = json!(5213);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        let sustained = native_budget(diagnostic, policy, &evidence, 0);
+        assert_eq!(sustained["status"], "burning");
+        assert!(sustained["remaining_percent"].is_null());
+    }
+
+    #[test]
+    fn transaction_write_below_one_percent_keeps_the_max_miss_diagnostic() {
+        // A representative 0.45% slow mix, under complete retained coverage. The max is
+        // still a miss; neither the diagnostic miss nor its magnitude empties the ratio.
+        let mut write = windows(210097, 139.263, 944);
+        for name in WINDOWS {
+            write[name]["max_ms"] = json!(19074.382);
+        }
+        write["budget"] = retained_budget(210097, 944);
+        let report = json!({"targets": [{"name": "transaction", "about": "Transactions", "max_ms": 300,
+            "read": windows(0, 0.0, 0), "write": write, "writer_hold": windows(0, 0.0, 0)}]});
+        let rows = rows(&report, &[], 0, 0);
+        let row = by_id(&rows, "transaction/write");
+        assert_eq!(row["status"], "met");
+        assert!(row["remaining_percent"].as_f64().unwrap() > 55.0);
+        assert!(row["remaining_percent"].as_f64().unwrap() < 55.1);
+        assert!(row["target"].as_str().unwrap().contains("≤ 1.0% bad events; diagnostic max ≤ 300 ms"));
+        assert!(row["explain"].as_str().unwrap().contains("19074 ms"));
+    }
+
+    #[test]
+    fn writer_hold_uses_its_max_target_and_all_or_nothing_budget() {
+        for (samples, p99, over, status, remaining, current) in [
+            (1000, 123.0, 4, "missed", json!(0.0), "max 500 ms over 1000 samples"),
+            (1000, 123.0, 0, "met", json!(100.0), "max 124 ms over 1000 samples"),
+            (0, 0.0, 0, "no-data", Value::Null, "no samples"),
+        ] {
+            let mut measured = windows(samples, p99, over);
+            if over > 0 {
+                for window in WINDOWS {
+                    measured[window]["max_ms"] = json!(500.0);
+                }
+            }
+            let report = json!({"targets": [{
+                "name": "writer-hold", "about": "Holds of the store's writer", "max_ms": 300,
+                "windows": measured,
+            }]});
+            let rows = rows(&report, &[], 0, 0);
+            let row = by_id(&rows, "writer-hold");
+            assert_eq!(row["target"], "max ≤ 300 ms");
+            assert_eq!(row["current"], current);
+            assert_eq!(row["status"], status);
+            assert_eq!(row["remaining_percent"], remaining);
+        }
+    }
+
+    #[test]
+    fn writer_hold_is_missed_when_only_a_short_window_has_an_overrun() {
+        let mut measured = windows(1000, 123.0, 0);
+        measured["5m"] = window(100, 400.0, 1);
+        let report = json!({"targets": [{
+            "name": "writer-hold", "max_ms": 300, "windows": measured,
+        }]});
+        let rows = rows(&report, &[], 0, 0);
+        let row = by_id(&rows, "writer-hold");
+        assert_eq!(row["status"], "missed");
+        assert_eq!(row["remaining_percent"], 100.0);
     }
 
     #[test]
@@ -716,8 +1127,8 @@ mod tests {
         let rows = rows(&report, &[], 0, 0);
         assert_eq!(by_id(&rows, "cpu")["remaining_percent"], 75.0);
         assert_eq!(by_id(&rows, "cpu/idle")["remaining_percent"], 80.0);
-        assert_eq!(by_id(&rows, "database")["remaining_percent"], 75.0);
-        assert_eq!(by_id(&rows, "database")["status"], "met");
+        assert!(by_id(&rows, "database")["remaining_percent"].is_null(), "capacity headroom is not a time budget");
+        assert_eq!(by_id(&rows, "database")["status"], "no-data", "a current gauge alone does not prove retained coverage");
         // 0.6% disconnected of the 1% allowed leaves 40%.
         assert_eq!(by_id(&rows, "ios-live-share")["remaining_percent"], 40.0);
     }
@@ -751,6 +1162,13 @@ mod tests {
         let (_, idle) = both(target(Some(0.4), 60, 9, Some(0.01)));
         assert_eq!((idle["status"].as_str(), idle["current"].as_str()), (Some("no-data"), Some("unknown: 9 idle minutes, needs 10")));
         assert_eq!(idle["remaining_percent"], Value::Null);
+        let mut busy = target(None, 60, 0, None);
+        busy["targets"][0]["idle"]["not_idle"]["seat"] = json!(59);
+        let (hour, idle) = both(busy);
+        assert_eq!(idle["current"], "not eligible: busy");
+        assert_eq!(idle["status"], "no-data");
+        assert_eq!(idle["remaining_percent"], Value::Null);
+        assert_eq!(hour["status"], "no-data", "ineligibility must not hide missing whole-hour CPU");
         // A daemon up less than the hour: both unknown.
         let (hour, idle) = both(target(None, 42, 30, Some(0.01)));
         assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("no-data"), Some("no-data")));
@@ -907,7 +1325,7 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "merge-latency/p50", "flakes"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "database-archive"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
@@ -917,75 +1335,13 @@ mod tests {
     }
 
     #[test]
-    fn ci_objectives_are_declared_with_their_targets_and_no_data_until_fed() {
-        let rows = rows(&json!({"targets": []}), &[], 0, 0);
-        for (id, target, window) in [
-            ("merge-latency/p50", "p50 ≤ 10 min", "1d"),
-            ("merge-latency/p95", "p95 ≤ 10 min", "1d"),
-            ("ci-critical-path/p95", "p95 ≤ 13 min", "1d"),
-            ("flakes", "≤ 0 an hour", "1h"),
-        ] {
-            let row = by_id(&rows, id);
-            assert_eq!(
-                (row["kind"].as_str(), row["target"].as_str(), row["window"].as_str(), row["status"].as_str()),
-                (Some("objective"), Some(target), Some(window), Some("no-data")),
-                "{id}"
-            );
-            assert!(row["remaining_percent"].is_null(), "{id}");
-            // The same fields as every other row, and no others: the client's SloRow is closed.
-            let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
-            keys.sort_unstable();
-            assert_eq!(
-                keys,
-                ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"],
-                "{id}"
-            );
-        }
-        assert!(by_id(&rows, "merge-latency/p95")["explain"].as_str().unwrap().contains("5 in 100 may run over"));
-        assert!(by_id(&rows, "flakes")["explain"].as_str().unwrap().contains("ci/flakes"));
-        // Objectives come before budgets.
-        let rows = super::rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(1.0), Some(1.0))], 10_000_000, 3_600_000);
+    fn objectives_come_before_budgets() {
+        let report = crate::api::request_latency_target_windows();
+        let rows = rows(&report, &[limit("claude/abc", None, Some(1.0), Some(1.0))], 10_000_000, 3_600_000);
         let first_budget = rows.iter().position(|row| row["kind"] == "budget").unwrap();
-        assert!(rows[..first_budget].iter().any(|row| row["id"] == "flakes"));
-    }
-
-    const NOW: &str = "2026-10-21T12:00:00Z";
-
-    fn unix_ms(at: &str) -> u64 {
-        chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() as u64
-    }
-
-    /// A completed Workspace CI run as GitHub's list-runs answer has it, finished `ago_minutes`
-    /// before `NOW` after running `minutes`; a merge group's run starts 30 seconds after GitHub
-    /// creates it, a pull request's at once.
-    fn ci_run(id: u64, event: &str, conclusion: &str, minutes: f64, ago_minutes: f64) -> Value {
-        let at = |ms: u64| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64).unwrap().to_rfc3339();
-        let updated = unix_ms(NOW) - (ago_minutes * 60_000.0) as u64;
-        let created = updated - (minutes * 60_000.0) as u64;
-        let started = if event == "merge_group" { created + 30_000 } else { created };
-        let branch = if event == "merge_group" { format!("gh-readonly-queue/main/pr-{id}-{}", "c".repeat(40)) } else { "feature".into() };
-        json!({"id": id, "name": "Workspace CI", "path": ".github/workflows/fleet.yml", "event": event,
-            "head_branch": branch, "status": "completed", "conclusion": conclusion,
-            "created_at": at(created), "run_started_at": at(started), "updated_at": at(updated),
-            "repository": {"full_name": "acme/garden"}})
-    }
-
-    fn ci_rows(runs: &[Value]) -> Vec<Value> {
-        ci_rows_flaky(runs, &[])
-    }
-
-    /// The rows from `runs`, of which those named in `flaky` had their artifacts listed.
-    fn ci_rows_flaky(runs: &[Value], flaky: &[(u64, u64)]) -> Vec<Value> {
-        let runs = runs
-            .iter()
-            .map(|run| crate::resource::github_workflows::WorkspaceRun::from_run("acme/garden", run).expect("a fixture run"))
-            .map(|mut run| {
-                run.flaky = flaky.iter().find(|(id, _)| *id == run.run_id).map(|(_, tests)| *tests);
-                run
-            })
-            .collect();
-        let source = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
-        ci(crate::slo::targets(), Some(&source), unix_ms(NOW))
+        assert!(first_budget > 0);
+        assert!(rows[..first_budget].iter().all(|row| row["kind"] == "objective"));
+        assert!(rows[first_budget..].iter().all(|row| row["kind"] == "budget"));
     }
 
     #[test]
@@ -999,134 +1355,12 @@ mod tests {
     }
 
     #[test]
-    fn the_critical_path_spends_its_budget_on_runs_over_the_target_in_the_last_day() {
-        // 39 pull request runs of 10 minutes and one of 15, all in the last day: 1 in 40 over
-        // 13 minutes is half of a p95's 5% allowance.
-        let mut runs = (1..40).map(|id| ci_run(id, "pull_request", "success", 10.0, id as f64 * 30.0)).collect::<Vec<_>>();
-        runs.push(ci_run(40, "pull_request", "success", 15.0, 60.0));
-        // Neither a failed run nor one that finished more than a day ago counts.
-        runs.push(ci_run(41, "pull_request", "failure", 30.0, 10.0));
-        runs.push(ci_run(42, "pull_request", "success", 30.0, 24.0 * 60.0 + 1.0));
-        let rows = ci_rows(&runs);
-        let row = by_id(&rows, "ci-critical-path/p95");
-        assert_eq!(
-            (row["status"].as_str(), row["current"].as_str(), row["remaining_percent"].as_f64(), row["window"].as_str()),
-            (Some("met"), Some("p95 10 min over 40 runs"), Some(50.0), Some("1d"))
-        );
-        let explain = row["explain"].as_str().unwrap();
-        assert!(explain.contains("1 of 40 runs ran over (2.5%)"), "{explain}");
-        assert!(explain.contains("from its start to its last update"), "{explain}");
-        // Two over in forty is 5%, the whole allowance; three is past it.
-        runs[0] = ci_run(1, "pull_request", "success", 14.0, 30.0);
-        let row = by_id(&ci_rows(&runs), "ci-critical-path/p95").clone();
-        assert_eq!((row["status"].as_str(), row["remaining_percent"].as_f64()), (Some("met"), Some(0.0)));
-        runs[1] = ci_run(2, "pull_request", "success", 14.0, 60.0);
-        let row = by_id(&ci_rows(&runs), "ci-critical-path/p95").clone();
-        assert_eq!((row["status"].as_str(), row["remaining_percent"].as_f64()), (Some("missed"), Some(0.0)));
-        assert!(row["explain"].as_str().unwrap().contains("missed"));
-        // Merge groups are not the critical path.
-        assert_eq!(by_id(&ci_rows(&runs), "merge-latency/p50")["status"], "no-data");
-    }
-
-    #[test]
-    fn merge_latency_is_each_green_merge_groups_run_from_creation_to_its_last_update() {
-        let runs = [
-            ci_run(1, "merge_group", "success", 6.0, 30.0),
-            ci_run(2, "merge_group", "success", 8.0, 90.0),
-            ci_run(3, "merge_group", "success", 12.0, 150.0),
-            // An ejected group has no latency; it counts as a flake instead.
-            ci_run(4, "merge_group", "failure", 40.0, 10.0),
-            ci_run(5, "pull_request", "success", 40.0, 10.0),
-        ];
-        let rows = ci_rows(&runs);
-        let p50 = by_id(&rows, "merge-latency/p50");
-        assert_eq!((p50["status"].as_str(), p50["current"].as_str()), (Some("met"), Some("p50 8 min over 3 runs")));
-        // One of three over is 33%, within a p50's 50% allowance: a third of it spent.
-        assert_eq!(p50["remaining_percent"].as_f64(), Some(33.3));
-        let p95 = by_id(&rows, "merge-latency/p95");
-        assert_eq!((p95["status"].as_str(), p95["current"].as_str()), (Some("missed"), Some("p95 12 min over 3 runs")));
-        assert_eq!(p95["remaining_percent"].as_f64(), Some(0.0));
-        assert!(p95["explain"].as_str().unwrap().contains("the merge after it are not counted"));
-    }
-
-    #[test]
-    fn flakes_count_ejected_merge_groups_in_the_last_hour() {
-        let green = ci_run(1, "merge_group", "success", 6.0, 20.0);
-        let rows = ci_rows(std::slice::from_ref(&green));
-        let flakes = by_id(&rows, "flakes");
-        assert_eq!(
-            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64(), flakes["window"].as_str()),
-            (Some("met"), Some("0 in the last hour"), Some(100.0), Some("1h"))
-        );
-        assert!(flakes["explain"].as_str().unwrap().contains("the test lanes of 0 of 1 finished run had 0 flaky tests"), "{}", flakes["explain"]);
-        // One ejected group in the hour spends the whole allowance; one before the hour does not count.
-        let rows = ci_rows(&[green.clone(), ci_run(2, "merge_group", "failure", 4.0, 50.0), ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
-        let flakes = by_id(&rows, "flakes");
-        assert_eq!(
-            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64()),
-            (Some("missed"), Some("1 in the last hour"), Some(0.0))
-        );
-        assert!(flakes["explain"].as_str().unwrap().contains("1 of 2 merge groups were ejected"));
-        // No merge group in the hour is nothing to count.
-        let rows = ci_rows(&[ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
-        assert_eq!((by_id(&rows, "flakes")["status"].as_str(), by_id(&rows, "flakes")["current"].as_str()), (Some("no-data"), Some("no samples")));
-    }
-
-    #[test]
-    fn flakes_add_tests_nextest_passed_only_on_a_retry() {
-        // A green pull request run alone in the hour is a sample; its flaky tests spend the allowance.
-        let pull = ci_run(1, "pull_request", "success", 9.0, 10.0);
-        let rows = ci_rows_flaky(std::slice::from_ref(&pull), &[(1, 2)]);
-        let flakes = by_id(&rows, "flakes");
-        assert_eq!(
-            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64()),
-            (Some("missed"), Some("2 in the last hour"), Some(0.0))
-        );
-        let explain = flakes["explain"].as_str().unwrap();
-        assert!(explain.contains("no merge group finished, and the test lanes of 1 of 1 finished run had 2 flaky tests (tests nextest passed only on a retry): 2 in all"), "{explain}");
-        assert!(explain.contains("A pull request run is read only when it succeeded"), "{explain}");
-        // Ejected groups and flaky tests add up; a run before the hour counts neither.
-        let runs = [pull.clone(), ci_run(2, "merge_group", "failure", 6.0, 20.0), ci_run(3, "merge_group", "success", 6.0, 30.0),
-            ci_run(4, "merge_group", "success", 6.0, 70.0)];
-        let rows = ci_rows_flaky(&runs, &[(1, 2), (2, 0), (3, 1), (4, 6)]);
-        let flakes = by_id(&rows, "flakes");
-        assert_eq!((flakes["status"].as_str(), flakes["current"].as_str()), (Some("missed"), Some("4 in the last hour")));
-        let explain = flakes["explain"].as_str().unwrap();
-        assert!(explain.contains("1 of 2 merge groups were ejected (their Workspace CI run failed), and the test lanes of 3 of 3 finished runs had 3 flaky tests"), "{explain}");
-        // A run whose artifacts are not listed yet adds no flaky test, and its group still counts.
-        let rows = ci_rows_flaky(&runs[2..], &[]);
-        let flakes = by_id(&rows, "flakes");
-        assert_eq!((flakes["status"].as_str(), flakes["current"].as_str()), (Some("met"), Some("0 in the last hour")));
-        assert!(flakes["explain"].as_str().unwrap().contains("0 of 1 merge group was ejected"));
-    }
-
-    #[test]
-    fn ci_rows_without_samples_or_without_runs_are_no_data() {
-        let empty = ci_rows(&[]);
-        let unobserved = ci(crate::slo::targets(), None, unix_ms(NOW));
-        for id in ["merge-latency/p50", "merge-latency/p95", "ci-critical-path/p95", "flakes"] {
-            for (rows, current) in [(&empty, "no samples"), (&unobserved, "not observed")] {
-                let row = by_id(rows, id);
-                assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some(current)), "{id}");
-                assert!(row["remaining_percent"].is_null(), "{id}");
-            }
-            assert!(by_id(&unobserved, id)["explain"].as_str().unwrap().contains("main_performance_failures"), "{id}");
-        }
-        // Every row keeps exactly the SloRow fields once fed.
-        let fed = ci_rows(&[ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 6.0, 20.0)]);
-        for row in &fed {
-            assert_ne!(row["status"], "no-data", "{row}");
-            let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
-            keys.sort_unstable();
-            assert_eq!(keys, ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"]);
-        }
-    }
-
-    #[test]
-    fn a_ci_duration_reads_in_minutes() {
+    fn a_duration_reads_in_minutes_from_a_minute_and_seconds_below() {
         assert_eq!(duration(600_000), "10 min");
         assert_eq!(duration(780_000), "13 min");
         assert_eq!(duration(90_000), "1.5 min");
-        assert_eq!(duration(1_500), "1500 ms");
+        assert_eq!(duration(55_000), "55 s");
+        assert_eq!(duration(1_500), "1.5 s");
+        assert_eq!(duration(400), "400 ms");
     }
 }

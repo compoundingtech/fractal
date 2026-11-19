@@ -10,6 +10,8 @@ Use these documents for implementation details:
 - [Architecture](design.md) defines the stable system shape.
 - [Native runtime invariants](invariants.md) names the current delivery, harness and lifecycle proof obligations.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
+- [Program engine](program-engine.md) is the accepted design for missions whose body is a program: where
+  it runs, its journal, versioning by bundle hash, authority, child runs and visibility.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Native driver contracts](native-driver-contracts.md) retains launch, scope, helper, harness-state and context obligations after catalog-runner retirement.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
@@ -17,6 +19,8 @@ Use these documents for implementation details:
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
+- [Principals and grants](principals-and-grants.md) defines the #867 acceptance matrix, delegated authority,
+  read-only service identity, explicit deferrals and release gates.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
 - [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.
@@ -32,6 +36,9 @@ Use these documents for implementation details:
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
 - [Portable rename proofs](rename-proof.md) explains signed agent/mission naming history, offline verification and explicit fleet-anchor trust.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
+- [Live-receive performance design](receive-replay-design.md) records FPL's accepted direction for
+  owned-set incremental projection, the replay fence, whole-route continuation, observation
+  writer work and status attribution; it does not describe shipped behavior.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.
@@ -51,6 +58,7 @@ Use these documents for implementation details:
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
+- [Topic thread contract](thread-contract.md) proposes one durable discussion across Inbox and clients.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
   allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and
@@ -58,6 +66,8 @@ Use these documents for implementation details:
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `fractal agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
+- [Idle residency](idle-residency.md) specifies daemon-owned suspension of quiet seats after an idle
+  time and their resume when a wake-class message arrives (specified, not implemented).
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
   message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
@@ -92,6 +102,8 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
+- [Objectives](objectives.md) explains the `objective` kind: the objectives Fractal ships in
+  `slo/objectives.kdl`, the ones a fleet declares, their indicators, targets and breach response.
 - [What a run waits on](waiting-on.md) explains `fractal missions waiting-on RUN` and `fractal missions blocked`:
   each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
   milliseconds from published state.

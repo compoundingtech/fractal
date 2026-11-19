@@ -50,6 +50,13 @@ pub struct PreparedEnvelope<'r> {
     content: Result<PreparedPayload, FractalError>,
 }
 
+impl PreparedEnvelope<'_> {
+    pub fn requires_keyed_envelope(&self) -> bool {
+        self.content.as_ref().is_ok_and(|content| content.payload.batch.claims.iter()
+            .any(|claim| self.runtime.requires_keyed_envelope(&claim.kind)))
+    }
+}
+
 struct EnvelopeKey {
     writer: String,
     sequence: u64,

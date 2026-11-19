@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { markdownBlock } from '@fractal/client/markdown'
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -35,7 +36,7 @@ afterEach(async () => {
 it('keeps unchanged message parsing stable across unrelated frames while references remain reactive', async () => {
   const frame = (revision: number, text = 'Existing **message** doc/foo.md') => <div data-frame={revision}>
     <MarkdownImagePolicy value={{ renderInlineReference: path => path === 'doc/foo.md' ? <span data-reference>{`Reference ${revision}`}</span> : undefined }}>
-      <Markdown text={text} />
+      <Markdown text={markdownBlock(text)} />
     </MarkdownImagePolicy>
   </div>
   await act(async () => root.render(frame(0)))
@@ -52,7 +53,7 @@ it('keeps unchanged message parsing stable across unrelated frames while referen
 it('only parses newly prepended Markdown during progressive history chunks', async () => {
   const messages = Array.from({ length: 24 }, (_, index) => ({ id: `history-${index}`, text: `Historical **answer ${index}**` }))
   const history = (startIndex: number) => <div>
-    {messages.slice(startIndex).map(message => <section key={message.id} data-message={message.id}><Markdown text={message.text} /></section>)}
+    {messages.slice(startIndex).map(message => <section key={message.id} data-message={message.id}><Markdown text={markdownBlock(message.text)} /></section>)}
   </div>
   await act(async () => root.render(history(20)))
   expect(parses.count).toBe(4)

@@ -37,6 +37,44 @@ fn work(read: impl FnOnce() -> StatusResponse) -> (smallclaims::sqlite::work::Sq
     let status = read();
     (scope.finish(), status)
 }
+#[test]
+fn owned_set_member_fields_avoid_the_full_claim_vector_at_current_and_older_cuts() {
+    let store = seat_with(3_000);
+    let cut = store.index().unwrap();
+    observe(&store, json!({
+        "status": "running", "incarnation_id": "after-pinned-cut", "runtime_id": "after-pinned-cut",
+    }));
+    assert!(store.index().unwrap() > cut, "fixture must retain a genuinely older cut");
+    for at in [None, Some(cut)] {
+        let (summary_work, summary) = work(|| store.generic_status_reduction(
+            Some(SEAT), None, at, false, ClaimsReduction::Fields,
+        ).unwrap());
+        let (full_work, full) = work(|| store.generic_status_reduction(
+            Some(SEAT), None, at, false, ClaimsReduction::Full,
+        ).unwrap());
+        assert!(summary.subjects[0].claims.is_empty(), "hot path enumerated claim ids");
+        assert_eq!(summary.subjects[0].claims_summary.count, 0);
+        assert_eq!(full.subjects[0].claims.len(), if at.is_some() { 3_000 } else { 3_001 });
+        assert_eq!(full.subjects[0].actual.as_ref().unwrap()["incarnation_id"],
+            if at.is_some() { "incarnation-2999" } else { "after-pinned-cut" });
+        let actual_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let actual = store.actual_for_generic_reads(SEAT, at).unwrap();
+        let actual_work = actual_scope.finish();
+        assert_eq!(actual, full.subjects[0].actual);
+        assert!(actual_work.vm_steps < full_work.vm_steps,
+            "actual={actual_work:?}, full={full_work:?}");
+        assert!(summary_work.vm_steps < full_work.vm_steps,
+            "summary={summary_work:?}, full={full_work:?}");
+        let mut summary = serde_json::to_value(summary).unwrap();
+        let mut full = serde_json::to_value(full).unwrap();
+        for response in [&mut summary, &mut full] {
+            response["subjects"][0].as_object_mut().unwrap().remove("claims");
+            response["subjects"][0].as_object_mut().unwrap().remove("claims_summary");
+        }
+        assert_eq!(summary, full, "only claim provenance representation may change");
+    }
+}
+
 
 #[test]
 fn a_summary_status_read_of_a_seat_does_not_read_its_history() {
@@ -77,6 +115,176 @@ fn a_summary_takes_each_field_from_the_newest_observation_that_has_it() {
     for field in ["incarnation_id", "status"] {
         assert_eq!(summary[field], full[field], "{field}");
     }
+}
+
+#[test]
+fn notice_summary_does_not_advance_a_populated_shared_cache_over_a_claim_backlog() {
+    let store = seat_with(2);
+    let warm_cut = store.index().unwrap();
+    store.status_at(Some(SEAT), None, Some(warm_cut)).unwrap();
+    let before = {
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert!(!cache.statuses.is_empty(), "exercise an already populated cache");
+        (cache.through, cache.statuses.len())
+    };
+    for index in 0..32 {
+        notice_raw_observation(
+            &store, "agent/example/backlog", "runtime.observed",
+            &format!("summary-backlog-{index}"), "backlog-origin", 100 + index,
+            json!({"status":"running", "incarnation_id":"unrelated"}),
+        );
+    }
+    let through = store.index().unwrap();
+    assert!(through > before.0, "the cache has a claim backlog to process");
+    for cut in [None, Some(through)] {
+        let summary = store.status_summary_at(SEAT, cut).unwrap();
+        assert_eq!(summary.store_index, through);
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert_eq!((cache.through, cache.statuses.len()), before,
+            "an incarnation-only reduction must neither advance nor maintain the shared cache");
+    }
+}
+
+
+/// Model retained or replicated rows without the public append boundary rejecting reserved kinds.
+fn notice_raw_observation(
+    store: &Store,
+    subject: &str,
+    kind: &str,
+    id: &str,
+    origin: &str,
+    sequence: u64,
+    fields: serde_json::Value,
+) -> u64 {
+    let connection = store.connection.write();
+    let accepted = (1_700_000_000_000 + sequence).to_string();
+    connection
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+            rusqlite::params![id, origin, sequence, accepted],
+        )
+        .unwrap();
+    connection
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h87bbf137f13b owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?1,?2,?3,?4,?5,'[]',?6)",
+            rusqlite::params![id, subject, kind, origin, json!({"fields": fields}).to_string(), accepted],
+        )
+        .unwrap();
+    u64::try_from(connection.last_insert_rowid()).unwrap()
+}
+
+#[test]
+fn notice_incarnation_reduction_excludes_reserved_fields_and_source_identity_without_generic_guard() {
+    for (kind, safe_kind) in [("attention.notice", "runtime.observed"),
+        ("custom.attention.snapshot", "custom.health-observed")] {
+        let store = Store::open_memory("node").unwrap();
+        notice_raw_observation(
+            &store, SEAT, safe_kind, "safe-actual", "safe-origin", 1,
+            json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+        );
+        notice_raw_observation(
+            &store, SEAT, kind, "reserved-later", "reserved-origin", 2,
+            json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+        );
+        const RESERVED_ONLY: &str = "agent/example/reserved-only";
+        notice_raw_observation(
+            &store, RESERVED_ONLY, kind, "reserved-only", "reserved-origin", 3,
+            json!({"status": "reserved-only-status", "incarnation_id": "reserved-only-incarnation"}),
+        );
+        // Deliberately bypass Store::status_summary_at's generic visibility guard: the
+        // incarnation fold and its source attribution must each exclude reserved kinds.
+        let connection = store.readers.get();
+        let (safe, _) = subject_status_at(&connection, SEAT, None, None, ClaimsReduction::Incarnation)
+            .unwrap().unwrap();
+        let actual = safe.actual.as_ref().unwrap();
+        assert_eq!(actual["status"], "running", "{kind}: {safe:?}");
+        assert_eq!(actual["incarnation_id"], "safe-incarnation", "{kind}: {safe:?}");
+        assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{kind}: {safe:?}");
+        assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{kind}: {safe:?}");
+
+        if let Some((reserved, _)) =
+            subject_status_at(&connection, RESERVED_ONLY, None, None, ClaimsReduction::Incarnation).unwrap()
+        {
+            assert!(reserved.actual.is_none(), "{kind}: {reserved:?}");
+            assert!(reserved.actual_claim.is_none(), "{kind}: {reserved:?}");
+            assert!(reserved.actual_origin.is_none(), "{kind}: {reserved:?}");
+        }
+    }
+}
+
+#[test]
+fn notice_status_summary_refuses_contamination_but_serves_the_safe_historical_cut() {
+    for kind in ["attention.notice", "custom.attention.snapshot"] {
+        let store = Store::open_memory("node").unwrap();
+        let safe_cut = notice_raw_observation(
+            &store, SEAT, "runtime.observed", "safe-actual", "safe-origin", 1,
+            json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+        );
+        let contaminated_cut = notice_raw_observation(
+            &store, SEAT, kind, "reserved-later", "reserved-origin", 2,
+            json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+        );
+        for cut in [None, Some(contaminated_cut)] {
+            let error = store.status_summary_at(SEAT, cut).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<FractalError>().expect("explicit notice refusal").code,
+                "notices-unavailable",
+                "{kind} at {cut:?}: {error:?}",
+            );
+        }
+        let safe = store.status_summary_at(SEAT, Some(safe_cut)).unwrap().subjects.remove(0);
+        let actual = safe.actual.as_ref().unwrap();
+        assert_eq!(actual["status"], "running", "{kind}: {safe:?}");
+        assert_eq!(actual["incarnation_id"], "safe-incarnation", "{kind}: {safe:?}");
+        assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{kind}: {safe:?}");
+        assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{kind}: {safe:?}");
+    }
+}
+
+#[test]
+fn notice_status_summary_pins_visibility_fields_and_source_before_a_concurrent_reserved_append() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    notice_raw_observation(
+        &store, SEAT, "runtime.observed", "safe-actual", "safe-origin", 1,
+        json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+    );
+    let writer = Store::open(&path, "node").unwrap();
+    STATUS_AFTER_DESIRED_READ.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            std::thread::spawn(move || {
+                notice_raw_observation(
+                    &writer, SEAT, "custom.attention.snapshot", "reserved-later", "reserved-origin", 2,
+                    json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+                );
+                // A safe observation also lands after the request's cut. Reserved-kind
+                // filtering alone cannot prevent a mixed snapshot from selecting this row.
+                notice_raw_observation(
+                    &writer, SEAT, "runtime.observed", "safe-after-cut", "safe-origin", 3,
+                    json!({"status": "stopped", "incarnation_id": "later-incarnation"}),
+                );
+            })
+            .join()
+            .unwrap();
+        }));
+    });
+    let safe = store.status_summary_at(SEAT, None).unwrap().subjects.remove(0);
+    assert!(
+        STATUS_AFTER_DESIRED_READ.with(|slot| slot.borrow().is_none()),
+        "the interleaving hook must run during the summary reduction",
+    );
+    let actual = safe.actual.as_ref().unwrap();
+    assert_eq!(actual["status"], "running", "{safe:?}");
+    assert_eq!(actual["incarnation_id"], "safe-incarnation", "{safe:?}");
+    assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{safe:?}");
+    assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{safe:?}");
+    let error = store.status_summary_at(SEAT, None).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<FractalError>().expect("explicit notice refusal").code,
+        "notices-unavailable",
+        "{error:?}",
+    );
 }
 
 /// A small deterministic generator, so each seed's history can be replayed.
@@ -154,7 +362,7 @@ fn random_history(seed: u64) -> Store {
             let id = format!("history-batch-{index}");
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+                    /* sqlite-large-value: allow-for-now lv-hb4ac3d3059e1 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
                     rusqlite::params![id, origins[which], sequences[which], accepted.to_string()],
                 )
                 .unwrap();
@@ -308,3 +516,79 @@ fn status_summary_benchmark() {
 }
 
 
+/// Generic visibility must cost subject/kind probes, not runtime history scans.
+#[test]
+fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
+    const BEFORE: &str =
+        "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
+         JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2";
+    let store = seat_with(3_000);
+    let names = BTreeSet::from([SEAT.to_owned()]);
+    let cut = store.index().unwrap();
+    let encoded = serde_json::to_string(&names).unwrap();
+    let connection = store.readers.get();
+    for (label, sql) in [("before", BEFORE), ("after", Store::GENERIC_RESERVED_SUBJECTS_SQL)] {
+        let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e1064300ed4 owner=fractal_store::store::status_summary_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map(params![encoded, cut], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        eprintln!("generic visibility {label} plan: {plan:?}");
+        if label == "after" {
+            assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+            // Either existing subject/kind covering index can win a prefix probe.
+            assert_eq!(plan.iter().filter(|line| line.contains(
+                "COVERING INDEX claims_subject_kind")).count(), 4, "{plan:?}");
+        }
+    }
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let started = std::time::Instant::now();
+    let before = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09de396c3650 owner=fractal_store::store::status_summary_tests TODO=trace-statement-and-value-representation */ BEFORE).unwrap()
+        .query_map(params![encoded, cut], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let before_elapsed = started.elapsed();
+    let before_work = scope.finish();
+    assert_eq!(before, vec![(SEAT.to_owned(), "runtime.observed".into())]);
+    drop(connection);
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let started = std::time::Instant::now();
+    assert_eq!(store.generic_status_subject_names_at(names, cut).unwrap(),
+        BTreeSet::from([SEAT.to_owned()]));
+    let after_elapsed = started.elapsed();
+    let after_work = scope.finish();
+    eprintln!("generic visibility 3000 observations: before={before_work:?} {before_elapsed:?}; after={after_work:?} {after_elapsed:?}");
+    assert!(before_work.vm_steps > after_work.vm_steps * 10,
+        "before={before_work:?}, after={after_work:?}");
+}
+
+#[test]
+fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundaries() {
+    let kinds = [
+        "custom.attention", "custom.attention.", "custom.attention.source-created",
+        "attention.notice", "attention.notice-", "attention.notice-source",
+        "custom.attention-", "custom.attention/", "custom.attentionX",
+        "attention.notice.", "attention.notice/", "attention.noticeX", "runtime.observed",
+    ];
+    let store = seat_with(kinds.len());
+    let names = kinds.iter().enumerate().map(|(index, _)| format!("agent/kind-{index}"))
+        .collect::<BTreeSet<_>>();
+    // Rewrite only this in-memory fixture to exercise hostile and legacy kinds
+    // independently of today's write-time schema validation.
+    for (index, kind) in kinds.iter().enumerate() {
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h7fa84ab32e1a owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?1,kind=?2 WHERE store_index=?3",
+            params![format!("agent/kind-{index}"), kind, index + 1],
+        ).unwrap();
+    }
+    for cut in 0..=kinds.len() as u64 {
+        let expected = kinds.iter().enumerate()
+            .filter(|&(index, kind)| index as u64 >= cut || !fractal_schema::notice::is_reserved_kind(kind))
+            .map(|(index, _)| format!("agent/kind-{index}"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(store.generic_status_subject_names_at(names.clone(), cut).unwrap(),
+            expected, "cut={cut}");
+    }
+    let roots = BTreeSet::from([
+        "custom/attention".to_owned(), "custom/attention/source/x".to_owned(),
+    ]);
+    assert!(store.generic_status_subject_names_at(roots, 0).unwrap().is_empty());
+}

@@ -5,6 +5,7 @@ use crate::OwnedSetsStore;
 use super::owned_sets::{Options, Source};
 use super::*;
 use crate::parse_intent;
+use fractal_attention::store::identities::IdentityStore;
 use fractal_attention::store::card_fold_tests_shared::*;
 use fractal_attention::store::card_fold_tests_shared::{agent_subjects, assert_card_fold_parity, assert_card_reads_parity, assert_card_reads_parity_with, per_subject_card_status};
 use fractal_attention::store::owned_sets_tests_shared::*;
@@ -32,6 +33,7 @@ fn options(store: &Store, sequence: u64) -> Options {
         adopt: Default::default(),
         allow_empty: false,
         confirm_retire: None,
+        policy: None,
         expected_subjects: Default::default(),
     }
 }
@@ -858,6 +860,114 @@ fn same_source_retry_is_noop_and_new_source_does_not_relaunch_unchanged_members(
 }
 
 #[test]
+fn canonical_agent_publication_after_rename_keeps_owned_identity_live() {
+    let store = Store::open_memory("amber").unwrap();
+    apply(&store, &bundle("true", false), 10);
+    let original = "agent/garden/orchard";
+    let canonical = "agent/garden/grove";
+    let token = store.selected_desired_token(original).unwrap();
+    store.rename_identity(
+        identities::IdentityKind::Agent,
+        &identities::RenameRequest {
+            from: original.into(),
+            to: canonical.into(),
+            actor: "person/operator".into(),
+            reason: "Clarify the owned agent name".into(),
+            expected_naming_revision: None,
+            expected_declaration: token.clone(),
+            idempotency_key: "rename-owned-agent".into(),
+        },
+        &[],
+    ).unwrap();
+    let input = parse_intent(
+        "version 2\nagent \"garden/grove\" { command \"true\" }",
+        "amber",
+    ).unwrap();
+    assert!(input.subjects.contains_key(canonical));
+    assert!(!input.subjects.contains_key(original));
+    let mut opts = options(&store, 20);
+    let preview = store.owned_set_preview(&input, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(!preview.mass_retirement);
+    assert!(preview.changes.values().all(|change| change != "retiring" && change != "retired"));
+    assert!(preview.expected_subjects.contains_key(original));
+    assert!(!preview.expected_subjects.contains_key(canonical));
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&input, &opts, "canonical-agent", "person/operator").unwrap();
+    let view = store.owned_sets().unwrap().remove(0);
+    assert!(view.receipt.members.contains_key(original));
+    assert!(!view.receipt.members.contains_key(canonical));
+    assert!(view.receipt.retired.is_empty());
+    let desired = store.desired_subjects().unwrap();
+    let agent = desired.iter().find(|desired| desired.subject == original).unwrap();
+    assert_eq!(agent.kind, "agent");
+    assert!(agent.member.is_some());
+    store.owned_desired_guard(agent).unwrap();
+    assert!(store.latest_claim(original, Some("agent.retired")).unwrap().is_none());
+}
+
+#[test]
+fn canonical_mission_publication_after_rename_keeps_owned_definition_and_runs_live() {
+    let store = Store::open_memory("amber").unwrap();
+    let input = parse_intent(
+        "version 2\nmission \"harvest\" state=\"ready\" { concurrent-runs max=2; goal \"Harvest\"; step \"work\" { agentless } }",
+        "amber",
+    ).unwrap();
+    apply(&store, &input, 10);
+    let original = "mission/harvest";
+    let canonical = "mission/gather";
+    let mut request = crate::model::MissionRunRequest {
+        mission: "harvest".into(),
+        revision: Some(input.missions["harvest"].revision.clone()),
+        workspace: "/tmp".into(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "before-owned-rename".into(),
+    };
+    let active = store.create_mission_run(&request).unwrap();
+    store.rename_identity(
+        identities::IdentityKind::Mission,
+        &identities::RenameRequest {
+            from: original.into(),
+            to: canonical.into(),
+            actor: "person/operator".into(),
+            reason: "Clarify the owned mission name".into(),
+            expected_naming_revision: None,
+            expected_declaration: None,
+            idempotency_key: "rename-owned-mission".into(),
+        },
+        &[],
+    ).unwrap();
+    let input = parse_intent(
+        "version 2\nmission \"gather\" state=\"ready\" { concurrent-runs max=2; goal \"Harvest\"; step \"work\" { agentless } }",
+        "amber",
+    ).unwrap();
+    assert!(input.missions.contains_key("gather"));
+    assert!(!input.missions.contains_key("harvest"));
+    let mut opts = options(&store, 20);
+    let preview = store.owned_set_preview(&input, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(!preview.mass_retirement);
+    assert!(preview.changes.values().all(|change| change != "retiring" && change != "retired"));
+    assert!(preview.expected_subjects.contains_key(original));
+    assert!(!preview.expected_subjects.contains_key(canonical));
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&input, &opts, "canonical-mission", "person/operator").unwrap();
+    let view = store.owned_sets().unwrap().remove(0);
+    assert!(view.receipt.members.contains_key(original));
+    assert!(!view.receipt.members.contains_key(canonical));
+    assert!(view.receipt.retired.is_empty());
+    assert_eq!(store.mission_spec("gather", None).unwrap().unwrap().state, MissionState::Ready);
+    assert_eq!(store.mission_run(&active.id).unwrap().unwrap().status, "running");
+    request.mission = "gather".into();
+    request.idempotency_key = "after-owned-rename".into();
+    let next = store.create_mission_run(&request).unwrap();
+    assert_eq!(next.mission, original);
+    assert_eq!(next.status, "running");
+}
+
+#[test]
 fn empty_set_needs_both_explicit_empty_and_preview_bound_retirement() {
     let store = Store::open_memory("amber").unwrap();
     apply(&store, &bundle("initial", true), 10);
@@ -1677,4 +1787,245 @@ fn the_agent_card_fold_reads_set_owned_declarations_as_the_reduction_does() {
         .agent_card_reads(&["agent/garden/orchard".to_owned()], store.index().unwrap(), &HashMap::new())
         .unwrap();
     assert!(reads.may_have_rollout("agent/garden/orchard"));
+}
+
+/// A set status read asks for every member's rollout, which selects the set each time. Within one
+/// read snapshot every member reference is validated once, so the read stays linear in the set.
+#[test]
+fn set_status_reads_validate_each_member_once_per_snapshot() {
+    let per_member = [8usize, 32].map(|count| {
+        let store = Store::open_memory("amber").unwrap();
+        let mut source = "version 2\n".to_owned();
+        for index in 0..count {
+            source.push_str(&format!("agent \"garden/worker-{index}\" {{ command \"true\" }}\n"));
+        }
+        apply(&store, &parse_intent(&source, "amber").unwrap(), 10);
+        let subjects = (0..count).map(|index| format!("agent/garden/worker-{index}")).collect::<Vec<_>>();
+        let before = STATEMENTS_RUN.with(std::cell::Cell::get);
+        store
+            .read_snapshot(|_| {
+                store.with_owned_set_snapshot_reads(|| {
+                    for subject in &subjects {
+                        store.rollout(subject).unwrap();
+                    }
+                });
+                Ok(())
+            })
+            .unwrap();
+        (STATEMENTS_RUN.with(std::cell::Cell::get) - before) / count
+    });
+    assert!(per_member[1] <= per_member[0] + 2, "statements per member: {per_member:?}");
+}
+
+fn enforce_policy(publisher: Option<&str>) -> owned_sets::PolicyRequest {
+    owned_sets::PolicyRequest {
+        enforce: Some(owned_sets::Enforce::Enforce),
+        publisher: publisher.map(|actor| vec![actor.to_owned()]),
+        ..Default::default()
+    }
+}
+
+fn publish_as(
+    store: &Store,
+    input: &NormalizedIntent,
+    sequence: u64,
+    actor: &str,
+    policy: Option<owned_sets::PolicyRequest>,
+) -> (owned_sets::Preview, ApplyResponse) {
+    let mut opts = options(store, sequence);
+    opts.policy = policy;
+    let preview = store.owned_set_preview(input, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    opts.expected_subjects = preview.expected_subjects.clone();
+    let applied = store
+        .apply_owned_set(input, &opts, &format!("set-{sequence}"), actor)
+        .unwrap();
+    (preview, applied)
+}
+
+fn runtime_write(subject: &str, kind: &str, fields: Value, evidence: Vec<String>, key: &str) -> ClaimInput {
+    ClaimInput {
+        subject: subject.into(),
+        kind: kind.into(),
+        actor: Some("person/operator".into()),
+        fields: serde_json::from_value(fields).unwrap(),
+        evidence,
+        expected_subject: None,
+        idempotency_key: Some(key.into()),
+    }
+}
+
+/// A forced hold or suspension commits with its debt, or not at all; the set's next publication,
+/// by an agent publisher, releases the hold and resumes the seat in its own transaction, and
+/// replicated admission accepts all of it.
+#[test]
+fn forced_runtime_writes_carry_their_debt_and_publication_reverts_them_on_every_replica() {
+    use owned_sets::Verb;
+    let fleet = signed_fleet();
+    for store in &fleet {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("daemon/{}", store.origin),
+                kind: "daemon.started".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({"status": "running",
+                    "features": {"owned_sets": 1, "source_enforcement": 1}}))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    for from in &fleet {
+        for to in &fleet {
+            if from.origin != to.origin {
+                signed_share(from, to);
+            }
+        }
+    }
+    let (amber, cobalt) = (&fleet[0], &fleet[1]);
+    let publisher = "agent/dotfiles/factory-publisher";
+    let declared = bundle("sleep 100", false);
+    publish_as(amber, &declared, 10, publisher, Some(enforce_policy(Some(publisher))));
+    let subject = "agent/garden/orchard";
+    let token = amber.selected_desired_token(subject).unwrap().unwrap();
+    let runtime_id = amber.desired_subjects_named(&[subject.into()]).unwrap().remove(0)
+        .member.unwrap().runtime_id;
+    let suspend = runtime_write(subject, "runtime.action.requested",
+        json!({"action": "suspend", "runtime_id": runtime_id, "incarnation_id": "garden-1"}),
+        vec![token.clone()], "suspend-orchard");
+    let until = u64::try_from(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap() + 900_000;
+    let hold = runtime_write(subject, "delivery.hold",
+        json!({"held": true, "until_unix_ms": until, "reason": "quiet", "legacy_adoption": false}),
+        vec![], "hold-orchard");
+
+    // Unforced, the write is refused and nothing is written: the request rolls back with it. The
+    // first write as `person/operator` on a signed store mints that person's keys outside the
+    // write, so the check reads the member's own claims rather than the store index.
+    let before = amber.claims_for(subject, None).unwrap().len();
+    for (input, verb) in [(&suspend, Verb::Suspend), (&hold, Verb::Hold)] {
+        let refused = amber.append_source_gated(subject, input, verb, None).unwrap_err();
+        assert_eq!(refused.code, "set-managed-subject", "{refused:?}");
+    }
+    assert_eq!(amber.claims_for(subject, None).unwrap().len(), before);
+
+    // Forced, each request and its debt commit together; a replay records no second debt.
+    let mut requests = BTreeMap::new();
+    for (input, verb) in [(&suspend, Verb::Suspend), (&hold, Verb::Hold)] {
+        let (request, appended) = amber.append_source_gated(subject, input, verb, Some("memory pressure")).unwrap();
+        assert!(appended);
+        assert!(!amber.append_source_gated(subject, input, verb, Some("memory pressure")).unwrap().1);
+        requests.insert(verb.as_str(), request.id);
+    }
+    let debts = amber.claims_for(subject, Some(owned_sets::DEBT_KIND)).unwrap();
+    assert_eq!(
+        debts.iter().map(|d| (d.body["fields"]["verb"].as_str().unwrap(), d.body["fields"]["request"].as_str().unwrap()))
+            .collect::<BTreeMap<_, _>>(),
+        requests.iter().map(|(verb, id)| (*verb, id.as_str())).collect::<BTreeMap<_, _>>()
+    );
+    signed_share(amber, cobalt);
+
+    // The publisher's next publication reverts both.
+    let (preview, _) = publish_as(amber, &declared, 11, publisher, None);
+    assert_eq!(
+        preview.reverted_debts.iter().map(|d| (d.verb.as_str(), d.outcome.as_deref().unwrap())).collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([("hold", "reverted"), ("suspend", "reverted")])
+    );
+    signed_share(amber, cobalt);
+    for store in [amber, cobalt] {
+        let resume = store.latest_claim(subject, Some("runtime.action.requested")).unwrap().unwrap();
+        assert_eq!(resume.actor.as_deref(), Some(publisher));
+        assert_eq!(resume.body["fields"]["action"], "resume");
+        assert_eq!(resume.body["fields"]["runtime_id"], runtime_id);
+        assert_eq!(resume.body["evidence"], json!([token, requests["suspend"]]));
+        let released = store.latest_claim(subject, Some("delivery.hold")).unwrap().unwrap();
+        assert_eq!((released.actor.as_deref(), &released.body["fields"]["held"]), (Some(publisher), &json!(false)));
+        let closed = store.claims_for(subject, Some(owned_sets::DEBT_CLOSED_KIND)).unwrap();
+        assert_eq!(closed.len(), 2);
+        assert!(closed.iter().all(|c| c.body["fields"]["outcome"] == "reverted" && c.actor.as_deref() == Some(publisher)));
+    }
+
+    // A forced resume of a seat the source never suspended is closed, not reverted.
+    let resume = runtime_write(subject, "runtime.action.requested",
+        json!({"action": "resume", "runtime_id": runtime_id}),
+        vec![token.clone(), requests["suspend"].clone()], "resume-orchard");
+    amber.append_source_gated(subject, &resume, Verb::Resume, Some("needed it back")).unwrap();
+    let (preview, _) = publish_as(amber, &declared, 12, publisher, None);
+    assert_eq!(preview.reverted_debts.len(), 1);
+    assert_eq!(preview.reverted_debts[0].outcome.as_deref(), Some("closed"));
+    assert_eq!(amber.latest_claim(subject, Some("runtime.action.requested")).unwrap().unwrap().body["fields"]["action"], "resume");
+    assert_eq!(amber.claims_for(subject, Some("runtime.action.requested")).unwrap().len(), 3);
+}
+
+/// `missions retire --force` takes effect with its debt in one transaction; the set's next
+/// publication restores the source mission.
+#[test]
+fn a_forced_mission_retire_holds_until_the_set_publishes_again() {
+    let store = Store::open_memory("amber").unwrap();
+    let declared = parse_intent(
+        "version 2\nagent \"garden/orchard\" { command \"sleep 100\" }\nmission \"garden/harvest\" state=\"ready\" { goal \"Harvest\"; step \"work\" { assigned-to \"agent/garden/orchard\" } }\n",
+        "amber",
+    )
+    .unwrap();
+    publish_as(&store, &declared, 10, "person/operator", Some(enforce_policy(None)));
+    let source = store.mission_spec("garden/harvest", None).unwrap().unwrap();
+    let index = store.index().unwrap();
+    let refused = store.retire_mission("garden/harvest", "person/operator", "retire", None).unwrap_err();
+    assert_eq!(refused.code, "set-managed-subject");
+    assert!(refused.message.contains("ad hoc mission retire is refused"), "{}", refused.message);
+    let blank = store.retire_mission("garden/harvest", "person/operator", "retire-blank", Some(" ")).unwrap_err();
+    assert_eq!(blank.code, "source-force-refused");
+    assert_eq!(store.index().unwrap(), index);
+
+    let retired = store
+        .retire_mission("garden/harvest", "person/operator", "retire-forced", Some("frost tonight"))
+        .unwrap();
+    assert_ne!(retired.revision, source.revision);
+    assert_eq!(store.mission_spec("garden/harvest", None).unwrap().unwrap().revision, retired.revision);
+    let debt = store.latest_claim("mission/garden/harvest", Some(owned_sets::DEBT_KIND)).unwrap().unwrap();
+    assert_eq!(debt.body["fields"]["verb"], "mission retire");
+    assert_eq!(debt.body["fields"]["revision"], retired.revision);
+    assert_eq!(debt.body["fields"]["reason"], "frost tonight");
+
+    let (preview, _) = publish_as(&store, &declared, 11, "person/operator", None);
+    assert_eq!(preview.reverted_debts.len(), 1);
+    assert_eq!(preview.reverted_debts[0].outcome.as_deref(), Some("reverted"));
+    assert_eq!(store.mission_spec("garden/harvest", None).unwrap().unwrap().revision, source.revision);
+}
+
+/// A claimed namespace refuses an ad hoc create, but a mission run still materializes the
+/// declarations it owns there: source does not route run starts.
+#[test]
+fn a_claimed_namespace_still_admits_run_owned_declarations() {
+    let store = Store::open_memory("amber").unwrap();
+    let declared = parse_intent("version 2\nagent \"garden/orchard\" { command \"sleep 100\" }\n", "amber").unwrap();
+    let policy = owned_sets::PolicyRequest {
+        namespaces: Some(vec!["agent/garden/*".into()]),
+        ..enforce_policy(None)
+    };
+    publish_as(&store, &declared, 10, "person/operator", Some(policy));
+    let mut helper = parse_intent("version 2\nagent \"garden/helper\" { command \"sleep 100\" }\n", "amber").unwrap();
+    let expected = BTreeMap::from([("agent/garden/helper".to_owned(), Vec::new())]);
+    let index = store.index().unwrap();
+    let refused = store.apply(&helper, &expected, "ad-hoc-helper").unwrap_err();
+    assert_eq!(refused.code, "set-managed-subject");
+    assert_eq!(store.index().unwrap(), index);
+
+    helper.subjects.get_mut("agent/garden/helper").unwrap().owner_run = Some("run/harvest-1".into());
+    let applied = store.apply(&helper, &expected, "run-helper").unwrap();
+    assert!(applied.changed);
+    assert!(applied.source_debts_recorded.is_empty());
+
+    let mut orchard = parse_intent("version 2\nagent \"garden/orchard\" { command \"sleep 1\" }\n", "amber").unwrap();
+    orchard.subjects.get_mut("agent/garden/orchard").unwrap().owner_run = Some("run/harvest-1".into());
+    let token = store.selected_desired_token("agent/garden/orchard").unwrap().unwrap();
+    let index = store.index().unwrap();
+    let member = store
+        .apply(&orchard, &BTreeMap::from([("agent/garden/orchard".to_owned(), vec![token])]), "run-orchard")
+        .unwrap_err();
+    assert_eq!(member.code, "set-managed-subject");
+    assert_eq!(store.index().unwrap(), index);
+    assert!(store.latest_claim("agent/garden/helper", Some(owned_sets::DEBT_KIND)).unwrap().is_none());
 }

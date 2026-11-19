@@ -21,7 +21,8 @@ const compare = (left: string, right: string): number => {
 export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat[], collapse: SidebarCollapse): SidebarNode[] => {
   const agent = (seat: SidebarSeat): SidebarNode => ({
     _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label,
-    children: seat.children, collapsed: collapse.get(seat.id) ?? true,
+    // A seat with further missions starts open, so they show; otherwise children wait behind the chevron.
+    children: seat.children, collapsed: collapse.get(seat.id) ?? !seat.children?.some(child => child.missionId !== undefined),
   })
   const seats = new Map<string, SidebarNode[]>()
   for (const seat of roster) {

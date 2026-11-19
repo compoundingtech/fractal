@@ -23,7 +23,7 @@ fn identity_env(name: &str) -> bool {
     matches!(
         name,
         "ST_AGENT" | "ST_SUPERVISOR" | "ST3_SUBJECT" | "ST3_INCARNATION"
-            | "ST_GATE_CAPABILITY" | "ST3_TERMINAL_CAPABILITY"
+            | "ST_GATE_CAPABILITY" | "ST3_TERMINAL_CAPABILITY" | "ST_RUN_CREDENTIAL"
     ) || name.starts_with("ST_DRIVER_")
         || ((name.starts_with("ST_CLAUDE_")
             || name.starts_with("ST_PI_CHANNEL_")

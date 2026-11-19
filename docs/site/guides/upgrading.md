@@ -99,7 +99,7 @@ and any later database relocation as separate operations.
 For Home Manager, stage through the configuration that owns the services:
 
 ```nix
-services.smalltalk.fractalMigration.phase = "stage";
+services.fractal.fractalMigration.phase = "stage";
 ```
 
 Stage installs disabled target definitions without moving state. Build the

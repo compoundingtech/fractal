@@ -44,7 +44,7 @@ for (const change of ['append', 'update', 'replace', 'second prepend']) test(`hi
   try {
     await publish(tail)
     await publish([...older, ...tail])
-    assert.deepEqual(ids(), [...older.slice(-8), ...tail].map(message => message.id))
+    assert.deepEqual(ids(), tail.map(message => message.id), 'the prepending commit adopts no older message')
     assert.equal(adoption.isSnapshotAdopted(), false)
     const obsolete = [...frames.values()]
     const updated = { ...tail[0], text: 'updated while paging' }
@@ -60,6 +60,30 @@ for (const change of ['append', 'update', 'replace', 'second prepend']) test(`hi
     assert.equal(adoption.isSnapshotAdopted(), true)
     assert.equal(frames.size, 0, 'obsolete batches are cancelled and adoption completes')
     if (change === 'update') assert.equal(messages.at(-1).content[0].text, updated.text)
+  } finally { await act(async () => root.unmount()); container.remove(); frames.clear() }
+})
+test('an older-page prepend adopts nothing in its own commit, then one batch per frame', async () => {
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  let messages, adoption
+  function Probe() { messages = useAuiState(state => state.thread.messages); adoption = React.useContext(RuntimeAdoptedIds); return null }
+  const publish = async messages => act(async () => {
+    root.render(React.createElement(EmbraceRuntimeProvider, { options: { messages, isRunning: false, onNew } }, React.createElement(Probe)))
+  })
+  const ids = () => messages.map(message => message.id)
+  const paint = async () => act(async () => { const callbacks = [...frames.values()]; frames.clear(); for (const callback of callbacks) callback(0) })
+  try {
+    await publish(tail)
+    // React flushes a discrete update's passive effects before the frame paints, so any older batch adopted here
+    // would rebuild the runtime's message resources inside the frame that delivered the page.
+    await publish([...older, ...tail])
+    assert.deepEqual(ids(), tail.map(message => message.id))
+    assert.equal(adoption.isSnapshotAdopted(), false)
+    await paint()
+    assert.deepEqual(ids(), [...older.slice(-8), ...tail].map(message => message.id))
+    await paint()
+    assert.deepEqual(ids(), [...older, ...tail].map(message => message.id))
+    assert.equal(adoption.isSnapshotAdopted(), true)
   } finally { await act(async () => root.unmount()); container.remove(); frames.clear() }
 })
 
@@ -90,7 +114,7 @@ for (const withPrompt of [true, false]) test(`a published answer remains mounted
     await publish(full)
     visible()
     assert.equal(adopted, false)
-    for (let batch = 0; batch < 7; batch++) {
+    for (let batch = 0; batch < 8; batch++) {
       await act(async () => { const callbacks = [...frames.values()]; frames.clear(); for (const callback of callbacks) callback(0) })
       visible()
     }

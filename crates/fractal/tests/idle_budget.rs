@@ -207,13 +207,25 @@ mission "idle/wait-{index}" state="ready" {{
     }
 }
 
-/// A seat driver with the environment the reconciler gives it, its directories in `root`.
+/// A seat driver with a private managed profile and idle provider, its directories in `root`.
 fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
     let root = root.join(format!("seat-{index}"));
     for directory in ["workspace", "home", "state", "config", "runtime", "drivers"] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     let (runtime_id, _) = seat(index);
+    let managed_bin = root.join("managed-bin");
+    std::fs::create_dir(&managed_bin).unwrap();
+    let provider = managed_bin.join("claude");
+    std::fs::write(&provider, format!("#!{}\nexec sleep 600\n", env!("ST3_FIXTURE_BASH"))).unwrap();
+    std::fs::set_permissions(&provider, {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(0o700)
+    }).unwrap();
+    let profile = root.join("runtime-profile.json");
+    std::fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": managed_bin}}},
+    })).unwrap()).unwrap();
     fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         // Its own process group, so stopping the seat also stops the stand-in provider.
         .process_group(0)
@@ -221,6 +233,10 @@ fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", root.join("home"))
+        .env("AGENT_RUNTIME_PROFILE", &profile)
+        .env("AGENT_PERSONA", "generalist")
+        .env("ST_AGENT", format!("agent/{runtime_id}"))
+        .env("FRACTAL_AGENT", format!("agent/{runtime_id}"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_RUNTIME_DIR", root.join("runtime"))
@@ -230,7 +246,8 @@ fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
         .arg(socket)
         .args(["driver", "claude", "--subject"])
         .arg(format!("agent/{runtime_id}"))
-        .args(["--", "sleep", "600"])
+        .arg("--")
+        .arg(provider)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -400,12 +417,14 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_601))
         .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: NODE.into(),
+        api_socket: state_dir.join("api.sock"),
         state_dir,
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -588,12 +607,14 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: NODE.into(),
+        api_socket: root.join("daemon").join("api.sock"),
         state_dir: root.join("daemon"),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),

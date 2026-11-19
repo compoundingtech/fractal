@@ -130,6 +130,9 @@ const pickedOr = (namespaceLabels: string, output = 'ci1', mergeLabels = mergeCi
 // Deployment and merge progress take precedence during saturation. Required PR
 // checks precede optional/manual work; local reservations remain unchanged.
 const workspaceJobPriority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
+export const requiredLinuxRunner = [
+  `${linuxRunnerProfile.replace(linuxJobPriority, `\${{ ${workspaceJobPriority} }}`)};github.run-id=\${{ github.run_id }}`,
+] as const
 // CI_MERGE_NAMESPACE_PROFILE remains the independent merge overflow profile.
 // CI_PR_NAMESPACE_PROFILE is selected by the hosted step only after a successful
 // exact-head, not-queued lookup. Keep it unset until the PR profile is provisioned.
@@ -261,6 +264,9 @@ export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
 export const buildEnv = { CARGO_PROFILE_DEV_DEBUG: '0', CARGO_PROFILE_TEST_DEBUG: '0', CARGO_INCREMENTAL: '0' }
 
+// This archive is dependency-only evidence, even on an exact key hit: its key
+// omits Rust sources. buildSnapshotPrepare discards local package fingerprints
+// and outputs after restoration; only exact-source snapshots retain them.
 export const cargoCacheStep = {
   name: 'Restore the Cargo target and registry',
   id: 'cargo-cache',
@@ -355,6 +361,7 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    env: { GH_TOKEN: '${{ github.token }}' },
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
 printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
@@ -809,7 +816,10 @@ export const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command }),
+      ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+    },
     ...after,
     {
       name: 'Save Nix outputs to the local Nix cache',
@@ -863,8 +873,8 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
-  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-',
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-',
 } as const
 
 /**

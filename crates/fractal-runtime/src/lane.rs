@@ -40,6 +40,25 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "camelCase")]
+pub enum RequestClass { Landing, Check, #[default] Agent }
+
+impl RequestClass {
+    pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiskRequest {
+    pub bytes: u64,
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum IoClass { Heavy }
+
 /// A seat lane's size: how many cores of CPU time and how many bytes of memory it may use.
 #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct Capacity {
@@ -182,9 +201,28 @@ pub fn show_memory(bytes: u64) -> String {
         .map_or_else(|| bytes.to_string(), |(shift, unit)| format!("{}{unit}", bytes >> shift))
 }
 
-/// `4G`, `512M`, `1T` or a byte count: binary units, as systemd reads them.
+/// A memory byte count has invalid syntax or cannot fit in a `u64`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParseMemoryError {
+    InvalidFormat,
+    Overflow,
+}
+
+impl std::fmt::Display for ParseMemoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidFormat => "capacity memory must be unsigned integer bytes, optionally with an unsigned e/E exponent, or a whole number with K, M, G or T",
+            Self::Overflow => "capacity memory is too large",
+        })
+    }
+}
+
+impl std::error::Error for ParseMemoryError {}
+
+/// Integer bytes, decimal `2e9`/`2E9`, or binary `4G`/`512M`/`1T` (units ignore case).
+/// Signs, decimal points, whitespace, and combining exponents with units are not accepted.
 pub fn parse_memory(value: &str) -> Result<u64> {
-    let (digits, unit) = match value.char_indices().last() {
+    let (number, unit) = match value.char_indices().last() {
         Some((index, suffix)) if suffix.is_ascii_alphabetic() => (&value[..index], Some(suffix)),
         _ => (value, None),
     };
@@ -194,14 +232,32 @@ pub fn parse_memory(value: &str) -> Result<u64> {
         Some('M') => 20,
         Some('G') => 30,
         Some('T') => 40,
-        Some(_) => bail!("capacity memory `{value}` must end in K, M, G or T"),
+        Some(_) => return Err(ParseMemoryError::InvalidFormat.into()),
     };
-    let amount: u64 = digits
-        .parse()
-        .with_context(|| format!("capacity memory `{value}` must be a whole number with K, M, G or T"))?;
-    amount
-        .checked_mul(1 << shift)
-        .with_context(|| format!("capacity memory `{value}` is too large"))
+    let (digits, exponent) = match number.split_once(['e', 'E']) {
+        Some((digits, exponent)) if unit.is_none() => (digits, Some(exponent)),
+        Some(_) => return Err(ParseMemoryError::InvalidFormat.into()),
+        None => (number, None),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || exponent.is_some_and(|exponent| {
+            exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(ParseMemoryError::InvalidFormat.into());
+    }
+    let amount: u64 = digits.parse().map_err(|_| ParseMemoryError::Overflow)?;
+    let multiplier = match exponent {
+        Some(exponent) => {
+            let exponent: u32 = exponent.parse().map_err(|_| ParseMemoryError::Overflow)?;
+            if amount == 0 {
+                return Ok(0);
+            }
+            10_u64.checked_pow(exponent).ok_or(ParseMemoryError::Overflow)?
+        }
+        None => 1 << shift,
+    };
+    Ok(amount.checked_mul(multiplier).ok_or(ParseMemoryError::Overflow)?)
 }
 
 /// Turns lanes on or off for this host (`lanes` in the install config). Applies to launches after
@@ -270,6 +326,85 @@ impl Lane {
     }
 }
 
+/// Finite roots share the named policy's slice, not a seat's environment-selected slice.
+/// Admission owns the aggregate capacity; this backend only installs and verifies its envelope.
+pub(crate) fn prepare_finite(name: &str, capacity: Option<Capacity>) -> Result<Lane> {
+    anyhow::ensure!(!name.is_empty(), "finite lane name is empty");
+    if let Some(capacity) = capacity {
+        anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
+    }
+    let slice = seat_slice(&format!("finite:{name}"));
+    let output = crate::systemd::output(crate::isolate::systemctl()
+        .args(["--user", "set-property", "--runtime", &slice])
+        .args(capacity.map_or_else(
+            || vec!["CPUAccounting=yes".to_owned(), "MemoryAccounting=yes".to_owned(), "TasksAccounting=yes".to_owned()],
+            |capacity| capacity.slice_properties(),
+        ))
+        .stdin(std::process::Stdio::null()))
+        .with_context(|| format!("cap finite lane {slice}"))?;
+    anyhow::ensure!(output.status.success(), "cap finite lane {slice}: {}", String::from_utf8_lossy(&output.stderr));
+    crate::systemd::invalidate();
+    Ok(Lane { slice })
+}
+
+/// Read kernel controls and the blocked leader's actual placement before releasing its payload.
+pub(crate) fn verify_finite(lane: &Lane, capacity: Option<Capacity>, unit: &str, pid: u32) -> Result<()> {
+    let cgroup = slice_cgroup(&lane.slice).context("finite lane cgroup is unavailable")?;
+    if let Some(capacity) = capacity {
+        let cpu = std::fs::read_to_string(cgroup.join("cpu.max"))?;
+        let memory = std::fs::read_to_string(cgroup.join("memory.max"))?;
+        anyhow::ensure!(parse_live(&cpu, &memory) == Some(capacity), "finite lane CPU/memory readback differs");
+        verify_cpu_bound(&cpu, capacity, true)?;
+        for parent in cgroup.ancestors().skip(1) {
+            if parent == std::path::Path::new("/sys/fs/cgroup") {
+                break;
+            }
+            let cpu = std::fs::read_to_string(parent.join("cpu.max"))?;
+            verify_cpu_bound(&cpu, capacity, false)?;
+            let memory = std::fs::read_to_string(parent.join("memory.max"))?;
+            anyhow::ensure!(memory.trim() == "max" || memory.trim().parse::<u64>()? >= capacity.memory,
+                "finite lane exceeds an ancestor memory boundary");
+        }
+        let swap = std::fs::read_to_string(cgroup.join("memory.swap.max"))?;
+        let tasks = std::fs::read_to_string(cgroup.join("pids.max"))?;
+        anyhow::ensure!(swap.trim().parse::<u64>()? == capacity.memory / 4, "finite lane swap readback differs");
+        anyhow::ensure!(tasks.trim().parse::<u32>()? == TASKS_MAX, "finite lane task readback differs");
+    }
+    let placement = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
+    let expected = cgroup.join(unit);
+    let actual = placement.lines().find_map(|line| line.strip_prefix("0::"))
+        .context("finite execution has no unified cgroup placement")?;
+    anyhow::ensure!(
+        std::path::Path::new("/sys/fs/cgroup").join(actual.trim_start_matches('/')) == expected,
+        "finite execution did not join its admitted lane"
+    );
+    // Missing controllers fail closed: finite launches cannot inherit an apparent no-op cap.
+    let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers"))?;
+    for required in if capacity.is_some() { &["cpu", "memory", "pids"][..] } else { &[][..] } {
+        anyhow::ensure!(controllers.split_whitespace().any(|value| value == *required),
+            "finite lane lacks required controller {required}");
+    }
+    Ok(())
+}
+
+fn verify_cpu_bound(value: &str, capacity: Capacity, exact: bool) -> Result<()> {
+    let mut fields = value.split_whitespace();
+    let quota = fields.next().context("CPU quota is missing")?;
+    let period = fields.next().context("CPU period is missing")?.parse::<u64>()?;
+    anyhow::ensure!(period > 0 && fields.next().is_none(), "CPU boundary is malformed");
+    if quota == "max" {
+        anyhow::ensure!(!exact, "finite lane CPU boundary is unlimited");
+        return Ok(());
+    }
+    let quota = quota.parse::<u64>()?;
+    let requested = u128::from(capacity.cores) * u128::from(period);
+    anyhow::ensure!(
+        if exact { u128::from(quota) == requested } else { u128::from(quota) >= requested },
+        "finite lane CPU boundary differs from admission"
+    );
+    Ok(())
+}
+
 /// The lane a launch of `runtime_id` starts in: its declared capacity, when this host enforces
 /// lanes and can. The seat's slice holds the capacity before anything starts in it, so a laned
 /// harness never runs uncapped; a slice that cannot be capped refuses the launch.
@@ -305,11 +440,10 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
         // An end asked before this launch no longer applies to the slice.
         slot.launches += 1;
         slot.end_at = None;
-        let output = crate::isolate::systemctl()
+        let output = crate::systemd::output(crate::isolate::systemctl()
             .args(["--user", "set-property", "--runtime", &slice])
             .args(capacity.slice_properties())
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null()))
             .with_context(|| format!("cap the lane {slice}"))?;
         if !output.status.success() {
             bail!(
@@ -317,6 +451,7 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
+        crate::systemd::invalidate();
         return Ok(Some(Lane { slice }));
     }
 }
@@ -333,15 +468,15 @@ pub fn resize(capacity: Capacity, runtime_id: &str) -> Result<bool> {
     if !slice_cgroup(&slice).is_some_and(|cgroup| cgroup.is_dir()) {
         return Ok(false);
     }
-    let output = crate::isolate::systemctl()
+    let output = crate::systemd::output(crate::isolate::systemctl()
         .args(["--user", "set-property", "--runtime", &slice])
         .args(capacity.slice_properties())
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(std::process::Stdio::null()))
         .with_context(|| format!("resize the lane {slice}"))?;
     if !output.status.success() {
         bail!("resize the lane {slice}: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
+    crate::systemd::invalidate();
     Ok(true)
 }
 
@@ -413,15 +548,19 @@ fn slice_cgroup(slice: &str) -> Option<std::path::PathBuf> {
     Some(app_slice_cgroup()?.join(LANES_SLICE).join(slice))
 }
 
-/// `app.slice` of the user manager this process runs in, where seats' scopes and the lanes sit.
+/// `app.slice` of the user manager this process runs in, where the lanes sit.
 pub(crate) fn app_slice_cgroup() -> Option<std::path::PathBuf> {
+    Some(user_manager_cgroup()?.join("app.slice"))
+}
+
+/// The user manager's cgroup, including app and interactive session slices.
+pub(crate) fn user_manager_cgroup() -> Option<std::path::PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
     let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
     let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
     let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
     path.extend(&parts[..=manager]);
-    path.push("app.slice");
     Some(path)
 }
 
@@ -442,30 +581,22 @@ fn end_requested(slice: &str) -> Result<()> {
 }
 
 fn stop_slice(slice: &str) -> Result<()> {
-    let loaded = crate::isolate::systemctl()
-        .args(["--user", "show", "--property=LoadState", "--value", slice])
-        .output()
-        .with_context(|| format!("read the state of the lane {slice}"))?;
-    anyhow::ensure!(
-        loaded.status.success(),
-        "read the state of the lane {slice}: {}",
-        String::from_utf8_lossy(&loaded.stderr).trim()
-    );
-    // A slice that is not loaded has nothing left to end.
-    if String::from_utf8_lossy(&loaded.stdout).trim() != "loaded" {
+    let snapshot = crate::systemd::snapshot_after_admission()?;
+    // A complete loaded-only snapshot proves an absent slice has nothing left to end.
+    if !snapshot.units.contains_key(slice) {
         return Ok(());
     }
     for verb in ["stop", "revert"] {
-        let output = crate::isolate::systemctl()
+        let output = crate::systemd::output(crate::isolate::systemctl()
             .args(["--user", verb, slice])
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null()))
             .with_context(|| format!("{verb} the lane {slice}"))?;
         anyhow::ensure!(
             output.status.success(),
             "{verb} the lane {slice}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        crate::systemd::invalidate();
     }
     Ok(())
 }
@@ -540,6 +671,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finite_cpu_readback_rejects_rounded_and_tighter_ancestor_limits() {
+        let capacity = Capacity { cores: 1, memory: GIB };
+        assert!(verify_cpu_bound("100000 100000", capacity, true).is_ok());
+        assert!(verify_cpu_bound("50000 100000", capacity, true).is_err());
+        assert!(verify_cpu_bound("max 100000", capacity, true).is_err());
+        assert!(verify_cpu_bound("max 100000", capacity, false).is_ok());
+        assert!(verify_cpu_bound("200000 100000", capacity, false).is_ok());
+        assert!(verify_cpu_bound("50000 100000", capacity, false).is_err());
+        assert!(verify_cpu_bound("100000 0", capacity, false).is_err());
+        assert!(verify_cpu_bound("100000 100000 extra", capacity, false).is_err());
+    }
+    #[test]
     fn a_declaration_fills_what_it_omits_and_refuses_what_cannot_start() {
         assert_eq!(Capacity::declared(None, None).unwrap(), Capacity::DEFAULT);
         assert_eq!(
@@ -583,13 +726,53 @@ mod tests {
 
     #[test]
     fn memory_reads_binary_units() {
+        for (unit, multiplier) in [('K', 1 << 10), ('M', MIB), ('G', GIB), ('T', 1 << 40)] {
+            for spelling in [unit, unit.to_ascii_lowercase()] {
+                assert_eq!(parse_memory(&format!("2{spelling}")).unwrap(), 2 * multiplier);
+            }
+        }
         assert_eq!(parse_memory("512M").unwrap(), 512 * MIB);
-        assert_eq!(parse_memory("4g").unwrap(), 4 * GIB);
-        assert_eq!(parse_memory("1T").unwrap(), 1024 * GIB);
         assert_eq!(parse_memory("1048576").unwrap(), MIB);
-        assert!(parse_memory("").is_err());
-        assert!(parse_memory("G").is_err());
-        assert!(parse_memory("99999999999T").is_err());
+    }
+
+    #[test]
+    fn memory_reads_decimal_exponents_as_exact_integer_bytes() {
+        for spelling in ["2000000000", "2e9", "2E9", "02e09"] {
+            assert_eq!(parse_memory(spelling).unwrap(), 2_000_000_000, "{spelling}");
+        }
+        for spelling in ["9007199254740993", "9007199254740993e0", "9007199254740993E0"] {
+            assert_eq!(parse_memory(spelling).unwrap(), 9_007_199_254_740_993, "{spelling}");
+        }
+        for spelling in ["18446744073709551615", "18446744073709551615e0"] {
+            assert_eq!(parse_memory(spelling).unwrap(), u64::MAX, "{spelling}");
+        }
+        assert_eq!(parse_memory("1e19").unwrap(), 10_000_000_000_000_000_000);
+        assert_eq!(parse_memory("0").unwrap(), 0);
+        assert_eq!(parse_memory("0e20").unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_refuses_other_numeric_forms_with_a_typed_error() {
+        for spelling in [
+            "", "G", "1B", "1KiB", "1X", "+1", "-1", "+2e9", "-2e9",
+            "1.0", "1.5", "2.0e9", ".2e10", "4.5G", "+4G", "-4G",
+            "2e", "e9", "2e+9", "2e-9", "2e1.5", "2ee9", "2e9e0", "2e9G",
+            " 1", "1 ", "2 e9", "2e 9", "0x10", "1_000", "NaN", "inf", "١",
+        ] {
+            let error = parse_memory(spelling).unwrap_err();
+            assert_eq!(error.downcast_ref::<ParseMemoryError>(), Some(&ParseMemoryError::InvalidFormat), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn memory_refuses_overflow_without_rounding_or_wrapping() {
+        for spelling in [
+            "18446744073709551616", "18446744073709551616e0", "18446744073709551615e1",
+            "2e19", "1e20", "2E20", "1e4294967296", "99999999999T",
+        ] {
+            let error = parse_memory(spelling).unwrap_err();
+            assert_eq!(error.downcast_ref::<ParseMemoryError>(), Some(&ParseMemoryError::Overflow), "{spelling}");
+        }
     }
 
     #[test]

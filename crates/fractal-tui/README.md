@@ -61,6 +61,12 @@ between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split righ
 close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox tab; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+Middle-click an Inbox row or its card's `[x]` button to dismiss that item, pressing and
+releasing over the same target. Requests are dismissed immediately without confirmation;
+keyboard `x` still asks for `y`. Updates and messages are marked read, and Recently closed
+items are cleared locally. Decisions and faults refuse dismissal just as `x` does.
+In the TUI, middle-click closes or dismisses items in closable lists; destructive actions
+and answering decisions are excluded.
 
 Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
 **Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
@@ -70,6 +76,29 @@ choose a link and `Enter` opens it, and `r` reads it again; in the list `m` read
 A document that cannot be shown says why (not found, not synced yet, the host did not answer, not
 text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
 page is `fractal_ui_model::documents`, the model the phone and web read.
+
+**Availability**, in `Ctrl+K`, opens a tab with the person's own availability: the status
+(available or away), whether they set it, it follows their devices' presence, or no device has
+reported for 24 hours (then it reads available and agents ask as usual), and until when; their
+presence (present, idle, locked or unreported); which asks may interrupt them (all, urgent only,
+none) and until when; whether the deadline clock holds routine asks' or every ask's deadline,
+since and until when; and their directive note with its expiry. Times are in local time. A word
+a newer daemon sends that the terminal UI does not know shows as `unknown`, with a line saying an
+update shows it. No stream carries availability, so the
+tab reads `availability.list` and `notes.list` when it opens, when the terminal regains focus,
+after a reconnect and on `r`, and never on a timer.
+
+In the tab, `s`, `i` and `d` choose the status, interruptions or deadline clock, then a digit
+its value (`0` returns it to the default: status from presence, all asks, a running clock), then
+how long it holds: `1` 30 minutes, `2` an hour, `3` two hours, `4` until tomorrow 09:00 local
+time, `5` a typed end (`45m`, `1h30m`, `17:30`, `tomorrow 09:00`, `2026-11-14 09:00`), or Enter
+until it is changed again. `n` edits the directive note, then asks for its end the same way; an
+empty note clears it. `Esc` puts the choice away. Edits require a live connection. Losing it
+or replacing the connection closes the editor and discards unsent changes, including notes;
+already-sent writes are not retried or presumed canceled. Each change goes through
+`availability.set` or `notes.set` one at a time, and the tab shows what Fractal answered.
+Only a person's own session may change them: a pairing without the scope, an agent's session,
+or a daemon without the routes is told so in the tab, and nothing changes.
 
 Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
 or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
@@ -129,6 +158,25 @@ it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. 
 their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
+
+Below what is open, Inbox lists your asks that resolved by themselves at their deadline in the
+last seven days under `Auto-resolved` (`↻`): the title, who asked, the default that applied and
+when. `o` on one (or on a `Recently closed` row of the same ask) uses your answer instead: digits
+choose one of its other answers, Enter sends it as `work.override`, Esc cancels. The chooser says
+what that does: "Your answer replaces the default. Work already done on the default is not
+undone; <asker> is told." An answer that requests changes first opens a box for them: Enter sends
+the answer with the words (empty words are refused), Esc goes back to the answers. Until Fractal
+answers, the row says `sending your answer…` and `o` offers no second answer. `o` is not offered
+once Fractal no longer takes an override or the ask has no other answer. The list is read when
+Inbox opens, when the alerts change and after an override is accepted, never on a timer; a read
+that stopped at its limit says so, even when it found none.
+
+On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
+`✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
+every note on the other named answers (a custom answer or a dismissal carries them too), and the
+line above the keys names each one. A Fractal that does not advertise
+`person-answer-option-notes` is asked first and sent nothing: the card says why and keeps the
+answer and every note, instead of dropping the notes it cannot take.
 
 A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
 `mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave

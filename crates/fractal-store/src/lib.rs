@@ -23,25 +23,32 @@ pub mod test_support;
 
 
 pub mod backup;
+pub mod ask_digest_clock;
 pub mod conversation_delivery;
 pub mod external_sessions;
+pub mod gate_admission_receipts;
 pub mod recorder_receipts;
 pub mod replication_worker_build;
 pub mod launch_contract;
+pub mod invocation_artifacts;
 pub mod render;
 pub mod client_values;
 pub mod graph;
 pub mod maintenance;
+pub mod pairing;
 pub mod owner_indexes;
 pub mod references;
 pub mod private_notes;
 mod private_notes_fs;
 pub mod restart;
+pub mod residency;
 pub mod rollout;
 pub mod sekrets_daemon;
 pub mod store;
 pub mod suspension;
 pub mod work_eta;
+pub mod wire_archive_candidates;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, FractalError};
+

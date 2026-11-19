@@ -1,3 +1,4 @@
+import { withCompatArchives } from './compat-archive.ts'
 import { githubWorkflow, nixDevelopStep } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
@@ -62,7 +63,7 @@ const fullScaleShard = (shard: 1 | 2) => ({
 })
 
 // No daily lane enables user namespaces, so none may keep the strict Linux Nix sandbox (nix-sandbox-scope.ts).
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+export default githubWorkflow(withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   actionlint: {
     ...linuxActionlintConfig,
     selfHostedRunnerLabels: [...linuxActionlintConfig.selfHostedRunnerLabels, ...performanceRunner, ...macosRunner],
@@ -190,4 +191,4 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   ...perfLoadCachePolicy,
   'daily-macos-check': 'Type-checks cold on a macOS runner and keeps no cache.',
   'daily-report': 'Reads job results through the API and builds nothing.',
-})))
+}))))

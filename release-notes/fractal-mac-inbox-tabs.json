@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Organize the Mac Inbox into All, Asks, Updates and Notices tabs",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "No daemon or generated-client contract changes." },
+  "rules": { "status": "none", "detail": "Tabs filter the existing Inbox items without changing attention or human-review rules." },
+  "compatibility": { "status": "changed", "detail": "The Mac Inbox offers All, Asks, Updates and Notices tabs, with counts and category-specific empty states." },
+  "downtime": { "status": "none", "detail": "No downtime is required." },
+  "manual": { "status": "none", "detail": "No migration or user action is required." },
+  "recovery": { "status": "changed", "detail": "Restore the prior app package pin to roll back; daemon state is unchanged." }
+}

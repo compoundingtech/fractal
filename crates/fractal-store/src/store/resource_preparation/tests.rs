@@ -38,7 +38,9 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
 #[test]
 fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
     let directory = tempfile::tempdir().unwrap();
-    for name in ["preparation_work_pending", "preparation_work_dirty"] {
+    let names = ["preparation_work_pending", "preparation_work_dirty"].into_iter()
+        .chain(custom::work_notifier_definitions().keys().map(String::as_str));
+    for name in names {
         let store = Store::open(&directory.path().join(format!("{name}.sqlite")), "example-notifier-fence").unwrap();
         let writer = store.connection.write();
         assert!(temporary_schema_safe(&writer), "the installed body-free notifiers are eligible");

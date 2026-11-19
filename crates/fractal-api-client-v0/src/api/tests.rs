@@ -9,11 +9,11 @@ use crate::api::tests_shared::{probe_claim, state};
 use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
 
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
-    fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/example-own/worker".into())
+    fn own_seat(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_api_core::api::HarnessAncestry {
+        fractal_api_core::api::HarnessAncestry::Bound("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");
@@ -62,7 +62,7 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
     assert!(message.contains("cannot act as"));
     let value = serde_json::to_value(envelope).unwrap();
     assert_eq!(value["api_version"], CLIENT_API_VERSION);
-    assert_eq!(value["error_version"], "st3.client.error.v0");
+    assert_eq!(value["error_version"], "fractal.client.error.v0");
     assert!(
         value["request_id"]
             .as_str()
@@ -333,6 +333,106 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
     .await
     .unwrap_err();
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn series_reads_declared_event_counts_on_both_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = parse_intent(r#"version 2
+objective "factory/work-throughput" {
+  about "Merged pull requests"
+  indicator "count" {
+    subject-prefix "custom/acme/change/"
+    event "custom.acme.change-merged" at="merged_at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-objective").unwrap();
+    for (name, at) in [("a", 1000), ("b", 2000), ("c", 4000)] {
+        state.store.append_claim(&ClaimInput {
+            subject: format!("custom/acme/change/{name}"),
+            kind: "custom.acme.change-merged".into(),
+            actor: None,
+            fields: BTreeMap::from([("merged_at".into(), json!(at))]),
+            evidence: vec![],
+            idempotency_key: None,
+            expected_subject: None,
+        }).unwrap();
+    }
+    let app = router(state.clone());
+    for prefix in ["/v1/series", "/v1/client/series"] {
+        let (status, body) = get_request(app.clone(), &format!(
+            "{prefix}?objective=factory%2Fwork-throughput&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({
+            "from": 1000, "to": 4000, "bucket_seconds": 1,
+            "buckets": [
+                {"start": 1000, "end": 2000, "count": 1},
+                {"start": 2000, "end": 3000, "count": 1},
+                {"start": 3000, "end": 4000, "count": 0},
+            ],
+        }));
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?objective=missing&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?objective=factory%2Fwork-throughput&from=4000&to=1000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let denied = client_v0::series_read(
+        State(state),
+        Extension(client_v0::ClientSession::for_tests_scoped("person/fixture", "person/fixture", &["read.attention"])),
+        Query(vec![]),
+    ).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn series_counts_repeatable_claim_kinds_and_typed_field_groups() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (subject, kind, at, group) in [
+        ("custom/acme/inbox/a", "custom.acme.arrived", 1000, Some(json!("ask"))),
+        ("custom/acme/inbox/b", "custom.acme.resolved", 1001, Some(json!("update"))),
+        ("custom/acme/inbox/c", "custom.acme.arrived", 2000, None),
+        ("custom/acme/elsewhere/d", "custom.acme.arrived", 1000, Some(json!("ask"))),
+    ] {
+        let mut fields = BTreeMap::from([("at".into(), json!(at))]);
+        if let Some(group) = group { fields.insert("type".into(), group); }
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: None, fields,
+            evidence: vec![], idempotency_key: None, expected_subject: None,
+        }).unwrap();
+    }
+    let app = router(state);
+    for prefix in ["/v1/series", "/v1/client/series"] {
+        let (status, body) = get_request(app.clone(), &format!(
+            "{prefix}?kind=custom.acme.arrived&kind=custom.acme.resolved&subject_prefix=custom%2Facme%2Finbox%2F&group_by=type&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({
+            "from": 1000, "to": 4000, "bucket_seconds": 1, "group_by": "type",
+            "buckets": [
+                {"start": 1000, "end": 2000, "count": 2, "groups": [{"value": "ask", "count": 1}, {"value": "update", "count": 1}]},
+                {"start": 2000, "end": 3000, "count": 1, "groups": [{"value": null, "count": 1}]},
+                {"start": 3000, "end": 4000, "count": 0, "groups": []},
+            ],
+        }));
+        for query in [
+            "from=1000&to=4000&bucket_seconds=1",
+            "objective=missing&kind=custom.acme.arrived&from=1000&to=4000&bucket_seconds=1",
+            "kind=custom.acme.arrived&from=1000&from=2000&to=4000&bucket_seconds=1",
+        ] {
+            let (status, _) = get_request(app.clone(), &format!("{prefix}?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1908,23 +2008,34 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
         .unwrap();
     for (name, mode) in [("birch", "listening"), ("cedar", "dial-out")] {
         let key = MemberKey::generate().unwrap().0;
-        state
-            .store
-            .append_claim(&ClaimInput {
-                subject: format!("host/{name}"),
-                kind: "fleet.member-admitted".into(),
-                actor: None,
-                fields: serde_json::from_value(json!({
-                    "fleet_id": fleet, "member_key": key.public(), "via": "invite",
-                    "mode": mode, "sponsor": "host/node"
-                }))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        let invite = state.store.create_fleet_invite(
+            Some(name), Duration::from_secs(60), &["loopback".into()],
+            "person/example", false,
+        ).unwrap();
+        let code = smallclaims::fleet::code::JoinCode {
+            fleet_id: fleet.parse().unwrap(),
+            invite: hex::decode(&invite.invite).unwrap().try_into().unwrap(),
+            token: invite.token,
+            fingerprint: [0; 16],
+            expires_at: invite.expires_at_unix_ms / 1000,
+            name: Some(name.into()),
+            migrate: false,
+            endpoints: Vec::new(),
+            pairing: None,
+        };
+        let joiner = smallclaims::fleet::handshake::Joiner::start(
+            &code, &key, name, mode, None, "test-build",
+        ).unwrap();
+        assert!(matches!(
+            state.store.redeem_fleet_invite(joiner.request()).unwrap(),
+            smallclaims::store::FleetRedemption::Admitted { .. }
+        ));
+        state.store.seal_local_batches().unwrap();
+        assert!(state.store.fleet_view_sealed().unwrap().members.iter()
+            .any(|member| member.name == name && member.state == "current"
+                && member.member_key == key.public()));
     }
+    state.store.record_replication_worker_heartbeat();
     // Both exchange with this daemon, then cedar's last exchange is aged a day.
     for peer in ["birch", "cedar"] {
         let source = smallclaims::store::Store::open_memory(
@@ -1933,9 +2044,13 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
         )
         .unwrap();
         let summary = source.export_replication_summary(fleet).unwrap();
+        let member_key = state.store.fleet_view_sealed().unwrap().members.into_iter()
+            .find(|member| member.name == peer && member.state == "current").unwrap().member_key;
         state
             .store
-            .receive_replication_exchange(peer, fleet, &summary)
+            .receive_replication_exchange_via(
+                peer, fleet, &summary, false, Default::default(), Some(&member_key),
+            )
             .unwrap();
     }
     state.store.age_replication_peer_for_test("cedar");

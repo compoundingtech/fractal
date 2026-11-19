@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import { it } from '@effect/vitest'
 import type {
   Agent,
@@ -112,7 +113,7 @@ class Gateway {
             message: 'Device credential revoked',
             retryable: false,
             request_id: 'request/revoked',
-            details: {},
+            details: { reason: 'credential-rejected' },
           }),
           { status: 403, headers: { 'content-type': 'application/json' } },
         )
@@ -332,7 +333,7 @@ class Gateway {
           body: { message_id: this.echoMessageId, from: 'person/operator', to: agent.id } },
         { id: 'timeline-entry/echo/0123456789abcdef-content', sequence: 2, revision: 1,
           type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-          body: { media_type: 'text/plain', text: 'hello' } },
+          body: { media_type: 'text/plain', text: markdownBlock('hello') } },
       ],
     })
   }
@@ -516,6 +517,47 @@ describe('mission decode evidence', () => {
       yield* settle
       expect(live.registry.get(live.source.missionsDecode!)).toEqual({ undecodable: [], decodeStale: false })
       expect(live.registry.get(live.source.missions)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+    })),
+  )
+})
+
+describe('attention decode evidence', () => {
+  it.live('publishes rejected alerts, retains last-good rows on all-bad frames and recovers', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.attention)
+      yield* settle
+      const alert = {
+        id: 'attention/example', kind: 'attention', title: 'Example', detail: '',
+        revision: '1', updated_at: snapshot.created_at, requested_at: snapshot.created_at,
+        person_id: 'person/operator', source_id: 'agent/example', attention_kind: 'agent-request',
+        priority: 'normal', state: 'open', actions: ['work.done'],
+      }
+      const broken = { ...alert, id: 'attention/broken', actions: 'not-a-list' }
+      const frame = (items: readonly Record<string, unknown>[]) => gateway.sendUnchecked({
+        kind: 'snapshot', id: gateway.subscription('attention').id, collection: 'attention',
+        has_more: false, items, order: items.map((row) => row.id), snapshot,
+      })
+      frame([alert, broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'live', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!)).toMatchObject({
+        decodeStale: false,
+        undecodable: expect.arrayContaining([
+          expect.objectContaining({ _tag: 'Rejected', id: broken.id, path: 'actions' }),
+        ]),
+      })
+      frame([broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!).decodeStale).toBe(true)
+      frame([alert])
+      yield* settle
+      expect(live.registry.get(live.source.attentionDecode!)).toEqual({ undecodable: [], decodeStale: false })
+      expect(live.registry.get(live.source.attention)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
     })),
   )
 })
@@ -867,11 +909,11 @@ describe('live feed sync sidecars', () => {
         live.registry.mount(live.source.agents)
         live.registry.mount(sync.agents)
         yield* settle
-        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.agents).sync.status).toEqual(failed)
         expect(Option.isNone(live.registry.get(sync.agents).last)).toBe(true)
         const later = 'agent/opened-after-rejection'
-        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.conversation(later)).sync.status).toEqual(failed)
       }),
     ),
@@ -1825,7 +1867,7 @@ describe('optimistic conversation sends', () => {
         yield* settle
         const content = (id: string, sequence: number, timestamp: string) => ({
           id, sequence, revision: 1, type: 'content' as const, role: 'assistant' as const,
-          final: true, timestamp, body: { media_type: 'text/plain', text: id },
+          final: true, timestamp, body: { media_type: 'text/plain', text: markdownBlock(id) },
         })
         const page = (replace: boolean) => gateway.send({
           kind: 'conversation', id: gateway.subscription('conversation').id,
@@ -2029,7 +2071,7 @@ describe('optimistic conversation sends', () => {
               body: { message_id: 'message/secret', from: 'person/operator', to: agent.id } },
             { id: 'timeline-entry/secret/content', sequence: 2, revision: 1,
               type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'authorized rows' } },
+              body: { media_type: 'text/plain', text: markdownBlock('authorized rows') } },
           ],
         })
         yield* settle
@@ -2073,7 +2115,7 @@ describe('optimistic conversation sends', () => {
               body: { message_id: resent, from: 'person/operator', to: agent.id } },
             { id: 'timeline-entry/resent/content', sequence: 2, revision: 1,
               type: 'content', role: 'user', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'hello' } },
+              body: { media_type: 'text/plain', text: markdownBlock('hello') } },
           ],
         })
         yield* settle
@@ -2086,14 +2128,14 @@ describe('optimistic conversation sends', () => {
         const feed = live.registry.get(conversation)
         expect(feed).toMatchObject({ _tag: 'Observed' })
         if (feed._tag !== 'Observed') return
-        expect(feed.value.items.map((item) => item._tag)).toEqual(['Message', 'Text'])
+        // A person's mail reads as the person's one row; its header joins its body.
+        expect(feed.value.items.map((item) => item._tag)).toEqual(['Text'])
         resolvePost()
         expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
         yield* settle
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [
-            { _tag: 'Message', messageId: resent },
-            { _tag: 'Text', id: 'timeline-entry/resent/content' },
+            { _tag: 'Text', id: 'timeline-entry/resent/content', text: 'hello' },
           ] },
         })
       }),
@@ -2260,7 +2302,7 @@ describe('optimistic conversation sends', () => {
           items: [
             { id: 'timeline-entry/resumed/content', sequence: 1, revision: 1,
               type: 'content', role: 'assistant', final: true, timestamp: snapshot.created_at,
-              body: { media_type: 'text/plain', text: 'resumed' } },
+              body: { media_type: 'text/plain', text: markdownBlock('resumed') } },
           ],
         })
         yield* settle

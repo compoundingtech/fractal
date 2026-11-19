@@ -13,6 +13,7 @@ mod github_repository;
 mod github_poll;
 pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
+pub use github_workflows::WorkflowRunLedger;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
 };
@@ -34,6 +35,14 @@ pub struct ObservationRequest {
     /// A declared refresh asked for this observation. It revalidates with GitHub instead of
     /// reusing a cached response; a conditional request costs nothing when nothing changed.
     pub refresh: bool,
+    /// A verified webhook delivery refreshed this observer recently, so this poll is a backstop
+    /// and a repository observer waits the settled interval between GraphQL reads.
+    pub webhook_covered: bool,
+    /// Where a `github.repository` observation with `main_performance_failures` records each
+    /// recent completed Workspace CI run, once. Without one, no CI run is read.
+    pub workflow_runs: Option<Arc<dyn WorkflowRunLedger>>,
+    /// Claim-backed history acquisition, independent of operational collection fields.
+    pub github_capture: Option<Arc<dyn crate::github_capture::GitHubCaptureLedger>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -930,7 +939,7 @@ async fn github_listing_at_field(
 
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
-async fn github_graphql_with_cache_eligibility(
+pub(crate) async fn github_graphql_with_cache_eligibility(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,
@@ -1490,6 +1499,9 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
+            workflow_runs: None,
+            github_capture: None,
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1535,6 +1547,9 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1610,6 +1625,9 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1632,6 +1650,9 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1686,6 +1707,9 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
+            workflow_runs: None,
+            github_capture: None,
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1721,7 +1745,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None, github_capture:None };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1814,6 +1838,9 @@ mod tests {
                     previous_facts: None,
                     every_ms: None,
                     refresh: false,
+                    webhook_covered: false,
+                    workflow_runs: None,
+                    github_capture: None,
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),

@@ -88,7 +88,7 @@ END;
 ",
     )?;
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h57332bf5c3ee owner=fractal_store::store::stream_mirror TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-hb9877ca0c664 owner=fractal_store::store::stream_mirror TODO=prepare-body-and-predecessor-values */ "
 -- A mirrored send, and its close, queue the item's client selector header as a graph claim on
 -- the subject does (client_messages.rs); the fold builds it from the mirror row. Each says the
 -- stream headers are not whole until this build's fold has run (STREAM_WHOLE_MARKER there).
@@ -101,7 +101,8 @@ BEGIN
     DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
 END;
 CREATE TRIGGER IF NOT EXISTS local_stream_lifecycle_client_selector AFTER INSERT ON local_stream_lifecycle
-WHEN NEW.kind='message.closed'
+WHEN NEW.kind='message.closed' OR (NEW.kind IN ('message.delivered','message.read')
+ AND EXISTS(SELECT 1 FROM claims WHERE subject=NEW.subject AND kind='message.expired'))
 BEGIN
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
     VALUES(NEW.subject,-1,1,1)
@@ -117,6 +118,16 @@ END;
 /// `local_stream_sent`, read in the caller's snapshot of the graph.
 pub fn sent_through(connection: &Connection) -> Result<u64> {
     Ok(u64::try_from(cursor(connection, SENT_THROUGH)?)?)
+}
+
+/// The native mail source independently replays original timestamps, including old mirror rows.
+pub fn mail_source_sent_through(connection: &Connection) -> Result<u64> {
+    Ok(u64::try_from(cursor(connection, "mail_delivery_source_v1_sent_through")?)?)
+}
+
+/// Lifecycle rowid covered by this graph snapshot, independent of the send cursor.
+pub fn lifecycle_through(connection: &Connection) -> Result<u64> {
+    Ok(u64::try_from(cursor(connection, LIFECYCLE_THROUGH)?)?)
 }
 
 /// Serializes [`mirror`], so two catch-ups never page over the same rows at once.
@@ -135,7 +146,8 @@ pub fn mirror(graph: &Store) -> Result<usize> {
     loop {
         let (sent_after, lifecycle_after) = {
             let connection = graph.readers.get();
-            (cursor(&connection, SENT_THROUGH)?, cursor(&connection, LIFECYCLE_THROUGH)?)
+            (cursor(&connection, SENT_THROUGH)?.min(cursor(&connection, "mail_delivery_source_v1_sent_through")?),
+                cursor(&connection, LIFECYCLE_THROUGH)?.min(cursor(&connection, "mail_delivery_source_v1_stream_through")?))
         };
         let (sent, steps) = {
             let connection = shard.readers.get();
@@ -158,10 +170,11 @@ pub fn mirror(graph: &Store) -> Result<usize> {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let steps = connection
                 .prepare_cached(
-                    "SELECT rowid, subject, kind FROM stream_lifecycle WHERE rowid>?1 ORDER BY rowid LIMIT ?2",
+                    "SELECT rowid, subject, kind, actor, recorded_at_unix_ms FROM stream_lifecycle WHERE rowid>?1 ORDER BY rowid LIMIT ?2",
                 )?
                 .query_map(params![lifecycle_after, PAGE], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?, row.get::<_, u64>(4)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             (sent, steps)
@@ -182,21 +195,26 @@ pub fn mirror(graph: &Store) -> Result<usize> {
                         /* sqlite-large-value: allow-for-now lv-h2a0161203901 owner=fractal_store::store::stream_mirror TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_stream_sent(subject, sent_ms, fields, stream_index)
                          SELECT ?1, ?2, ?3, ?4",
                     )?.execute(/* sqlite-large-value: allow-for-now lv-h07a55bb424a1 owner=fractal_store::store::stream_mirror TODO=trace-statement-and-value-representation */ params![subject, sent_ms, fields, index])?;
+                    mail_delivery_source::stream_send_clock(transaction, subject, accepted)?;
                 }
-                for (_, subject, kind) in &steps {
+                for (_, subject, kind, consumer, at_ms) in &steps {
+                    mail_delivery_source::stream_step(transaction, subject, consumer, kind, *at_ms)?;
                     added += transaction
                         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1ddc79a25e13 owner=fractal_store::store::stream_mirror TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_stream_lifecycle(subject, kind) VALUES (?1, ?2)")?
                         .execute(/* sqlite-large-value: allow-for-now lv-h5decb1ae5ee8 owner=fractal_store::store::stream_mirror TODO=trace-statement-and-value-representation */ params![subject, kind])?;
                 }
                 if let Some((_, _, _, through)) = sent.last() {
                     advance(transaction, SENT_THROUGH, *through)?;
+                    advance(transaction, "mail_delivery_source_v1_sent_through", *through)?;
                 }
-                if let Some((through, _, _)) = steps.last() {
+                if let Some((through, _, _, _, _)) = steps.last() {
                     advance(transaction, LIFECYCLE_THROUGH, *through)?;
+                    advance(transaction, "mail_delivery_source_v1_stream_through", *through)?;
                 }
                 // The sends queued usage and held-mail work; settle it in this transaction, as
                 // the graph's own projection pass does after it admits sends.
                 agent_messages::flush(transaction)?;
+                wake_demand::flush(transaction)?;
                 Ok(added)
             })
             .map_err(|error| anyhow::anyhow!(error))??;

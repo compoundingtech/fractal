@@ -22,6 +22,9 @@ struct TabBadge {
     ask: bool,
     needs_person: bool,
     inbox: bool,
+    /// Its agent said something since the person last read the conversation, on any device: a `•`
+    /// after the title, as the web's tab and the phone's row show it.
+    unread: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,6 +33,7 @@ struct SubjectBadge {
     ask: bool,
     activity: &'static str,
     needs_person: bool,
+    unread: bool,
 }
 
 impl SubjectBadge {
@@ -50,7 +54,7 @@ pub(super) struct TabStatuses {
 }
 
 impl TabStatuses {
-    pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
+    pub(super) fn new(world: &World, closed: &HashSet<String>) -> Self {
         let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
         let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
             .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
@@ -71,6 +75,7 @@ impl TabStatuses {
                         agent.state,
                         AgentState::NeedsYou | AgentState::NeedsLogin
                     ),
+                    unread: world.unread.contains(&agent.id),
                     ..SubjectBadge::default()
                 },
             );
@@ -81,7 +86,7 @@ impl TabStatuses {
             }
         }
         for item in world.attention.items().iter().filter(|item| {
-            item.is_alert() && !closed.contains(&item.id) && !snoozed.contains(&item.id)
+            item.is_alert() && !closed.contains(&item.id) && !item.snoozed(world.at)
         }) {
             // Question identity outlives answer eligibility (for example, an expired client
             // submission window). Only live attention establishes that the prompt is open.
@@ -176,6 +181,7 @@ impl TabBadge {
             + text::width(title)
             + usize::from(truncated)
             + count
+            + 2 * usize::from(self.unread)
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
@@ -208,7 +214,8 @@ impl TabBadge {
             + usize::from(!glyph.is_empty())
             + title.len()
             + if truncated { "…".len() } else { 0 }
-            + digits;
+            + digits
+            + if self.unread { " •".len() } else { 0 };
         let mut label = String::with_capacity(capacity);
         label.push(' ');
         label.push_str(glyph);
@@ -223,6 +230,9 @@ impl TabBadge {
         label.push_str(title);
         if truncated {
             label.push('…');
+        }
+        if self.unread {
+            label.push_str(" •");
         }
 
         label.push(' ');
@@ -1262,7 +1272,7 @@ impl Ui {
             );
         }
         for item in self.world.attention.items() {
-            if !self.snoozed.contains(&item.id) {
+            if !item.snoozed(self.world.at) {
                 open(
                     0,
                     screens::attention_style(&item.kind),
@@ -1371,6 +1381,18 @@ impl Ui {
                 detail: "spend by agent, mission, step, model, account or host".into(),
                 search: "usage spend tokens cost".into(),
                 action: Action::Usage,
+            },
+        );
+        // The person's own availability and note, in a tab.
+        choices.insert(
+            2,
+            Choice {
+                section: 0,
+                glyph: ("◐", theme::PERSON),
+                label: "Availability".into(),
+                detail: "your status, interruptions, deadline clock and note".into(),
+                search: "availability status away available interruptions deadline clock hold note".into(),
+                action: Action::Open(Pane::Availability),
             },
         );
         // Starting things: an agent from the query, or the empty form.
@@ -2614,8 +2636,13 @@ impl Ui {
     fn status_line(&self, buf: &mut Buffer, area: Rect, glass: &Glass) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
         let bar = |style: Style| style.bg(theme::CRUST);
-        // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
-        let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
+        let name = format!(" ▢ {} ▾ ", glass.name);
+        let selector_width = (text::width(&name) as u16).min(area.width);
+        let left_width = area.width.saturating_sub(selector_width);
+        let mut hits = [None, None, None, None, None];
+        let mut next_hit = hits.iter_mut();
+        let mut record_hit = |target| *next_hit.next().expect("five status actions") = Some(target);
+        let mut spans = vec![Span::raw(" ")];
         let (glyph, word, color) = match &self.world.link {
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
             // Stale says which list: the word alone sent the person hunting for why.
@@ -2627,14 +2654,14 @@ impl Ui {
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
-        self.hit(
+        record_hit((
             Rect {
                 x: area.x + Line::from(spans.clone()).width() as u16,
                 width: text::width(&link_text) as u16,
                 ..area
             },
             Hit::Connection,
-        );
+        ));
         spans.push(Span::styled(link_text, bar(theme::fg(color))));
         // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
         // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
@@ -2671,14 +2698,14 @@ impl Ui {
                     "◆ {alerts} alert{}",
                     if alerts == 1 { "" } else { "s" }
                 );
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: text::width(&alerts_text) as u16,
                         ..area
                     },
                     Hit::Home,
-                );
+                ));
                 spans.push(Span::styled(alerts_text, bar(theme::strong(theme::PERSON))));
             }
             let working = self
@@ -2691,14 +2718,14 @@ impl Ui {
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
             let working_text = format!("{} {working} working", self.spinner());
-            self.hit(
+            record_hit((
                 Rect {
                     x,
                     width: text::width(&working_text) as u16,
                     ..area
                 },
                 Hit::PaletteSection(1),
-            );
+            ));
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
             // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
             // missions list keeps them.
@@ -2726,14 +2753,14 @@ impl Ui {
             }
             let end = area.x + Line::from(spans.clone()).width() as u16;
             if machines_shown {
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: end.saturating_sub(x),
                         ..area
                     },
                     Hit::PaletteSection(3),
-                );
+                ));
             }
         }
         // Usage beside the fleet, floating over the glass as Now does (Nathan, 2026-10-04).
@@ -2751,19 +2778,42 @@ impl Ui {
                 theme::fg(theme::YELLOW)
             }),
         ));
-        self.hit(
+        record_hit((
             Rect {
                 x,
                 width: text::width(usage_text) as u16,
                 ..area
             },
             Hit::Usage,
-        );
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        ));
+        // The optional shortcut must not displace an existing status action.
+        // Reserve the glass selector before deciding whether the prefix fits.
+        let sidebar_width = text::width("sidebar · ") as u16;
+        let show_sidebar = Line::from(spans.clone()).width() + usize::from(sidebar_width)
+            <= usize::from(left_width);
+        if show_sidebar {
+            let style = if self.glasses.sidebar.shown {
+                theme::strong(theme::ACCENT)
+            } else {
+                theme::dim()
+            };
+            spans.insert(1, Span::styled("sidebar", bar(style)));
+            spans.insert(2, Span::styled(" · ", bar(theme::dim())));
+            self.hit(Rect::new(area.x + 1, area.y, 7, area.height), Hit::SidebarToggle);
+        }
+        for (mut rect, hit) in hits.into_iter().flatten() {
+            if show_sidebar {
+                rect.x += sidebar_width;
+            }
+            // A truncated label is not an actionable pointer target.
+            if rect.right() <= area.x + left_width {
+                self.hit(rect, hit);
+            }
+        }
+        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
-        let name = format!(" ▢ {} ▾ ", glass.name);
-        let width = text::width(&name) as u16;
-        let x = area.x + area.width.saturating_sub(width);
+        let width = selector_width;
+        let x = area.x + left_width;
         buf.set_stringn(
             x,
             area.y,
@@ -3071,6 +3121,7 @@ impl Ui {
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
             Pane::Usage(None) => "Usage".into(),
+            Pane::Availability => "Availability".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
         }
@@ -3094,11 +3145,16 @@ impl Ui {
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
             inbox: matches!(pane, Some(Pane::List(0))),
+            unread: subject.unread,
         }
     }
 
     pub(super) fn refresh_tab_statuses(&mut self) {
-        self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
+        self.world.unread = self.world.agents.items().iter()
+            .filter(|agent| self.reads.unread(&agent.id, agent.last_prose_ms))
+            .map(|agent| agent.id.clone())
+            .collect();
+        self.tab_statuses = TabStatuses::new(&self.world, &self.closed);
         self.refresh_recent_labels();
     }
 
@@ -3369,7 +3425,8 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
-        // A document page or the documents list has no box to type in: its plain letters act.
+        // A document page, the documents list and Availability act on plain letters; an open
+        // Availability box takes the typing keys instead.
         if !sidebar_keys
             && !self.home_open()
             && !self.editing
@@ -3378,7 +3435,7 @@ impl Ui {
             && self.chat.as_ref().is_none_or(|chat| !chat.editing)
             && self.confirm.is_none()
             && self.popover.is_none()
-            && self.document_key(key)
+            && (self.document_key(key) || self.availability_key(key))
         {
             return true;
         }
@@ -4207,7 +4264,7 @@ impl Ui {
             Some(group) if group != focus => {
                 // A click on another split's message box focuses the split and the box.
                 let composer = self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
-                    matches!(hit, Hit::Composer) && contains(*rect, column, row)
+                    matches!(hit, Hit::Composer | Hit::ChatComposer) && contains(*rect, column, row)
                 });
                 self.focus_group(group);
                 !composer
@@ -5388,6 +5445,7 @@ mod tests {
         let (client, mut peer) = UnixStream::pair().unwrap();
         ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
             client, "agent/example/atlas/builder", "one".into(), 24, 80,
+            None,
         ));
         peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
         let start = Instant::now();
@@ -5435,6 +5493,36 @@ mod tests {
         view.stale = None;
         ui.effects.clear();
         ui
+    }
+
+    #[test]
+    fn details_preview_enter_is_scoped_and_expanded_text_scrolls() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = terminal_details_fixture();
+        let agent = "agent/example/atlas/builder";
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        let row = agents.iter_mut().find(|row| row.id == agent).unwrap();
+        row.details.goal = Some("A long goal with enough prose to fill the details pane. ".repeat(100));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.is_empty());
+        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == KeyCode::Enter));
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ui.terminal_details_have_focus());
+        ui.effects.clear();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::CONTROL);
+        assert!(ui.details_expanded.is_empty(), "modified Enter retains its existing scope");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.contains_key(agent));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::PageDown, KeyModifiers::NONE);
+        let key = format!("details:{agent}");
+        assert!(ui.conversation_state.panes.borrow().get(&key).is_some_and(|state| state.top > 0));
+        assert!(ui.effects.is_empty(), "details never forward Enter or scrolling to the terminal");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.details_expanded.contains_key(agent));
     }
 
     #[test]
@@ -5503,6 +5591,7 @@ mod tests {
             let (client, _peer) = UnixStream::pair().unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 80,
+                None,
             ));
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -5530,6 +5619,7 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 200,
+                None,
             ));
             peer.write_all(&encode_packet(
                 MessageType::Screen, b"\x1b[?1003h\x1b[?1006h\x1b[?1004h",
@@ -5836,6 +5926,7 @@ mod tests {
                     ask,
                     needs_person,
                     inbox: false,
+                    unread: false,
                 };
                 let glyph = if attention.is_empty() { activity } else { attention };
                 assert_eq!(
@@ -5858,6 +5949,161 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tab_badge_unread_dot_follows_the_title_within_its_width() {
+        let long = "a".repeat(27);
+        let cut = format!(" ○ {}… • ", "a".repeat(25));
+        for (unread, title, expected) in [
+            (false, "Atlas", " ○ Atlas "),
+            (true, "Atlas", " ○ Atlas • "),
+            (true, long.as_str(), cut.as_str()),
+        ] {
+            let badge = TabBadge { activity: "○", unread, ..TabBadge::default() };
+            let label = badge.label(title, 80, true);
+            assert_eq!(label, expected);
+            assert_eq!(badge.width(title, true), text::width(&label), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_agent_with_prose_newer_than_its_read_position_is_marked_until_its_conversation_shows() {
+        // The same unread signal on the web, the TUI and the phone compares
+        // st's `last_prose_at` against where the person last read the conversation.
+        let mut ui = tab_badge_world();
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(60_000);
+        }
+        ui.set_world(next);
+        let badge = |ui: &Ui| {
+            let tab = ui.glasses.glass().layout.groups()[0].tabs[1].clone();
+            ui.tab_badge(&tab, Pane::parse(&tab.pane).as_ref())
+        };
+        assert!(!badge(&ui).unread, "never read here: nothing is new");
+        ui.reads.advance("agent/b", 60_000 - read_store::ROSTER_SKEW_MS);
+        ui.refresh_tab_statuses();
+        assert!(!badge(&ui).unread, "the same words, stamped a moment later");
+        let mut later = ui.world.clone();
+        if let Load::Ready(agents) = &mut later.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        ui.set_world(later);
+        assert!(badge(&ui).unread, "it said something since");
+        let strip = tab_badge_strip(&ui, 120);
+        assert!(strip.contains("Idle •"), "{strip}");
+        let listing = screens::agents_list(&ui.world, "⠋", 80);
+        let marked: Vec<_> = listing.items.iter().filter_map(|item| match item {
+            screens::Item::Row { index, right, .. } if right.first().is_some_and(|span| span.content == "• ") => {
+                Some(listing.ids[*index].as_str())
+            }
+            _ => None,
+        }).collect();
+        assert_eq!(marked, ["agent/b"], "its row in Agents is marked too");
+        // Its conversation, presented, is read up to its newest prose.
+        let timelines = presented_read_timeline(&mut ui, 90_000);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        assert!(ui.frame.borrow().panes.iter().any(|pane| pane.key == "chat:agent/b"), "the conversation shows");
+        ui.read_presented_conversations(&timelines);
+        assert!(!badge(&ui).unread);
+        assert!(ui.world.unread.is_empty());
+    }
+
+    fn presented_read_timeline(
+        ui: &mut Ui,
+        at: i64,
+    ) -> BTreeMap<String, fractal_conversation_ui::Timeline> {
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([{
+            "id": "prose", "sequence": 1, "revision": 1, "timestamp": read_store::timestamp(at).unwrap(),
+            "role": "assistant", "type": "content", "final": true,
+            "body": { "media_type": "text/plain", "text": "Presented prose" }
+        }])).unwrap();
+        ui.world.conversations.insert(
+            "agent/b".into(),
+            Load::Ready(adapt::conversation(&items, &BTreeMap::new())),
+        );
+        BTreeMap::from([("agent/b".into(), fractal_conversation_ui::Timeline {
+            items, ..Default::default()
+        })])
+    }
+
+    #[test]
+    fn presented_reads_queue_the_latest_advance_only_when_live_and_supported() {
+        let mut ui = tab_badge_world();
+        let now = Instant::now();
+        ui.show_tab(1);
+        ui.effects.clear();
+        for at in [60_000, 90_000] {
+            let timelines = presented_read_timeline(&mut ui, at);
+            let _ = screen(&ui);
+            ui.read_presented_conversations(&timelines);
+        }
+
+        ui.queue_read_advances(now, true);
+        assert!(ui.effects.is_empty(), "wait until st supports read positions");
+        ui.reads.connected(now);
+        assert_eq!(ui.reads.list_due(now), Some(true));
+        ui.reads.listed(Ok(Some(Vec::new())), now);
+        ui.queue_read_advances(now, false);
+        assert!(ui.effects.is_empty(), "do not send while offline");
+
+        ui.queue_read_advances(now, true);
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::AdvanceReadPosition { conversation, at_ms: 90_000 }] if conversation == "agent/b"),
+            "send the latest presented prose, not each intermediate read: {:?}",
+            ui.effects
+        );
+        ui.effects.clear();
+        let timelines = presented_read_timeline(&mut ui, 120_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        ui.queue_read_advances(now + read_store::COALESCE, true);
+        assert!(ui.effects.is_empty(), "only one advance may be in flight");
+    }
+
+    #[test]
+    fn roster_before_transcript_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let mut timelines = presented_read_timeline(&mut ui, 60_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "stale presented prose cannot consume the roster update");
+
+        ui.world.conversations.insert("agent/b".into(), Load::Loading);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "loading is not presentation");
+
+        timelines = presented_read_timeline(&mut ui, 90_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(!ui.reads.unread("agent/b", Some(90_000)), "the new prose is read only after presentation");
+    }
+
+    #[test]
+    fn failed_conversation_load_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let timelines = presented_read_timeline(&mut ui, 90_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        next.conversations.insert("agent/b".into(), Load::Failed("Transcript unavailable".into()));
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)));
     }
 
     #[test]
@@ -5954,8 +6200,17 @@ mod tests {
     fn tab_badge_inbox_complete_window_excludes_closed_snoozed_and_updates() {
         let mut ui = tab_badge_world();
         let inbox = Tab::pane("list:home");
-        ui.snoozed.insert("attention/a".into());
-        ui.refresh_tab_statuses();
+        // st's snooze on a row: one that has ended hides nothing, one still ahead hides it.
+        let at = ui.world.at;
+        let snooze = |ui: &mut Ui, until: chrono::DateTime<chrono::FixedOffset>| {
+            if let Load::Ready(items) = &mut ui.world.attention {
+                items.iter_mut().find(|item| item.id == "attention/a").unwrap().snoozed_until = Some(until);
+            }
+            ui.refresh_tab_statuses();
+        };
+        snooze(&mut ui, at - chrono::TimeDelta::minutes(1));
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ?2 Inbox ");
+        snooze(&mut ui, at + chrono::TimeDelta::hours(1));
         assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ?1 Inbox ");
         ui.closed.insert("attention/b".into());
         ui.refresh_tab_statuses();
@@ -6079,7 +6334,7 @@ mod tests {
         assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
         ui.note_acted(&Effect::Attention {
             id: "attention/a".into(), action: "work.done".into(),
-            reason: Some("Yes".into()), answer: None,
+            reason: Some("Yes".into()), answer: None, option_notes: Vec::new(),
         });
         assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
         ui.set_world(world);
@@ -6358,6 +6613,8 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: format!("{agent} is waiting for a permission"),
@@ -8020,7 +8277,7 @@ mod tests {
             let (client, mut peer) = UnixStream::pair().unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal_view_mut(agent).unwrap().native = Some(
-                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80),
+                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80, None),
             );
             peer.write_all(&encode_packet(
                 MessageType::Screen,
@@ -8373,6 +8630,101 @@ mod tests {
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!ui.home_open());
         assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
+    fn the_top_bar_reserves_the_selector_before_showing_the_sidebar_shortcut() {
+        let mut ui = glass();
+        ui.world.link = Link::Live;
+        ui.world.settled = true;
+        ui.world.agents = Load::Ready(vec![]);
+        ui.world.machines = Load::Ready(vec![]);
+        ui.world.inbox_alerts = Some(1);
+        ui.refresh_tab_statuses();
+        let selector = format!(" ▢ {} ▾ ", ui.glasses.glass().name);
+        let baseline = " ● live · ◆ 1 alert · ◐ 0 working · $ usage";
+        let threshold = (text::width(baseline) + text::width("sidebar · ")
+            + text::width(&selector)) as u16;
+        for width in [20, 30, threshold - 1, threshold, 80] {
+            ui.frame.borrow_mut().hits.clear();
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.status_line(&mut buffer, area, ui.glasses.glass());
+            let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+            let sidebar = width >= threshold;
+            assert_eq!(top.starts_with(" sidebar · "), sidebar, "{width}: {top}");
+            let offset = if sidebar { 10 } else { 0 };
+            assert!(top.contains("● live"), "{width}: {top}");
+            assert_eq!(top.contains("◆ 1 alert"), width >= 30, "{width}: {top}");
+            let frame = ui.frame.borrow();
+            let winning = |x| frame.hits.iter().rev()
+                .find(|(rect, _)| super::super::contains(*rect, x, 0))
+                .map(|(_, hit)| hit.clone());
+            for x in 1 + offset..7 + offset {
+                assert_eq!(winning(x), Some(Hit::Connection), "{width}: {x}");
+            }
+            if width >= 30 {
+                for x in 10 + offset..19 + offset {
+                    assert_eq!(winning(x), Some(Hit::Home), "{width}: {x}");
+                }
+            } else {
+                assert!(!frame.hits.iter().any(|(_, hit)| *hit == Hit::Home));
+            }
+            assert_eq!(frame.hits.iter().any(|(_, hit)| *hit == Hit::SidebarToggle), sidebar);
+            if sidebar {
+                for x in 1..8 {
+                    assert_eq!(winning(x), Some(Hit::SidebarToggle));
+                }
+            }
+            let selector_x = width - text::width(&selector) as u16;
+            for (rect, hit) in &frame.hits {
+                if *hit != Hit::GlassMenu {
+                    assert!(rect.right() <= selector_x, "{width}: {hit:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_top_bar_sidebar_item_toggles_the_sidebar_like_ctrl_s() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut ui = glass();
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let target = ui.frame.borrow().hits.iter()
+            .find(|(_, hit)| *hit == Hit::SidebarToggle)
+            .map(|(rect, _)| *rect)
+            .expect("the top bar has a sidebar toggle");
+        assert_eq!(target, Rect::new(1, 0, 7, 1));
+        let top = screen(&ui);
+        assert!(top.lines().next().unwrap().starts_with(" sidebar · "));
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::dim().fg.unwrap());
+        let click = |ui: &mut Ui| {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                ui.mouse(MouseEvent {
+                    kind,
+                    column: target.x + target.width / 2,
+                    row: target.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+            }
+        };
+        click(&mut ui);
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        assert!(ui.glasses.sidebar.configured && ui.resource_sidebar.focused);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::ACCENT);
+        assert!(terminal.backend().buffer()[(target.x, target.y)].modifier.contains(Modifier::BOLD));
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown && !ui.glasses.sidebar.focused);
+        assert!(!ui.resource_sidebar.focused);
+        ctrl(&mut ui, 's');
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown);
     }
 
     #[test]
@@ -10083,6 +10435,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();
@@ -10176,6 +10529,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();

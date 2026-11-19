@@ -1,3 +1,5 @@
+#[path = "desired_batch_tests.rs"]
+mod desired_batch_tests;
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
 mod exec_only;
@@ -9,9 +11,468 @@ pub use crate::api::tests_shared_client_v0_tests::{checked_agent_cache, get_requ
 use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
+use crate::gate_check::now_ms;
 use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
+
+#[tokio::test]
+async fn health_reports_read_only_systemd_failure_and_recovery() {
+    // No manager access: both production routers share the health handler, and
+    // isolation is initialized with an environment without a manager address.
+    fractal_runtime::initialize_isolation(&std::collections::BTreeMap::new());
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for app in [router(state.clone()), fabric_router(state.clone())] {
+        let (status, mut health) = get_request(app, "/v1/health").await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["status"], "ready");
+        apply_systemd_health(&mut health, fractal_runtime::systemd::Health {
+            unresponsive: Some(fractal_runtime::systemd::SystemdUnresponsive {
+                since: std::time::UNIX_EPOCH + std::time::Duration::from_secs(17),
+                message: "invocation deadline".into(),
+            }),
+        });
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(health["supervisor"]["reason"], "systemd-unresponsive");
+        assert_eq!(health["supervisor"]["since_unix_ms"], 17_000);
+        let (status, recovered) = get_request(router(state.clone()), "/v1/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recovered["status"], "ready");
+        assert!(recovered.get("supervisor").is_none());
+    }
+}
+
+#[tokio::test]
+async fn health_reports_read_only_supervisor_failure_and_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let failure = json!({"reason":"launchd-unresponsive", "since_unix_ms":1000,
+        "retry_after_unix_ms":6000, "consecutive_timeouts":1});
+    let current = Arc::new(std::sync::Mutex::new(Some(failure.clone())));
+    let observed = current.clone();
+    let app = router(state).layer(Extension(SupervisorHealth(Arc::new(move || {
+        observed.lock().unwrap().clone()
+    }))));
+    let (status, health) = get_request(app.clone(), "/v1/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["service_manager"], failure);
+    *current.lock().unwrap() = None;
+    let (_, health) = get_request(app, "/v1/health").await;
+    assert!(health.get("service_manager").is_none());
+}
+
+#[test]
+fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
+    assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
+    assert!(wire_names::api_version("st3.client.v0"));
+    assert!(wire_names::api_version(CLIENT_API_VERSION));
+    let error = client_error_envelope(StatusCode::BAD_REQUEST, &json!({}), "request/test");
+    assert_eq!(error["api_version"], "fractal.client.v0");
+    assert_eq!(error["error_version"], "fractal.client.error.v0");
+}
+
+#[test]
+fn launch_hash_inputs_keep_base_golden_bytes() {
+    assert_eq!(launch_preview_token_values("fixed", "default", 7, Some("generation/fixed"),
+        &json!({"title":"Versions","steps":[]}), &[]).unwrap(),
+        "lpv0:b7b6e7a32a9fb0a0fed198d3b6f3deadae46a5200abeb3f92c4df7d19afff357");
+    let old = json!({"visualization":{"version":"st3.visualization.v0"}});
+    let new = json!({"visualization":{"version":"fractal.visualization.v0"}});
+    for collection in ["launches", "launches/fixed/variants"] {
+        assert_eq!(client_items_digest(collection, std::slice::from_ref(&new)).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&vec![old.clone()]).unwrap())));
+    }
+    assert_eq!(new["visualization"]["version"], "fractal.visualization.v0");
+}
+
+#[test]
+fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let kdl = "version 2\nmission \"example/versions\" state=\"ready\" { goal \"Check versions\"; }";
+    let intent = crate::graph::parse_test_intent(kdl, &state.node).unwrap();
+    let mut session: PlanningSessionView = serde_json::from_value(json!({
+        "subject": "planning/versions", "id": "versions", "mission": "example/versions",
+        "request": "Check versions", "workspace": root.path(), "requester": "person/ada",
+        "planner": "agent/planner", "status": "draft", "created_at_unix_ms": 0,
+        "updated_at_unix_ms": 0, "variants": [{
+            "name": "default", "candidate": {
+                "variant": "default", "revision": 1, "markdown": "", "kdl": kdl,
+                "mission": "example/versions", "mission_revision": "", "submitted_at_unix_ms": 0
+            }
+        }]
+    })).unwrap();
+    let drafts = client_launch_variant_resources(&state, &session).unwrap();
+    assert_eq!(drafts[0]["visualization"]["version"], "fractal.visualization.v0");
+    let mission = state.store.mission(&intent, crate::model::IntentInput {
+        kdl: kdl.into(), source_name: None,
+    }).unwrap();
+    let preview = crate::model::PlanningPreviewView {
+        variant: "default".into(), hash: "preview".into(), candidate_revision: 1,
+        store_index: 0, graph: String::new(), diff: String::new(), mission,
+        created_at_unix_ms: 0,
+    };
+    session.variants[0].preview = Some(preview.clone());
+    let visualization = launch_visualization(
+        &intent.missions["example/versions"], &session, &preview, &[],
+    );
+    assert_eq!(visualization["version"], "fractal.visualization.v0");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn incomplete_linux_environment_is_unavailable() {
+    for (case, environment, expected) in [
+        ("empty environ", b"".as_slice(), HarnessAncestry::Unavailable),
+        ("truncated environ", b"PATH=/bin".as_slice(), HarnessAncestry::Unavailable),
+        ("complete environment without markers", b"PATH=/bin\0".as_slice(), HarnessAncestry::Person),
+        ("complete environment with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Bound("agent/fixture/worker".into())),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_credential_in_the_environment_binds_a_run_and_never_an_agent_too() {
+    for (case, environment, expected) in [
+        ("credential", b"ST_RUN_CREDENTIAL=secret\0".as_slice(), HarnessAncestry::Run(RunCredential::new("secret"))),
+        ("empty credential", b"ST_RUN_CREDENTIAL=\0".as_slice(), HarnessAncestry::Unavailable),
+        ("credential and agent", b"ST_RUN_CREDENTIAL=secret\0ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Unavailable),
+        ("credential and legacy agent", b"FRACTAL_AGENT=agent/fixture/worker\0ST_RUN_CREDENTIAL=secret\0".as_slice(),
+            HarnessAncestry::Unavailable),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+    assert_eq!(format!("{:?}", RunCredential::new("secret")), "RunCredential(..)");
+}
+
+/// An effect's descendant that clears its own environment is still bound: the walk reads each
+/// ancestor's exec-time environment and finds the credential the effect was started with.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_effects_descendant_binds_its_run() {
+    use std::io::BufRead;
+    let mut effect = std::process::Command::new("sh")
+        .args(["-c", "env -i MARKER=1 sleep 10 & echo $!; wait"])
+        .env("ST_RUN_CREDENTIAL", "secret")
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    // `$!` is printed before the child has exec'd. Until then /proc shows the forked shell's
+    // environment, which would not exercise a cleared descendant; mid-exec it shows none, which
+    // the walk refuses as Unavailable. `comm` changes first, so read it before `environ`.
+    let proc = |file: &str| std::fs::read(format!("/proc/{pid}/{file}")).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut cleared = false;
+    while !cleared && std::time::Instant::now() < deadline {
+        cleared = proc("comm") == b"sleep\n" && proc("environ") == b"MARKER=1\0";
+        if !cleared { std::thread::sleep(std::time::Duration::from_millis(5)); }
+    }
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    effect.kill().unwrap();
+    let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    effect.wait().unwrap();
+    assert!(cleared, "the effect's descendant never ran `sleep` with a cleared environment");
+    assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
+}
+
+/// A request whose ancestry carries a live run credential is attributed to `mission-run/RUN`,
+/// may not name another actor, and writes nothing once its attempt has ended.
+#[tokio::test]
+async fn a_run_credential_binds_requests_to_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let post = |subject: &str, actor: Option<&str>| {
+        let mut body = json!({"subject": subject, "kind": "custom.example.recorded", "fields": {}});
+        if let Some(actor) = actor { body["actor"] = json!(actor); }
+        app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap())
+    };
+    let response = post("custom/example/run-own", None).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let claims = state.store.claims_for("custom/example/run-own", Some("custom.example.recorded")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(step.run.as_str()));
+    assert!(step.run.starts_with("mission-run/"));
+
+    let named = post("custom/example/run-named", Some(&step.run)).await.unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
+    for actor in ["person/operator", "agent/example/worker"] {
+        let before = state.store.index().unwrap();
+        let refused = post("custom/example/run-foreign", Some(actor)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{actor}");
+        let body = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
+    // The attempt ends: the credential no longer binds, and the caller writes nothing.
+    state.store.set_step_run_state_for_tests(&step.subject, "completed", 1);
+    let before = state.store.index().unwrap();
+    let ended = post("custom/example/run-ended", None).await.unwrap();
+    assert_eq!(ended.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+/// A program effect's `fractal apply` publishes a mission as its run, and as no other actor; its
+/// mission's `authority { publish ... }` decides which missions it may publish.
+#[tokio::test]
+async fn a_run_bound_request_publishes_as_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let apply = |mission: &str, actor: &str| {
+        let source = format!("version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Take notes.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = serde_json::to_string(&apply_request(&state, &source, actor, &format!("{mission}:{actor}"))).unwrap();
+        let request = Request::builder().method("POST").uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body)).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    for actor in ["person/operator", "agent/example/worker"] {
+        let (status, refused) = apply("example/notes", actor).await;
+        assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("foreign-agent-actor")), "{actor} {refused}");
+    }
+    assert!(state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().is_none());
+    // Outside its mission's `publish "example/*"`: refused, and nothing is written.
+    let before = state.store.index().unwrap();
+    let (status, refused) = apply("x/notes", &step.run).await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("run-authority-denied")), "{refused}");
+    assert_eq!(state.store.index().unwrap(), before);
+    assert!(state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().is_none());
+    // Inside it: published as the run.
+    let (status, published) = apply("example/notes", &step.run).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let claim = state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some(step.run.as_str()));
+}
+
+/// A program effect's CLI names its run on the trusted Unix client; only a request its run
+/// credential binds to that same run may.
+#[tokio::test]
+async fn a_run_bound_unix_client_acts_as_its_run_and_no_other() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let binding = state.store.run_binding(&secret).unwrap();
+    let request = |person: &str, bound: bool| {
+        let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+            .header(client_v0::LOCAL_PERSON_HEADER, person);
+        if bound { request = request.extension(BoundRun(binding.clone())); }
+        request.body(Body::empty()).unwrap()
+    };
+    let session = client_v0::authenticate(&state, &request(&step.run, true), "unix").unwrap();
+    assert_eq!((session.actor.as_str(), session.authority_actor.as_str()), (step.run.as_str(), step.run.as_str()));
+    assert!(session.local_peer);
+    for (person, bound) in [(step.run.as_str(), false), ("mission-run/another", true)] {
+        let refused = client_v0::authenticate(&state, &request(person, bound), "unix").unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{person} bound={bound}");
+    }
+}
+
+/// Handlers that hold a bound caller to itself read one bound identity, so a bound run is never
+/// an unbound person: it writes no seat's document, and it is the writer the rules decide.
+#[tokio::test]
+async fn a_bound_run_is_held_to_its_identity_by_document_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    state.store.set_rule("runs-keep-out", &smallclaims::rules::Rule {
+        mode: smallclaims::rules::Mode::Enforce,
+        actors: vec!["mission-run/*".into()],
+        kinds: vec!["doc.bound".into()],
+        subjects: vec!["doc/locked/**".into()],
+        ..Default::default()
+    }, "person/owner").unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let write = |name: &str, key: &str| {
+        let body = json!({"name": name, "bytes": b"notes".to_vec(), "expected_document": null, "idempotency_key": key});
+        let request = Request::builder().method("POST").uri("/v1/documents")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let (status, refused) = write("doc/agents/garden/ash/handoff", "seat").await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("document-not-yours")), "{refused}");
+    let (status, refused) = write("doc/locked/notes", "locked").await;
+    assert_eq!(refused["code"], "rule-denied", "{status} {refused}");
+    let (status, written) = write("doc/runs/notes", "notes").await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(BoundActor::of(Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
+        Some(BoundActor::Agent("agent/a".into())));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_process_environment_is_unavailable() {
+    let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let identity = local_harness_identity(pid);
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(identity, Err(AncestryUnavailableReason::EmptyEnvironment), "empty environ local identity");
+    assert_eq!(ancestry, HarnessAncestry::Unavailable, "empty environ ancestry walk");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+        for (ancestor, expected) in [
+            (Ok(HarnessProcess { uid: 0, generation: None, generation_error: None }), HarnessAncestry::Person),
+            (Ok(HarnessProcess { uid: 1000, generation: None, generation_error: None }), HarnessAncestry::Unavailable),
+            (Err(AncestryUnavailableReason::ProcessMetadataInvalid("fixture")), HarnessAncestry::Unavailable),
+        ] {
+            let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |candidate| {
+                if candidate == pid {
+                    Ok(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)), generation_error: None })
+                } else {
+                    ancestor.clone()
+                }
+            }, |candidate| {
+                assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+                Ok(HarnessAncestry::Person)
+            }), |_| {});
+            assert_eq!(result, expected);
+        }
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        ancestry_or_record(walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+            let mut current = process.clone();
+            if changed_at == Some(inspection) {
+                current.generation.as_mut().unwrap().1 =
+                    current.generation.unwrap().1.wrapping_add(1);
+            }
+            inspection += 1;
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))), |_| {})
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_connector_generation_mismatch_is_unavailable() {
+    for inspection in [0, 1, 2] {
+        assert_eq!(captured_connector_case(true, Some(inspection)), HarnessAncestry::Unavailable);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_failed_connector_capture_is_unavailable() {
+    assert_eq!(captured_connector_case(false, None), HarnessAncestry::Unavailable);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_matching_connector_capture_binds() {
+    assert_eq!(captured_connector_case(true, None),
+        HarnessAncestry::Bound("agent/fixture/worker".into()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_environment_read_failure() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let ancestor = pid + 1;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+            |_| {
+                let mut current = process.clone();
+                current.generation.as_mut().unwrap().0 = ancestor;
+                Ok(current)
+            },
+            |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+                Err(AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+                })
+            }),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+        })]);
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_generation_change() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |_| {
+            let mut current = process.clone();
+            if inspection == 1 {
+                current.generation.as_mut().unwrap().1 += 1;
+            }
+            inspection += 1;
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(pid), AncestryUnavailableReason::AncestorGenerationChanged)]);
+    });
+}
+
+// A real serving-boundary probe for manual person-CLI integration checks.
+#[tokio::test]
+async fn person_cli_probe_server() {
+    let Ok(socket) = std::env::var("FRACTAL_PERSON_CLI_PROBE_SOCKET") else { return; };
+    let socket = PathBuf::from(socket);
+    let state = state(socket.parent().unwrap());
+    let app = Router::new().fallback(|| async { Json(json!({"person_admitted": true})) });
+    serve_unix_with_ancestor_ready(&socket, None, app, Some(state.store), harness_ancestor,
+        || println!("PERSON_CLI_PROBE_READY")).await.unwrap();
+}
 
 #[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
@@ -22,7 +483,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -42,6 +503,272 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
         assert_eq!(store.index().unwrap(), before);
     }
     server.abort();
+}
+
+// Re-executed by the transport test below, so the socket connector has a real exec-time
+// environment rather than process-global test mutations.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scratch_attributed_client_probe() {
+    let Ok(socket) = std::env::var("FRACTAL_SCRATCH_PROBE_SOCKET") else { return; };
+    let body: Value = serde_json::from_str(&std::env::var("FRACTAL_SCRATCH_PROBE_BODY").unwrap()).unwrap();
+    let result: anyhow::Result<Value> = crate::client::Client::unix(Path::new(&socket))
+        .post("/v1/intent/apply", &body).await;
+    if std::env::var("FRACTAL_SCRATCH_PROBE_ALLOWED").unwrap() == "yes" {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("foreign-agent-actor"), "{error}");
+    }
+}
+
+/// A private instance cannot resolve its creator's outer mission credential. Its clients
+/// use an explicit agent identity instead of claiming that the exec is a person.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_agent() {
+    use std::os::unix::process::CommandExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("scratch.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    for (index, marker, actor, allowed) in [
+        (0, false, "person/operator", false),
+        (1, true, "person/operator", false),
+        (2, true, "agent/fixture/foreign", false),
+        (3, true, "agent/fixture/scratch", true),
+    ] {
+        let source = format!("version 2\nmission \"fixture/scratch-{index}\" state=\"ready\" {{\n  goal \"Exercise scratch attribution.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = apply_request(&state, &source, actor, &format!("scratch-{index}"));
+        let before = store.index().unwrap();
+        // The shell models an outer mission exec, in a different process group with no TTY.
+        // The leaf exec removes the foreign credential; without its own identity the walk
+        // still finds that credential in the parent. With one it binds to that agent.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "env -u ST_RUN_CREDENTIAL \"$@\"; result=$?; exit \"$result\"", "scratch-probe"]);
+        if marker { command.arg("ST_AGENT=agent/fixture/scratch"); }
+        command.arg(std::env::current_exe().unwrap())
+            .args(["--exact", "api::tests::scratch_attributed_client_probe", "--nocapture"])
+            .env("ST_RUN_CREDENTIAL", "foreign-instance-credential")
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            .env("FRACTAL_SCRATCH_PROBE_SOCKET", &socket)
+            .env("FRACTAL_SCRATCH_PROBE_BODY", serde_json::to_string(&body).unwrap())
+            .env("FRACTAL_SCRATCH_PROBE_ALLOWED", if allowed { "yes" } else { "no" })
+            .stdin(std::process::Stdio::null()).process_group(0);
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "probe did not execute: {}", String::from_utf8_lossy(&output.stdout));
+        let claim = store.latest_claim(&format!("mission/fixture/scratch-{index}"), Some("mission.published")).unwrap();
+        if allowed {
+            assert_eq!(claim.unwrap().actor.as_deref(), Some(actor));
+        } else {
+            assert!(claim.is_none());
+            assert_eq!(store.index().unwrap(), before);
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
+    use http_body_util::BodyExt as _;
+    for (ancestry, worker) in [(HarnessAncestry::Unavailable, false),
+        (HarnessAncestry::Unavailable, true), (HarnessAncestry::Person, false)] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let socket = root.path().join("bound.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+            -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
+            |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
+                reason: AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied (os error 13)".into(),
+                } })
+        } else {
+            |_, _| Ok(HarnessAncestry::Person)
+        };
+        let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
+        let authority: Option<WorkerAuthority> = worker.then(|| {
+            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+        });
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, app, Some(state.store), authority, lookup,
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        tokio::spawn(connection);
+        for (method, path, person, body, sensitive) in [
+            ("GET", "/v1/health", false, "{}", false),
+            ("POST", "/v1/example", false, "{}", false),
+            ("GET", "/v1/backup", false, "{}", true),
+            ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/internal/example", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", true, "{}", true),
+            ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/internal/replication-wake", false, "{}", true),
+            ("GET", "/v1/internal/fleet/membership", false, "{}", true),
+            ("GET", "/v1/client/capabilities", true, "{}", true),
+            ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
+            ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
+        ] {
+            let mut request = Request::builder().method(method).uri(path).header("host", "local")
+                .header("x-verified-worker-fallback", "true");
+            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
+            assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
+            response.into_body().collect().await.unwrap();
+        }
+        server.abort();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person() {
+    use tower::ServiceExt as _;
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let parent = pid + 1;
+    let ancestry = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+        |_| {
+            let mut process = process.clone();
+            process.generation.as_mut().unwrap().0 = parent;
+            Ok(process)
+        },
+        |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+            // Model a same-uid, non-dumpable service manager: metadata remains readable,
+            // but its environment does not.
+            Err(AncestryUnavailableReason::ProcessReadFailed {
+                operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+            })
+        }), |_| {});
+    assert_eq!(ancestry, HarnessAncestry::Unavailable);
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    for verified in [false, true] {
+        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let app = Router::new().fallback(|| async { "accepted" })
+            .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
+        for (method, path, header) in [
+            ("POST", "/v1/internal/replication/receive", None),
+            ("POST", "/v1/internal/seat-freshness", None),
+            ("POST", "/v1/internal/seat-freshness/reads", None),
+            ("POST", "/v1/internal/seat-snapshot", None),
+            ("POST", crate::peer::CLIENT_READ_FORWARD_PATH, None),
+            ("POST", "/v1/internal/replication-wake", None),
+            ("GET", "/v1/internal/fleet/membership", None),
+            ("POST", "/v1/internal/fleet/endpoints", None),
+            ("POST", "/v1/internal/fleet/redeem", None),
+            ("POST", "/v1/internal/fleet/invites", None),
+            ("GET", "/v1/client/capabilities", Some(client_v0::LOCAL_PERSON_HEADER)),
+            ("GET", "/v1/client/capabilities", Some(wire_names::LOCAL_PERSON_HEADER_ALIAS)),
+        ] {
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some(header) = header { request = request.header(header, "person/operator"); }
+            let mut request = request.body(Body::from(r#"{"actor":"person/operator"}"#)).unwrap();
+            request.extensions_mut().insert(ancestry.clone());
+            request.extensions_mut().insert(LocalPeer { pid, ancestor: None, peer_process: Some(peer.clone()) });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), if verified {
+                StatusCode::OK
+            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {method} {path} {header:?}");
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn with_process_fixture<T>(command: &mut std::process::Command, inspect: impl FnOnce(u32) -> T) -> T {
+    use std::io::{BufRead as _, Write as _};
+    let mut child = command
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut pid = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+    let pid: u32 = pid.trim().parse().unwrap();
+    let result = inspect(pid);
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    child.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    child.wait().unwrap();
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+    with_process_fixture(command, |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        harness_ancestor(pid, Some(&peer))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (primary, legacy) in [
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("agent/fixture/worker")),
+        (Some("agent/fixture/worker"), Some("")),
+        (Some("person/example"), None),
+        (Some("agent/"), None),
+        (Some("agent/fixture/worker"), Some("agent/fixture/other")),
+    ] {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo $$; read answer"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        if let Some(value) = primary { command.env("ST_AGENT", value); }
+        if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
+        let ancestry = inspect_ancestry_fixture(&mut command);
+        assert_eq!(ancestry, HarnessAncestry::Unavailable, "{path}: {primary:?} {legacy:?}");
+        let mut request = Request::builder().method(method).uri(path);
+        if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ancestry);
+        let error = guard_bound_request(request, None, &state.store).await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{path}: {primary:?} {legacy:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_backup_export() {
+    assert_masked_identity_refused("GET", "/v1/backup", false, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_person_session() {
+    assert_masked_identity_refused("GET", "/v1/client/session", true, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_foreign_actor() {
+    assert_masked_identity_refused("POST", "/v1/fleet/transports", false, json!({"actor": "agent/other"})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_harness_descendant_without_agent_environment_is_bound() {
+    let ancestry = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
+        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent"));
+    assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
 
 #[tokio::test]
@@ -71,7 +798,7 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     ).unwrap();
     let app = Router::new().route("/v1/internal/fleet/leave-state", get(move || {
         let fleet = fleet.clone();
@@ -101,7 +828,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     )
     .unwrap();
     let expected_public = public.clone();
@@ -285,6 +1012,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -507,6 +1251,8 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         .unwrap()
         .unwrap();
     assert_eq!(suspension.phase, "quiescing");
+    assert_eq!(suspension.cause(), "manual");
+    assert_eq!(suspension.mode(), "git");
     assert!(suspension.holds_seat());
     let (_, body) = ask("/v1/agents/suspend", "again").await;
     assert_eq!(body["code"], "already-suspended");
@@ -533,6 +1279,96 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         })).await;
         assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
     }
+}
+
+#[tokio::test]
+async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let source = format!(
+        "version 2\nagent \"test/seat\" {{ host \"node\"; workspace {:?}; harness \"omp\" {{}} }}",
+        root.path().display().to_string(),
+    );
+    let request = apply_request(&state, &source, "person/test", "declare");
+    let (status, body) = json_request(app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subject = "agent/test/seat";
+    let token = state.store.selected_desired_token(subject).unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence,
+            expected_subject: None, idempotency_key: key,
+        }).unwrap()
+    };
+    let suspend = append("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"incumbent"
+    }), vec![token.clone()], None);
+    append("runtime.action.succeeded", json!({
+        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place", "source_host":"node"
+    }), vec![suspend.id.clone()], Some(crate::suspension::suspend_snapshot_key(&suspend.id)));
+    append("runtime.action.succeeded", json!({"action":"suspend"}),
+        vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
+    let before = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    let boundary = state.store.index().unwrap();
+    let error = request_suspend(&state, serde_json::from_value(json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"stale"
+    })).unwrap(), Some(SuspensionFence {
+        desired: token.clone(), incarnation: Some("successor".into()),
+    })).unwrap_err();
+    assert_eq!(error.code, "stale-fence");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().cause(), "idle");
+    let payload = json!({"subject":subject, "actor":"person/test", "idempotency_key":"make-manual"});
+    let (status, converted) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{converted}");
+    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(converted["id"], replay["id"]);
+    assert_eq!(converted["body"]["fields"]["operation_id"], before.operation_id);
+    let after = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    assert_eq!(after.cause(), "manual");
+    assert!(after.holds_seat());
+    assert_eq!(after.operation_id, before.operation_id);
+    assert_eq!(after.native_session_id, before.native_session_id);
+    assert_eq!(after.mode(), "in-place");
+    assert_eq!(after.suspended_at_unix_ms, before.suspended_at_unix_ms);
+    assert_eq!(crate::suspension::current_at(&state.store, subject, Some(boundary)).unwrap().unwrap().cause(), "idle");
+    let path = root.path().join("reopened.sqlite3");
+    state.store.copy_store_to(&path).unwrap();
+    let reopened = Store::open(&path, "node").unwrap();
+    assert_eq!(crate::suspension::current(&reopened, subject).unwrap().unwrap(), after);
+    let shown = client_suspension(&after);
+    assert_eq!(shown["cause"], "manual");
+    assert_eq!(shown["mode"], "in-place");
+    let (status, refused) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "host":"other", "idempotency_key":"move"
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "snapshot-in-place");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "suspended");
+    let (status, resumed) = json_request(app.clone(), "/v1/agents/resume", json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"same-host"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let resume = state.store.claim_by_id(resumed["id"].as_str().unwrap()).unwrap().unwrap();
+    append("runtime.action.succeeded", json!({"action":"resume", "incarnation_id":"resumed"}),
+        vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
+    append("runtime.observed", json!({"status":"running", "runtime_id":"seat", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.session-file", json!({"harness":"omp", "session_id":"native", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.observed", json!({"state":"idle", "incarnation_id":"resumed", "quiescent":true, "blocking":[]}), vec![], None);
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "resumed");
+    assert!(crate::suspension::blockers(&state.store, subject, "resumed").unwrap().is_empty());
+    let requests = state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len();
+    let (status, replay) = json_request(app, "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], converted["id"]);
+    assert_eq!(state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len(), requests);
+    let resumed_path = root.path().join("resumed.sqlite3");
+    state.store.copy_store_to(&resumed_path).unwrap();
+    let resumed_store = Store::open(&resumed_path, "node").unwrap();
+    assert_eq!(resumed_store.suspension_manual_request(subject, "agent-suspend:agent/test/seat:make-manual")
+        .unwrap().unwrap().id, converted["id"].as_str().unwrap());
 }
 
 #[tokio::test]
@@ -793,28 +1629,16 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
     // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
     // with this fixture's identity and bind nothing.
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
+    let bound = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "echo $$; read answer"])
         .env_remove("FRACTAL_AGENT")
-        .env("ST_AGENT", "agent/fixture/worker")
-        .spawn()
-        .unwrap();
-    let mut bound = None;
-    for _ in 0..50 {
-        bound = harness_ancestor(child.id());
-        if bound.is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(bound.as_deref(), Some("agent/fixture/worker"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+        .env("ST_AGENT", "agent/fixture/worker"));
+    assert_eq!(bound.agent(), Some("agent/fixture/worker"));
 }
 
 #[tokio::test]
@@ -1599,6 +2423,122 @@ fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     );
 }
 
+#[tokio::test]
+async fn message_delivery_expiry_is_terminal_before_human_and_path_diagnostics() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let seat = "agent/expiry-delivery-recipient";
+    let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    append(seat, "runtime.observed", seat, json!({"status":"running", "incarnation_id":"one"}));
+    append(seat, "harness.observed", seat, json!({
+        "state":"working", "driver":"claude", "incarnation_id":"one", "blocked_on":"human", "ask":"permission"
+    }));
+    let now = client_now_ms();
+    assert!(message_delivery_value(store, seat, "sent", now, now).unwrap()["reason"]
+        .as_str().unwrap().contains("held outside"));
+    delivery_presence::record(seat, &json!({
+        "transport":"omp-channel", "pid":4242, "ready":false, "reason":"native handoff refused"
+    }).to_string());
+    assert!(delivery_presence::known(seat).unwrap().stale());
+    for reason in ["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"] {
+        let subject = format!("message/{reason}");
+        let sent = append(&subject, "message.sent", "person/sender", json!({
+            "from":"person/sender", "to":seat, "content":"expiry contract", "status":"sent"
+        }));
+        append(&subject, "message.expired", "daemon/runtime", json!({"status":"expired", "reason":reason}));
+        let (status, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let delivery = &view["delivery"];
+        assert_eq!(delivery["state"], "expired", "{view}");
+        assert_eq!(delivery["phase"], "expired", "{view}");
+        assert_eq!(delivery["reason"], reason, "{view}");
+        assert!(delivery["age_ms"].is_number());
+        assert_eq!(delivery["recipient_delivery"]["state"], "stale");
+        assert!(delivery.get("history").is_none());
+        // A receipt arriving after the endpoint captured its view still wins.
+        let expired = store.message(&subject).unwrap().unwrap();
+        for phase in ["delivered", "read"] {
+            append(&subject, &format!("message.{phase}"), seat, json!({"status":phase}));
+            assert!(store.message_expiry(&subject).unwrap().unwrap().superseded);
+            let delivery = message_delivery_for(store, &expired, sent.accepted_at_unix_ms, now, None).unwrap();
+            assert_eq!(delivery["phase"], phase);
+            let (_, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+            assert_eq!(view["delivery"]["phase"], phase);
+            assert_ne!(view["delivery"]["state"], "expired");
+        }
+    }
+}
+
+#[test]
+fn message_delivery_expiry_survives_remote_unknown_but_not_real_relayed_receipts() {
+    let store = Arc::new(Store::open_memory("expiry-sender").unwrap());
+    let source = "version 2\nagent \"recipient\" { host \"expiry-remote\"; command \"true\"; }";
+    let intent = crate::graph::parse_intent(source, "expiry-sender").unwrap();
+    store.apply_internal(&intent, "expiry-remote-delivery").unwrap();
+    // The remote host's advertisement, as retained by replication.
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::store::append_claim_tx(&transaction, "expiry-remote", "daemon/expiry-remote",
+            "daemon.started", Some("daemon/expiry-remote"), &json!({"fields":{
+                "status":"running", "features":{"seat_freshness_reads":1, "message_offsets":1}
+            }}), &[], None).unwrap();
+        transaction.commit().unwrap();
+    }
+    let seat = store.desired_subjects().unwrap().into_iter()
+        .find(|seat| seat.member.as_ref().is_some_and(|member| member.host == "expiry-remote"))
+        .unwrap().subject;
+    let subject = "message/expiry-relay";
+    let append = |kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let sent = append("message.sent", "person/sender", json!({
+        "from":"person/sender", "to":seat, "content":"remote expiry", "status":"sent"
+    }));
+    append("message.expired", "daemon/runtime", json!({"status":"expired", "reason":"no-live-recipient"}));
+    let expired = store.message(subject).unwrap().unwrap();
+    assert_eq!(message_reads::relay_host(&store, &expired).unwrap().as_deref(), Some("expiry-remote"));
+    let unknown = message_reads::Relayed::Unknown { host:"expiry-remote".into(), reason:"unreachable".into() };
+    let delivery = |relayed: Option<&message_reads::Relayed>| message_delivery_for(
+        &store, &expired, sent.accepted_at_unix_ms, sent.accepted_at_unix_ms, relayed,
+    ).unwrap();
+    for relayed in [None, Some(&unknown)] {
+        assert_eq!(delivery(relayed)["state"], "expired");
+        assert_eq!(delivery(relayed)["reason"], "no-live-recipient");
+    }
+    for (phases, expected) in [
+        (&["delivered"][..], "delivered"), (&["read"][..], "read"),
+        (&["read", "closed"][..], "read"), (&["closed"][..], "expired"),
+    ] {
+        let marks = phases.iter().map(|phase| (format!("message.{phase}"), seat.clone()))
+            .chain(std::iter::once(("message.read".into(), "agent/not-on-remote".into())))
+            .map(|(kind, consumer)| crate::peer::RelayedMark {
+                kind, consumer, recorded_at_unix_ms: 1, receipt: "remote-receipt".into(),
+            }).collect();
+        let answers = message_reads::settle(&store, vec![("expiry-remote".into(), Ok(crate::peer::MessageMarksAnswer {
+            subject: subject.into(), held: true, marks,
+        }))]);
+        let answer = answers.get(subject).unwrap();
+        assert_eq!(answer.status(), phases.last().copied());
+        assert_eq!(delivery(Some(answer))["phase"], expected);
+        assert_eq!(delivery(Some(answer))["state"] == "expired", expected == "expired");
+        assert!(!store.message_expiry(subject).unwrap().unwrap().superseded);
+    }
+    append("message.read", &seat, json!({"status":"read"}));
+    assert_eq!(delivery(Some(&unknown))["state"], "read");
+}
+
 #[test]
 fn message_delivery_keeps_expired_claude_hook_mail_held_until_native_closure() {
     let store = Store::open_memory("expired-claude-hook-mail-hold").unwrap();
@@ -1926,6 +2866,23 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+#[test]
+fn doctor_reports_work_wake_copy_progress_and_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for complete in [false, true] {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he79e179dc71c owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=12, ceiling=34, complete=?1 WHERE singleton=1",
+            [complete],
+        ).unwrap();
+        let check = work_wake_index_check(&state);
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&format!("cursor=12 ceiling=34 done={complete}")));
+        assert_eq!(check.message.contains("indexed tags only"), complete);
+        assert_eq!(check.message.contains("unindexed historical tail"), !complete);
+    }
+}
+
 /// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
 /// what holds them off: here a configured peer whose start has not reached it.
 #[test]
@@ -2080,7 +3037,7 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let root = tempfile::tempdir().unwrap();
-    let app = AppState { store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
+    let app = AppState { browser_pairing_login: None, store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
     let store = app.store.clone();
     let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
         store
@@ -2851,9 +3808,9 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     use http_body_util::{BodyExt as _, Empty};
     use hyper::client::conn::http1::SendRequest;
 
-    fn slow_ancestor(_pid: u32) -> Option<String> {
+    fn slow_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
         std::thread::sleep(Duration::from_millis(500));
-        None
+        HarnessAncestry::Person
     }
 
     async fn health(sender: &mut SendRequest<Empty<axum::body::Bytes>>) {
@@ -2910,8 +3867,8 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
-    fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original/worker".into())
+    fn ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+        HarnessAncestry::Bound("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();
@@ -3633,14 +4590,15 @@ async fn only_work_wake_messages_wake_the_reconciler() {
     let mut events = state.event_notify.subscribe();
     let send = |key: &str, tags: &[&str]| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: "person/example".into(),
-            to: "agent/receiver".into(),
-            content: "A note.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: "person/example".into(),
+        to: "agent/receiver".into(),
+        content: "A note.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -3734,6 +4692,8 @@ fn apply_request(state: &AppState, source: &str, actor: &str, key: &str) -> Appl
         expected_subjects: preview.subject_tokens,
         idempotency_key: key.into(),
         actor: Some(actor.into()),
+        program_bundles: Default::default(),
+        force_reason: None,
     }
 }
 
@@ -3768,7 +4728,7 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
 async fn a_bound_harness_cannot_record_seat_freshness() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let received = crate::peer::ReceivedSeatFreshness {
         from: "another-member".into(),
         seats: vec![crate::peer::SeatHeard {
@@ -3826,9 +4786,9 @@ fn internal_routes() -> Vec<String> {
         .collect()
 }
 
-/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
-/// any method, while this node's replication worker and its operator's CLI, which run in no
-/// harness, pass.
+/// Internal routes refuse seat callers except the exact resource methods whose handlers enforce
+/// native ownership. This node's replication worker and operator CLI, which run in no harness,
+/// still pass the transport guard for every internal route.
 #[tokio::test]
 async fn internal_routes_refuse_seat_callers() {
     let root = tempfile::tempdir().unwrap();
@@ -3836,7 +4796,11 @@ async fn internal_routes_refuse_seat_callers() {
     let routes = internal_routes();
     assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
     for route in &routes {
-        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+        for method in [
+            axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT,
+            axum::http::Method::PATCH, axum::http::Method::DELETE, axum::http::Method::HEAD,
+            axum::http::Method::OPTIONS, axum::http::Method::TRACE, axum::http::Method::CONNECT,
+        ] {
             let request = || {
                 Request::builder()
                     .method(method.clone())
@@ -3845,8 +4809,17 @@ async fn internal_routes_refuse_seat_callers() {
                     .body(Body::from("{}"))
                     .unwrap()
             };
-            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
-            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            let bound = guard_bound_request(request(), Some("agent/own"), &state.store).await;
+            let resource_owner_route = matches!((route.as_str(), method.as_str()),
+                ("/v1/internal/resources" | "/v1/internal/resources/example", "GET")
+                | ("/v1/internal/resources/exec"
+                    | "/v1/internal/resources/example/wait"
+                    | "/v1/internal/resources/example/cancel", "POST"));
+            if resource_owner_route {
+                assert!(bound.is_ok(), "{method} {route} reaches native resource ownership enforcement");
+            } else {
+                assert_eq!(bound.unwrap_err().code, "foreign-agent-actor", "{method} {route}");
+            }
             assert!(
                 guard_bound_request(request(), None, &state.store).await.is_ok(),
                 "{method} {route} serves a caller in no harness"
@@ -3861,7 +4834,7 @@ async fn internal_routes_refuse_seat_callers() {
 async fn a_seat_reads_fleet_views_through_public_routes_only() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let call = |method: &str, route: &str, bound: bool| {
         let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
         if bound {
@@ -3888,7 +4861,7 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))
@@ -3925,7 +4898,7 @@ async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/foreign", "person/operator"] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -3944,7 +4917,7 @@ async fn repair_actor_bound_router_requires_present_nonempty_actor() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for body in [
         json!({"token":"not-a-repair-token"}),
         json!({"token":"not-a-repair-token","actor":null}),
@@ -3965,7 +4938,7 @@ async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, refusal) = repair_actor_apply_request(
         app.clone(),
@@ -3996,7 +4969,7 @@ async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -4020,7 +4993,7 @@ async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() 
     // Both the handler and the daemon's outer binding guard must close the legacy path.
     for app in [
         app.clone(),
-        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+        app.layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor)),
     ] {
         for body in [
             json!({"token":token}),
@@ -4048,7 +5021,7 @@ async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_bindi
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/own", "person/operator", ""] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4065,7 +5038,7 @@ async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -5034,7 +6007,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let health_of = |state: &AppState| {
         let state = state.clone();
-        async move { health(State(state)).await.unwrap().0 }
+        async move { health(State(state), None).await.unwrap().0 }
     };
     assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
     crate::store::messages_shard::open(&state.store, root.path()).unwrap();
@@ -5649,6 +6622,16 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
     let mut state = state(root.path());
     state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
     state.configured_peers = vec!["cobalt".into()];
+    // A pass needs a live worker and a fresh exchange, beside the refusal under test.
+    state.store.record_replication_worker_heartbeat();
+    state
+        .store
+        .replication_sync
+        .lock()
+        .unwrap()
+        .entry("cobalt".into())
+        .or_default()
+        .observe(0, Some((0, 0)), now_ms());
     let app = router(state.clone());
     let (status, recorded) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
         "peer": "cobalt", "status": "refused", "error": "refused by that member's Fabric grants (service st3-peer-v1); replication can continue through other members"
@@ -5678,6 +6661,47 @@ async fn doctor_and_replication_status_explain_fabric_refusals_without_errors() 
             .as_str()
             .unwrap()
             .contains("cobalt: refused by that member's Fabric grants")
+    );
+}
+
+/// The silent dial-out incident shape: redeemed membership, stored envelopes, no worker
+/// process. Doctor must fail loudly instead of passing on persisted history.
+#[tokio::test]
+async fn doctor_fails_replication_when_a_redeemed_member_has_no_live_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.store.bind_fleet("94cd11ba-c582-4558-9c84-c3bda922eb6d").unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: "custom/test/stored-history".into(),
+            kind: "custom.test.recorded".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(!state.store.replication_inventory().unwrap().envelopes.is_empty());
+    state.store.replication_worker_observed_for_test(Some(now_ms().saturating_sub(120_000)), None);
+    let app = router(state);
+    let (status, doctor) = get_request(app, "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "replication")
+        .unwrap();
+    assert_eq!(check["status"], "fail", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no replication worker heartbeat"),
+        "{check}"
     );
 }
 
@@ -5797,6 +6821,8 @@ fn doctor_reports_waiting_claims_without_a_replication_fault() {
         .store
         .receive_replication_exchange("alder", "fleet/waiting", &exchange)
         .unwrap();
+    // A pass needs the live-worker evidence beside the waiting claim.
+    state.store.record_replication_worker_heartbeat();
     let report = doctor_report(&state).unwrap().0;
     let check = report
         .checks
@@ -5852,6 +6878,44 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
             .iter()
             .any(|check| check.name == "shared-projections")
     );
+}
+
+#[test]
+fn doctor_distinguishes_disabled_checkpoint_worker_from_missing_participant_seals() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet/checkpoint-diagnostics".into());
+    state.configured_peers.push("absent-writer".into());
+    state.store.checkpoint_worker_phase(CheckpointPhase::Disabled);
+    let report = doctor_report(&state).unwrap().0;
+    let check = report.checks.iter().find(|check| check.name == "checkpoint").unwrap();
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=Disabled"));
+    assert!(check.message.contains("disabled by config on 1 node"));
+    assert!(check.message.contains("newest stable none"));
+    assert!(check.message.contains("absent-writer phase=seal (no seal)"));
+}
+
+#[test]
+fn checkpoint_doctor_warns_on_worker_failure_or_halt_without_pending_work() {
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.checkpoint_worker_phase(CheckpointPhase::ApplyStable);
+    state.store.checkpoint_worker_error("trim commit failed".into());
+    let mut status = state.store.checkpoint_status(client_now_ms(), &[]).unwrap();
+    status.pending = None;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    let check = checkpoint_doctor_check(&status);
+    assert_eq!(check.status, "warn");
+    assert!(check.message.contains("phase=trim (halted"));
+    status.halted = false;
+    assert_eq!(checkpoint_doctor_check(&status).status, "pass");
 }
 
 #[test]
@@ -6145,6 +7209,14 @@ async fn mission_resolves_a_bare_document_to_immutable_bytes() {
 }
 
 async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value) {
+    preview_and_apply_with_bundles(app, kdl, BTreeMap::new()).await
+}
+
+async fn preview_and_apply_with_bundles(
+    app: Router,
+    kdl: &str,
+    program_bundles: BTreeMap<String, String>,
+) -> (Value, StatusCode, Value) {
     let (status, preview) = json_request(
         app.clone(),
         "/v1/intent/mission",
@@ -6171,11 +7243,81 @@ async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value)
                 .unwrap(),
             idempotency_key: format!("apply-{}", hex::encode(Sha256::digest(kdl))),
             actor: Some("person/alex".into()),
+            program_bundles,
+            force_reason: None,
         })
         .unwrap(),
     )
     .await;
     (preview, status, applied)
+}
+
+/// A publication carries its program bundles as base64, so both caller guards buffer a body up to
+/// the publication route limit (32 MiB) and hand a body past 16 MiB on whole.
+#[tokio::test]
+async fn caller_guards_pass_a_publication_body_past_sixteen_mebibytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let padding = "a".repeat(20 * 1024 * 1024);
+    for (bound, body) in [
+        (Some("agent/example/publisher"), format!(r#"{{"actor":"agent/example/publisher","pad":"{padding}"}}"#)),
+        (None, format!(r#"{{"pad":"{padding}"}}"#)),
+    ] {
+        let mut request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        if bound.is_none() {
+            request.extensions_mut().insert(HarnessAncestry::Unavailable);
+        }
+        let passed = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = to_bytes(passed.into_body(), PUBLICATION_BODY_LIMIT).await.unwrap();
+        assert_eq!(bytes.len(), body.len(), "{bound:?}");
+    }
+}
+
+#[tokio::test]
+async fn publication_stores_the_program_bundle_its_declaration_names() {
+    use base64::Engine as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
+    let bytes = b"export default {}";
+    let hash = hex::encode(Sha256::digest(bytes));
+    let kdl = format!(
+        "version 2\nmission \"land\" state=\"ready\" {{\n  goal \"Land.\"\n  step \"program\" {{ program \"/bundles/land.mjs\" sha256=\"{hash}\" }}\n}}"
+    );
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let before = store.index().unwrap();
+    // A declaration whose bytes this member never received would be refused by every replica.
+    let (_, status, error) = preview_and_apply(app.clone(), &kdl).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "missing-program-bundle");
+    let (_, status, error) =
+        preview_and_apply_with_bundles(app.clone(), &kdl, BTreeMap::from([(hash.clone(), encoded(b"export default 2"))])).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "program-bundle-hash-mismatch");
+    let (_, status, error) = preview_and_apply_with_bundles(
+        app.clone(),
+        &kdl,
+        BTreeMap::from([(hash.clone(), encoded(bytes)), ("0".repeat(64), encoded(b""))]),
+    )
+    .await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "unused-program-bundle");
+    assert_eq!(store.index().unwrap(), before);
+    assert_eq!(store.get_blob(&hash).unwrap(), None);
+
+    let (_, status, applied) =
+        preview_and_apply_with_bundles(app, &kdl, BTreeMap::from([(hash.clone(), encoded(bytes))])).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(&bytes[..]));
+    // The published definition names the blob by `bundle_hash`, which promotes and replicates it.
+    let published = store.latest_claim("mission/land", Some("mission.published")).unwrap().unwrap();
+    assert!(published.body.to_string().contains(&format!("\"bundle_hash\":\"{hash}\"")), "{}", published.body);
 }
 
 #[tokio::test]
@@ -6418,6 +7560,8 @@ mission "invalid-message" state="ready" {
             expected_subjects: BTreeMap::new(),
             idempotency_key: "reject-invalid-nested-message".into(),
             actor: Some("person/alex".into()),
+            program_bundles: Default::default(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -7381,8 +8525,16 @@ mission "targeted" state="ready" revisions="human-only" {
     .await;
     assert_eq!(status, StatusCode::OK, "{approved}");
     assert_eq!(approved["status"], "approved");
-    let revised = store.mission_run(&run.id).unwrap().unwrap();
+    let source = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(source.generation, run.generation);
+    assert_eq!(source.revision, run.revision);
+    let revised = store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    assert_ne!(revised.subject, run.subject);
+    assert_eq!(revised.supersedes.as_deref(), Some(run.subject.as_str()));
     assert_ne!(revised.generation, run.generation);
+    assert_eq!(revised.revision, approved["published_revision"].as_str().unwrap());
+    assert_eq!(approved["target_mission_run"], run.subject);
+    assert_eq!(approved["source_generation"], run.generation);
 
     let approvals = store
         .events_after(0, None)
@@ -7581,14 +8733,15 @@ async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "empty-message".into(),
-            from: "agent/sender".into(),
-            to: "agent/receiver".into(),
-            content: " \n".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "empty-message".into(),
+        from: "agent/sender".into(),
+        to: "agent/receiver".into(),
+        content: " \n".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -7605,14 +8758,15 @@ async fn a_runtime_work_message_uses_a_valid_daemon_sender() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "runtime-work-message".into(),
-            from: "daemon/runtime".into(),
-            to: "agent/worker".into(),
-            content: "A durable mission step is ready.".into(),
-            title: Some("Mission step ready".into()),
-            in_reply_to: None,
-            tags: vec!["st3-work:step-run/run/build@1@1@incarnation".into()],
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "runtime-work-message".into(),
+        from: "daemon/runtime".into(),
+        to: "agent/worker".into(),
+        content: "A durable mission step is ready.".into(),
+        title: Some("Mission step ready".into()),
+        in_reply_to: None,
+        tags: vec!["st3-work:step-run/run/build@1@1@incarnation".into()],
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -7630,14 +8784,15 @@ async fn a_requester_message_uses_a_full_person_subject() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "requester-message".into(),
-            from: "requester".into(),
-            to: "agent/worker".into(),
-            content: "Please do the work.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "requester-message".into(),
+        from: "requester".into(),
+        to: "agent/worker".into(),
+        content: "Please do the work.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -7661,14 +8816,15 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             app.clone(),
             "/v1/messages",
             serde_json::to_value(MessageSendRequest {
-                idempotency_key: format!("replay-original-{transport}"),
-                from: "agent/sender".into(),
-                to: "agent/receiver".into(),
-                content: "Please answer once.".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: format!("replay-original-{transport}"),
+            from: "agent/sender".into(),
+            to: "agent/receiver".into(),
+            content: "Please answer once.".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             })
             .unwrap(),
         )
@@ -7699,14 +8855,15 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             assert_eq!(status, StatusCode::OK, "{claim}");
         }
         let reply = serde_json::to_value(MessageSendRequest {
-            idempotency_key: format!("replay-reply-{transport}"),
-            from: "agent/receiver".into(),
-            to: "agent/sender".into(),
-            content: "Answered.".into(),
-            title: None,
-            in_reply_to: Some(subject.into()),
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: format!("replay-reply-{transport}"),
+        from: "agent/receiver".into(),
+        to: "agent/sender".into(),
+        content: "Answered.".into(),
+        title: None,
+        in_reply_to: Some(subject.into()),
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap();
         let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
@@ -7734,20 +8891,148 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
 }
 
 #[tokio::test]
+async fn replying_settles_stream_routed_parents_and_replays_without_another_send() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/receiver\" {{ host {:?}; command \"true\"; workspace {:?} }}",
+        state.store.origin(),
+        root.path().display().to_string(),
+    );
+    let intent = crate::graph::parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-stream-recipient").unwrap();
+    let app = router(state.clone());
+    for initial in ["sent", "delivered", "read", "closed"] {
+        let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": format!("stream-parent-{initial}"),
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Please answer."
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{original}");
+        let parent = original["subject"].as_str().unwrap();
+        assert!(state.store.message(parent).unwrap().unwrap().created_index
+            >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(state.store.claims_for(parent, Some("message.sent")).unwrap().is_empty());
+        for lifecycle in ["delivered", "read", "closed"] {
+            if initial == "sent" {
+                break;
+            }
+            crate::store::messages_shard::record_lifecycle(
+                &state.store, parent, &format!("message.{lifecycle}"),
+                Some("agent/example/receiver"),
+                &BTreeMap::from([("status".into(), json!(lifecycle))]),
+            ).unwrap();
+            if lifecycle == initial {
+                break;
+            }
+        }
+        let reply = json!({
+            "idempotency_key": format!("stream-reply-{initial}"),
+            "from": "agent/example/receiver",
+            "to": "agent/example/sender",
+            "content": "Answered.",
+            "in_reply_to": parent
+        });
+        let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["already_sent"], false);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+        let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+            .unwrap().unwrap();
+        assert_eq!(marks.iter().filter(|(kind, _, _)| kind == "message.closed").count(), 1);
+        assert!(state.store.claims_for(parent, Some("message.closed")).unwrap().is_empty());
+
+        let (status, repeated) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["already_sent"], true);
+        assert_eq!(repeated["subject"], sent["subject"]);
+        assert_eq!(repeated["sent_at"], sent["sent_at"]);
+        let reply_subject = sent["subject"].as_str().unwrap();
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+
+        // A changed request under the same key fails before another send, even after closure.
+        let mut changed = reply;
+        changed["content"] = json!("Different answer.");
+        let (status, error) = json_request(app.clone(), "/v1/messages", changed).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+    }
+}
+
+#[tokio::test]
+async fn a_retired_recipient_cannot_reply_or_settle_its_successors_stream_mail() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/old\" {{ host {:?}; command \"true\"; workspace \"/tmp\" }}\nagent \"example/new\" {{ command \"true\"; workspace \"/tmp\" }}",
+        state.store.origin(),
+    );
+    let intent = parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-retirement-fixture").unwrap();
+    let app = router(state.clone());
+    let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+        "idempotency_key": "reply-retired-parent",
+        "from": "agent/example/sender",
+        "to": "agent/example/old",
+        "content": "Keep this for the successor."
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let parent = original["subject"].as_str().unwrap();
+    assert!(state.store.message(parent).unwrap().unwrap().created_index
+        >= crate::store::messages_shard::STREAM_INDEX_BASE);
+    for lifecycle in ["delivered", "read"] {
+        crate::store::messages_shard::record_lifecycle(
+            &state.store, parent, &format!("message.{lifecycle}"),
+            Some("agent/example/old"),
+            &BTreeMap::from([("status".into(), json!(lifecycle))]),
+        ).unwrap();
+    }
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "reply-retired-custody", &[], Some("agent/example/new"), None,
+    ).unwrap();
+    let (status, refused) = json_request(app, "/v1/messages", json!({
+        "idempotency_key": "reply-retired-refused",
+        "from": "agent/example/old",
+        "to": "agent/example/sender",
+        "content": "A stale process answered.",
+        "in_reply_to": parent
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(state.store.operation_claim("reply-retired-refused").unwrap().is_none());
+    // Also exercise settlement's own admission, independently of the pre-send check.
+    let refused = settle_answered_message(
+        &state.store, parent, "agent/example/old", "agent/example/sender",
+        "message/stale-reply", "claim/stale-reply",
+    ).unwrap_err();
+    assert_eq!(refused.code, "wrong-message-recipient");
+    assert_eq!(state.store.message(parent).unwrap().unwrap().status, "read");
+    let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+        .unwrap().unwrap();
+    assert!(!marks.iter().any(|(kind, _, _)| kind == "message.closed"));
+}
+
+#[tokio::test]
 async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing() {
     // Nathan, 2026-10-06: signatures existed but nothing showed them.
     let root = tempfile::tempdir().unwrap();
     let app = router(state(root.path()));
     let send = |key: &str, from: &str| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: "agent/receiver".into(),
-            content: "Hello.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: "agent/receiver".into(),
+        content: "Hello.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -7770,14 +9055,15 @@ async fn a_sender_followup_does_not_settle_the_recipient_message() {
     let app = router(state(root.path()));
     let send = |key: &str, from: &str, to: &str, parent: Option<String>| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: to.into(),
-            content: "Please respond.".into(),
-            title: None,
-            in_reply_to: parent,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: to.into(),
+        content: "Please respond.".into(),
+        title: None,
+        in_reply_to: parent,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -7818,14 +9104,15 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
     let app = router(state.clone());
     let message = |key: &str, from: &str, to: &str, in_reply_to: Option<&str>| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: to.into(),
-            content: "Hello".into(),
-            title: None,
-            in_reply_to: in_reply_to.map(str::to_owned),
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: to.into(),
+        content: "Hello".into(),
+        title: None,
+        in_reply_to: in_reply_to.map(str::to_owned),
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -7897,14 +9184,15 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
         app.clone(),
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "recipient-authority-message".into(),
-            from: "agent/sender".into(),
-            to: "agent/receiver".into(),
-            content: "Please review this.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "recipient-authority-message".into(),
+        from: "agent/sender".into(),
+        to: "agent/receiver".into(),
+        content: "Please review this.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -8734,7 +10022,7 @@ fn roster_fixture_draining_seats(fixture: &RosterClaimsFixture) -> Vec<String> {
             expected_set: store.owned_sets().unwrap().first()
                 .map_or("absent".into(), |set| set.revision.clone()),
             rollout: None, adopt: Default::default(), allow_empty: false,
-            confirm_retire: None, expected_subjects: Default::default(),
+            confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&input, &options).unwrap();
         assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
@@ -9036,7 +10324,10 @@ fn agent_roster_typical_claim_kind_baseline() {
     assert_eq!(breakdown["work.progress"], (6, 6));
     assert_eq!(breakdown["harness.todo.observed"], (12, 0));
     assert_eq!(local_breakdown["harness.usage"], 12);
-    assert_eq!(old_cold, 12);
+    // Carried turn termination and work-turn invocation receipts now append one
+    // durable harness.invocation pair per claimed turn in this fixture.
+    assert_eq!(breakdown["harness.invocation"], (12, 12));
+    assert_eq!(old_cold, 24);
 }
 
 #[test]
@@ -11015,6 +12306,8 @@ mission "agent-health" state="ready" {
     let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
+    // Readiness and a queued step are not words from the agent.
+    assert!(resources[0]["last_prose_at"].is_null(), "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {
@@ -11263,6 +12556,132 @@ mission "agent-human" state="ready" {
 }
 
 #[test]
+fn a_run_seats_drift_item_resolves_its_person_without_rebuilding_the_run() {
+    use crate::store::model_drift::{MODEL_DRIFT_CONDITION, MODEL_DRIFT_TITLE, ModelDrift, model_drift_episode};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"drift-owner\" state=\"ready\" {\n  goal \"Exercise drift ownership.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "drift-owner-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "drift-owner".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "drift-owner-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reason = ModelDrift { declared: "anthropic/claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 1 }.reason();
+    store.record_failure(&model_drift_episode(&subject), &crate::model::AttentionRequest {
+        reviewer: subject.clone(), title: MODEL_DRIFT_TITLE.into(), reason, severity: "error".into(),
+        targets: vec![subject.clone()], actor: "agent/st3/reconciler".into(),
+        idempotency_key: "drift-owner:attention".into(),
+    }, MODEL_DRIFT_CONDITION).unwrap();
+    // The person comes from the run's requester header: no step of the run is enriched.
+    crate::store::STEPS_ENRICHED.with(|enriched| enriched.set(0));
+    let items = store.model_drift_attention_items(Some("person/test"), u128::MAX).unwrap();
+    assert_eq!(crate::store::STEPS_ENRICHED.with(std::cell::Cell::get), 0);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].person, "person/test");
+    assert_eq!(items[0].targets, [subject]);
+}
+
+#[test]
+fn only_a_client_that_negotiated_model_drift_reads_the_kind_as_it_is() {
+    let row = json!({"kind": "attention", "attention_kind": "model-drift", "source_kind": "model-drift",
+        "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
+    let negotiated = AttentionCompatibility { custom_forms: true, model_drift: true };
+    let mut current = vec![row.clone()];
+    client_attention_compatibility(&mut current, negotiated);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0], row);
+    // A client with custom forms but without the model-drift feature (an existing TypeScript
+    // client) and a client with neither both read a request without actions.
+    for custom_forms in [true, false] {
+        let mut older = vec![row.clone()];
+        client_attention_compatibility(&mut older, AttentionCompatibility { custom_forms, model_drift: false });
+        assert_eq!(older[0]["attention_kind"], "agent-request", "custom_forms={custom_forms}");
+        assert_eq!(older[0]["actions"], json!([]));
+        assert_eq!(older[0]["title"], "2 agents declared a run b since 09:14Z (oldest agent/example.a)");
+    }
+}
+
+#[test]
+fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"live-model\" state=\"ready\" {\n  goal \"Exercise live model projection.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "live-model-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "live-model".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "live-model-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    let append = |kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "one"}));
+    let card = || {
+        checked_agent_cache(&store, true, store.index().unwrap())
+            .into_iter()
+            .find(|agent| agent["id"] == subject.as_str())
+            .unwrap()
+    };
+    // No usage yet: null, and the typed client still decodes.
+    assert!(card()["live_model"].is_null());
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert!(typed.live_model.is_none());
+    // Usage on another incarnation does not leak into this card.
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
+    assert!(card()["live_model"].is_null());
+    // The session's reading on this incarnation reports live, and survives a typed decode.
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // Response spend on another model (a subagent's, rolled up on the parent) is not what
+    // the seat runs on: the card keeps the session's model.
+    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "claude-haiku-4-5", "total_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
+    // A stale incarnation keeps its own live model after the seat moves on.
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));
+    assert!(card()["live_model"].is_null());
+}
+
+#[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
     // This unpolled seat is assessed during the daemon's startup grace.
     let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
@@ -11440,6 +12859,13 @@ version 2
     assert_ne!(revised["mission_run"]["revision"], run.revision);
     assert_eq!(revised["mission_run"]["root_revision"], run.root_revision);
     assert_eq!(revised["mission_run"]["steps"][0]["status"], "pending");
+    assert_eq!(revised["mission_run"]["subject"], run.subject);
+    assert_eq!(revised["mission_run"]["phase"], "normal");
+    assert!(revised["mission_run"].get("superseded_by").is_none_or(Value::is_null));
+    assert_eq!(
+        state.store.run_generations(&run.subject).unwrap().first().unwrap().revision,
+        run.revision
+    );
     let published = state.store.mission_spec("revision", None).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:revision");
@@ -11495,6 +12921,107 @@ mission "revision" state="ready" {
         "{error}"
     );
     assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn mission_run_json_carries_execution_projection_without_inventing_unclaimed_work() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "execution-read" state="ready" {
+  goal "Read execution evidence."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "execution-read-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "execution-read".into(), revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "execution-read-run".into(),
+    }).unwrap();
+    let Json(detail) = super::runs::get_mission_run(
+        State(state), AxumPath(run.id),
+    ).await.unwrap();
+    assert_eq!(detail.steps.len(), 1);
+    let value = serde_json::to_value(detail).unwrap();
+    assert_eq!(value["steps"][0]["executions"], json!([]));
+    // The CLI's native typed read must retain this detail-only field.
+    let decoded: MissionRunView = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.steps[0].executions.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn mission_run_retry_preserves_typed_refusals_and_returns_the_new_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "native-retry" state="ready" {
+  goal "Retry a failed run."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "native-retry-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "native-retry".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "native-retry-source".into(),
+    }).unwrap();
+    let path = format!("/v1/mission-runs/{}/retry", urlencoding::encode(&run.subject));
+    let request = json!({
+        "actor":"person/operator", "reason":"the failure is resolved",
+        "idempotency_key":"native-retry-new"
+    });
+    let before = state.store.index().unwrap();
+    let (status, refused) = json_request(router(state.clone()), &path, request.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "mission-run-not-retryable");
+    assert_eq!(state.store.index().unwrap(), before);
+
+    state.store.set_mission_run_state(&run.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    let (status, retried) = json_request(router(state.clone()), &path, request).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_ne!(retried["subject"], run.subject);
+    assert_eq!(retried["retry_of"], run.subject);
+    assert_eq!(retried["workspace"], run.workspace);
+    assert_eq!(retried["revision"], run.revision);
+    assert_eq!(retried["requester"], "person/operator");
+    let new_subject = retried["subject"].as_str().unwrap();
+    let stored = state.store.mission_run(new_subject).unwrap().unwrap();
+    assert_eq!(stored.subject, new_subject);
+    assert_eq!(stored.retry_of.as_deref(), Some(run.subject.as_str()));
+}
+
+#[tokio::test]
+async fn mission_run_retry_binds_the_actor_without_special_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (actor, code) in [
+        ("person/operator", "foreign-agent-actor"),
+        ("agent/other", "foreign-agent-actor"),
+        ("agent/helper", "missing-mission-run"),
+    ] {
+        let before = state.store.index().unwrap();
+        let response = app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mission-runs/absent/retry")
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/helper".into()))
+                .body(Body::from(json!({
+                    "actor":actor, "idempotency_key":"native-retry-authority"
+                }).to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let refused: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refused["code"], code, "{refused}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
 }
 
 #[tokio::test]
@@ -11660,6 +13187,7 @@ version 2
         serde_json::to_value(MissionRetireRequest {
             actor,
             idempotency_key: key.into(),
+            force_reason: None,
         })
         .unwrap()
     };
@@ -11928,6 +13456,7 @@ agent "example/other" {
         serde_json::to_value(MissionRetireRequest {
             actor: agent.into(),
             idempotency_key: "free-retire".into(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -11938,6 +13467,15 @@ agent "example/other" {
 
 #[tokio::test]
 async fn a_claimed_step_publishes_one_attempt_bound_ready_mission() {
+    claimed_step_mission_output(false).await;
+}
+
+#[tokio::test]
+async fn a_claimed_step_publishes_a_run_scoped_ready_mission() {
+    claimed_step_mission_output(true).await;
+}
+
+async fn claimed_step_mission_output(per_run: bool) {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let source = r#"
@@ -11957,13 +13495,18 @@ version 2
   }
 
 "#;
-    let intent = parse_intent(source, "node").unwrap();
+    let source = if per_run {
+        source.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+    } else {
+        source.to_owned()
+    };
+    let intent = parse_intent(&source, "node").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
             crate::model::IntentInput {
-                kdl: source.into(),
+                kdl: source.clone(),
                 source_name: None,
             },
         )
@@ -12002,13 +13545,15 @@ version 2
   }
 
 "#;
+    let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+    let produced = produced.replace("project/work", &mission_id);
     let app = router(state.clone());
     let (status, output) = json_request(
         app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
             actor: actor.clone(),
@@ -12060,14 +13605,14 @@ version 2
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{output}");
     assert_eq!(output["code"], "wrong-mission-output");
     let (status, output) = json_request(
-        app,
+        app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
-            actor,
+            actor: actor.clone(),
             incarnation: Some("test".into()),
             idempotency_key: "publish-produced-work".into(),
         })
@@ -12075,13 +13620,13 @@ version 2
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{output}");
-    assert_eq!(output["mission"], "mission/project/work");
+    assert_eq!(output["mission"], format!("mission/{mission_id}"));
     let revision = output["revision"].as_str().unwrap();
     assert_eq!(revision.len(), 64);
     assert!(
         state
             .store
-            .mission_spec("project/work", Some(revision))
+            .mission_spec(&mission_id, Some(revision))
             .unwrap()
             .is_some()
     );
@@ -12092,9 +13637,21 @@ version 2
         .expect("attempt-bound mission output");
     assert_eq!(bound.revision, revision);
     assert_eq!(bound.claim_id, output["claim_id"]);
-    let published = state.store.mission_spec("project/work", Some(revision)).unwrap().unwrap();
+    let published = state.store.mission_spec(&mission_id, Some(revision)).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:output");
+    let (status, replay) = json_request(
+        app,
+        &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
+        serde_json::to_value(MissionProductionRequest {
+            intent: crate::model::IntentInput { kdl: produced, source_name: Some("generated.kdl".into()) },
+            actor,
+            incarnation: Some("test".into()),
+            idempotency_key: "publish-produced-work".into(),
+        }).unwrap(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, output);
 }
 
 #[test]
@@ -12118,14 +13675,15 @@ fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
         .apply(&intent, &planned.subject_tokens, "seat-retry")
         .unwrap();
     let request = || MessageSendRequest {
-        idempotency_key: "silent-retry".into(),
-        from: "agent/example/writer".into(),
-        to: "agent/example/reader".into(),
-        content: "An update".into(),
-        title: None,
-        in_reply_to: None,
-        tags: vec![crate::silent::SILENT_TAG.into()],
-        attachments: vec![],
+    owner: None,
+    idempotency_key: "silent-retry".into(),
+    from: "agent/example/writer".into(),
+    to: "agent/example/reader".into(),
+    content: "An update".into(),
+    title: None,
+    in_reply_to: None,
+    tags: vec![crate::silent::SILENT_TAG.into()],
+    attachments: vec![],
     };
     let first = accept_message(&state, request(), None, None).unwrap().0;
     assert!(crate::silent::is_held(&first));
@@ -12214,6 +13772,560 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
         descending["claims"][0]["subject"].as_str(),
         Some("host/two")
     );
+}
+
+#[tokio::test]
+async fn claims_endpoint_filters_by_kind_and_subject_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (subject, kind) in [
+        ("custom/acme/change/1", "custom.acme.change"),
+        ("custom/acme/changes/x", "custom.acme.change"),
+        ("custom/acme/change/2", "custom.acme.note"),
+    ] {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let app = router(state);
+    let subjects = |page: &Value| {
+        page["claims"].as_array().unwrap().iter()
+            .map(|claim| claim["subject"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (query, expected) in [
+        ("kind=custom.acme.change", vec!["custom/acme/change/1", "custom/acme/changes/x"]),
+        ("subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1", "custom/acme/change/2"]),
+        ("kind=custom.acme.change&subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1"]),
+    ] {
+        let (status, page) = get_request(app.clone(), &format!("/v1/claims?{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {page}");
+        assert_eq!(subjects(&page), expected, "{query}");
+    }
+    let (status, refused) = get_request(
+        app,
+        "/v1/claims?subject=custom%2Facme%2Fchange%2F1&subject_prefix=custom%2Facme%2F",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "invalid-claims-query");
+}
+
+async fn writer_binding_request(
+    app: Router,
+    path: &str,
+    bound: Option<&str>,
+    credential: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(bound) = bound {
+        request = request.extension(BoundAgent(bound.into()));
+    }
+    if let Some(credential) = credential {
+        request = request.header("authorization", format!("Bearer {credential}"));
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+fn writer_binding_pairing(state: &AppState, credential: &str, scopes: &[&str]) {
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject: "custom/client/writer-binding".into(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({
+            "credential_hash": client_v0::credential_digest(credential),
+            "session_actor": "person/example/session/phone",
+            "person_id": "person/example",
+            "device_id": "device/writer-binding",
+            "scopes": scopes,
+            "expires_at_unix_ms": u64::MAX,
+            "pairing_operation_version": 1
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_local_claims_preserve_optional_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (name, actor) in [("person", Some("person/example")), ("missing", None)] {
+        let subject = format!("custom/example/local-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = json!(actor);
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), actor);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_bound_claim_actor_matches_and_omissions_are_attributed() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (name, actor) in [
+        ("explicit", Some(json!("agent/own"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/writer-{name}");
+        let mut body = json!({
+            "subject": subject, "kind": "custom.example.recorded", "fields": {}
+        });
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"), "{name}");
+    }
+    for actor in ["agent/other", "person/example"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None,
+            json!({"subject":"custom/example/other-writer", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for sender in ["agent/other", "person/example"] {
+        for path in ["/v1/claims", "/v1/messages"] {
+            let before = state.store.index().unwrap();
+            let body = if path == "/v1/claims" {
+                json!({"subject":"message/writer-binding-other", "kind":"message.sent",
+                    "actor":"agent/own", "fields":{
+                        "from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"
+                    }})
+            } else {
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":"writer-binding-other"})
+            };
+            let (status, refusal) = writer_binding_request(
+                app.clone(), path, Some("agent/own"), None, body,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    for path in ["/v1/claims", "/v1/messages"] {
+        let body = if path == "/v1/claims" {
+            json!({"subject":"message/writer-binding-own", "kind":"message.sent",
+                "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
+        } else {
+            json!({"from":"agent/own", "to":"agent/receiver", "content":"hello",
+                "idempotency_key":"writer-binding-own"})
+        };
+        let (status, receipt) = writer_binding_request(
+            app.clone(), path, Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {receipt}");
+        let subject = receipt["subject"].as_str().unwrap();
+        let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"));
+        assert_eq!(claims[0].body["fields"]["from"], "agent/own");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_read_only_pairing_reads_and_refuses_generic_posts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-read-only";
+    writer_binding_pairing(&state, credential, &["read.projections"]);
+    let app = router(state.clone());
+    let response = app.clone().oneshot(Request::builder()
+        .uri("/v1/claims")
+        .header("authorization", format!("Bearer {credential}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (path, body) in [
+        ("/v1/claims", json!({"subject":"custom/example/paired-read", "kind":"custom.example.recorded",
+            "actor":"person/example", "fields":{}})),
+        ("/v1/claims", json!({"subject":"message/paired-read", "kind":"message.sent",
+            "actor":"person/example", "fields":{
+                "from":"person/example", "to":"agent/receiver", "content":"hello", "status":"sent"}})),
+        ("/v1/messages", json!({"from":"person/example", "to":"agent/receiver",
+            "content":"hello", "idempotency_key":"paired-read"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-control";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work", "control.messages"]);
+    let app = router(state.clone());
+    for (name, actor) in [
+        ("explicit", Some(json!("person/example"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/paired-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+    }
+    for actor in ["person/example/session/phone", "person/other", "agent/other"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":"custom/example/paired-other", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    for sender in ["person/example", "person/other", "person/example/session/phone"] {
+        let before = state.store.index().unwrap();
+        let subject = "message/writer-binding-paired";
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":subject, "kind":"message.sent", "actor":"person/example",
+                "fields":{"from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"}}),
+        ).await;
+        if sender == "person/example" {
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+            assert_eq!(claims[0].body["fields"]["from"], sender);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(receipt["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-reserved-records";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    let app = router(state.clone());
+    for bound in [false, true] {
+        let actor = if bound { "agent/own" } else { "person/example" };
+        for (subject, kind) in [
+            ("custom/client/writer-binding-reserved", "custom.client.pairing-completed"),
+            ("custom/client/pairing-writer-binding", "custom.example.recorded"),
+        ] {
+            let before = state.store.index().unwrap();
+            let (status, response) = writer_binding_request(
+                app.clone(), "/v1/claims", bound.then_some(actor),
+                (!bound).then_some(credential),
+                json!({"subject":subject, "kind":kind, "actor":actor,
+                    "fields":{"credential_hash":client_v0::credential_digest("reserved-record"),
+                        "session_actor":"person/example/session/other",
+                        "person_id":"person/example", "device_id":"device/other",
+                        "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
+                        "pairing_operation_version":1}}),
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bound}/{kind}: {response}");
+            assert_eq!(response["code"], "claim-write-forbidden");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_legacy_attention_operations_require_attention_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "scope-api-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let (status, ask) = json_request(app.clone(), "/v1/work/ask", json!({
+        "person":"person/example", "title":"Choose a date", "reason":"A date",
+        "actor":actor, "new_run":"scope-date", "idempotency_key":"scope-ask"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{ask}");
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = state.store.claims_for(subject, Some("work.person-asked")).unwrap()[0].id.clone();
+    let credential = "writer-binding-work-only";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    for (path, body) in [
+        ("/v1/work/done", json!({"subject":subject, "actor":"person/example",
+            "summary":"Friday", "episode":episode, "evidence":[], "idempotency_key":"scope-done"})),
+        ("/v1/custom/reply", json!({"subject":"custom/example/reply",
+            "registration":"custom/example/registration", "revision":"revision/one",
+            "episode":"episode/one", "fields":{}, "actor":"person/example",
+            "idempotency_key":"scope-reply"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, response) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let projection = state.store.step_run(subject).unwrap().unwrap();
+    assert!(projection.person_answers.is_empty());
+}
+
+#[tokio::test]
+async fn writer_binding_native_sessions_and_internal_routes_retain_their_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let peer = NativeDeliveryPeer {
+        agent: "agent/native".into(), transport: "claude-hook", pid: 37, archives_inbox: false,
+    };
+    for actor in ["agent/native", "agent/other", "person/example"] {
+        let request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(peer.clone())
+            .extension(client_v0::ClientSession::for_tests(actor, actor, "unix"))
+            .body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        let result = super::write_principal::bind_request(&state, request).await;
+        assert_eq!(result.is_ok(), actor == "agent/native", "{actor}");
+    }
+    let app = router(state.clone()).layer(axum::Extension(peer.clone()));
+    let before = state.store.index().unwrap();
+    let (status, response) = writer_binding_request(
+        app, "/v1/agents/restart", None, None,
+        json!({"subject":"agent/native","actor":"agent/other","idempotency_key":"native-restart"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+    for path in ["/v1/internal/replication/receive", "/v1/repair/apply"] {
+        for native in [false, true] {
+            let mut request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json");
+            if native { request = request.extension(peer.clone()); }
+            let result = super::write_principal::bind_request(
+                &state, request.body(Body::from("{}")).unwrap(),
+            ).await;
+            assert_eq!(result.is_ok(), !native, "{path}/{native}");
+        }
+    }
+    for native in [false, true] {
+        let mut request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(HarnessAncestry::Unavailable);
+        if native { request = request.extension(peer.clone()); }
+        let request = request.body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        assert!(super::write_principal::bind_request(&state, request).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_dedicated_optional_fields_use_the_connected_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, key) in [
+        ("/v1/launches", "requester"),
+        ("/v1/intent/apply", "actor"),
+        ("/v1/reviews/mission/example", "actor"),
+        ("/v1/messages/example/claims", "actor"),
+        ("/v1/delivery/hold", "actor"),
+    ] {
+        for body in [json!({}), json!({(key): null})] {
+            let request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap();
+            let bound = super::write_principal::bind_request(&state, request).await.unwrap();
+            let bytes = to_bytes(bound.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value[key], "agent/own", "{path}: {value}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        let app = router(state.clone()).layer(axum::Extension(NativeDeliveryPeer {
+            agent: "agent/native".into(), transport, pid: 37, archives_inbox: false,
+        }));
+        for (kind, subject, fields) in [
+            ("custom.agent.initial-message", format!("custom/agent/initial-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","from":"person/example"})),
+            ("custom.agent.first-native-launch", format!("custom/agent/seed-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","outcome":"fresh"})),
+            ("subagent.appeared", "agent/native".into(),
+                json!({"subagent_id":format!("child-{transport}"),"driver":transport,
+                    "incarnation_id":"one","lease_expires_at_unix_ms":u64::MAX})),
+            ("runtime.observed", "agent/native".into(), json!({"status":"running"})),
+        ] {
+            let (status, receipt) = writer_binding_request(app.clone(), "/v1/claims", None, None,
+                json!({"subject":subject,"kind":kind,"fields":fields})).await;
+            assert_eq!(status, StatusCode::OK, "{transport}/{kind}: {receipt}");
+            assert_eq!(receipt["actor"], "agent/native");
+            if kind == "custom.agent.initial-message" {
+                assert_eq!(receipt["body"]["fields"]["from"], "person/example");
+            }
+        }
+        let (status, receipt) = writer_binding_request(app, "/v1/claims", None, None,
+            json!({"subject":"custom/example/native-other","kind":"custom.example.recorded",
+                "actor":"person/example","fields":{}})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{receipt}");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_json_media_types_and_missing_message_sender() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (media_type, sender, expected) in [
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
+    ] {
+        let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
+        if let Some(sender) = sender { fields["from"] = json!(sender); }
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/claims")
+            .header("content-type", media_type)
+            .extension(BoundAgent("agent/own".into()))
+            .body(Body::from(json!({"subject":"message/writer-binding-media",
+                "kind":"message.sent","fields":fields}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+    let claim = state.store.claims_for("message/writer-binding-media", Some("message.sent")).unwrap();
+    assert_eq!(claim[0].actor.as_deref(), Some("agent/own"));
+    assert_eq!(claim[0].body["fields"]["from"], "agent/own");
+}
+
+#[tokio::test]
+async fn ordinary_claim_writes_cannot_create_pairing_records() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for kind in [
+        "custom.client.pairing-begun",
+        "custom.client.pairing-completed",
+        "custom.client.pairing-revoked",
+        "custom.client.pairing.device-grant",
+        "custom.client.pairing-future",
+    ] {
+        for subject in ["custom/client/example", "custom/client/pairing-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"pairing_operation_version": 1, "person_id": "person/alex"}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    for subject in ["custom/client/pairing-example", "custom/client/pairing.browser"] {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": subject, "kind": "custom.example.note", "fields": {}
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{subject}: {body}");
+        assert_eq!(body["code"], "claim-write-forbidden");
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject":"custom/client/operation-example", "kind":"client.operation-authorized",
+        "actor":"person/alex", "fields":{"record_id":"example","record_hash":"example"}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
+    assert!(state.store.claims_for_kind_at(
+        "custom.client.pairing-completed", None, true, 10,
+    ).unwrap().claims.is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_claim_writes_cannot_create_terminal_records() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(state(root.path()));
+    for kind in [
+        "custom.client.terminal-attached",
+        "custom.client.terminal-consumed",
+        "custom.client.terminal-detached",
+    ] {
+        for subject in ["custom/client/example", "custom/client/terminal-attachment-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"terminal_operation_version": 1}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject": "custom/client/terminal-attachment-example", "kind": "custom.example.note",
+        "fields": {}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
 }
 
 #[tokio::test]
@@ -12514,6 +14626,26 @@ version 2
         })
         .unwrap();
     let store = state.store.clone();
+    // Attention links use the full step-run identity, not the review's display path.
+    let resources = client_attention_resources(&store, Some("person/alex"), false).unwrap();
+    let gate = resources
+        .iter()
+        .find(|item| item["source_id"] == step.subject)
+        .unwrap();
+    let step_id = gate["step_run_id"].as_str().unwrap();
+    fractal_schema::registry().validate_subject(step_id).unwrap();
+    assert!(step_id.starts_with("step-run/"));
+    assert_eq!(step_id, step.subject);
+    assert_eq!(gate["step_run_id"], gate["source_id"]);
+    let items = store.mission_run_attention_items(Some("person/alex")).unwrap();
+    let item = items.iter().find(|item| item.subject == step.subject).unwrap();
+    let projected = crate::store::attention_ivm::resource(item).unwrap();
+    assert_eq!(projected["step_run_id"], gate["step_run_id"]);
+    let mission_gate = resources
+        .iter()
+        .find(|item| item["source_id"] == run.subject)
+        .unwrap();
+    assert!(mission_gate.get("step_run_id").is_none());
     let app = router(state);
     let (status, listed) = get_request(app.clone(), "/v1/reviews").await;
     assert_eq!(status, StatusCode::OK, "{listed}");
@@ -13485,6 +15617,180 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
 }
 
 #[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
+#[test]
+fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equivalence() {
+    for hide_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let first = "agent/collision/a";
+        let second = "agent/collision/a:b";
+        for (subject, incarnation) in [(first, "b:c"), (second, "c")] {
+            roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":state.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let id = managed_session_id(first, "b:c");
+        assert_eq!(id, managed_session_id(second, "c"));
+        if hide_first {
+            // A retained reserved fact hides the subject without changing its routing ID.
+            state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hc075bae4b26b owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
+                        '{\"fields\":{}}','[]',accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 LIMIT 1", [first],
+            ).unwrap();
+        }
+        state.store.read_snapshot(|cut| {
+            assert_eq!(state.store.generic_status_subject_visible_at(first, cut)?, !hide_first);
+            let generic = managed_session_owner_at(&state.store, cut, &id)?;
+            assert_eq!(generic.as_ref().unwrap().0, if hide_first { second } else { first });
+            for hint in [first, second, "agent/missing"] {
+                assert_eq!(
+                    managed_session_owner_for_timeline_at(&state.store, cut, &id, hint)?,
+                    generic,
+                    "hide_first={hide_first}, hint={hint}",
+                );
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn managed_owner_map_is_built_once_for_many_timeline_pages_in_one_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subjects: Vec<_> = (0..4).map(|i| format!("agent/owner-memo/worker-{i}")).collect();
+    for subject in &subjects {
+        roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":"current",
+        }));
+    }
+    let session = client_v0::ClientSession::for_tests_scoped(
+        "person/alex", "person/alex", &["read.projections"],
+    );
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    state.store.read_snapshot(|_| {
+        let snapshot = new_client_snapshot(&state);
+        for subject in &subjects {
+            let id = managed_session_id(subject, "current");
+            assert_eq!(managed_session_owner_for_timeline_at(
+                &state.store, snapshot.store_index, &id, subject,
+            )?.unwrap().0, *subject);
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 0);
+        // First pages perform authorization too: repeating them must not fold the fleet.
+        for _ in 0..5 {
+            for subject in &subjects {
+                let id = managed_session_id(subject, "current");
+                let Json(page) = client_v0::timeline_value(
+                    &state, &snapshot, &session, &id,
+                    &ClientListQuery { limit: Some(1), ..Default::default() },
+                ).unwrap();
+                assert!(page["items"].is_array(), "{page}");
+                assert_eq!(managed_session_owner_at(&state.store, snapshot.store_index, &id)?.unwrap().0, *subject);
+                assert_eq!(managed_session_owner_for_timeline_at(
+                    &state.store, snapshot.store_index, &id, subject,
+                )?, managed_session_owner_at(&state.store, snapshot.store_index, &id)?);
+            }
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let subject = "agent/owner-memo/repair";
+    for incarnation in ["before", "after"] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":incarnation,
+        }));
+    }
+    let through = store.index().unwrap();
+    let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+        .subjects.remove(0).actual_claim.unwrap();
+    let after = managed_session_id(subject, "after");
+    let before = managed_session_id(subject, "before");
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_some());
+        assert!(managed_session_owner_at(store, through, &before)?.is_none());
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-he543d968a9fa owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+    ).unwrap();
+    smallclaims::Runtime::forget_views(store.fractal.as_ref());
+    assert_eq!(store.index().unwrap(), through);
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_none());
+        // The inventory's old session must be re-resolved after repair on this new pin.
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &before, subject)?,
+            managed_session_owner_at(store, through, &before)?);
+        assert_eq!(managed_session_owner_at(store, through, &before)?.unwrap().1.as_deref(), Some("before"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 2);
+}
+
+
+#[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
     let root = tempfile::tempdir().unwrap();
     let owner = state(root.path());
@@ -13561,7 +15867,7 @@ async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity()
             sha: format!("{:040x}", 1), sequence: 1,
         },
         expected_set: "absent".into(), rollout: None, adopt: Default::default(),
-        allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
     };
     let preview = state.store.owned_set_preview(&intent, &options).unwrap();
     assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
@@ -13955,7 +16261,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
     state.store.apply(&intent, &preview.subject_tokens, "signature-resume-owner").unwrap();
     let fault_agent = state.store.fleet_fault_agent().unwrap().unwrap();
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let fault = || state.store.signature_migration().unwrap().fault;
 
     state.store.fail_signature_migration("fixture stopped page").unwrap();
@@ -13991,7 +16297,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
 async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let dismiss = |bound: Option<&'static str>, actor: &'static str| {
         let mut request = Request::builder()
             .method("POST")
@@ -14048,7 +16354,7 @@ async fn checkpoint_actor_request(
 async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
         for actor in ["person/operator", "agent/other"] {
             let before = state.store.index().unwrap();
@@ -14085,7 +16391,7 @@ async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
     state.store.trim_locally(true).unwrap();
     *state.store.extension::<crate::store::answers_check::TrimSettings>()
         .notify.lock().unwrap() = Some("agent/helper".into());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let (status, resumed) = checkpoint_actor_request(
         app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
     ).await;
@@ -14556,4 +16862,521 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
         "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
     })).await;
     assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
+
+#[test]
+fn population_repository_observations_require_current_host_and_workspace() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
+    let subject = "agent/example/workspace";
+    for (host, workspace, repository, expected) in [
+        ("node", "/tmp", Some("example/current"), Some(json!("example/current"))),
+        ("remote", "/tmp", Some("example/wrong-host"), None),
+        ("node", "/previous", Some("example/wrong-workspace"), None),
+        ("node", "/tmp", None, Some(Value::Null)),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("host".into(), json!(host)),
+            ("workspace".into(), json!(workspace)),
+        ]);
+        if let Some(repository) = repository {
+            fields.insert("repository".into(), json!(repository));
+        }
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "workspace.observed".into(), actor: None,
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
+        let card = rows.iter().find(|card| card["id"] == subject).unwrap();
+        assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
+    }
+    // Reusing a presented card must erase evidence that no longer matches its location.
+    let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    rows[0]["workspace"] = json!("/moved");
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert!(rows[0].get("observed_repository").is_none());
+}
+
+#[test]
+fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
+        let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
+        let mut source = String::from("version 2\n");
+        for i in 0..count {
+            source.push_str(&format!(
+                "agent \"example/seat-{i}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
+            ));
+        }
+        store.apply_internal(&parse_intent(&source, "node").unwrap(), "workspace-query-growth").unwrap();
+        for i in 0..count {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/example/seat-{i}"), kind: "workspace.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("host".into(), json!("node")),
+                    ("workspace".into(), json!("/tmp")),
+                    ("repository".into(), json!("example/current")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        let rows = client_agent_resources(&store, false, "warm", index).unwrap();
+        assert_eq!(rows.len(), count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let rows = client_agent_resources(&store, false, "again", index).unwrap();
+        let work = scope.finish();
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
+    }
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
+}
+
+#[tokio::test]
+async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_deletion() {
+    use fractal_store::invocation_artifacts;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.owning_person = Some("person/owner".into());
+    let invocation = "invocation/artifact-test";
+    let agent = "agent/example/worker";
+    state.store.append_claim(&ClaimInput { subject:agent.into(),kind:"harness.invocation".into(),
+        actor:None,fields:serde_json::from_value(json!({"invocation_id":invocation,
+            "operation_id":"artifact-test","phase":"admitted","agent":agent})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None }).unwrap();
+    let mut artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
+    artifact.message_id = Some("message/a".into());
+    invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+    let query = || Query(serde_json::from_value(json!({"invocation":invocation,"kind":"input"})).unwrap());
+    let stranger = client_v0::ClientSession::local(Some("person/other")).unwrap();
+    let denied = super::agent_invocations::artifact(State(state.clone()),Extension(stranger),
+        AxumPath(artifact.sha256.clone()),query(),None,None,None).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let owner = client_v0::ClientSession::local(Some("person/owner")).unwrap();
+    let allowed = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap();
+    assert_eq!(allowed.status(),StatusCode::OK);
+    drop(super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap());
+    let deleted = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    assert_eq!(deleted.status,StatusCode::GONE);
+
+    let mut second = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
+    second.message_id = Some("message/b".into());
+    assert_eq!(second.sha256, artifact.sha256);
+    invocation_artifacts::record(&state.store, agent, &second).unwrap();
+    let recaptured = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(second.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    assert_eq!(recaptured.status, StatusCode::GONE);
+
+    // Deterministically model a capture committing a stale retained claim after deletion.
+    state.store.append_claim(&ClaimInput {
+        subject:agent.into(),kind:"harness.invocation-artifact".into(),actor:None,
+        fields:serde_json::from_value(json!({"invocation_id":invocation,"kind":"input",
+            "status":"retained","artifact":second})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let raced = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(second.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    assert_eq!(raced.status, StatusCode::GONE);
+    invocation_artifacts::delete(root.path(), &state.store, agent, &second, now_ms()).unwrap();
+    let repeated = super::agent_invocations::artifact(State(state),Extension(owner),
+        AxumPath(second.sha256),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    assert_eq!(repeated.status, StatusCode::GONE);
+}
+
+#[cfg(target_os = "linux")]
+fn invocation_input_session(state: &AppState, agent: &str, incarnation: &str) -> client_v0::ClientSession {
+    use std::os::fd::FromRawFd as _;
+    let name = agent.strip_prefix("agent/").unwrap();
+    state.store.apply_internal(&parse_intent(&format!(
+        "version 2\nagent \"{name}\" {{ workspace \"/tmp\"; harness \"codex\" {{}} }}"
+    ), "node").unwrap(), "input-process-fixture").unwrap();
+    let pid = std::process::id();
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "incarnation_id":incarnation})),
+        ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":incarnation,
+            "harness":"codex", "runtime_pid":pid,
+            "runtime_pid_start_token":fractal_runtime::process_start_token(pid).unwrap().to_string()})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    assert!(fd >= 0);
+    let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) };
+    let mut session = client_v0::ClientSession::local(Some(agent)).unwrap();
+    session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(pid, descriptor).unwrap());
+    session
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn invocation_input_rejects_an_old_process_claiming_a_new_incarnation() {
+    use super::agent_invocations::{InputRequest, input};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input-restarted";
+    let session = invocation_input_session(&state, agent, "incarnation-a");
+    let invocation = "invocation/restarted-input";
+    for (subject, kind, fields) in [
+        (agent, "harness.invocation", json!({"invocation_id":invocation, "operation_id":"restarted-input",
+            "phase":"started", "agent":agent, "incarnation":"incarnation-b", "event_key":"message/restarted"})),
+        ("message/restarted", "message.sent", json!({"from":"person/owner", "to":agent,
+            "content":"wake", "status":"sent", "tags":[format!("fractal-invocation:{invocation}")]})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:subject.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let request = || InputRequest { agent:agent.into(), incarnation:"incarnation-b".into(),
+        invocation_id:invocation.into(), message_id:"message/restarted".into(), text:"forged envelope".into() };
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        Some(Extension(session.clone())), None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+    // Even a current projection naming B cannot make A its process: the generation
+    // witness recorded for B must match, rather than trusting an incarnation label.
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "incarnation_id":"incarnation-b"})),
+        ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"incarnation-b",
+            "harness":"codex", "runtime_pid":std::process::id(),
+            "runtime_pid_start_token":fractal_runtime::process_start_token(std::process::id()).unwrap().wrapping_add(1).to_string()})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        Some(Extension(session)), None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn invocation_input_requires_authenticated_exact_agent_incarnation_and_message() {
+    use super::agent_invocations::{InputRequest, input};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input";
+    let session = invocation_input_session(&state, agent, "exact-incarnation");
+    let invocation = "invocation/input-test";
+    state.store.append_claim(&ClaimInput { subject: agent.into(), kind: "harness.invocation".into(),
+        actor: None, fields: serde_json::from_value(json!({
+            "invocation_id":invocation, "operation_id":"input-test", "phase":"started",
+            "agent":agent, "incarnation":"exact-incarnation", "event_key":"message/exact"
+        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    state.store.append_claim(&ClaimInput { subject:"message/exact".into(), kind:"message.sent".into(),
+        actor:None, fields:serde_json::from_value(json!({"from":"person/owner","to":agent,
+            "content":"wake", "status":"sent", "tags":[format!("fractal-invocation:{invocation}")]})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    let request = || InputRequest { agent:agent.into(), incarnation:"exact-incarnation".into(),
+        invocation_id:invocation.into(), message_id:"message/exact".into(),
+        text:"native pi/omp envelope\ntoken=fixture-secret".into() };
+    let denied = input(State(state.clone()), None, None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Agent("agent/other".into())),
+        None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Run(agent.into())),
+        None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    for mismatch in ["agent", "incarnation", "message", "invocation"] {
+        let mut request = request();
+        match mismatch {
+            "agent" => request.agent = "agent/other".into(),
+            "incarnation" => request.incarnation = "candidate-incarnation".into(),
+            "message" => request.message_id = "message/unrelated".into(),
+            _ => request.invocation_id = "invocation/unrelated".into(),
+        }
+        let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+            None, Some(Extension(session.clone())), None, Json(request)).await.unwrap_err();
+        assert!(matches!(denied.status, StatusCode::FORBIDDEN | StatusCode::CONFLICT));
+    }
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+    let Json(first) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(request())).await.unwrap();
+    let Json(retry) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(request())).await.unwrap();
+    assert_eq!(first, retry);
+    let artifact: fractal_store::invocation_artifacts::InvocationArtifact =
+        serde_json::from_value(first["artifact"].clone()).unwrap();
+    assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+    assert_eq!(artifact.message_id.as_deref(), Some("message/exact"));
+    let retained = fractal_store::invocation_artifacts::read(root.path(), &artifact, now_ms())
+        .unwrap().unwrap();
+    assert_eq!(String::from_utf8(retained).unwrap(), "native pi/omp envelope\ntoken=[REDACTED]");
+    let mut changed = request();
+    changed.text = "different envelope".into();
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(changed)).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::CONFLICT);
+    assert_eq!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().len(), 1);
+    let body = json!({"agent":agent, "incarnation":"exact-incarnation",
+        "invocation_id":invocation, "message_id":"message/exact",
+        "text":"native pi/omp envelope\ntoken=fixture-secret"});
+    for (writer, expected) in [(agent, StatusCode::OK), ("agent/other", StatusCode::FORBIDDEN)] {
+        let app = router(state.clone()).layer(Extension(NativeDeliveryPeer {
+            agent:writer.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+        })).layer(Extension(LocalPeer { pid:std::process::id(), ancestor:Some(writer.into()),
+            peer_process:session.peer_process.clone() }));
+        let (status, response) = json_request(app, "/v1/invocation-input", body.clone()).await;
+        assert_eq!(status, expected, "{response}");
+        assert!(!response.to_string().contains("fixture-secret"));
+    }
+}
+
+#[tokio::test]
+async fn invocation_artifact_router_rejects_forged_unix_identity_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.owning_person = Some("person/owner".into());
+    let agent = "agent/example/private-artifact";
+    let invocation = "invocation/private-router";
+    state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+        actor:None, fields:serde_json::from_value(json!({"agent":agent,
+            "invocation_id":invocation,"operation_id":"private-router","phase":"admitted"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    let artifact = fractal_store::invocation_artifacts::capture_input(root.path(), invocation,
+        "private-native-input", now_ms()).unwrap();
+    fractal_store::invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let uri = format!("/v1/client/invocation-artifacts/{}?invocation={}&kind=input",
+        artifact.sha256, urlencoding::encode(invocation));
+    for claimed in [agent, "person/owner"] {
+        for caller in ["foreign-agent", "native-peer", "run", "unverifiable", "missing-ancestry"] {
+            let request = Request::builder().method("GET").uri(&uri)
+                .header(client_v0::LOCAL_PERSON_HEADER, claimed);
+            let request = match caller {
+                "foreign-agent" => request.extension(BoundAgent("agent/other".into())),
+                "native-peer" => request.extension(NativeDeliveryPeer {
+                    agent:"agent/other".into(), transport:"omp-channel", pid:37, archives_inbox:false,
+                }),
+                "run" => request.extension(RunCredential::new(secret.clone())),
+                "unverifiable" => request.extension(HarnessAncestry::Unavailable),
+                _ => request,
+            };
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert!(!response.status().is_success(), "{caller} claimed {claimed}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-native-input"));
+        }
+    }
+    // Real operator and actual owning-agent reads still pass through the same middleware.
+    for caller in ["owner", "own-agent", "own-peer"] {
+        let request = Request::builder().method("GET").uri(&uri)
+            .header(client_v0::LOCAL_PERSON_HEADER, if caller == "owner" { "person/owner" } else { agent });
+        let request = match caller {
+            "owner" => request.extension(HarnessAncestry::Person),
+            "own-agent" => request.extension(BoundAgent(agent.into())),
+            _ => request.extension(NativeDeliveryPeer {
+                agent:agent.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+            }),
+        };
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{caller}");
+        assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"private-native-input");
+    }
+}
+
+#[tokio::test]
+async fn invocation_input_rejects_non_message_events_and_foreign_or_untagged_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input-events";
+    let invocation = "invocation/input-events";
+    let observation = state.store.append_claim(&ClaimInput { subject:agent.into(),
+        kind:"runtime.observed".into(), actor:None, fields:serde_json::from_value(json!({
+            "status":"stopped","incarnation_id":"exact"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    for (subject, recipient, tags) in [
+        ("message/foreign", "agent/other", vec![format!("fractal-invocation:{invocation}")]),
+        ("message/untagged", agent, vec![]),
+        ("message/other-invocation", agent, vec!["fractal-invocation:invocation/other".into()]),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:subject.into(), kind:"message.sent".into(),
+            actor:None, fields:serde_json::from_value(json!({"from":"person/owner",
+                "to":recipient,"content":"wake","status":"sent","tags":tags})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    for event in [observation.id.as_str(), "work-claim-event", "transcript:0123456789",
+        "message/missing", "message/foreign", "message/untagged", "message/other-invocation"] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+            actor:None, fields:serde_json::from_value(json!({"agent":agent, "incarnation":"exact",
+                "invocation_id":invocation,"operation_id":"input-events","phase":"observed",
+                "event_key":event})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        let app = router(state.clone()).layer(Extension(NativeDeliveryPeer {
+            agent:agent.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+        }));
+        let (status, response) = json_request(app, "/v1/invocation-input", json!({
+            "agent":agent,"incarnation":"exact","invocation_id":invocation,
+            "message_id":event,"text":"must not be retained"
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{event}: {response}");
+    }
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
+    use http_body_util::BodyExt as _;
+    for caller in ["person", "own-agent", "foreign-agent", "unavailable"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.owning_person = Some("person/owner".into());
+        let agent = "agent/example/unix-private";
+        let invocation = "invocation/unix-private";
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+            actor:None, fields:serde_json::from_value(json!({"agent":agent,
+                "invocation_id":invocation,"operation_id":"unix-private","phase":"admitted"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        let artifact = fractal_store::invocation_artifacts::capture_input(root.path(), invocation,
+            "private-unix-input", now_ms()).unwrap();
+        fractal_store::invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+        let socket = root.path().join("private.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let store = state.store.clone();
+        // Use the production accept/ancestry-to-request handoff, not manually inserted
+        // request extensions. Only the completed ancestry lookup result is controlled.
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, router(state), Some(store), None,
+            move |_, _| Ok(match caller {
+                "person" => HarnessAncestry::Person,
+                "own-agent" => HarnessAncestry::Bound("agent/example/unix-private".into()),
+                "foreign-agent" => HarnessAncestry::Bound("agent/other".into()),
+                _ => HarnessAncestry::Unavailable,
+            }),
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        let connection = tokio::spawn(connection);
+        let uri = format!("/v1/client/invocation-artifacts/{}?invocation={}&kind=input",
+            artifact.sha256, urlencoding::encode(invocation));
+        let allowed = matches!(caller, "person" | "own-agent");
+        for method in ["GET", "DELETE"] {
+            let response = sender.send_request(Request::builder().method(method).uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status().is_success(), allowed, "{caller} {method}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            if allowed && method == "GET" {
+                assert_eq!(bytes.as_ref(), b"private-unix-input");
+            } else {
+                assert!(!String::from_utf8_lossy(&bytes).contains("private-unix-input"));
+            }
+        }
+        if allowed {
+            let response = sender.send_request(Request::builder().method("GET").uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{caller}");
+            response.into_body().collect().await.unwrap();
+        }
+        connection.abort();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn native_rename_plan_and_proof_routes_are_read_only_and_symmetric() {
+    for (family, from, to, source) in [
+        ("agents", "agent/example-plan/worker", "agent/example-plan-renamed/worker",
+            "version 2\nagent \"example-plan/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n"),
+        ("missions", "mission/example-plan", "mission/example-plan-renamed",
+            "version 2\nmission \"example-plan\" state=\"ready\" { goal \"Review candidate\"; step \"review\" { assigned-to \"person/robin\"; }; }\n"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+        let expected = intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)).map(|subject| {
+            (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+        }).collect();
+        state.store.apply(&intent, &expected, "example-plan-declare").unwrap();
+        let before = state.store.selected_desired_token(from).unwrap();
+        let app = router(state.clone());
+        let request = json!({
+            "from": from, "to": to, "actor": "person/robin",
+            "reason": "Clarify responsibility", "idempotency_key": "example-plan",
+            "expected_naming_revision": null, "expected_declaration": null,
+        });
+        let (status, plan) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id/plan"), request.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["request"], request);
+        let digest = plan["request_digest"].as_str().unwrap();
+        assert_eq!(state.store.selected_desired_token(from).unwrap(), before);
+        let (status, receipt) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id"), request,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let applied = state.store.selected_desired_token(from).unwrap();
+        for suffix in [String::new(), format!("&request_digest={digest}")] {
+            let path = format!("/v1/{family}/rename-proof?from={from}&to={to}{suffix}");
+            let (status, proof) = get_request(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{proof}");
+            assert_eq!(proof["availability"], "selected", "{proof}");
+            assert_eq!(proof["request_digest"], digest);
+            assert_eq!(state.store.selected_desired_token(from).unwrap(), applied);
+        }
+        let response = app.oneshot(Request::builder()
+            .uri(format!("/v1/{family}/rename-proof?from={from}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

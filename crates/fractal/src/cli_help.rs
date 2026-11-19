@@ -13,11 +13,15 @@ const GROUPS: &[(&str, &[&str])] = &[
             "agents",
             "conversations",
             "note",
+            "availability",
             "missions",
             "schedules",
+            "effects",
             "alerts",
             "usage",
             "slo",
+            "series",
+            "budgets",
             "terminals",
             "machines",
             "launch",
@@ -40,11 +44,14 @@ const GROUPS: &[(&str, &[&str])] = &[
             "service",
             "migrate",
             "fleet",
+            "hosts",
+            "resources",
             "deploy",
             "replication",
             "apply",
             "validate",
             "sets",
+            "source",
             "backup",
             "doctor",
             "admission",
@@ -62,6 +69,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "schema",
             "actor-contract",
             "subject",
+            "claims",
             "harness-questions",
             "documents",
             "evidence",
@@ -165,8 +173,8 @@ pub(super) fn agent_state(
             Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
             }
-            // Fractal withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
-            // five minutes): nothing is known to be waiting on a person.
+            // Fractal withdraws an idle report older than the shared harness observation
+            // freshness window: nothing is known to be waiting on a person.
             Some("indeterminate") => {
                 "Quiet — Fractal has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
             }

@@ -11,6 +11,30 @@ or replica. Devices read and act through a member's client gateway and are not s
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
 
+## Replication health
+
+Fleet admission and a running daemon do not establish replication health. The
+daemon and `fractal replication-worker` are separately supervised; both must
+actually be running. A saved join receipt or stored envelopes are not evidence
+of a fresh exchange. Fleet status, doctor/health and alerts report missing worker
+or stale exchange evidence as degraded, including a dial-out join whose imported
+membership and peer lists are still empty.
+
+Daemon/store startup has a bounded 60-second grace for the worker's first
+heartbeat and exchange. After that grace, missing worker evidence fails health;
+an observed heartbeat expires after 25 seconds and exchange evidence after
+60 seconds. Exchange evidence belongs to the authenticated sender incarnation,
+not whichever member key has the same name when processing finishes. Ended
+incarnations do not prevent a live sole current creator from being healthy.
+
+Before membership arrives, the worker uses the sponsor routes saved by the join.
+An empty member list therefore does not mean the node has no bootstrap target.
+If synchronization never begins, inspect the worker's supervisor state and logs,
+not just the daemon or carrier's reachability. With externally managed services,
+complete that manager's activation and verify its worker job rather than
+installing a second set of native services.
+
+
 ## Automatic transport selection
 
 The local `fleet.toml` `transports` list is both an enablement filter and a
@@ -42,14 +66,35 @@ and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
 Installed services restart automatically. Without services, start
 `fractal replication-worker` first, retain its PID, then start
-`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
-generation before listening; this option is refused for service-managed daemons. A manual
+`fractal up --replication-worker-pid PID`. On Linux and macOS the daemon captures
+that process generation before listening; this option is refused for service-managed daemons. A manual
 worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
 
 ## Local adapter membership and leave authority
+
+The worker serves live leave authority on a private Unix socket beside the configured
+daemon API socket. Its name preserves the full API basename and appends
+`.leave-state.sock`: `/run/user/1000/fractal.sock` uses
+`/run/user/1000/fractal.sock.leave-state.sock`, with the persistent
+`fractal.sock.leave-state.sock.lock` reservation beside it. Different API basenames
+in one runtime directory therefore have distinct worker listeners and reservations,
+including basenames that differ only in extension. A worker refuses an equal API
+and leave-state path with `InvalidInput` before reserving or removing either socket.
+Long durable state directories do not affect this path; configured runtime paths
+still need to fit the platform socket limit. Bind errors include the full path,
+its byte length, and the usable limit (Linux 107 bytes, macOS 103 bytes).
+
+The daemon and replication worker are separately supervised. For the one-release
+upgrade bridge, upgrade the daemon first, then restart the worker: daemon requests
+try the new socket and fall back to `STATE/fleet/leave-state.sock` only on
+not-found or connection-refused, logging attempted paths at debug level. HTTP
+errors, timeouts and other connection failures do not use the legacy path.
+The worker binds only the new path. Restarting the daemon alone does not move an
+old worker's listener; the legacy client fallback is removed after one release.
+
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
 socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
@@ -65,11 +110,15 @@ a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
 
-On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+On Linux and macOS worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
 `/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
-enrolled process. An unrelated unbound process is not a worker.
+enrolled process. An unrelated unbound process is not a worker. The daemon pins the
+observed worker's process generation once the supervisor (`launchctl`/`systemctl`) still
+names that PID after the capture, and asks again only once that generation stops
+validating: a supervisor replaces its worker only after the old process ends, so
+requests do not spawn service-manager commands.
 
 The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
 exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
@@ -86,12 +135,30 @@ Deploy with observe first. Before enabling enforce on a member, retain at least
 classes, including worker restarts. Review unexpected would-refuse entries before
 changing that member's configuration; roll enforcement out one member at a time.
 
-On macOS these routes retain existing admission and emit `unverified-platform`,
-not an authentication success. The unbound local caller authority gap remains
-open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
-after PID reuse they can attribute a surviving socket to the wrong worker.
+On macOS the connector PID comes from `LOCAL_PEERPID`; `proc_pidinfo` supplies its
+birth time. The daemon revalidates that generation before accepting worker authority,
+including explicit foreground enrollment. Unavailable or stale evidence follows the
+same observe/enforce policy above, rather than bypassing it as `unverified-platform`.
+macOS has no pidfd: before/after birth-time checks narrow but cannot eliminate the
+PID reuse window. A surviving socket and reused PID are not a permanently pinned identity.
 
-This Linux boundary does not protect against same-UID service-manager takeover or
+Local harness attribution on macOS walks ancestry using `proc_pidinfo` and reads
+`KERN_PROCARGS2` environment entries with nearest-process masking. Each process birth
+is checked before and after inspection. The connector's generation must also match its
+accept-time process witness before and after the walk; failed capture cannot produce
+a person or harness attribution. A positively observed effective-UID transition ends
+the cooperative walk as a person, preserving ordinary login-shell and SSH access.
+Linux reads effective UID from `/proc/PID/status`; macOS uses `PROC_PIDTBSDINFO`.
+If full BSD metadata is refused, `PROC_PIDT_SHORTBSDINFO` may establish ownership only;
+it supplies no generation witness and cannot authorize a same-UID process.
+Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
+A completed same-UID walk without any identity variable is a person.
+On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
+Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
+sessions and actor/requester body impersonation; it does not deny every public request.
+The same macOS PID-reuse residual risk applies to this ancestry inspection.
+
+This boundary does not protect against same-UID service-manager takeover or
 ptrace of the trusted worker. User-service ownership and process debugging
 remain host trust assumptions; process pinning is not a separate-user sandbox.
 Operator fleet routes retain their existing local authority boundary.
@@ -166,6 +233,21 @@ writer, replica sequence, batch identity and immutable position, with claim iden
 tie break. Arrival order belongs to local cursors, caches and operational overlays. Equal claims
 must produce equal shared rows and selected source identities through incremental admission,
 restart replay and checkpoint trimming.
+
+An operation ID with different request digests never requests a whole-log replay during
+replication projection. Its registry row is reduced deterministically (minimum request
+digest, then the smallest retained claim ID for that digest, with checkpoint fallback).
+This registry choice does not suppress graph facts: graph projections still fold all
+admitted claims in canonical order, exactly as replay does.
+
+Event-only conflicts update the registry without rebuilding the graph. Affected desired,
+document, mission, run-tree and planning-session histories may refold under the writer only
+up to `OPERATION_CONFLICT_REFOLD_CLAIMS` (4096 claims). Above that bound, or without an
+affected-subject reducer, the previous projection remains and `projection_health` records
+a typed degraded entry. Receipt does not automatically repair these entries: large-history
+repair must commit separate pages rather than hold one writer transaction. Existing
+projection-failure detail and replication/store health retain the operation ID, current
+and previous claim IDs and conflict count. Writer-hold rows report fold `processed`/`total`.
 
 The digest covers everything that is synced: authenticated claim and blob identity, and every
 shared logical projection and its shared columns. Each shared table or claim-derived source has
@@ -378,7 +460,7 @@ recorded. A seat it left out, such as one whose declaration hasn't reached it ye
 host retries it a minute later without waiting for a commit, then less often while it stays owed,
 doubling up to every 15 minutes. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
-90-second rule ages it, so a host that stops pushing reads stale.
+shared `HARNESS_OBSERVATION_FRESHNESS` window ages it, so a host that stops pushing reads stale.
 
 A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
@@ -1110,6 +1192,65 @@ rebuilds from its complete canonical history; the chunk limit does not bound tha
 fallback replay. The regression interleaves local writes with committed prefixes and checks the
 final graph against canonical replay.
 
+The projection gate covers the complete catch-up pass, including its between-chunk writer
+returns and final drains. Fenced actions cannot drain its markers between successful chunks.
+A local standalone person ask has already atomically materialized its run, generation and step;
+an unrelated aggregate's later canonical time does not require rebuilding that independent run.
+The incremental sweep skips that ask's redundant person-guard and global-order dirtiness only when those
+rows bind to the local ask, the run has no descendants, and its step/run/generation have no
+foreign claims. Foreign asks, repair markers and competing same-part history retain their
+canonical rebuilds.
+
+The contended receive benchmark attributes rebuild identity, dirty cause and receive/fence/action
+role across threads. It fails on a page taking 15 seconds or more, more than two rebuilds covering
+the huge target part in a page, any redundant already-materialized local-ask rebuild, or a route
+with no successful mutations. Other aggregates' legitimate rebuilds are reported separately.
+Page output separates projection-gate wait, writer wait, chunk count and final-drain rebuild time.
+
+Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
+rebuilt. Reconciliation and dispatch skip a pending part. Mission/run mutations use
+`with_run_fence` for the named run or step's part and its ancestor root, or
+`with_all_runs_fenced` for descendant, capacity, retirement, repair and cross-run owner-routing
+decisions. Both use one FIFO projection gate shared with receive, catch-up and maintenance.
+The gate stays held across drain turns, but each turn selects at most one pending aggregate in
+a standalone writer loan, commits it, and returns the writer before selecting again. A drain
+turn does not group-commit with another drain or the eventual action. This is option A: an
+individual aggregate still rebuilds from its full canonical history; no attempt is made to
+split that history or bound its own SQL duration.
+
+After every returned writer loan, completion summaries invalidate the affected caches and
+publish local `run-projection.finished` observations so readers re-evaluate on the normal
+change notification, without a retry timer. The full caught-up roster wake is sent only when
+no part is pending and replication projection is not deferred. Completing one part alone
+does not assert that all admitted envelopes are projected. Selection is fresh in every
+writer transaction: restoration's `replay_replication_graph` may interleave without the gate
+because it atomically replays the graph, updates projections and health, and clears or widens
+marker state in its own transaction.
+
+The action enters a separate foreground writer turn only after its fence is empty. That
+transaction rechecks pending state before running the action and checks generation and attempt
+fences against the drained tree, so a superseded cancellation or revision approval is refused
+rather than applied to the old generation. Queue, lane and attention claim admission retains
+the same selector inside its existing writer transaction, without nesting another writer.
+API-facing wrappers allow eight seconds for gate admission and between-part progress. On
+expiry they do not invoke the action: the existing retryable HTTP 503 `database-busy` carries
+`details.reason: "run-projection-drain"` and `details.pending_parts`. An already-running
+aggregate transaction finishes before this refusal; the eight seconds is not cancellation
+of its SQL. Daemon-only evaluator, observer and canonical-settlement paths use
+`with_run_fence_internal` or `with_all_runs_fenced_internal` to finish draining without this
+API refusal budget. Helpers shared with API callers retain the bounded wrappers.
+
+Both Rust clients retry only this typed mutation refusal with the identical serialized body
+and idempotency key, exponential pauses, and one total 60-second window. Before sending
+again they reserve the entire ordinary request deadline; a started mutation is never cancelled
+and misreported as an earlier refusal. The raw daemon client's `set_mutation_observer` and
+the typed SDK's `set_observer` (`Mutation` event) expose physical attempt count, total elapsed
+duration and cumulative retry-wait duration. Per-attempt SDK `Request` events remain unchanged.
+The daemon counts these refusals per matched route and method in
+`st.run_projection.drain.refusals`; no run, person or raw URL labels are recorded.
+Later receive chunks can queue a part again. Read APIs retain their existing catch-up behavior;
+there is no new error kind or claim format.
+
 The first start of a build with this rule replays from nothing once. A run that this node created
 could show as over in its old graph while its claims say it runs. Starting that work again long
 after anyone expected it would surprise people, so the node writes the claims that end the run as
@@ -1278,7 +1419,7 @@ episode stays open; that projection opens its own episode. The same pair and pro
 diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
 open fault stays open until the next comparison that agrees.
 
-The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+The `projection-divergence` objective in `slo/objectives.kdl` counts open divergence faults
 fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
 read, so `fractal doctor` (as `slo/projection-divergence`), `fractal slo` and the SLO history read no claims
 for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
@@ -1673,6 +1814,35 @@ or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
 `client-send-start`, `connect-done`, `client-fresh-retry`,
 `client-headers-received`, and `client-failed`.
+The `client-failed` boundary also includes `peer` (the destination node name).
+
+Failed, unanswered, or overloaded worker backend exchange responses produce
+rate-limited stderr `fractal: replication exchange answer` lines with `correlation_id`, `peer`,
+`shard`, `outcome` (`failed`, `no-answer`, or `overload`), `code`, `phase`,
+`elapsed_ms`, `permit_wait_ms`, `local_receive_ms`, and `follow_up_export_ms`.
+`correlation_id=none` means the request did not carry a valid exchange UUID;
+an absent shard or unstarted measurement is `none`. Permit wait runs from request
+head arrival to permit acquisition. The receive/export split uses the retained
+job's original request clock, including on later polls; an unfinished phase reports
+its elapsed duration at the answer, not zero. `elapsed_ms` uses that same job clock
+(or the current request clock when admission is refused). Local receive failures
+also include `local_receive_http_status` when the typed error carries it.
+These lines contain machine metadata, never error bodies or free-form causes.
+
+The daemon receive handler produces rate-limited `fractal: replication receive error`
+stderr lines on backend errors with `route=/v1/internal/replication/receive`,
+`correlation_id` (a valid `x-fractal-exchange-id` header, otherwise `none`), and
+`code`. This is distinct from middleware request-duration logging. The handler
+does not currently expose a per-request gate/writer/apply/final-drain timing split.
+
+Both failure diagnostics use one shared bounded limiter per process: four fixed
+keys (worker failed, no-answer, overload, and daemon receive), one sample per key
+per 60 seconds. Peer names, shard IDs, correlation IDs, and error codes never
+create additional keys. Emitted samples append `suppressed=0`. On the next event,
+expired windows with suppressed repeats emit their original sample with
+`event=suppression-summary suppressed=N`; idle windows need no timer.
+Worker admission drops the exchange-jobs lock before formatting or writing these
+diagnostics; neither limiter nor exchange-jobs guards are held during stderr writes.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.

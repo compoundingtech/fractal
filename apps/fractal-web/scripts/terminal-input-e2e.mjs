@@ -52,9 +52,9 @@ const poll = async (check, ms) => {
 try {
   await page.goto(url)
   step('on-scratch-seat', onSeat(), { path: new URL(page.url()).pathname })
-  const toggle = page.locator('[data-testid="thread-header"] button[aria-label="Toggle terminal drawer"]')
+  const toggle = page.locator('[data-testid="thread-header"] button[aria-label="Show terminal"]')
   await toggle.waitFor({ state: 'visible', timeout: 90_000 })
-  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click()
+  await toggle.click()
   await grid.waitFor({ state: 'visible', timeout: 60_000 })
   step('grid-visible', true)
   step('raw-live', await poll(async () => ['Click to type', 'Typing'].includes(await chip()), 30_000), { chip: await chip() })

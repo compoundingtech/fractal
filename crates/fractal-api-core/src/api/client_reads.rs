@@ -90,6 +90,11 @@ pub async fn client_work(
     if query.history {
         return client_work_history(&state, snapshot, &query).await;
     }
+    if let Some(min_cut) = query.min_cut
+        && min_cut > state.store.index().map_err(ApiError::internal)?
+    {
+        return Err(client_v0::validation("min_cut must not exceed the current store index"));
+    }
     // While a refresher governs the work list (from when it holds the list's view, before it
     // starts), pages come from its publications and never fold the list on read. With none,
     // as with ST3_PUBLISHED_LISTS=off, they read directly, as before.
@@ -113,6 +118,89 @@ pub async fn client_work(
     .await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyWorkCohortQuery {
+    /// Explicit comma-separated canonical Factory seat references, at most 64.
+    cohort: String,
+}
+
+pub async fn client_ready_work(
+    State(state): State<AppState>,
+    Query(query): Query<ReadyWorkCohortQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
+    use crate::AttentionListStore;
+    use crate::store::published_list::ListRead;
+
+    let cohort: Vec<String> = query.cohort.split(',').take(65).map(str::to_owned).collect();
+    if cohort.len() > 64
+        || cohort.iter().any(|agent| agent.strip_prefix("agent/").is_none_or(str::is_empty) || agent.len() > 128)
+    {
+        return Err(client_v0::validation("cohort must name 1 to 64 agents"));
+    }
+
+    let list = state.store.published_work_list();
+    let ListRead::Served(publication, publication_id) = list.current() else {
+        return Err(published_lists::work_list_not_ready());
+    };
+    let cut = publication.cut;
+    let published_at = publication.published_at_unix_ms;
+    let evaluated_at = publication.rows.time_unix_ms;
+    let frontier = publication.rows.frontier;
+    let valid_until = publication.valid_until_unix_ms;
+    let available = || ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "ready-work-unavailable".into(),
+        message: "a current work cut and all cohort declarations are required".into(),
+        details: Box::default(),
+    };
+    // No live refold: at most 5,000 published steps, each eligible step doing indexed
+    // subject/kind seeks through that subject's release/return/progress events.
+    // Latest handoff candidates also need canonical ordering; event history is not capped.
+    if publication.rows.rows.len() > 5_000 {
+        return Err(available());
+    }
+    let store = state.store.clone();
+    let count = blocking_store(move || {
+        store.read_snapshot(|head| {
+            // The frontier tracks projected replication. Local commits can advance head
+            // without advancing it, so match both fences independently.
+            if head != cut
+                || !store.attention_projection_frontier()?.is_some_and(|(status, at)| {
+                    status == "healthy" && at == frontier
+                })
+                || store.replication_catching_up()
+                || store.replication_diverged()
+                || valid_until.is_some_and(|until| until <= client_now_ms())
+            {
+                return Ok(None);
+            }
+            store.ready_work_cohort_count(
+                publication.rows.rows.values().map(|row| row.view.as_ref()),
+                &cohort,
+                evaluated_at,
+            )
+        })
+    })
+    .await?
+    .ok_or_else(available)?;
+    #[cfg(test)]
+    super::ready_work_tests::after_count(&state);
+    // The same generation fence as published work paging. This result has no continuation.
+    if valid_until.is_some_and(|until| until <= client_now_ms())
+        || !matches!(list.current(), ListRead::Served(_, id)
+            if id.list == publication_id.list && id.generation == publication_id.generation)
+    {
+        return Err(published_lists::work_list_not_ready());
+    }
+    Ok((Extension(roster_snapshot(&state, cut, published_at)), Json(json!({
+        "coverage": "local-graph-cut",
+        "evaluated_at": client_timestamp(evaluated_at),
+        "projection_frontier": frontier,
+        "ready_count": count,
+    }))))
+}
+
 /// A current work page from the work list's publications. A first page serves the newest
 /// current publication, or with `fresh=true` one at least as new as the request; a continuation
 /// serves the publication its first page did. Neither folds the list: with nothing current to
@@ -134,9 +222,9 @@ async fn client_work_published(
         return Ok((Extension(snapshot), Json(page)));
     }
     let list = state.store.published_work_list();
-    let (publication, id) = if query.fresh {
+    let (publication, id) = if query.fresh || query.min_cut.is_some() {
         let waited = Instant::now();
-        let fresh = wait_for_work_list(&state.store).await;
+        let fresh = wait_for_work_list(&state.store, query.min_cut).await;
         record_work_stage(request_latency::WorkStage::FreshWait, waited.elapsed());
         fresh?
     } else {
@@ -153,12 +241,13 @@ async fn client_work_published(
     blocking_store(move || Ok(client_work_published_page(&reader, &publication, id, &query))).await?
 }
 
-/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the store's index
-/// when the request arrived. Each way it can end answers differently: such a publication; not
-/// fresh, once the wait is over; not ready, if the list is withdrawn or forgotten meanwhile or
-/// its change channel closes; unavailable, if the refresher ends. Never stale rows as fresh.
+/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the pinned minimum,
+/// or the store's index when this request arrived. Each way it can end answers differently:
+/// such a publication; not fresh, once the wait is over; not ready, if the list is withdrawn or
+/// forgotten meanwhile or its change channel closes; unavailable, if the refresher ends.
 async fn wait_for_work_list(
     store: &Arc<Store>,
+    min_cut: Option<u64>,
 ) -> Result<
     (
         Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
@@ -168,7 +257,10 @@ async fn wait_for_work_list(
 > {
     use crate::store::published_list::ListRead;
     let list = store.published_work_list();
-    let wanted = store.index().map_err(ApiError::internal)?;
+    let wanted = match min_cut {
+        Some(cut) => cut,
+        None => store.index().map_err(ApiError::internal)?,
+    };
     let mut changes = list.subscribe();
     let deadline = tokio::time::Instant::now() + WORK_LIST_FRESH_WAIT;
     let mut asked = false;
@@ -890,7 +982,7 @@ pub async fn client_attention(
         &effective_query,
         move |state, _| {
             let mut items = client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             Ok(items)
         },
     )
@@ -917,7 +1009,7 @@ pub async fn client_attention_detail(
     let mut items =
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
-    client_attention_compatibility(&mut items, session.custom_forms);
+    client_attention_compatibility(&mut items, session.attention_compatibility());
     let Json(item) = client_detail(items, "attention", &id)?;
     let mut items = [item];
     relay_attention_target_states(&state, &mut items)
@@ -1533,7 +1625,7 @@ pub async fn client_history(
     };
     let store = state.store.clone();
     let page =
-        blocking_store(move || records::generic_claims_page(&store, None, None, 0, Some(before_index), true, limit))
+        blocking_store(move || records::generic_claims_page(&store, Default::default(), None, 0, Some(before_index), true, limit, None))
             .await?;
     let has_more = page.next_cursor.is_some();
     let items = page

@@ -665,6 +665,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unread_backlog_preserves_complete_attention_and_still_finds_relevant_claims() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = Clock;
+        smallclaims::store::set_thread_clock(Some(client_now_ms()));
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let first = store.newest_attention_list().1.unwrap();
+        // More than the delta limit of permanently unread lease-renewal claims.
+        // Do not force a fleet fold or hide the relevant claim after the backlog.
+        for number in 0..10_001 {
+            store.append_claim(&ClaimInput {
+                subject: format!("step-run/noise-{number}/step"),
+                kind: "work.renewed".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        assert_eq!(index - first.cut, 10_001, "exercise the raw-span guard boundary");
+        assert!(
+            store.attention_future_since(first.cut, index, 0).unwrap().is_some(),
+            "the future helper must count post-filter claims, not the 10001-index span",
+        );
+        assert_eq!(
+            store.attention_list_delta(&first, index, client_now_ms()).unwrap(),
+            AttentionDelta::Unchanged(None),
+        );
+        assert!(matches!(
+            store.attention_list_delta(&first, index, 0).unwrap(),
+            AttentionDelta::Unchanged(Some(_)),
+        ), "even unread future claims retain the next-evaluation fence");
+        refresh_attention_list(&store).unwrap();
+        let published = store.newest_attention_list().1.unwrap();
+        assert_eq!(published.cut, index);
+        assert!(Arc::ptr_eq(&first.rows, &published.rows));
+
+        store.append_claim(&ClaimInput {
+            subject: "custom/test/relevant".into(),
+            kind: "custom.test.changed".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            store.attention_list_delta(&first, store.index().unwrap(), client_now_ms()).unwrap(),
+            AttentionDelta::Refold("custom.test.changed".into()),
+        );
+    }
+
+    #[test]
     fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {
         let mut rows = vec![
             json!({
@@ -703,6 +764,42 @@ mod tests {
         let mut rows = vec![json!({"attention_kind": "harness-prompt", "source_id": "agent/example/oak", "presentation": {}})];
         assert!(!present_prompts(&mut rows, None));
         assert!(rows[0]["presentation"].get("prompt").is_none());
+    }
+
+    /// A host hold placed by a run that has since ended is still a card on its owner's Now:
+    /// the published list presents it as `stopped` · `request`, raised by its owner.
+    #[test]
+    fn a_published_host_hold_is_a_stopped_card_on_now() {
+        use crate::store::host_holds::PlaceHostHold;
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        let hold = store
+            .place_host_hold(
+                "person/operator",
+                &PlaceHostHold {
+                    actor: "person/operator".into(),
+                    host: "node".into(),
+                    reason: "investigate".into(),
+                    operations: vec!["activation".into()],
+                    originating_run: Some("mission-run/terminal".into()),
+                    receipt: Some("receipt/activation".into()),
+                },
+            )
+            .unwrap();
+        refresh_attention_list(&store).unwrap();
+        let (_, publication) = store.newest_attention_list();
+        let publication = publication.unwrap();
+        let row = publication
+            .rows
+            .iter()
+            .find(|row| row["attention_kind"] == "host-hold")
+            .expect("the hold is published");
+        assert_eq!(row["source_id"], hold.id);
+        let presentation = &row["presentation"];
+        assert_eq!(presentation["tier"], "stopped");
+        assert_eq!(presentation["kind"], "request");
+        assert_eq!(presentation["raised_by"]["id"], "person/operator");
+        assert!(presentation["agent"].is_null(), "chat reaches the chief of staff");
     }
 
     /// A seat's conversation changes no claim attention reads. The refresher follows each

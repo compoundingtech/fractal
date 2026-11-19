@@ -51,12 +51,14 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
     }
     let socket = root.path().join("api.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "alder".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),

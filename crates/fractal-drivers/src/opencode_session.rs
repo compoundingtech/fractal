@@ -1461,25 +1461,30 @@ impl SpendProducer {
         if self.recorded.contains(id) {
             return;
         }
-        let leaf = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+        let leaf = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64);
         let reasoning = leaf("/reasoning");
-        let output = leaf("/output").saturating_add(reasoning);
+        let output = leaf("/output").zip(reasoning).map(|(output, reasoning)| output.saturating_add(reasoning));
         let (input, reads, writes) = (leaf("/input"), leaf("/cache/read"), leaf("/cache/write"));
         let mut body = json!({
             "semantics": "response",
             "model": info.get("modelID").and_then(Value::as_str),
             "provider": info.get("providerID").and_then(Value::as_str),
+            "stop_reason": info.get("finish").and_then(Value::as_str),
+            "started_at_unix_ms": info.pointer("/time/created").and_then(Value::as_u64),
+            "completed_at_unix_ms": info.pointer("/time/completed").and_then(Value::as_u64),
             "input_tokens": input,
             "output_tokens": output,
             "reasoning_tokens": reasoning,
             "cached_tokens": reads,
             "cache_write_tokens": writes,
-            "total_tokens": input.saturating_add(output).saturating_add(reads).saturating_add(writes),
+            "total_tokens": leaf("/total").or_else(|| input.zip(output).zip(reads).zip(writes).map(
+                |(((input, output), reads), writes)| input.saturating_add(output).saturating_add(reads).saturating_add(writes)
+            )),
         });
         if let Some(cost) = info
             .get("cost")
             .and_then(Value::as_f64)
-            .filter(|cost| cost.is_finite() && *cost > 0.0)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0)
         {
             body["cost"] = json!(cost);
             body["currency"] = json!("USD");
@@ -1716,7 +1721,7 @@ impl Delivery {
         // Archive is the recipient agent's act and the only settlement authority. An entry whose
         // file left the inbox releases ownership here; this pump never moves a file itself.
         self.ledger
-            .prune(|filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
+            .prune(self.control.incarnation().as_deref(), |filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
         // Continue receipt read-back for an existing attempt. No new input can pass
         // `send` while held.
         if self.control.held() && self.ledger.entries().is_empty() {
@@ -1752,7 +1757,7 @@ impl Delivery {
             .binding()
             .is_some_and(|binding| binding != target)
         {
-            self.ledger.rebind(&target)?;
+            self.ledger.rebind(&target, self.control.incarnation().as_deref())?;
         }
         // Fail closed. An unreadable ledger holds and surfaces instead of guessing, and it never
         // refused to start: a driver that will not start delivers nothing at all. The
@@ -1790,9 +1795,7 @@ impl Delivery {
             filename: head.filename.clone(),
             binding: target.clone(),
             correlation: delivery_ledger::Correlation::native(message_id.clone()),
-            // Read-back is a durable query, not a live frame, so a pre-crash attempt is
-            // reconcilable without an incarnation token.
-            incarnation: None,
+            incarnation: self.control.incarnation(),
         })?;
         let text = ding::poke_text(&self.catalog_root, &self.this_host, &self.identity, &head);
         self.send(client, &entry, &text, diagnostics)
@@ -1857,6 +1860,14 @@ impl Delivery {
         if self.control.held() {
             return Ok(());
         }
+        // A retry was authorized by native absence; bind the actual new POST, not its
+        // predecessor's read-back, to this runtime's receipt authority.
+        self.ledger.begin(delivery_ledger::Begin {
+            filename: entry.filename.clone(),
+            binding: entry.binding.clone(),
+            correlation: entry.correlation.clone(),
+            incarnation: self.control.incarnation(),
+        })?;
         self.next_attempt = Instant::now() + DELIVERY_RETRY;
         let payload = json!({
             "messageID": entry.correlation.value,
@@ -1977,9 +1988,23 @@ pub fn consumed_delivery_paths(
     identity: &str,
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
+    Ok(delivery_receipts(session_dir, identity, runtime_id)?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
+        .map(|entry| entry.filename)
+        .collect())
+}
+
+/// Validated durable evidence; acceptance clocks are never inferred from consumption.
+pub fn delivery_receipts(
+    session_dir: &Path,
+    identity: &str,
+    runtime_id: &str,
+) -> Result<delivery_ledger::ReceiptSnapshot> {
     let path = session_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(BTreeSet::new());
+        return Ok(delivery_ledger::ReceiptSnapshot::default());
     }
     let owner = identity.to_owned();
     let ledger = delivery_ledger::Ledger::open(
@@ -1992,12 +2017,7 @@ pub fn consumed_delivery_paths(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("OpenCode delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger
-        .entries()
-        .iter()
-        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
-        .map(|entry| entry.filename.clone())
-        .collect())
+    Ok(ledger.receipt_snapshot())
 }
 
 #[cfg(test)]
@@ -2461,6 +2481,8 @@ mod tests {
         let client = Client::new(server.port, "pw");
         let state_path = tmp.path().join("state/delivery-ledger.json");
         let (mut delivery, filename) = delivery_fixture(tmp.path(), state_path.clone());
+        let SessionControl::Graph(gate) = &delivery.control;
+        gate.bind_incarnation("runtime-acceptance-fixture");
 
         server.read_back_error.store(true, Ordering::SeqCst);
         delivery.pump(&client);
@@ -2470,6 +2492,11 @@ mod tests {
             Some(delivery_ledger::Phase::TransportAccepted),
             "the POST landed; nothing yet proves the server holds it"
         );
+        let first_acceptance = reopen_ledger(&state_path).entry(&filename)
+            .unwrap().input_acceptances.clone();
+        assert_eq!(first_acceptance.len(), 1);
+        assert_eq!(first_acceptance[0].incarnation, "runtime-acceptance-fixture");
+        assert!(first_acceptance[0].accepted_at_unix_ms > 0);
 
         // While the read-back stays indeterminate, no pass may re-POST.
         delivery.pump(&client);
@@ -2485,6 +2512,8 @@ mod tests {
             "a recovered read-back proves storage, not consumption"
         );
         assert_eq!(server.posts.lock().unwrap().len(), 1);
+        assert_eq!(reopen_ledger(&state_path).entry(&filename)
+            .unwrap().input_acceptances, first_acceptance);
     }
 
     #[test]
@@ -3499,6 +3528,36 @@ mod tests {
         assert_eq!(usage[0]["cache_write_tokens"], 40);
         assert_eq!(usage[0]["total_tokens"], 377);
         assert_eq!(usage[0]["cost"], 0.004);
+        assert_eq!(usage[0]["provider"], "provider-example");
+        assert_eq!(usage[0]["started_at_unix_ms"], 1);
+        assert_eq!(usage[0]["completed_at_unix_ms"], 2);
+        assert!(usage[0].get("response_id").is_none());
+        assert!(usage[0].get("api").is_none());
+        assert!(usage[0].get("duration_ms").is_none());
+        assert!(usage[0].get("ttft_ms").is_none());
         assert_eq!(record.incarnation_id, "incarnation-1");
+    }
+
+    #[test]
+    fn spend_keeps_unknown_buckets_and_observed_zero_cost_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut spend = SpendProducer::new(directory.path(), "incarnation-1");
+        spend.apply(&json!({"type":"message.updated","properties":{"info":{
+            "id":"response-unknown", "role":"assistant", "finish":"stop",
+            "time":{"completed":2}, "cost":0, "tokens":{"input":1,"output":2}
+        }}}));
+        let record = crate::harness_timeline::read(&crate::harness_timeline::timeline_path(
+            directory.path(),
+        )).unwrap();
+        let body = &record.operations.iter().find(|op| op.entry_type == "usage").unwrap().body;
+        for key in ["model", "provider", "started_at_unix_ms", "output_tokens", "reasoning_tokens",
+            "cached_tokens", "cache_write_tokens", "total_tokens"]
+        {
+            assert!(body.get(key).is_none(), "{key} must remain unknown");
+        }
+        assert_eq!(body["input_tokens"], 1);
+        assert_eq!(body["stop_reason"], "stop");
+        assert_eq!(body["cost"], 0.0);
+        assert_eq!(body["currency"], "USD");
     }
 }

@@ -1,18 +1,16 @@
 import { RegistryContext, useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import type { AtomRegistry } from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { buildIdentity } from 'virtual:build-identity'
 import { persistence, persistedAtom } from '../state/persistence.ts'
 import { decodeChangelogManifest } from './contract.ts'
-import { ChangelogPopover, ChangelogView, type ChangelogLoad } from './ChangelogView.tsx'
+import { ChangelogView, type ChangelogLoad } from './ChangelogView.tsx'
 import { changelogDeployment, changelogEntryIds } from './metadata.ts'
 import { loadChangelog, loadedChangelog } from './load.ts'
-import { acknowledgeEntryIds, initialSeen, seenKey, type ChangelogSeen } from './seen.ts'
+import { acknowledgeEntryIds, initialSeen, seenKey } from './seen.ts'
 
 const seen = persistedAtom({ key: seenKey(changelogDeployment), schema: Schema.Struct({ visited: Schema.Boolean, entryIds: Schema.Array(Schema.String) }), defaultValue: initialSeen })
-const baseline = Atom.make<ChangelogSeen>(initialSeen)
 const readyManifest = (manifest: unknown): ChangelogLoad => ({
   _tag: 'Ready', manifest: decodeChangelogManifest(manifest, { machineVersion: buildIdentity.machineVersion }),
 })
@@ -30,18 +28,16 @@ const manifest = Atom.make<ChangelogLoad>((get) => {
   return { _tag: 'Loading' }
 }).pipe(Atom.keepAlive)
 
-/** Opening acknowledges IDs without waiting for prose to load. */
-const acknowledgeChangelog = (registry: AtomRegistry): void => {
-  const previous = registry.get(seen)
-  registry.set(baseline, previous)
-  registry.set(seen, acknowledgeEntryIds(changelogEntryIds, previous))
-  persistence.flush()
-}
-const ChangelogContent = () => {
+/**
+ * The open list, diffed against the cursor as it was when the list mounted, so acknowledging while
+ * it is open does not regroup what the reader is looking at.
+ */
+export const ChangelogContent = ({ firstEntryRef }: { readonly firstEntryRef: React.Ref<HTMLHeadingElement> }) => {
+  const registry = React.useContext(RegistryContext)
+  const [baseline] = React.useState(() => registry.get(seen))
   const state = useAtomValue(manifest)
-  const previous = useAtomValue(baseline)
   const retry = useAtomRefresh(manifest)
-  return <ChangelogView state={state} baseline={previous} onRetry={retry} buildRevision={buildIdentity.rev} />
+  return <ChangelogView state={state} baseline={baseline} onRetry={retry} firstEntryRef={firstEntryRef} />
 }
 /** Unseen while this build lists an entry the device has not acknowledged; drives every dot. */
 export const useChangelogUnseen = (): boolean => {
@@ -49,14 +45,14 @@ export const useChangelogUnseen = (): boolean => {
   const ids = new Set(cursor.entryIds)
   return changelogEntryIds.some((id) => !ids.has(id))
 }
-/** Warm prose on intent while keeping the disclosure immediately responsive. */
-export const Changelog = ({ dark }: { readonly dark: boolean }) => {
+/** The host acknowledges this build's IDs once the reader has seen the list; intent only warms the prose. */
+export const useChangelogDisclosure = (): { readonly acknowledge: () => void; readonly prefetch: () => void } => {
   const registry = React.useContext(RegistryContext)
-  const hasUnseen = useChangelogUnseen()
-  const [open, setOpen] = React.useState(false)
-  const onOpenChange = (next: boolean) => {
-    if (next) acknowledgeChangelog(registry)
-    setOpen(next)
-  }
-  return <ChangelogPopover dark={dark} isOpen={open} onOpenChange={onOpenChange} onPrefetch={() => { registry.get(manifest) }} hasUnseen={hasUnseen}>{open ? <ChangelogContent /> : null}</ChangelogPopover>
+  return React.useMemo(() => ({
+    acknowledge: () => {
+      registry.set(seen, acknowledgeEntryIds(changelogEntryIds, registry.get(seen)))
+      persistence.flush()
+    },
+    prefetch: () => { registry.get(manifest) },
+  }), [registry])
 }

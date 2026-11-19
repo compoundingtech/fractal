@@ -45,11 +45,30 @@ impl Edits {
                     _ => return Err(ProjectionError::InvalidResolution),
                 }
             },
-            Operations::Memberships(operations) => for operation in operations {
-                match operation {
-                    Member::Place { member, bucket, key } => position(&mut tree, &NodeRef::Subject { subject: member.clone() }, bucket, key)?,
-                    Member::Remove { member } => { tree.nodes.remove(&node_key(&NodeRef::Subject { subject: member.clone() })); }
+            Operations::Memberships(operations) => {
+                for operation in operations {
+                    match operation {
+                        Member::Place { member, bucket, key } => position(&mut tree, &NodeRef::Subject { subject: member.clone() }, bucket, key)?,
+                        Member::Remove { member } => { tree.nodes.remove(&node_key(&NodeRef::Subject { subject: member.clone() })); }
+                    }
                 }
+                // Memberships are leaves: a complete observed tree's folder ancestry
+                // cannot change here. Validate changed destinations, not every ancestor.
+                for operation in operations {
+                    if let Member::Place { member, .. } = operation {
+                        let node = format!("subject:{member}");
+                        let missing = tree.nodes.get(&node).and_then(|row| match &row.shown_under {
+                            Parent::Folder { id } if !tree.nodes.contains_key(&format!("folder:{id}")) => Some(id.clone()), _ => None,
+                        });
+                        if let Some(id) = missing {
+                            if observed.deleted_folders.binary_search(&id).is_ok() { return Ok(Cow::Borrowed(observed)); }
+                            let row = tree.nodes.get_mut(&node).expect("checked member");
+                            row.parent = Parent::Root {}; row.shown_under = Parent::Root {};
+                        }
+                    }
+                }
+                order_rows(&mut tree);
+                return Ok(Cow::Owned(tree));
             },
         }
         // Like server admission, install the whole batch's positions before resolving

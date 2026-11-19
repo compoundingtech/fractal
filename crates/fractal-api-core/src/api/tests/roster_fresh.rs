@@ -1,5 +1,60 @@
 use super::*;
 
+#[test]
+fn harness_cards_use_the_shared_observation_freshness_window() {
+    let store = Store::open_memory("example").unwrap();
+    let observed = 1_000_000_u128;
+    let freshness = HARNESS_OBSERVATION_FRESHNESS.as_millis();
+    for reported in ["idle", "ready"] {
+        for runtime in ["running", "starting"] {
+            for age in [150_000, freshness, 331_000] {
+                let mut cards = vec![json!({
+                    "id":"agent/example.worker", "state":runtime, "harness_state":reported,
+                    "_status_source":{"state":reported, "incarnation_id":"one", "claim":"claim/example",
+                        "since_unix_ms":observed, "observed_at_unix_ms":observed},
+                })];
+                overlay_agent_resources_at(&store, &mut cards, "now", observed + age, Some(Vec::new())).unwrap();
+                let current = age <= freshness;
+                assert_eq!(cards[0]["observation"], if current { "current" } else { "stale" }, "{runtime}/{reported}/{age}");
+                assert_eq!(cards[0]["harness_state"], if current { reported } else { "indeterminate" }, "{runtime}/{reported}/{age}");
+                assert_eq!(cards[0]["state"], if current { "running" } else { "waiting" }, "{runtime}/{reported}/{age}");
+            }
+        }
+    }
+}
+
+fn assert_harnessless_card_stays_missing(mut card: Value) {
+    let store = Store::open_memory("example").unwrap();
+    let state = card["state"].clone();
+    let expected = serde_json::to_value(fractal_ui_model::agents::present(
+        &fractal_ui_model::agents::Facts::deserialize(&card).unwrap(),
+    )).unwrap();
+    overlay_agent_resources_at(&store, std::slice::from_mut(&mut card), "now", 1_000_000, Some(Vec::new())).unwrap();
+    assert_eq!(card["observation"], "missing");
+    assert_eq!(card["state"], state);
+    assert_eq!(card["presentation"], expected);
+    assert!(card["incarnation_id"].is_null());
+    assert!(card["harness_state"].is_null());
+}
+
+#[test]
+fn suspended_card_without_an_incarnation_stays_missing() {
+    assert_harnessless_card_stays_missing(json!({
+        "id":"agent/example.paused", "state":"suspended", "incarnation_id":null,
+        "harness_state":null, "_status_source":null,
+        "suspension":{"action":"suspend", "phase":"suspended"},
+    }));
+}
+
+#[test]
+fn service_card_without_a_harness_stays_missing() {
+    assert_harnessless_card_stays_missing(json!({
+        "id":"agent/example.web-services", "state":"running", "driver":null,
+        "incarnation_id":null, "session":null, "harness":null, "harness_state":null,
+        "_status_source":null,
+    }));
+}
+
 fn fixture() -> (tempfile::TempDir, AppState) {
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());

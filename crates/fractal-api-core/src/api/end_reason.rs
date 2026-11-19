@@ -276,7 +276,7 @@ mod tests {
         let mut options = Options {
             set: "garden".into(), source: Source { repository: "example/garden".into(), r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: None, adopt: Default::default(),
-            allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+            allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
         store.apply_owned_set(&intent, &options, "owned", "person/operator").unwrap();

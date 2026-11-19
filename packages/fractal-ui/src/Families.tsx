@@ -1,8 +1,10 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { lightTheme } from './assistant-ui/composition-theme'
-import { Badge, Button, Checkbox, CheckIcon, CodeBlock, CommandMenu, ContextCard, CopyIcon, Description, EmptyState, Entity, Input, Kbd, MenuTrigger, Modal, Note, Pill, Progress, Spinner, StatusDot, Table, Tabs, Toggle, Tooltip, XCircleIcon, type CommandGroup, type Theme } from './kit'
+import { Badge, Button, Checkbox, CheckIcon, CodeBlock, CommandMenu, CopyIcon, Description, EmptyState, Entity, Input, Kbd, MenuTrigger, Modal, Note, Pill, Progress, Spinner, StatusDot, Table, Tabs, Toggle, Tooltip, XCircleIcon, type CommandGroup, type Theme } from './kit'
 import type { DiffFile } from './assistant-ui/composition/DiffPanel'
+import { HoverCard } from './assistant-ui/entity/HoverCard'
+import { ResourceEntityCard } from './assistant-ui/entity/ResourceCard'
 
 export interface FamiliesProps extends Theme {
   readonly changedFiles: readonly (Pick<DiffFile, 'path' | 'added' | 'removed'> & { readonly id: string; readonly status: React.ComponentProps<typeof StatusDot> })[]
@@ -56,7 +58,7 @@ export function Families({ direction = 'folio', scheme = 'light', density = 'com
       </Family>
       <Family name="StatusDot / Spinner / Progress">
         <div className="flex flex-wrap gap-x-5 gap-y-2">{actorStates.map((state, index) => <StatusDot key={index} {...state} />)}</div>
-        <div className="mt-3"><Spinner label="Fetching preview" /></div>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2"><Spinner label="Fetching preview" /><Spinner label="Fetching preview" size="sm" /></div>
         <div className="mt-3 space-y-3"><Progress label="Checks" value={4} maxValue={6} tone="warning" /><Progress label="Upload" value={100} tone="good" size="sm" /></div>
       </Family>
       <Family name="CodeBlock" note="Plain text and JSON with filename plus copy; language chip; horizontal scroll for long lines.">
@@ -65,10 +67,10 @@ export function Families({ direction = 'folio', scheme = 'light', density = 'com
       <Family name="CommandMenu" note="Grouped items with description and keywords; keyboard-first; honest empty state.">
         <CommandMenu groups={commandGroups} placeholder="Search everything…" />
       </Family>
-      <Family name="ContextCard" note="Preview appears on hover or keyboard focus after a 350 ms intent delay.">
-        <ContextCard title="Why synthetic" preview={<>Fixtures are authored, not captured. No live session, host or credential can leak into a story.</>}>
-          <div className="flex items-center justify-between"><span className="font-semibold">Fixture policy</span><StatusDot state="ready" label="Clean" /></div>
-        </ContextCard>
+      <Family name="Entity hover card" note="The canonical passive card opens after pointer rest or keyboard focus.">
+        <HoverCard content={() => <ResourceEntityCard id="document/fixture-policy" title="Why synthetic" kind="Document" text="Fixtures are authored, not captured. No live session, host or credential can leak into a story." />}>
+          <Button>Fixture policy</Button>
+        </HoverCard>
       </Family>
       <Family name="Description / Entity" note="Metadata pairs and named actors with stable identity chips.">
         <Description items={[['Worktree', <span className="font-mono">{worktree}</span>], ['Started', <span className="tabular">09:14</span>], ['Model', 'fixture · unlabeled'], ['Cost', <span className="text-muted">unavailable</span>]]} />

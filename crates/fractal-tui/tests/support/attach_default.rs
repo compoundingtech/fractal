@@ -33,6 +33,8 @@ fn ask(agent: &str) -> Attention {
     Attention {
         deadline: None,
         requested_at: None,
+        snoozed_until: None,
+        episode: None,
         id: "ask/probe".into(),
         tier: Tier::Stopped,
         title: "Ship the release?".into(),
@@ -116,6 +118,7 @@ fn attach_default_probe_worker() -> Result<()> {
                             "one".into(),
                             24,
                             80,
+                            None,
                         )),
                     });
                 }
@@ -211,7 +214,7 @@ fn attach_redraw_cost() {
         cursor: None,
         stale: None,
         ended: None,
-        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120)),
+        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120, None)),
     });
     if std::env::var_os("FRACTAL_TUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);

@@ -32,6 +32,7 @@ use crate::fleet::transport::{
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
 use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
+use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
 use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -160,14 +161,32 @@ impl FleetContext {
 }
 
 /// Private process boundary: the daemon proxies reads to the live worker, not its journal.
-pub fn leave_state_socket(state_dir: &Path) -> PathBuf {
-    state_dir.join("fleet/leave-state.sock")
+pub fn leave_state_socket(api_socket: &Path) -> std::io::Result<PathBuf> {
+    let mut name = api_socket.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "API socket has no basename")
+    })?.to_os_string();
+    // Retain the entire basename: endpoints differing only in extension also
+    // need distinct worker listeners and reservations.
+    name.push(".leave-state.sock");
+    Ok(api_socket.with_file_name(name))
 }
 
-fn bind_leave_state_socket(state_dir: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
+fn bind_leave_state_socket(api_socket: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
+    bind_leave_state_socket_path(api_socket, &leave_state_socket(api_socket)?)
+}
+
+fn bind_leave_state_socket_path(
+    api_socket: &Path,
+    path: &Path,
+) -> Result<(std::fs::File, tokio::net::UnixListener)> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let path = leave_state_socket(state_dir);
+    if path == api_socket {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("leave-state socket would replace API socket {}", api_socket.display()),
+        ).into());
+    }
     std::fs::create_dir_all(path.parent().context("leave socket parent")?)?;
     let reservation = std::fs::OpenOptions::new()
         .read(true)
@@ -184,12 +203,23 @@ fn bind_leave_state_socket(state_dir: &Path) -> Result<(std::fs::File, tokio::ne
             std::io::Error::last_os_error()
         );
     }
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = tokio::net::UnixListener::bind(&path)?;
+    let listener = tokio::net::UnixListener::bind(path).with_context(|| {
+        use std::os::unix::ffi::OsStrExt as _;
+        #[cfg(target_os = "macos")]
+        const LIMIT: usize = 103;
+        #[cfg(not(target_os = "macos"))]
+        const LIMIT: usize = 107;
+        format!(
+            "bind leave-state Unix socket {} ({} bytes; platform limit {LIMIT} bytes)",
+            path.display(),
+            path.as_os_str().as_bytes().len()
+        )
+    })?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok((reservation, listener))
 }
@@ -231,6 +261,7 @@ type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, Repl
 struct ExchangeJob {
     digest: String,
     answer: watch::Receiver<Option<ExchangeAnswer>>,
+    timing: Arc<ExchangeTiming>,
 }
 
 /// Only the store an exchange names, read before the whole exchange is decoded.
@@ -589,6 +620,8 @@ pub struct WorkerConfig {
     pub secret_file: PathBuf,
     /// Holds `fleet/`; a member that learns it was removed records it there.
     pub state_dir: PathBuf,
+    /// The configured daemon API socket, including its instance-specific basename.
+    pub api_socket: PathBuf,
     pub peers: Vec<PeerConfig>,
     /// The replication listener, such as `127.0.0.1:31313`. A dial-out member ignores it.
     pub peer_listen: Option<String>,
@@ -598,7 +631,7 @@ pub struct WorkerConfig {
 impl WorkerConfig {
     /// A member's worker as its `STATE/fleet/fleet.toml` describes it: the name it joined
     /// under (else `node`), its secret, and a loopback listener on its port.
-    pub fn from_fleet_file(state_dir: &Path, node: &str) -> Result<Self> {
+    pub fn from_fleet_file(state_dir: &Path, api_socket: &Path, node: &str) -> Result<Self> {
         let file = FleetFile::load(state_dir)?
             .with_context(|| format!("{} is missing", FleetFile::path(state_dir).display()))?;
         let peer_listen = match (file.mode, file.port) {
@@ -610,6 +643,7 @@ impl WorkerConfig {
             fleet_id: file.fleet_id.clone(),
             secret_file: file.secret_path(state_dir),
             state_dir: state_dir.to_path_buf(),
+            api_socket: api_socket.to_path_buf(),
             peers: Vec::new(),
             peer_listen,
             fleet: Some(file),
@@ -650,7 +684,7 @@ pub async fn run_with_shards<B: Backend>(
     routes: Router<PeerState<B>>,
     shards: Vec<ShardSync<B>>,
 ) -> Result<()> {
-    let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.state_dir)?;
+    let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.api_socket)?;
     let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
     let secret_file = config.secret_file.as_path();
@@ -1379,6 +1413,7 @@ fn may_carry_direct_leave(exchange: &ReplicationExchange, key: &str) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_from_peer<B: Backend>(
     backend: &B,
     fleet: &FleetContext,
@@ -1387,6 +1422,7 @@ async fn receive_from_peer<B: Backend>(
     exchange: &ReplicationExchange,
     round_trip: Option<Duration>,
     carrier: crate::replication::ReplicationCarrier,
+    authenticated_member_key: Option<&str>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
     let _refresh = fleet.view_refresh.lock().await;
     let before = backend.fleet_view().await?;
@@ -1413,7 +1449,7 @@ async fn receive_from_peer<B: Backend>(
         *leave = updated;
     }
     let received = backend
-        .receive(peer, fleet_id, exchange, round_trip, carrier)
+        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
         .await?;
     if received.changed {
         backend.changed().await;
@@ -2490,7 +2526,7 @@ struct ExchangeTiming {
     server: bool,
     // Clients promote retained DEBUG boundaries on failure/slowness; servers
     // retain them for one always-INFO summary at response handoff.
-    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
+    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 12], bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2579,6 +2615,73 @@ impl ExchangeTiming {
             elapsed_us = %boundary.elapsed_us,
             "replication exchange boundary"
         );
+    }
+
+    fn client_failed(&self, peer: &str) {
+        self.promote();
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage = "client-failed",
+            unix_ms = %crate::store::now_ms(),
+            elapsed_us = %self.started.elapsed().as_micros(),
+            peer,
+            "replication exchange boundary"
+        );
+    }
+
+    fn failure_line(
+        &self,
+        headers: &HeaderMap,
+        peer: &str,
+        shard: Option<&str>,
+        outcome: &str,
+        failure: Option<&ReplicationExchangeFailure>,
+    ) -> String {
+        let boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let at = |stage| boundaries.0.iter().flatten()
+            .find(|event| event.stage == stage).map(|event| event.elapsed_us);
+        let duration = |start, end| at(start)
+            .map(|start| at(end).unwrap_or(elapsed_us).saturating_sub(start) / 1000);
+        let measured = |value: Option<u64>| value.map_or_else(|| "none".into(), |ms| ms.to_string());
+        let correlation = headers.get(EXCHANGE_CORRELATION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        let phase = failure.map_or_else(
+            || if at("follow-up-export-start").is_some() { "follow-up-export" }
+                else if at("local-receive-start").is_some() { "local-receive" }
+                else { "none" },
+            |failure| match failure.phase {
+                ReplicationFailurePhase::Dial => "dial",
+                ReplicationFailurePhase::LocalExport => "local-export",
+                ReplicationFailurePhase::RequestHeaders => "request-headers",
+                ReplicationFailurePhase::ResponseBody => "response-body",
+                ReplicationFailurePhase::Verify => "verify",
+                ReplicationFailurePhase::LocalReceive => "local-receive",
+                ReplicationFailurePhase::FollowUpExport => "follow-up-export",
+            },
+        );
+        let code = failure.map_or(
+            if outcome == "no-answer" { "replication-no-answer" } else { "replication-overloaded" },
+            |failure| failure.code.as_str(),
+        );
+        let mut line = format!(
+            "fractal: replication exchange answer correlation_id={} peer={peer} shard={} outcome={outcome} code={code} phase={phase} elapsed_ms={} permit_wait_ms={} local_receive_ms={} follow_up_export_ms={}",
+            correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+            shard.unwrap_or("none"), elapsed_us / 1000,
+            measured(at("permit-acquired").map(|us| us / 1000)),
+            measured(duration("local-receive-start", "local-receive-done")),
+            measured(duration("follow-up-export-start", "backend-done")),
+        );
+        if let Some(status) = failure
+            .filter(|failure| failure.phase == ReplicationFailurePhase::LocalReceive)
+            .and_then(|failure| failure.http_status)
+        {
+            use std::fmt::Write as _;
+            let _ = write!(line, " local_receive_http_status={status}");
+        }
+        line
     }
 
     fn server_boundaries(&self) -> [Option<ExchangeBoundary>; 3] {
@@ -2694,6 +2797,19 @@ async fn receive_exchange_inner<B: Backend>(
     body: Bytes,
     timing: &Arc<ExchangeTiming>,
 ) -> Response {
+    receive_exchange_inner_to(
+        State(state), headers, body, timing, &FAILURE_DIAGNOSTICS, &mut std::io::stderr(),
+    ).await
+}
+
+async fn receive_exchange_inner_to<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+    timing: &Arc<ExchangeTiming>,
+    diagnostics: &FailureDiagnostics,
+    output: &mut (impl std::io::Write + Send),
+) -> Response {
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
@@ -2741,7 +2857,7 @@ async fn receive_exchange_inner<B: Backend>(
         Some(shard) => format!("{relay}\n{shard}"),
         None => relay.clone(),
     };
-    let mut answer = {
+    let (mut answer, job_timing) = {
         let mut jobs = state
             .fleet
             .exchange_jobs
@@ -2758,6 +2874,9 @@ async fn receive_exchange_inner<B: Backend>(
             && job.digest != request_digest
             && job.answer.borrow().is_none()
         {
+            drop(jobs);
+            diagnostics.record_to(FailureKind::ExchangeOverload,
+                || timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
             return signed_overload(&state, &request_digest);
         }
         let reuse = jobs
@@ -2771,8 +2890,12 @@ async fn receive_exchange_inner<B: Backend>(
                 .clone()
                 .try_acquire_owned()
             else {
+                drop(jobs);
+                diagnostics.record_to(FailureKind::ExchangeOverload,
+                    || timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
                 return signed_overload(&state, &request_digest);
             };
+            timing.record("permit-acquired");
             let request: ReplicationExchange = match serde_json::from_slice(&body) {
                 Ok(request) => request,
                 Err(_) => {
@@ -2797,28 +2920,34 @@ async fn receive_exchange_inner<B: Backend>(
                 ExchangeJob {
                     digest: request_digest.clone(),
                     answer,
+                    timing: Arc::clone(timing),
                 },
             );
             let state = state.clone();
             let relay = relay.clone();
             let shard = shard.clone();
             let backend_timing = Arc::clone(timing);
+            let authenticated_member_key = sender.member_key.clone().filter(|_| sender.member_signature_valid);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
                     let _permit = permit;
                     let started = std::time::Instant::now();
+                    backend_timing.record("local-receive-start");
                     if let Some(backend) = shard.as_ref().and_then(|shard| state.shards.get(shard)) {
                         // A shard carries no fleet claims, so none of the default store's
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
-                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default())
-                                .await
+                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref())
+                                .await;
+                            backend_timing.record("local-receive-done");
+                            let received = received
                                 .map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                             if received.changed {
                                 backend.changed().await;
                             }
+                            backend_timing.record("follow-up-export-start");
                             backend
                                 .export(state.auth.fleet_id(), &request.inventory, false, &request.signature_requests)
                                 .await
@@ -2841,13 +2970,17 @@ async fn receive_exchange_inner<B: Backend>(
                             &request,
                             None,
                             Default::default(),
+                            authenticated_member_key.as_deref(),
                         )
-                        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                        .await;
+                        backend_timing.record("local-receive-done");
+                        let received = received.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                         if received.receipt.received != 0 {
                             state.outbound_notify.send_modify(|generation| {
                                 *generation = generation.saturating_add(1)
                             });
                         }
+                        backend_timing.record("follow-up-export-start");
                         let response = state
                             .backend
                             .export(
@@ -2872,7 +3005,8 @@ async fn receive_exchange_inner<B: Backend>(
                 },
             ));
         }
-        jobs.get(&job_key).unwrap().answer.clone()
+        let job = jobs.get(&job_key).unwrap();
+        (job.answer.clone(), Arc::clone(&job.timing))
     };
     let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
         loop {
@@ -2927,6 +3061,8 @@ async fn receive_exchange_inner<B: Backend>(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(Some(Err(failure))) => {
+            diagnostics.record_to(FailureKind::ExchangeFailed,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)), output);
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &job_key, &answer);
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
@@ -2939,6 +3075,8 @@ async fn receive_exchange_inner<B: Backend>(
             }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
+            diagnostics.record_to(FailureKind::ExchangeNoAnswer,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "no-answer", None), output);
             finish_exchange_job(&state.fleet, &job_key, &answer);
             signed_error_response(
                 &state,
@@ -2949,7 +3087,11 @@ async fn receive_exchange_inner<B: Backend>(
             )
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => signed_overload(&state, &request_digest),
+        Err(_) => {
+            diagnostics.record_to(FailureKind::ExchangeOverload,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
+            signed_overload(&state, &request_digest)
+        }
     }
 }
 
@@ -3439,7 +3581,7 @@ async fn finish_leave_receipt(
         .get(&peer.name)
         .cloned()
         .context("member-left response has no durable receipt proof")?;
-    let (ack, _): (Value, bool) = post_signed_to(
+    let (ack, _, _): (Value, bool, Option<String>) = post_signed_to(
         http,
         peer,
         node,
@@ -3527,7 +3669,7 @@ async fn exchange_inner<B: Backend>(
         ..first
     };
     let started = std::time::Instant::now();
-    let (remote, peer_inflates) =
+    let (remote, peer_inflates, authenticated_member_key) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
     ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
@@ -3540,6 +3682,7 @@ async fn exchange_inner<B: Backend>(
         &remote,
         Some(round_trip),
         carrier,
+        authenticated_member_key.as_deref(),
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
@@ -3563,7 +3706,7 @@ async fn exchange_inner<B: Backend>(
             .exchange;
         let started = std::time::Instant::now();
         // A peer that says it takes compressed requests gets a large push compressed.
-        let (response, _) =
+        let (response, _, authenticated_member_key) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
@@ -3578,6 +3721,7 @@ async fn exchange_inner<B: Backend>(
             &response,
             Some(round_trip),
             carrier,
+            authenticated_member_key.as_deref(),
         )
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
@@ -3795,8 +3939,8 @@ async fn walk_claim_ranges<B: Backend>(
         let mut ask = summary.clone();
         ask.inventory.claim_range_query = Some(query.clone());
         let started = std::time::Instant::now();
-        let answer = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
-            Ok((answer, _)) => answer,
+        let (answer, authenticated_member_key) = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
+            Ok((answer, _, authenticated_member_key)) => (answer, authenticated_member_key),
             Err(error) => {
                 result = Err(error);
                 break;
@@ -3810,6 +3954,7 @@ async fn walk_claim_ranges<B: Backend>(
             &answer,
             Some(started.elapsed()),
             carrier,
+            authenticated_member_key.as_deref(),
         )
         .await
         {
@@ -3971,7 +4116,7 @@ async fn post_signed<B: Backend>(
     fleet: &FleetContext,
     exchange: &ReplicationExchange,
     compress: bool,
-) -> Result<(ReplicationExchange, bool)> {
+) -> Result<(ReplicationExchange, bool, Option<String>)> {
     if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
         select_leave_confirmer(backend, fleet, &peer.name).await?;
     }
@@ -4079,7 +4224,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     path: &str,
     request: &B,
     compress: bool,
-) -> Result<(R, bool)> {
+) -> Result<(R, bool, Option<String>)> {
     let observation = Arc::new(ClientConnectObservation {
         timing: ExchangeTiming {
             id: uuid::Uuid::now_v7().to_string(),
@@ -4113,7 +4258,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                 failure.request_body_bytes = Some(preparation.body_bytes);
                 failure.request_body_uncompressed_bytes = Some(preparation.uncompressed_body_bytes);
             }
-            timing.record("client-failed");
+            timing.client_failed(&peer.name);
             let display = error.to_string();
             error.context(failure).context(display)
         })
@@ -4132,7 +4277,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     timing: &ExchangeTiming,
     client_stage: &mut crate::replication::ReplicationClientStage,
     preparation: &mut Option<RequestPreparation>,
-) -> Result<(R, bool)> {
+) -> Result<(R, bool, Option<String>)> {
     let body = serde_json::to_vec(request)?;
     let uncompressed_body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let request_digest = FleetAuth::body_digest(&body);
@@ -4351,7 +4496,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         ));
     }
     fleet.note_activity(&peer.name);
-    Ok((response.value, accepts_deflate(&headers)))
+    Ok((response.value, accepts_deflate(&headers), responder.member_key.filter(|_| responder.member_signature_valid)))
 }
 
 #[cfg(test)]

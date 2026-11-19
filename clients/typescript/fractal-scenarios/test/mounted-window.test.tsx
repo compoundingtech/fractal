@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import type { Meta } from '@storybook/react'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -28,7 +29,7 @@ const Tail = ({ omit = false }: { readonly omit?: boolean }) => {
   })}</div>
 }
 
-// Transcript.tsx exports transcriptMountedWindow = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount } (6).
+// transcript-window.ts exports transcriptMountedWindow = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount } (6).
 const scenario = { _tag: 'slices', slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'sourceRows', rows: 6 } } satisfies ScenarioStoryParameter
 const meta = { title: 'Mounted window proof', render: () => <Tail />, parameters: { scenario } } satisfies Meta
 
@@ -39,7 +40,7 @@ const sourceContent = sourceThread.items.find(entry => entry.type === 'content')
 const sourceTool = sourceThread.items.find(entry => entry.type === 'tool_call')
 if (sourceContent === undefined || sourceTool === undefined) throw new Error('Mounted-window proof requires content and tool entries')
 const prompt = (index: number, marker = `Window boundary prompt ${index}`): Entry => ({
-  ...sourceContent, id: `entry/window-${index}`, sequence: index + 1, role: 'user', body: { media_type: 'text/plain', text: marker },
+  ...sourceContent, id: `entry/window-${index}`, sequence: index + 1, role: 'user', body: { media_type: 'text/plain', text: markdownBlock(marker) },
 })
 
 // Inject only the catalog lookup: real wire folding, world overrides, portable rendering,
@@ -54,7 +55,8 @@ const withEntries = (items: readonly Entry[], check: () => void): void => {
 }
 
 const answer = (index: number): Entry => ({
-  ...sourceContent, id: `entry/answer-${index}`, sequence: 100 + index, role: 'assistant', body: { media_type: 'text/plain', text: `Window boundary answer ${index}` },
+  // markdown-template-reviewed: a number
+  ...sourceContent, id: `entry/answer-${index}`, sequence: 100 + index, role: 'assistant', body: { media_type: 'text/plain', text: markdownBlock(`Window boundary answer ${index}`) },
 })
 
 /** Renders the given entries' content markers: all of them, or only the newest `last`. */
@@ -127,7 +129,7 @@ describe('story-declared mounted conversation window', () => {
   })
 
   it('counts an assistant-only or tool-only prefix as a source row outside the newest six', () => {
-    const assistant: Entry = { ...sourceContent, id: 'entry/window-prefix', role: 'assistant', body: { media_type: 'text/plain', text: 'Prefix assistant marker' } }
+    const assistant: Entry = { ...sourceContent, id: 'entry/window-prefix', role: 'assistant', body: { media_type: 'text/plain', text: markdownBlock('Prefix assistant marker') } }
     for (const prefix of [assistant, sourceTool]) {
       const items = [prefix, ...Array.from({ length: 6 }, (_, index) => prompt(index))]
       withEntries(items, () => {

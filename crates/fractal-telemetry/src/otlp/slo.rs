@@ -5,7 +5,7 @@
 //! collector holds the history. Nothing here runs on a request path; once a minute a task reads
 //! the same report as `GET /v1/client/request-latency` and sends it to `[observations.otlp]`.
 //!
-//! Every point carries bounded labels, all from `slo/targets.toml` or fixed words: `target`, the
+//! Every point carries bounded labels, all from `slo/objectives.kdl` or fixed words: `target`, the
 //! `series` inside it (`owner` or `remote` for a read target, `reported` for a latency a paired
 //! phone reported, `statement`, `read`, `write` or `writer_hold` for the store), the `window`
 //! (`1m`, `5m`, `1h`) and, for the latency gauge, the `stat` (`p50`, `p99`, `max`). The target
@@ -115,7 +115,8 @@ pub fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Value> {
                 }
             }
             // The writer-hold row's windows go out under `transaction`; its holders are not gauges.
-            "database" | "writer-hold" => {}
+            // Database capacity observations are not latency windows or latency targets.
+            "database" | "database-archive" | "writer-hold" => {}
             _ => {
                 let owner = if population.is_some() { "reported" } else { "owner" };
                 series(owner, &row["windows"]);
@@ -154,7 +155,7 @@ pub fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Value> {
         gauge(
             "st_slo_target_ms",
             "ms",
-            "The target in slo/targets.toml for a series: its 99th percentile, or its maximum",
+            "The target in slo/objectives.kdl for a series: its 99th percentile, or its maximum",
             targets,
         ),
         gauge(
@@ -289,6 +290,8 @@ mod tests {
                 "1h": {"cores": null, "minutes": 42}}, "minutes": 42,
                 "idle": {"minutes": 12, "cores": 0.1, "not_idle": {}}},
             {"name": "database", "max_live_gb": 5, "size": {"live_gb": 1.0}},
+            {"name": "database-archive", "kind": "gauge", "fresh": true, "status": "available",
+             "size": {"archive_bytes": 42, "growth_bytes_per_day": null}, "budget": null},
             {"name": "ios-connect", "p99_ms": 1500, "population": "client-observed-latencies",
              "windows": windows(20, 900.0, 0)},
             {"name": "ios-live-share", "min_percent": 99, "population": "client-observed-foreground-ms",
@@ -322,10 +325,11 @@ mod tests {
         // An hour not yet known sends no point rather than a zero.
         assert!(!points(&body, "st_slo_cpu_cores").iter().any(|point| label(point, "window") == Some("1h")));
         assert_eq!(points(&body, "st_slo_cpu_max_cores")[0]["asDouble"], 1.0);
-        // The database row is not a window and goes out through no gauge here.
+        // Database capacity rows are not windows and go out through no latency gauge here.
         for metric in body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array().unwrap() {
             for point in metric["gauge"]["dataPoints"].as_array().unwrap() {
                 assert_ne!(label(point, "target"), Some("database"));
+                assert_ne!(label(point, "target"), Some("database-archive"));
             }
         }
     }

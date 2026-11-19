@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject mission run scratch directories inside Git worktrees",
+  "replay": {"status": "none", "detail": "Existing run records are unchanged. Scheduled runs created before acknowledgement are recovered before new-run scratch admission."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "changed", "detail": "New mission runs reject scratch directories inside Git worktrees, including linked worktrees and symlink aliases. Scheduled launches diagnose and fail unsafe new requests before creating directories. Inherited unsafe scratch produces a durable failed child-dispatch or loop step with a diagnostic, not a repeated reconciliation fault."},
+  "compatibility": {"status": "changed", "detail": "Launchers that used a repository checkout as run scratch must use a per-seat state directory instead. Declare repository checkouts separately from run scratch."},
+  "downtime": {"status": "none", "detail": "No migration or service interruption is required."},
+  "manual": {"status": "changed", "detail": "Move affected launcher workspace declarations to per-seat state directories before their next run."},
+  "recovery": {"status": "none", "detail": "Rejected launches leave the repository untouched. Correct the declaration before starting a new occurrence."}
+}

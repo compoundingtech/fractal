@@ -109,9 +109,21 @@ import ast, json, re
 encoded = re.search(r"QUEUE_DEPENDENCIES: (.+)", guard)[1]
 dependencies = json.loads(ast.literal_eval(encoded))
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
-for name in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-gate'):
+# The Actions jobs API reports display names, not workflow IDs. Include archive
+# producers and every consumer so late graph decorators cannot escape this check.
+names = {}
+for job_id, block in blocks.items():
+    display = re.search(r"^    name: (.+)$", block, re.M)
+    value = display[1] if display else job_id
+    names[job_id] = ast.literal_eval(value) if value.startswith(("'", '"')) else value
+assert set(dependencies) == set(names.values()), (set(dependencies), set(names.values()))
+for name, block in blocks.items():
     # Job-level `needs` may be one line, a list or a bracketed block, and sits before or after `steps`.
-    actual = re.search(r"^    needs:(.*?)(?=^    \S|\Z)", blocks[name], re.M | re.S)
+    actual = re.search(r"^    needs:(.*?)(?=^    \S|\Z)", block, re.M | re.S)
     needs = re.findall(r"[A-Za-z][A-Za-z0-9_-]*", actual[1]) if actual else []
-    assert dependencies[name] == needs, (name, dependencies[name], needs)
-print('passed: observer uses actual generated stage dependencies')
+    expected = [names[dependency] for dependency in needs]
+    assert dependencies[names[name]] == expected, (name, dependencies[names[name]], expected)
+producer = 'compat-archives-x86_64-unknown-linux-gnu'
+assert names[producer] in dependencies[names['linux-test-build']]
+assert dependencies[names[producer]] == []
+print('passed: observer uses every generated stage dependency and producer display name')

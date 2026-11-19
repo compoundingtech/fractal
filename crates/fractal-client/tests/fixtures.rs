@@ -17,6 +17,222 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn series_fixture_preserves_zero_and_clipped_buckets() {
+    let raw: serde_json::Value = decode("series.json");
+    let series: Envelope<Series> = decode("series.json");
+    assert!(series.value.group_by.is_none());
+    assert_eq!(series.value.bucket_seconds, 60);
+    assert_eq!(series.value.buckets.iter().map(|bucket| bucket.count).collect::<Vec<_>>(), vec![2, 0, 1]);
+    assert_eq!(series.value.buckets.last().unwrap().end, series.value.to);
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
+    for (pointer, invalid_value) in [
+        ("/bucket_seconds", serde_json::json!(0)),
+        ("/buckets/0/count", serde_json::json!(-1)),
+        ("/buckets/0/start", serde_json::json!(-1)),
+        ("/buckets/0/end", serde_json::json!(-1)),
+    ] {
+        let mut invalid = raw["value"].clone();
+        *invalid.pointer_mut(pointer).unwrap() = invalid_value;
+        assert!(!validator.is_valid(&invalid), "{pointer}");
+    }
+    for field in ["from", "to", "bucket_seconds", "buckets"] {
+        let mut invalid = raw["value"].clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&invalid), "{field}");
+        assert!(serde_json::from_value::<Series>(invalid).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn series_grouped_fixture_preserves_json_values() {
+    let raw: serde_json::Value = decode("series-grouped.json");
+    let series: Envelope<Series> = decode("series-grouped.json");
+    assert_eq!(series.value.group_by.as_deref(), Some("category"));
+    let groups = series.value.buckets[0].groups.as_ref().unwrap();
+    assert_eq!(groups.len(), 6);
+    assert!(groups[0].value.is_null());
+    assert!(groups[1].value.is_string());
+    assert!(groups[2].value.is_number());
+    assert!(groups[3].value.is_boolean());
+    assert!(groups[4].value.is_array());
+    assert!(groups[5].value.is_object());
+    assert!(series.value.buckets[1].groups.as_ref().unwrap().is_empty());
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
+}
+
+#[test]
+fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
+    let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
+    let [ada, avery, blair] = &read.value.people[..] else { panic!("three people") };
+    assert_eq!((ada.status.as_str(), ada.status_source.as_str(), ada.interruptions.as_str()), ("away", "override", "urgent"));
+    assert!(ada.presence.is_none() && ada.presence_observed_at.is_none());
+    assert_eq!((avery.deadline_clock, avery.deadline_clock_until.as_deref()), (AvailabilityDeadlineClock::HoldRoutine, Some("2026-11-12T17:00:00Z")));
+    assert_eq!((blair.status, blair.status_source), (AvailabilityStatus::Available, AvailabilityStatusSource::Unreported));
+    let own: Envelope<PersonAvailability> = decode("availability-set-result.json");
+    assert_eq!(own.value.presence, Some(AvailabilityPresence::Present));
+    let set: AvailabilitySet = decode("availability-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("availability-set.json")).unwrap());
+    let clear = AvailabilitySet { status: Some(AvailabilityStatusChange { value: None, until: None }), ..AvailabilitySet::default() };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"status": {"value": null}}));
+    let report: PresenceReport = decode("presence-report.json");
+    assert_eq!((report.state.as_str(), report.last_input_at.as_deref(), report.observed_at.as_str()), ("active", Some("2026-11-12T09:57:30Z"), "2026-11-12T09:58:00Z"));
+    let reported: Envelope<PresenceReportResult> = decode("presence-report-result.json");
+    assert_eq!((reported.value.availability.presence, reported.value.report_again_at.as_deref()), (Some(AvailabilityPresence::Present), Some("2026-11-12T10:07:30Z")));
+    let bare = PresenceReport { state: "locked".into(), last_input_at: None, observed_at: "2026-11-12T09:58:00Z".into() };
+    assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!({"state": "locked", "observed_at": "2026-11-12T09:58:00Z"}));
+}
+
+#[test]
+fn availability_words_a_newer_daemon_adds_read_as_unknown() {
+    let mut row = serde_json::from_slice::<serde_json::Value>(&fixture("person-availability.json")).unwrap()["value"]["people"][0].clone();
+    for (field, word) in [("status", "busy"), ("status_source", "calendar"), ("presence", "in-call"), ("interruptions", "priority"), ("deadline_clock", "hold-weekend")] {
+        row[field] = serde_json::json!(word);
+    }
+    let future: PersonAvailability = serde_json::from_value(row).unwrap();
+    assert_eq!((future.status, future.status_source), (AvailabilityStatus::Unknown, AvailabilityStatusSource::Unknown));
+    assert_eq!(future.presence, Some(AvailabilityPresence::Unknown));
+    assert_eq!((future.interruptions, future.deadline_clock), (AvailabilityInterruptions::Unknown, AvailabilityDeadlineClock::Unknown));
+    assert_eq!((AvailabilityDeadlineClock::HoldAll.as_str(), AvailabilityStatus::Unknown.to_string()), ("hold-all", "unknown".to_owned()));
+}
+
+#[test]
+fn availability_history_fixture_round_trips_and_every_axis_covers_its_bucket() {
+    let read: Envelope<AvailabilityHistory> = decode("availability-history.json");
+    let wire = serde_json::from_slice::<serde_json::Value>(&fixture("availability-history.json")).unwrap();
+    assert_eq!(serde_json::to_value(&read.value).unwrap(), wire["value"]);
+    let [first, last] = &read.value.buckets[..] else { panic!("two buckets") };
+    assert_eq!((first.status_source.r#override, last.status_source.r#override), (0, 1_200_000));
+    assert_eq!((last.covered_ms, last.deadline_clock.hold_routine), (1_800_000, 1_200_000));
+    for bucket in &read.value.buckets {
+        let presence = bucket.presence.unwrap();
+        for total in [
+            bucket.status.available + bucket.status.away,
+            bucket.status_source.r#override + bucket.status_source.presence + bucket.status_source.unreported,
+            presence.present + presence.idle + presence.locked + presence.unreported,
+            bucket.interruptions.all + bucket.interruptions.urgent + bucket.interruptions.none,
+            bucket.deadline_clock.run + bucket.deadline_clock.hold_routine + bucket.deadline_clock.hold_all,
+        ] {
+            assert_eq!(total, bucket.covered_ms, "{bucket:?}");
+        }
+    }
+}
+
+#[test]
+fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
+    let set: DirectiveNoteSet = decode("directive-note-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());
+    let written: Envelope<DirectiveNoteSetResult> = decode("directive-note-set-result.json");
+    assert_eq!(written.value.note.as_ref().map(|note| note.text.as_str()), set.text.as_deref());
+    let clear = DirectiveNoteSet { text: None, expires_at: None };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
+}
+
+
+#[test]
+fn response_evidence_schema_and_typed_models_preserve_observations() {
+    let bodies: Vec<serde_json::Value> = decode("response-evidence.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/TimelineUsageBody"
+    })).unwrap();
+    for raw in bodies {
+        assert!(validator.is_valid(&raw));
+        let body: TimelineUsageBody = serde_json::from_value(raw.clone()).unwrap();
+        let encoded = serde_json::to_value(&body).unwrap();
+        for (key, value) in raw.as_object().unwrap() {
+            assert_eq!(&encoded[key], value, "{key}");
+        }
+        assert_eq!(body.response_id.as_deref(), raw["response_id"].as_str());
+    }
+    let unknown = serde_json::json!({
+        "semantics":"response", "driver":"omp", "attribution":{"agent_id":"agent/example"}
+    });
+    assert!(validator.is_valid(&unknown));
+    let body: TimelineUsageBody = serde_json::from_value(unknown.clone()).unwrap();
+    assert!(body.total_tokens.is_none());
+    assert!(body.cost.is_none());
+    assert!(body.provider_quota.is_none());
+    assert!(body.reasoning_tokens.is_none());
+    assert!(body.cache_write_1h_tokens.is_none());
+    let mut invalid = unknown;
+    invalid["provider_quota"] = serde_json::json!({"unit":"tokens","quantity":1});
+    assert!(!validator.is_valid(&invalid));
+    invalid["provider_quota"] = serde_json::json!({"unit":"premium_requests","quantity":-1});
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
+fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
+    let cases: serde_json::Value = decode("message-sender-outcomes.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/Page"
+    })).unwrap();
+    assert!(validator.is_valid(&cases));
+    for raw in cases["items"].as_array().unwrap() {
+        let message: Message = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(message.state, raw["state"].as_str().unwrap());
+        let encoded = serde_json::to_value(message).unwrap();
+        assert_eq!(encoded["state"], raw["state"]);
+    }
+}
+
+#[test]
+fn person_option_notes_round_trip_and_empty_omission() {
+    let legacy = serde_json::json!({"id": "land", "text": "Ship it."});
+    let input: PersonAnswerInput = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(input.option_notes.is_empty());
+    assert_eq!(serde_json::to_value(&input).unwrap(), legacy);
+    let notes = serde_json::json!([{"id": "hold", "text": "Keep as a fallback."}]);
+    let wire = serde_json::json!({"id": "land", "text": "Ship it.", "option_notes": notes});
+    let input: PersonAnswerInput = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(input.option_notes[0].id, "hold");
+    assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    let stored = serde_json::json!({"type": "decision", "outcome": "accept",
+        "id": "land", "text": "Ship it.", "option_notes": notes});
+    let answer: PersonAnswer = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(serde_json::to_value(answer).unwrap(), stored);
+    let mut empty = stored;
+    empty["option_notes"] = serde_json::json!([]);
+    let answer: PersonAnswer = serde_json::from_value(empty.clone()).unwrap();
+    empty.as_object_mut().unwrap().remove("option_notes");
+    assert_eq!(serde_json::to_value(answer).unwrap(), empty);
+}
+
+#[test]
+fn person_option_notes_schema_is_nested_and_strict() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/PersonAnswerInput"
+    })).unwrap();
+    assert!(validator.is_valid(&serde_json::json!({"id": "land",
+        "option_notes": [{"id": "hold", "text": "Fallback."}]})));
+    for note in [
+        serde_json::json!({"id": "hold"}),
+        serde_json::json!({"id": "hold", "text": ""}),
+        serde_json::json!({"id": "hold", "text": "x".repeat(8001)}),
+        serde_json::json!({"id": "hold", "text": "Fallback.", "label": "extra"}),
+    ] {
+        assert!(!validator.is_valid(&serde_json::json!({"id": "land", "option_notes": [note]})));
+    }
+}
+
+#[test]
 fn related_run_rows_decode_and_validate_server_semantics() {
     let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
     let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
@@ -457,6 +673,33 @@ fn generated_models_decode_every_stream_fixture() {
     assert_eq!(ended.code, ErrorCode::StaleFence);
     let pairing: Envelope<PersonPairedSession> = decode("pairing.json");
     assert!(pairing.value.credential.len() >= 32);
+}
+
+#[test]
+fn mcp_pairing_and_read_proofs_preserve_their_principal() {
+    let paired: Envelope<PairedSession> = decode("assistant-mcp-pairing.json");
+    let PairedSession::Assistant(session) = paired.value else {
+        panic!("MCP session decoded as person");
+    };
+    assert_eq!(session.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.issuer, "person/robin");
+    assert_eq!(
+        session.session_actor,
+        format!("assistant/mcp/session/{}", session.grant.id)
+    );
+    assert_eq!(session.session_actor, session.grant.session_actor);
+    assert!(serde_json::from_slice::<Envelope<PersonPairedSession>>(
+        &fixture("assistant-mcp-pairing.json")
+    ).is_err());
+
+    let mut proof: serde_json::Value = decode("assistant-read-authorization.json");
+    proof["payload"]["issuer"] = serde_json::json!("person/robin");
+    proof["payload"]["identity"] = serde_json::json!("mcp");
+    proof["payload"]["assistant_id"] = serde_json::json!("assistant/mcp");
+    let proof: ScgReadAuthorization = serde_json::from_value(proof).unwrap();
+    assert_eq!(proof.payload.identity, ScgReadIdentity::Mcp);
+    assert_eq!(proof.payload.assistant_id, AssistantPrincipal::Mcp);
 }
 
 #[test]
@@ -1120,6 +1363,23 @@ fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request
     explicit_root["position"]["bucket"] = serde_json::Value::Null;
     let decoded: OrderedMembership = serde_json::from_value(explicit_root).unwrap();
     assert_eq!(decoded.position.bucket, None);
+}
+
+#[test]
+fn invocation_attribution_preserves_each_optional_evidence_field() {
+    for mask in 0..8 {
+        let mut raw = serde_json::json!({"agent_id":"agent/example",
+            "mission_run_id":null,"generation_id":null,"step_id":null});
+        for (bit, key, value) in [
+            (1, "execution_id", serde_json::json!("claim/exact")),
+            (2, "invocation_id", serde_json::json!("invocation/exact")),
+            (4, "attempt", serde_json::json!(2)),
+        ] {
+            if mask & bit != 0 { raw[key] = value; }
+        }
+        let typed: TimelineAttribution = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), raw);
+    }
 }
 
 #[test]

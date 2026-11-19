@@ -30,6 +30,12 @@ clients/typescript/fractal-client/node_modules/
 clients/typescript/fractal-views/node_modules/
 clients/typescript/fractal-scenarios/node_modules/
 packages/fractal-sdk/node_modules/
+packages/fractal/node_modules/
+apps/macos/Fractal/design/node_modules/
+
+# Native gallery Storybook and TypeScript outputs; renders/ remains committed provenance.
+apps/macos/Fractal/design/storybook-static/
+apps/macos/Fractal/design/dist/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { markdownBlock } from '@fractal/client/markdown'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -20,6 +21,7 @@ import { Markdown, MarkdownImagePolicy } from '../../../../packages/fractal-ui/s
 import { DocumentPane } from './DocumentPane.tsx'
 import { documentReferences } from './DocumentLink.tsx'
 import { DOCUMENT_REF, documentVersion, gatewayDocuments } from './document-port.ts'
+import { credentialExpiredMessage } from '../data/source.ts'
 
 const hash = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2'
 const bytes = (text: string) => [...new TextEncoder().encode(text)]
@@ -35,7 +37,7 @@ describe('document references', () => {
   it('lets a host make doc names in any Markdown below it open, through the transcript\'s policy', () => {
     const html = renderToStaticMarkup(
       <MarkdownImagePolicy.Provider value={{ renderInlineReference: documentReferences(() => {}) }}>
-        <Markdown text="Read `doc/garden-notes` and `src/main.rs`." />
+        <Markdown text={markdownBlock('Read `doc/garden-notes` and `src/main.rs`.')} />
       </MarkdownImagePolicy.Provider>,
     )
     expect(html).toContain('<a href="doc/garden-notes">doc/garden-notes</a>')
@@ -86,6 +88,11 @@ describe('DocumentPane', () => {
     await act(async () => ([...pane.querySelectorAll('button')].find((button) => button.textContent === 'Read the newest') as HTMLElement).click())
     expect(data.read).toHaveBeenCalledTimes(2)
     expect(container.querySelector('[role="status"]')?.textContent).toBe('There is no document doc/garden-notes.')
+    data.read.mockResolvedValue({ _tag: 'Unavailable', reason: 'unauthorized', detail: 'private diagnostic' })
+    await act(async () => (pane.querySelector('button') as HTMLElement).click())
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(pane.querySelector('button')).toBeNull()
+    expect(pane.textContent).not.toContain('private diagnostic')
     act(() => root.unmount())
     container.remove()
   })

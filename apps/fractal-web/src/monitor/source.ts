@@ -40,13 +40,15 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const getJson = ({
   url,
   what,
+  fetchImpl = globalThis.fetch,
 }: {
   readonly url: string
   readonly what: 'quota' | 'history'
+  readonly fetchImpl?: typeof globalThis.fetch
 }): Effect.Effect<unknown, QuotaFailure> =>
   Effect.tryPromise({
     try: (signal) =>
-      fetch(url, { headers: { accept: 'application/json' }, credentials: 'same-origin', signal }),
+      fetchImpl(url, { headers: { accept: 'application/json' }, credentials: 'same-origin', signal }),
     catch: (error): QuotaFailure => ({
       kind: 'unreachable',
       reason: `${what} request failed: ${String(error)}`,
@@ -80,20 +82,47 @@ const getJson = ({
     ),
   )
 
-/** Usage relay; quota 404 is unsupported/unconfigured, separate from live-source connectivity. */
+/** The relay's client-v0 envelope; `snapshot` is the hub's own document, decoded by `decodeQuota`. */
+const RelayEnvelope = Schema.Struct({
+  value: Schema.Union([
+    Schema.Struct({ state: Schema.Literal('disabled') }),
+    Schema.Struct({ state: Schema.Literal('unavailable'), reason: Schema.Literals(['transport', 'invalid_snapshot']) }),
+    Schema.Struct({ state: Schema.Literal('available'), snapshot: Schema.Unknown }),
+  ]),
+})
+
+const relaySnapshot = (json: unknown): Effect.Effect<unknown, QuotaFailure> =>
+  Schema.decodeUnknownEffect(RelayEnvelope)(json).pipe(
+    Effect.mapError((): QuotaFailure => ({ kind: 'incompatible', reason: 'quota relay response is not recognized' })),
+    Effect.flatMap(({ value }) => {
+      switch (value.state) {
+        case 'available': return Effect.succeed(value.snapshot)
+        case 'disabled': return Effect.fail<QuotaFailure>({ kind: 'unavailable', reason: 'no quota source configured' })
+        case 'unavailable': return Effect.fail<QuotaFailure>(value.reason === 'transport'
+          ? { kind: 'unreachable', reason: 'the gateway could not reach its quota source' }
+          : { kind: 'incompatible', reason: 'the gateway refused its quota source’s response' })
+      }
+    }),
+  )
+
+/** Usage relay; quota 404 (a daemon without the route) and `disabled` both mean no source is configured. */
 export const relayUsageSource = ({
   label,
   prefix = RELAY_PREFIX,
+  fetchImpl,
 }: {
   readonly label: string
   readonly prefix?: string
+  /** The owning live source's transport, including its replay and telemetry boundaries. */
+  readonly fetchImpl?: typeof globalThis.fetch
 }): UsageSource => ({
   label,
-  quota: getJson({ url: `${prefix}/quota`, what: 'quota' }),
+  quota: getJson({ url: `${prefix}/quota`, what: 'quota', fetchImpl }).pipe(Effect.flatMap(relaySnapshot)),
   history: (ledgerAccountId) =>
     getJson({
       url: `${prefix}/history?${new URLSearchParams({ account: ledgerAccountId }).toString()}`,
       what: 'history',
+      fetchImpl,
     }),
 })
 

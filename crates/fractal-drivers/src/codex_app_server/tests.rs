@@ -2012,6 +2012,30 @@ fn a_hung_delivery_request_fails_instead_of_holding_the_fifo_forever() {
 }
 
 #[test]
+fn a_native_rpc_rejection_after_recipient_archive_releases_its_retained_source_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = delivery_config(tmp.path());
+    let filename = message::send_to_inbox(
+        &config.inbox, "h.sender", Some("pending"), None, &[], "body",
+    ).unwrap();
+    let mut delivery = inbox_delivery(tmp.path(), config.clone());
+    let idle = subscribed_state(CodexObservedState::Idle);
+    let request = delivery.maybe_request(&idle).unwrap().unwrap();
+    let start = delivery.ledger.entry(&filename).unwrap().attempted_at_unix_ms.unwrap();
+    let cut = start + 10_000;
+    let incarnation = delivery.runtime.incarnation().to_owned();
+    message::archive_msg(&config.inbox, &message::archive_dir(&config.agent_dir), &filename).unwrap();
+    delivery.reconcile_inbox(&message::list_inbox(&config.inbox).unwrap()).unwrap();
+    assert!(delivery.ledger.entry(&filename).is_none());
+    assert_eq!(delivery.ledger.receipt_snapshot().input_acceptance_frontier(&incarnation, cut), Some(start - 1));
+    assert!(delivery.accept_response(
+        &json!({"id":request["id"],"error":{"code":-32600,"message":"request refused"}}),
+        idle.observed(),
+    ).unwrap());
+    assert_eq!(delivery.ledger.receipt_snapshot().input_acceptance_frontier(&incarnation, cut), Some(cut));
+}
+
+#[test]
 fn a_rejected_delivery_retries_after_backoff_in_the_same_observed_state() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
@@ -2403,7 +2427,7 @@ fn a_transcript_user_message_receipt_is_exact_and_idempotent() {
         .unwrap();
     let receipt = json!({"type": "event_msg", "payload": {"type": "item_completed", "thread_id": "thread-main", "turn_id": "turn-live", "item": {"type": "UserMessage", "client_id": client_id}}});
     delivery
-        .accept_transcript_receipts(&[receipt.clone()], "other-thread")
+        .accept_transcript_receipts(std::slice::from_ref(&receipt), "other-thread")
         .unwrap();
     assert_eq!(
         delivery.ledger.entry(&filename).unwrap().phase,
@@ -6904,7 +6928,7 @@ fn a_controlled_tui_starts_without_the_update_notice() {
         "resume".to_string(),
         "thread-prior".to_string(),
     ];
-    let command = controlled_tui_command("codex", &args);
+    let command = controlled_tui_command("codex", &args).unwrap();
     assert_eq!(command.get_program(), "codex");
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
@@ -6927,7 +6951,7 @@ fn a_controlled_tui_starts_without_the_update_notice() {
             "gpt-test".into(),
         ],
     ] {
-        let command = controlled_tui_command("codex", &args);
+        let command = controlled_tui_command("codex", &args).unwrap();
         assert_eq!(
             command.get_args().take(2).collect::<Vec<_>>(),
             ["-c", "check_for_update_on_startup=false"]
@@ -9356,6 +9380,7 @@ fn managed_launch_argv_carries_access_mode_flags() {
                 prepare_controlled_launch_args("unix:///control.sock", &managed[1..], resume).unwrap();
             let server = prepared.server_args;
             let tui: Vec<String> = controlled_tui_command("codex", &prepared.tui_args)
+                .unwrap()
                 .get_args()
                 .map(|arg| arg.to_str().unwrap().to_owned())
                 .collect();

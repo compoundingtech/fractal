@@ -114,7 +114,13 @@ pub async fn doctor(
             ),
         });
     }
-    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
+    let slo_store = reader_store.clone();
+    let slo_report = blocking_store(move || {
+        let mut report = request_latency_windows();
+        super::client_observations::attach(&slo_store, &mut report, client_now_ms() as u64)?;
+        Ok(report)
+    }).await?;
+    for (name, status, message) in crate::slo::doctor_lines(&slo_report) {
         report.checks.push(DoctorCheck {
             name,
             status: status.into(),
@@ -135,6 +141,7 @@ pub async fn doctor(
         client_now_ms(),
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
+    report.checks.extend(crate::github_webhook::doctor_line(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -233,7 +240,7 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     if bound.is_some() || request.actor.is_some() {
@@ -249,14 +256,14 @@ pub async fn apply_operational_repair(
 /// before mutation, even if it would silently ignore an unknown actor field.
 pub async fn apply_attributed_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     let bound = bound.ok_or_else(|| ApiError::bad(FractalError::new(
         "foreign-agent-actor",
         "attributed repair apply requires an authenticated harness binding",
     )))?;
-    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+    apply_operational_repair_with_actor(state, request, Some(bound.actor().to_owned())).await
 }
 
 async fn apply_operational_repair_with_actor(
@@ -510,19 +517,23 @@ pub async fn get_usage(
 
 pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let dir = crate::slo_history::dir(&state.state_dir);
-    let rows = blocking_store(move || {
-        let mut rows = slo_rows(&store)?;
-        add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
-        add_tones(&mut rows);
-        Ok(rows)
-    })
-    .await?;
+    let state_dir = state.state_dir.clone();
+    let rows = blocking_store(move || current_slo_rows(&store, &state_dir)).await?;
     let mut body = json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows});
     if let Some(url) = crate::slo_history::ui_url() {
         body["otel_ui_url"] = Value::String(url);
     }
     Ok(Json(body))
+}
+
+/// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
+pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
+    let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
+    let mut rows = slo_rows(store, domain)?;
+    rows.extend(crate::readiness_slo::current(store));
+    add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
+    add_tones(&mut rows);
+    Ok(rows)
 }
 
 /// Say on each row how urgent it is, by the one rule the terminal UI colors with, so the phone
@@ -577,6 +588,47 @@ pub async fn get_slo_history(
         "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
         "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
     })))
+}
+
+/// Count a declared objective's selection, or explicit claim kinds, per bucket.
+/// Explicit claims use the first present `at`, `occurred_at_unix_ms`, or `occurred_at`
+/// field as event time. Only claims without these fields use `accepted_at_unix_ms`;
+/// a present unreadable event time is excluded rather than shifted to ingestion time.
+pub async fn get_series(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> Result<Json<Value>, ApiError> {
+    let invalid = |message| ApiError::bad(FractalError::new("invalid-series", message));
+    let mut kinds = Vec::new();
+    let mut query = BTreeMap::new();
+    for (key, value) in params {
+        if key == "kind" {
+            kinds.push(value);
+        } else if !matches!(key.as_str(), "objective" | "subject_prefix" | "group_by" | "from" | "to" | "bucket_seconds") {
+            return Err(invalid(format!("unknown series parameter `{key}`")));
+        } else if query.insert(key.clone(), value).is_some() {
+            return Err(invalid(format!("series parameter `{key}` must occur once")));
+        }
+    }
+    let number = |name: &str| -> Result<u64, ApiError> {
+        query.get(name).and_then(|value| value.parse().ok())
+            .ok_or_else(|| invalid(format!("series parameter `{name}` must be an unsigned integer")))
+    };
+    let (from, to, bucket_seconds) = (number("from")?, number("to")?, number("bucket_seconds")?);
+    tokio::task::spawn_blocking(move || {
+        crate::declared_objectives::claim_series(
+            &state.store,
+            query.get("objective").map(String::as_str),
+            &kinds,
+            query.get("subject_prefix").map(String::as_str),
+            query.get("group_by").map(String::as_str),
+            from, to, bucket_seconds,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map(Json)
+    .map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]
@@ -686,6 +738,27 @@ pub async fn get_desired(
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
 }
 
+/// Bulk comparison read: no status reduction or cold actual-state folds.
+pub async fn desired_batch(
+    State(state): State<AppState>,
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<crate::store::desired_batch::DesiredBatchPage>, ApiError> {
+    let mut request = crate::store::desired_batch::DesiredBatchRequest::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "subject" => request.subjects.push(value),
+            "kind" => request.kind = Some(value),
+            "cursor" => request.cursor = Some(value),
+            "limit" => request.limit = Some(value.parse().map_err(|_| ApiError::bad(
+                FractalError::new("desired-page-limit", "limit must be an integer between 1 and 1000"),
+            ))?),
+            _ => {}
+        }
+    }
+    let store = state.store.clone();
+    blocking_store(move || store.desired_batch(&request)).await.map(Json)
+}
+
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
@@ -707,11 +780,6 @@ pub async fn status(
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {
-            if !store.generic_status_subject_visible_at(subject, query.at_index.map_or_else(|| store.index(), Ok)?)? {
-                return Err(anyhow::Error::new(FractalError::new(
-                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
-                ).with_detail("reason", "notices-unavailable")));
-            }
             store.status_summary_at(subject, query.at_index)?
         } else {
             store.status_for_generic_reads(

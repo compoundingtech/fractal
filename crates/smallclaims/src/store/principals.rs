@@ -30,7 +30,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h56821e2a865f owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -66,7 +66,7 @@ CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_added AFTER INSERT ON cla
     ON CONFLICT(claim_id) DO UPDATE SET candidates=candidates+1;
 END;
 CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_removed AFTER DELETE ON claim_signature_candidates BEGIN
-    DELETE FROM claim_signature_sources WHERE claim_id=OLD.claim_id AND signature=OLD.signature;
+    DELETE FROM claim_signature_sources WHERE claim_id=OLD.claim_id AND (signature=OLD.signature OR signature=(SELECT reference FROM claim_signature_originals WHERE claim_id=OLD.claim_id AND signature=OLD.signature));
     UPDATE claim_signature_counts SET candidates=candidates-1 WHERE claim_id=OLD.claim_id;
     DELETE FROM claim_signature_counts WHERE claim_id=OLD.claim_id AND candidates=0;
 END;
@@ -204,12 +204,12 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
         .map(Position))
 }
 
-fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
+pub(super) fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h072ee9f3dbb6 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, SqlValue>(0))
         .optional()?;
-    text.map(|text| Ok(serde_json::from_str(&text)?))
+    text.map(|value| Ok(serde_json::from_str(&references::resolve(connection, claim_id, value)?)?))
         .transpose()
 }
 
@@ -253,7 +253,7 @@ pub(super) fn store_inventory_signature_tx(
     writer: Option<&str>,
 ) -> Result<()> {
     let origin = if writer.is_none() {
-        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h134e5aef5050 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
+        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
     } else {
         None
     };
@@ -279,15 +279,18 @@ fn store_candidate_tx(
         legacy::store_claim_signature_tx(connection, claim_id, signature)?;
     }
     let text = serde_json::to_string(signature)?;
-    let added = connection
-        .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h16586c1e56da owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce)
-         VALUES (?1,?2,?3,?4)",
-        )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h7609ad2c9eca owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, signature.key, signature.nonce])?;
+    let (added, reference) = references::insert_candidate(
+        connection, claim_id, &text, &signature.key, &signature.nonce,
+    )?;
+    // Contract old provenance only when the writer format is explicitly activated.
+    if matches!(&reference, references::SignatureValue::Reference(_)) {
+        connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-hd090f46fc316 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2 AND writer=?3",
+        )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, writer])?;
+    }
     connection.prepare_cached(
         /* sqlite-large-value: allow-for-now lv-h8b1d8ca0d39f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
-    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,text,writer])?;
+    )?.execute(/* sqlite-large-value: allow-for-now lv-h0d79b0cd4af5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,reference,writer])?;
     if added == 0 {
         return Ok(());
     }
@@ -317,12 +320,12 @@ fn store_candidate_tx(
             /* sqlite-large-value: allow-for-now lv-h3ef3e2963c54 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signatures(claim_id,signer,key,nonce,signature)
          VALUES (?1,?2,?3,?4,?5)",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h3d338a6f6764 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h202b43b80de5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             signature.signer,
             signature.key,
             signature.nonce,
-            text
+            reference
         ])?;
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h974754085cbf owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
@@ -353,6 +356,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
 mod judging;
 mod legacy;
 mod migration;
+mod references;
 pub(crate) use migration::SignatureEnvelopeWork;
 pub(crate) use migration::initialize_schema;
 pub use migration::{
@@ -907,11 +911,11 @@ fn write_verdict_tx(
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h5f8142f84899 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h63d55e8c184c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+        .execute(/* sqlite-large-value: allow-for-now lv-hc6a7a6c7b6d5 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             signature.signer,
             signature.key,
             signature.nonce,
-            serde_json::to_string(signature)?,
+            references::write_value(connection, claim_id, &serde_json::to_string(signature)?, false)?,
             claim_id
         ])?;
     // Candidate pages have already committed their dependency links. Publishing the
@@ -975,6 +979,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_verdict_links",
         "claim_verdict_queue",
         "claim_verdict_fresh",
+        "claim_signature_originals",
     ] {
         rows += connection
             .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-hf6676f3ba393 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
@@ -1331,6 +1336,16 @@ impl Store {
                 .first()
                 .map(|grant| (root.key.public().to_owned(), grant.clone()))
         }))
+    }
+
+    /// Sign a device-renewal offer with the person's local root.
+    pub fn sign_device_renewal_offer(&self, person: &str, tuple: &Value) -> Result<String, FractalError> {
+        self.person_root_grant(person)?;
+        let root = self.held_root(person).ok_or_else(|| {
+            FractalError::new("no-person-key", "this member holds no person root")
+        })?;
+        let message = format!("fractal-device-renewal-offer-v1\n{tuple}");
+        Ok(root.key.sign(message.as_bytes()))
     }
 
     /// Withdraw a device key of `person`, as the node.
@@ -1708,6 +1723,18 @@ impl Store {
         max_loans: Option<usize>,
         fresh_only: bool,
     ) -> Result<usize> {
+        self.judge_claims_with_loan_budget(
+            check_roots, max_loans, fresh_only, std::time::Duration::from_millis(10),
+        )
+    }
+
+    fn judge_claims_with_loan_budget(
+        &self,
+        check_roots: bool,
+        max_loans: Option<usize>,
+        fresh_only: bool,
+        loan_budget: std::time::Duration,
+    ) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
             return Ok(0);
@@ -1731,7 +1758,8 @@ impl Store {
         let mut ordinary_claims = BTreeSet::new();
         loop {
             loans += 1;
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let loan_started = std::time::Instant::now();
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let roots = self.trust_roots(&transaction, &self.origin)?;
@@ -1796,8 +1824,14 @@ impl Store {
             };
             let memo = RefCell::new(BTreeMap::new());
             let mut candidates_judged = 0;
-            for claim_id in &queued {
-                if candidates_judged >= CANDIDATE_PAGE {
+            for (position, claim_id) in queued.iter().enumerate() {
+                // Row counts alone do not bound writer occupancy: signature verification,
+                // dependency reads and page faults can make a small page expensive.
+                // Always advance one claim, then commit before starting another once due.
+                // This is cooperative: one claim, requeue page and COMMIT are not preempted.
+                if candidates_judged >= CANDIDATE_PAGE
+                    || (position != 0 && loan_started.elapsed() >= loan_budget)
+                {
                     break;
                 }
                 transaction
@@ -2386,6 +2420,69 @@ mod paced_verdict_tests {
             Some("roots-before-a-membership-change")
         );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn bootstrap_verdict_loans_revalidate_changed_roots_before_activation() {
+        let store = root_linked(REQUEUE_PAGE + 1);
+        store.connection.write().execute(
+            "UPDATE claim_signature_migration SET phase='judging' WHERE id=1",
+            [],
+        ).unwrap();
+        // Skip the optional root-check preflight: bootstrap must revalidate inside each
+        // bounded loan, including the transaction that eventually activates the fold.
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        let before = fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap().unwrap();
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        {
+            let connection = store.connection.write();
+            set_meta_tx(&connection, OWN_NODE_KEY, "changed-between-verdict-loans").unwrap();
+        }
+        let expected = {
+            let connection = store.readers.get();
+            crate::hash::canonical_hash(&store.trust_roots(&connection, &store.origin).unwrap())
+                .unwrap()
+        };
+        assert_ne!(before, expected);
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected.clone()),
+        );
+        // The changed roots restart dependency paging rather than continue past the first
+        // page under a digest that no longer describes the current authority.
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        store.judge_claims_inner(false, None, false).unwrap();
+        assert_eq!(store.signature_migration().unwrap().phase, "done");
+        assert_eq!(cursor(&store, "root"), None);
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected),
+        );
+    }
+
+    #[test]
+    fn an_expired_verdict_loan_commits_progress_and_leaves_the_tail_queued() {
+        let store = root_linked(3);
+        // An already-expired budget deterministically models one expensive claim, without
+        // sleeps or machine-speed assumptions. Missing claims must also make progress.
+        store.judge_claims_with_loan_budget(
+            true, Some(1), false, std::time::Duration::ZERO,
+        ).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 2);
+        assert!(store.verdicts_pending().unwrap());
+        // Another foreground loan can run between pages; no guard survives the return.
+        store.connection.write().execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('verdict-loan-test','interleaved')",
+            [],
+        ).unwrap();
+        store.judge_claims_with_loan_budget(
+            false, None, false, std::time::Duration::ZERO,
+        ).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+        assert!(!store.verdicts_pending().unwrap());
     }
 
     #[test]

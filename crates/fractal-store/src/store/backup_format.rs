@@ -26,6 +26,8 @@ pub const VERSION_WITH_MARKS: u32 = 4;
 /// admitted envelopes and the member-local rows it keeps, such as a stream item's delivery and
 /// read. An archive whose shards hold none of either keeps an earlier version, byte for byte.
 pub const VERSION_WITH_SHARDS: u32 = 5;
+/// Quarantine-bearing archives require readers that preserve permanent operation admission.
+pub const VERSION_WITH_QUARANTINE: u32 = 6;
 pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -131,6 +133,9 @@ pub struct RestoreReport {
     pub source_graph_digest: String,
     pub log_digest: String,
     pub projections_match: bool,
+    /// Retained operation envelopes without portable authority; their claims are not admitted.
+    #[serde(default)]
+    pub operation_envelopes_quarantined: u64,
     pub tables: BTreeMap<String, TableDigest>,
     /// Long message bodies the archive held and the restored claims name, verified by hash.
     #[serde(default)]

@@ -3,7 +3,7 @@ import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { isSidebarFiltering, matchesRow, parseSidebarQuery, sortMembers, type SidebarMatchRow } from '../shell/sidebar/filter.ts'
 import type { ShowRow } from '../shell/sidebar/show.ts'
 import type { SidebarFilters } from '../shell/sidebar/state.ts'
-import { sidebarRow, subagentRowId } from './sidebarRow.ts'
+import { agentSeatChildren, sidebarRow, subagentRowId } from './sidebarRow.ts'
 
 const matchRows = ({ agents, needsYou, asking, stale }: {
   readonly agents: readonly Agent[]
@@ -13,6 +13,12 @@ const matchRows = ({ agents, needsYou, asking, stale }: {
 }): ReadonlyMap<string, SidebarMatchRow> =>
 {
   const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref), asking: asking.has(agent.ref) }]))
+  // A child mission belongs to its agent: it filters with the parent's facts, and also matches by its own title.
+  for (const agent of agents) for (const child of agentSeatChildren(agent) ?? []) {
+    if (child.missionId === undefined) continue
+    const parent = rows.get(agent.ref)!
+    rows.set(child.id, { ...parent, workspace: { ...parent.workspace, title: child.label } })
+  }
   for (const agent of agents) for (const child of agent.subagents ?? []) {
     rows.set(subagentRowId({ parent: agent.ref, id: child.id }), {
       workspace: { title: `${child.description ?? ''} ${child.id}`, host: agent.host },

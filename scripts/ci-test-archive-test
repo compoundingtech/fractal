@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory() as tmp:
         (directory / name).write_bytes(name.encode())
     current = dict(source='a' * 40, tree='b' * 40, run='123', attempt='2', platform='x86_64',
                    nextest='same nextest', rustc='same rustc', recipe='same recipe', paths='same paths')
-    manifest = dict(version=2, standalone_model=True, identity=current, workspace='/producer/source',
+    manifest = dict(version=3, standalone_model=True, identity=current, workspace='/producer/source',
                     files={name: module.digest(directory / name) for name in module.FILES})
     module.verify(manifest, current, directory, "2")
     inherited = copy.deepcopy(manifest)
@@ -122,10 +122,14 @@ else:
     assert produced_manifest['byte_sizes'] == {name: (scratch / 'ci-test-archives' / name).stat().st_size for name in module.FILES}
     environment['CI_TEST_ARCHIVE_MANIFEST_SHA256'] = produced['manifest-sha256']
     environment['CI_TEST_ARCHIVE_PRODUCER_ATTEMPT'] = produced['producer-attempt']
-    (scratch / 'ci-test-archives/sekrets-st3').chmod(0o644)
+    assert not (scratch / 'ci-test-archives/sekrets-st3').exists(), 'do not upload an uncompressed gateway'
+    import gzip
+    assert gzip.decompress((scratch / 'ci-test-archives/sekrets-st3.gz').read_bytes()) == b'#!/bin/sh\nexit 0\n'
+    assert groups[0][groups[0].index('--zstd-level') + 1] == '10'
+    assert '--zstd-long' not in groups[0], 'the pinned nextest does not support this flag'
     environment['GITHUB_RUN_ATTEMPT'] = '3'  # failed-only rerun inherits this exact attempt-2 producer
     subprocess.run([sys.executable, 'scripts/ci-test-archive', 'consume'], cwd=ROOT, env=environment, check=True, capture_output=True)
-    assert os.access(scratch / 'ci-test-archives/sekrets-st3', os.X_OK)
+    assert os.access(scratch / 'ci-test-extracted/sekrets-st3', os.X_OK)
     exported = dict(line.split('=', 1) for line in env_file.read_text().splitlines())
     assert exported['CI_TEST_WORKSPACE'] == str(ROOT) and exported['CI_TEST_BUILD_WORKSPACE'] == str(ROOT)
     assert exported['CI_TEST_HOOKS_BINARY'].endswith('/workspace/target/debug/ci-hooks-install')
@@ -596,7 +600,7 @@ class SizeInventoryControls(unittest.TestCase):
             root = Path(d)
             for name in module.FILES: (root / name).write_bytes(b'fixture')
             current = {'attempt': '1'}
-            manifest = dict(version=2, standalone_model=True, identity=current, workspace='/producer',
+            manifest = dict(version=3, standalone_model=True, identity=current, workspace='/producer',
                             files={name: '0' * 64 for name in module.FILES},
                             byte_sizes={name: 7 for name in module.FILES})
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):

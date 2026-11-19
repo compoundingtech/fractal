@@ -384,6 +384,10 @@ async fn main() -> Result<()> {
         None => default_st_socket()?,
     };
     let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-st3-client"),
+            reqwest::header::HeaderValue::from_static(concat!("fractal-fabric-adapter ", env!("CARGO_PKG_VERSION"))),
+        )]))
         .no_proxy()
         .unix_socket(st_socket)
         .timeout(Duration::from_secs(10))

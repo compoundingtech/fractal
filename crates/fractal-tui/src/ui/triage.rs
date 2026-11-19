@@ -87,7 +87,7 @@ impl Ui {
         };
         let mut items: Vec<_> = items
             .iter()
-            .filter(|item| !self.closed.contains(&item.id) && !self.snoozed.contains(&item.id))
+            .filter(|item| !self.closed.contains(&item.id) && !item.snoozed(self.world.at))
             .map(|item| (class(item), item))
             .collect();
         items.sort_by(|(left_class, left), (right_class, right)| {
@@ -281,12 +281,21 @@ mod tests {
         let mut ui = ui(vec![
             item("closed", question(), "2026-10-01T00:00:00Z"),
             item("snoozed", decision(), "2026-10-01T00:00:00Z"),
+            item("woke", decision(), "2026-10-01T00:00:00Z"),
             item("open", failure(), "2026-10-01T00:00:00Z"),
         ]);
         ui.closed.insert("attention/closed".into());
-        ui.snoozed.insert("attention/snoozed".into());
+        // st says the person put one off past now, and another until a time already gone.
+        let at = ui.world.at;
+        if let Load::Ready(items) = &mut ui.world.attention {
+            items[1].snoozed_until = Some(at + chrono::TimeDelta::hours(1));
+            items[2].snoozed_until = Some(at - chrono::TimeDelta::minutes(1));
+        }
         ui.triage_next(true);
-        focused(&ui, "open", "1/1 · failure");
+        focused(&ui, "woke", "1/2 · decision");
+        ui.triage_next(true);
+        focused(&ui, "open", "2/2 · failure");
+        ui.closed.insert("attention/woke".into());
         ui.closed.insert("attention/open".into());
         ui.triage_next(true);
         focused(&ui, "open", "all clear");

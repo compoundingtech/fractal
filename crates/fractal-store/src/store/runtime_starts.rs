@@ -118,7 +118,7 @@ CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_run
 }
 
 thread_local! {
-    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64)>> = const { std::cell::RefCell::new(None) };
+    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64,u64)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,5 +275,7 @@ pub fn retain_runtime_start_producer_closed_tx(
         params![id, serde_json::to_string(&result)?],
     )?;
     release_evidence(tx, id)?;
+    super::invocation_receipts::append_native_receipt_tx(tx, origin, id, &operation.subject,
+        &operation.body, super::invocation_receipts::InvocationPhase::ProducerClosed, Some(&result))?;
     Ok(())
 }

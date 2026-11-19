@@ -86,7 +86,9 @@ export const ScenarioStreamingRevisions: Story = {
       await expect(row()).toHaveLength(1)
       await expect(row()[0]).toHaveTextContent(final)
       await expect(canvasElement).not.toHaveTextContent(partial)
-      await expect(row()[0]?.querySelector('[data-testid="message-time"]')).not.toBeNull()
+      // The settled answer carries no time of its own; its episode head does.
+      await expect(row()[0]?.querySelector('[data-testid="message-time"]')).toBeNull()
+      await expect(row()[0]?.closest('[data-testid="transcript-turn"]')?.querySelector('[data-testid="turn-time"]')).not.toBeNull()
       await expect(row()[0]?.closest('[data-testid="transcript-turn"]')?.querySelector('[data-testid="live-work"]')).toBeNull()
       await expect(canvasElement.querySelector('[data-item-kind="Status"][data-item-id="timeline-entry/scenario-transcript-families-builder-22"]')).toHaveTextContent('completed')
     })

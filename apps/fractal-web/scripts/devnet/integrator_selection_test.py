@@ -1039,6 +1039,105 @@ class SelectionTest(unittest.TestCase):
             self.module.prepare_clone()
         self.assertEqual(self.module.text('config', '--local', 'user.name'), 'Deployment Bot')
         self.assertEqual(self.module.text('config', '--local', 'user.email'), 'bot@example.invalid')
+        self.assertEqual(self.module.text('config', '--local', 'gc.auto'), '0')
+        self.assertEqual(self.module.text('config', '--local', 'maintenance.auto'), 'false')
+
+    def test_clone_maintenance_is_daily_and_failures_are_nonfatal(self):
+        row = {}
+        failure = subprocess.CalledProcessError(1, ['git', 'gc'], stderr='fixture gc failure')
+        with patch.object(self.module, 'git', side_effect=[self.response([]), failure, self.response([]), self.response([])]) as git, \
+                patch.object(self.module.time, 'time', return_value=100000):
+            self.module.maintain_clone(row)
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 4)
+        self.assertEqual(git.call_args_list[0].args, ('prune', '--expire=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[1].args, ('gc', '--cruft', '--prune=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[2].args, ('repack', '-d', '--geometric=2'))
+        self.assertEqual(git.call_args_list[3].args[-2:], ('rerere', 'gc'))
+        self.assertEqual(row['maintenanceErrors'][0]['detail'], 'fixture gc failure')
+        with patch.object(self.module, 'git') as git, \
+                patch.object(self.module.time, 'time', return_value=186400):
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 3)
+        self.assertNotIn(('gc', '--cruft', '--prune=2.weeks.ago'), [call.args for call in git.call_args_list])
+        with patch.object(self.module, 'git') as git, \
+                patch.object(self.module.time, 'time', return_value=100000 + 30 * 86400):
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 4)
+
+    def test_real_maintenance_preserves_base_pack_and_prunes_old_rerere(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            self.module.atomic_json(self.module.L/f'{self.module.C.name}-git-full-gc.json',
+                                    {'attemptedAt': self.module.time.time()})
+            git('repack', '-ad')
+            packs = list((self.module.C / '.git/objects/pack').glob('*.pack'))
+            self.assertEqual(len(packs), 1)
+            base = packs[0]
+            before = (base.stat().st_ino, base.stat().st_mtime_ns, base.read_bytes())
+            git('commit', '--allow-empty', '-m', 'small increment')
+            rr = self.module.C / '.git/rr-cache'
+            for name, age, resolved in (('a', 8, False), ('b', 61, True), ('c', 1, True)):
+                record = rr / (name * 40)
+                record.mkdir(parents=True)
+                for image in ('preimage', 'postimage') if resolved else ('preimage',):
+                    target = record / image
+                    target.write_text('fixture\n')
+                    old = self.module.time.time() - age * 86400
+                    os.utime(target, (old, old))
+            row = {}
+            self.module.maintain_clone(row)
+            self.assertNotIn('maintenanceErrors', row)
+            self.assertEqual(before, (base.stat().st_ino, base.stat().st_mtime_ns, base.read_bytes()))
+            self.assertFalse((rr / ('a' * 40)).exists())
+            self.assertFalse((rr / ('b' * 40)).exists())
+            self.assertTrue((rr / ('c' * 40) / 'postimage').exists())
+
+    def test_monthly_collection_expires_packed_garbage_but_keeps_fresh_objects(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            stale = self.module.C / 'stale-input'
+            stale.write_text('stale unreachable blob\n')
+            old_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            pack_root = self.module.C / '.git/objects/pack'
+            pack_root.mkdir(exist_ok=True)
+            packed = subprocess.run(['git', '-C', str(self.module.C), 'pack-objects',
+                                     str(pack_root / 'pack')], input=old_oid + '\n',
+                                    text=True, capture_output=True, check=True).stdout.strip()
+            old = self.module.time.time() - 30 * 86400
+            os.utime(pack_root / f'pack-{packed}.pack', (old, old))
+            git('prune-packed')
+            stale.write_text('fresh unreachable blob\n')
+            fresh_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            stale.write_text('stale loose blob\n')
+            loose_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            loose = self.module.C / '.git/objects' / loose_oid[:2] / loose_oid[2:]
+            os.utime(loose, (old, old))
+            row = {}
+            self.module.maintain_clone(row)
+            self.assertNotIn('maintenanceErrors', row)
+            for oid in (old_oid, loose_oid):
+                self.assertNotEqual(git('cat-file', '-e', oid, check=False).returncode, 0)
+            self.assertEqual(git('cat-file', '-e', fresh_oid, check=False).returncode, 0)
+
+    def test_abandoned_merge_clears_unresolved_rerere_variants(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            git('config', 'rerere.enabled', 'true')
+            git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+            target = self.module.C / 'conflict.txt'
+            target.write_text('base\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'conflict base')
+            git('branch', 'other')
+            target.write_text('ours\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'ours')
+            ours = git('rev-parse', 'HEAD', capture=True).stdout.strip()
+            git('checkout', 'other')
+            target.write_text('theirs\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'theirs')
+            git('checkout', '--detach', ours)
+            self.assertNotEqual(git('merge', 'other', check=False).returncode, 0)
+            rr = self.module.C / '.git/rr-cache'
+            self.assertTrue(list(rr.glob('*/preimage*')))
+            self.module.prepare_clone()
+            self.assertFalse(list((self.module.L / 'live-r3-rerere').glob('*/preimage*')))
 
     def test_oversized_pr_is_skipped_without_api_or_cache_and_selection_continues(self):
         oversized = dict(self.pr, changedFiles=4058)

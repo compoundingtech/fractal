@@ -42,6 +42,60 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
+test('human-gate attention read schema accepts the source step-run Id, never its bare path', async () => {
+    const read = await import('./ReadSchema.generated.ts');
+    const decode = read.decodeUnknownSync(read.Attention, 'strict');
+    const step = 'step-run/example-generation/approve';
+    const wire = {
+        id: 'attention/example-gate', kind: 'attention', attention_kind: 'human-gate',
+        source_id: step, step_run_id: step, person_id: 'person/alex',
+        revision: 'request-1', updated_at: '2026-11-14T00:00:00Z',
+        requested_at: '2026-11-14T00:00:00Z', title: 'Approve', detail: 'Ready?',
+        priority: 'normal', state: 'open', actions: ['review.approve'],
+    };
+    const gate = decode(wire);
+    assert.equal(gate.step_run_id, gate.source_id);
+    assert.equal(read.decodeUnknownSync(read.Id, 'strict')(gate.step_run_id), step);
+    assert.throws(() => decode({ ...wire, step_run_id: 'approve' }));
+});
+
+test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        id: 'mission-run/example/current', requester: 'person/operator',
+        status: 'running', phase: 'normal', must_act: 'system',
+        state_since: '2026-11-12T12:00:00.000Z',
+        progress: { done: 0, total: 1 }, current_steps: [],
+        retry_of: 'mission-run/example/failed', retried_by: ['mission-run/example/retry'],
+    };
+    const lineage = {
+        supersedes: 'mission-run/example/previous',
+        superseded_by: 'mission-run/example/replacement',
+        supersession_fault: 'revision old -> new: missing [replacement]; extra [value]',
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.MissionRunSummary, mode);
+        const legacy = Schema.encodeSync(Rich.MissionRunSummary)(decode(wire));
+        for (const field of Object.keys(lineage)) {
+            assert.equal(Object.hasOwn(legacy, field), false);
+        }
+        const encoded = Schema.encodeSync(Rich.MissionRunSummary)(decode({ ...wire, ...lineage }));
+        for (const [field, value] of Object.entries(lineage)) {
+            assert.equal(encoded[field], value);
+        }
+        assert.equal(encoded.retry_of, wire.retry_of);
+        assert.deepEqual(encoded.retried_by, wire.retried_by);
+    }
+    const strict = Rich.decodeUnknownSync(Rich.MissionRunSummary, 'strict');
+    for (const field of Object.keys(lineage)) {
+        assert.throws(() => strict({ ...wire, [field]: null }));
+        assert.throws(() => strict({ ...wire, [field]: 42 }));
+    }
+    for (const field of ['supersedes', 'superseded_by']) {
+        assert.throws(() => strict({ ...wire, [field]: 'step-run/example/wrong-kind' }));
+    }
+});
+
 test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
     const [{ Schema }, Rich] = await modules;
     const name = Rich.decodeUnknownSync(Rich.ArrangementName, 'strict');
@@ -535,6 +589,68 @@ test('directive notes decode metadata and expiry without becoming gate evidence'
     const invalid = structuredClone(wire);
     invalid.notes[0].time = '2026-02-30T09:00:00Z';
     assert.throws(() => decode(invalid));
+});
+
+test('availability decodes the coarse view, the full view and a status clear', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const people = Rich.decodeUnknownSync(Rich.PersonAvailabilities, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-availability.json').value;
+    const result = Schema.encodeSync(Rich.PersonAvailabilities)(people(wire));
+    assert.equal(result.people[0].presence, null);
+    assert.equal(result.people[0].status_until, '2026-11-12T12:00:00.000Z');
+    assert.equal(result.people[1].deadline_clock, 'hold-routine');
+    assert.deepEqual([result.people[2].status, result.people[2].status_source], ['available', 'unreported']);
+    // Words a newer daemon adds stay readable.
+    const future = { ...wire.people[0], status: 'busy', status_source: 'calendar', presence: 'in-call', interruptions: 'priority', deadline_clock: 'hold-weekend' };
+    const decodedFuture = Rich.decodeUnknownSync(Rich.PersonAvailability)(future);
+    assert.equal(Rich.containsUnknownCase(decodedFuture), true);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict')(future));
+    const kept = Schema.encodeSync(Rich.PersonAvailability)(decodedFuture);
+    assert.deepEqual([kept.status, kept.status_source, kept.presence, kept.interruptions, kept.deadline_clock], ['busy', 'calendar', 'in-call', 'priority', 'hold-weekend']);
+    const own = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json').value;
+    const full = Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict');
+    assert.equal(Schema.encodeSync(Rich.PersonAvailability)(full(own)).presence, 'present');
+    const set = Rich.decodeUnknownSync(Rich.AvailabilitySet, 'strict');
+    assert.equal(Schema.encodeSync(Rich.AvailabilitySet)(set({ status: { value: null } })).status.value, null);
+    for (const invalid of [{ interruptions: { value: 'focus' } }, { status: { value: 'away' }, person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const report = Rich.decodeUnknownSync(Rich.PresenceReport, 'strict');
+    report(require('../../../docs/st3/client-v0/fixtures/presence-report.json'));
+    assert.throws(() => report({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' }));
+    assert.throws(() => report({ presence: 'present', observed_at: '2026-11-12T09:58:00Z' }));
+    const reportResult = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json').value;
+    assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
+});
+
+test('availability history decodes milliseconds per axis and presence only for the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const history = Rich.decodeUnknownSync(Rich.AvailabilityHistory, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/availability-history.json').value;
+    const result = Schema.encodeSync(Rich.AvailabilityHistory)(history(wire));
+    assert.equal(result.buckets[1].deadline_clock['hold-routine'], 1200000);
+    assert.equal(result.buckets[1].status_source.override, 1200000);
+    const coarse = { ...wire, buckets: wire.buckets.map(bucket => ({ ...bucket, presence: null })) };
+    assert.equal(Schema.encodeSync(Rich.AvailabilityHistory)(history(coarse)).buckets[0].presence, null);
+    const { presence, ...missing } = wire.buckets[0];
+    assert.throws(() => history({ ...wire, buckets: [missing] }));
+});
+
+test('a note write requires text, clears with null and never names the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set(wire)).expires_at, '2026-11-16T09:00:00.000Z');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set({ text: null })).text, null);
+    for (const invalid of [{}, { text: '' }, { text: 'Approved', person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const result = Rich.decodeUnknownSync(Rich.DirectiveNoteSetResult, 'strict');
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json').value;
+    const encode = Schema.encodeSync(Rich.DirectiveNoteSetResult);
+    assert.equal(encode(result(written)).note.person, 'person/ada');
+    assert.equal(encode(result({ note: null })).note, null);
 });
 
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
@@ -1233,6 +1349,39 @@ test('an ask resolved at its deadline decodes, and what the decoder from before 
     assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
         ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
     }));
+});
+
+test('person option notes round trip inside input and stored answer without changing legacy payloads', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const notes = [{ id: 'hold', text: 'Keep this as a fallback.' }];
+    for (const [model, legacy] of [
+        [Rich.PersonAnswerInput, { id: 'land', text: 'Ship it.' }],
+        [Rich.PersonAnswer, { type: 'decision', outcome: 'accept', id: 'land', text: 'Ship it.' }],
+    ]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const decode = Rich.decodeUnknownSync(model, mode);
+            for (const wire of [legacy, { ...legacy, option_notes: notes }]) {
+                assert.deepEqual(Schema.encodeSync(model)(decode(wire)), wire);
+            }
+        }
+        for (const option_notes of [null, {}, [{ id: 'hold' }], [{ text: 'fallback' }], [{ id: 'hold', text: '' }], [{ id: 'hold', text: ' \n\t ' }], [{ id: 'hold', text: 'x'.repeat(8001) }]]) {
+            assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...legacy, option_notes }));
+        }
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({
+            ...legacy, option_notes: [{ ...notes[0], label: 'Unexpected' }],
+        }));
+    }
+});
+
+test('pre-option-notes readers reject strictly or lose notes tolerantly, so summary must remain readable', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const { option_notes, ...before } = Rich.PersonAnswer.fields;
+    assert.ok(option_notes);
+    const previous = Schema.Struct(before);
+    const wire = { type: 'decision', outcome: 'accept', id: 'land',
+        option_notes: [{ id: 'hold', text: 'Fallback only.' }] };
+    assert.throws(() => Rich.decodeUnknownSync(previous, 'strict')(wire));
+    assert.equal('option_notes' in Rich.decodeUnknownSync(previous, 'tolerant')(wire), false);
 });
 
 test('a later daemon adding a tone word does not fail the objectives and budgets read', async () => {

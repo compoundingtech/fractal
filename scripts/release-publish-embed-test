@@ -12,6 +12,7 @@ repo = Path(__file__).resolve().parent.parent
 SOURCE = 'a' * 40
 TAG = f'embed-{SOURCE}'
 TIMEOUT = "HTTP 504: We couldn't respond to your request in time. (https://api.github.com/repos/example/project/releases)"
+CANCEL = 'stream error: stream ID 17; CANCEL; received from peer'
 
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -41,13 +42,25 @@ def put(path):
     unfinished = late is not None and late['when'] == 'partial'
     release['assets'][pathlib.Path(path).name] = {'size': size // 2 if unfinished else size,
                                                   'state': 'starter' if unfinished else 'uploaded'}
-if args[:2] == ['release', 'view']:
+if args[:2] == ['git', 'ls-remote']:
+    if state['ref']:
+        print(f'{state["ref"]}\trefs/tags/{os.environ["EMBED_TAG"]}')
+elif args[:2] == ['git', 'push']:
+    assert args[2] == '--force-with-lease=refs/tags/' + os.environ['EMBED_TAG'] + ':', args
+    assert state['ref'] is None, 'absent-ref lease must reject existing tags'
+    assert args[3] == 'https://github.com/example/project.git', args
+    state['ref'] = args[4].split(':')[0]
+elif args[:2] == ['release', 'view']:
     if release is None or args[2] != state['tag']: fail('release not found')
     print(json.dumps({'isDraft': release['draft'], 'assets': [
         {'name': name, 'size': asset['size'], 'state': asset['state']} for name, asset in release['assets'].items()]}))
 elif args[:2] == ['release', 'create']:
     if release is not None: fail('HTTP 422: Validation Failed: tag_name already_exists')
     assert '--draft' in args and '--clobber' not in args, args
+    assert '--verify-tag' in args and state['ref'] == os.environ['EMBED_SOURCE'], args
+    # GitHub's Actions token times out when create redundantly supplies target_commitish.
+    # The exact-source ref must be verified before POST, not recreated by the release endpoint.
+    if '--target' in args: fail('HTTP 504: target_commitish resolution timed out')
     state['tag'] = args[2]
     release = state['release'] = {'draft': True, 'assets': {}}
     files = [a for a in args if a.startswith('/')]
@@ -78,12 +91,16 @@ def main():
         root = Path(temporary)
         scripts = root / 'scripts'
         scripts.mkdir()
-        for name in ('release-publish-embed', 'release_gh.py'):
+        for name in ('release-publish-embed', 'release_gh.py', 'release_tag.py'):
             shutil.copy(repo / 'scripts' / name, scripts / name)
         tools = root / 'tools'
         tools.mkdir()
         (tools / 'gh').write_text(FAKE_GH)
         (tools / 'gh').chmod(0o755)
+        (tools / 'git').write_text('#!/usr/bin/env python3\nimport os, pathlib, sys\n'
+                                   'gh = str(pathlib.Path(__file__).with_name("gh"))\n'
+                                   'os.execv(gh, [gh, "git", *sys.argv[1:]])\n')
+        (tools / 'git').chmod(0o755)
         dist = root / 'dist'
         dist.mkdir()
         archive = dist / 'fractal-web-embed.tar.gz'
@@ -93,10 +110,13 @@ def main():
         sizes = {f.name: f.stat().st_size for f in dist.iterdir()}
         state = root / 'state.json'
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', FAKE_GH_STATE=str(state),
-                   GH_REPO='example/project', RELEASE_GH_RETRY_DELAYS='0,0,0')
+                   GH_REPO='example/project', RELEASE_GH_RETRY_DELAYS='0,0,0',
+                   EMBED_TAG=TAG, EMBED_SOURCE=SOURCE)
 
-        def publish(release=None, *failures):
-            state.write_text(json.dumps({'release': release, 'tag': TAG if release else None, 'calls': [], 'fail': [
+        def publish(release=None, *failures, tag_source=None):
+            state.write_text(json.dumps({'release': release, 'tag': TAG if release else None,
+                'ref': tag_source if tag_source is not None else (SOURCE if release else None),
+                'calls': [], 'fail': [
                 {'match': match, 'when': when, 'times': times, 'message': message}
                 for match, when, times, message in failures]}))
             return subprocess.run(['python3', 'scripts/release-publish-embed', '--source', SOURCE, '--dist', str(dist)],
@@ -117,6 +137,29 @@ def main():
         # A first run makes a draft with both files and publishes it.
         done = publish()
         assert done.returncode == 0 and published() and calls(['release', 'create']) == 1, (done, current())
+        assert calls(['git', 'push']) == 1, current()
+        assert current()['calls'][0][:2] == ['git', 'ls-remote'], current()
+        done = publish(tag_source=SOURCE)
+        assert done.returncode == 0 and published() and calls(['git', 'push']) == 0, (done, current())
+        done = publish(tag_source='b' * 40)
+        assert done.returncode != 0 and 'existing tag differs' in done.stderr, done
+        assert calls(['release']) == 0 and calls(['git', 'push']) == 0, current()
+        done = publish(None, (['git', 'push'], 'before', 1, 'stale info: lease rejected'))
+        assert done.returncode != 0 and calls(['release']) == 0, (done, current())
+
+        # HTTP/2 CANCEL uses the existing bounded retry and reconciliation path.
+        done = publish(None, (['release', 'create'], 'before', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 2, (done, current())
+        done = publish(None, (['release', 'create'], 'after', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 1, (done, current())
+        done = publish(None, (['release', 'create'], 'partial', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 1, (done, current())
+        assert calls(['release', 'delete-asset']) == 1 and calls(['release', 'upload']) == 2, current()
+        done = publish(None, (['release', 'create'], 'before', 99, CANCEL))
+        assert done.returncode != 0 and calls(['release', 'create']) == 4, (done, current())
+        # The final attempt is reconciled too, even without another retry remaining.
+        done = publish(None, (['release', 'create'], 'before', 3, CANCEL), (['release', 'create'], 'after', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 4, (done, current())
 
         # A create that made the draft and then timed out is continued: no "already exists".
         done = publish(None, (['release', 'create'], 'after', 1, TIMEOUT))
@@ -141,12 +184,12 @@ def main():
         pin = {'draft': False, 'assets': {n: {'size': s, 'state': 'uploaded'} for n, s in sizes.items()}}
         done = publish(pin)
         assert done.returncode == 0 and 'already published' in done.stdout, done
-        assert [call[:2] for call in current()['calls']] == [['release', 'view']], current()['calls']
+        assert [call[:2] for call in current()['calls']] == [['git', 'ls-remote'], ['release', 'view']], current()['calls']
         # A published embed that differs is refused, never replaced.
         other = {'draft': False, 'assets': {'fractal-web-embed.tar.gz': {'size': 3, 'state': 'uploaded'}}}
         done = publish(other)
         assert done.returncode != 0 and 'never replaced' in done.stderr, done
-        assert [call[:2] for call in current()['calls']] == [['release', 'view']], current()['calls']
+        assert [call[:2] for call in current()['calls']] == [['git', 'ls-remote'], ['release', 'view']], current()['calls']
         # A draft file at another size is refused rather than replaced.
         odd = {'draft': True, 'assets': {'fractal-web-embed.tar.gz': {'size': 3, 'state': 'uploaded'}}}
         done = publish(odd)

@@ -35,8 +35,9 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 //   configured_person() and passes that actor to Client::unix_as (crates/fractal-tui/src/lib.rs).
 // - st ui open: fractal_tui::open_in_terminal_ui resolves configured_person() before
 //   queueing a request in that person's terminal UI request directory.
-// - st note and its subcommands: main's Command::Note passes config.person to
-//   directive_note::run, which resolves it with configured_actor before dispatch.
+// - st note and st availability with their subcommands: main's Command::Note and
+//   Command::Availability pass config.person to directive_note::run and
+//   availability::run, which resolve it with configured_actor before dispatch.
 // - st changes sync: main's Command::Changes resolves config.person with
 //   configured_actor before constructing the named execution client.
 // A parser-only test cannot prove these runtime fallbacks; keep their source
@@ -47,6 +48,8 @@ fn implicit_person(path: &str) -> bool {
         || path == "st ui open"
         || path == "st note"
         || path.starts_with("st note ")
+        || path == "st availability"
+        || path.starts_with("st availability ")
         || (path.starts_with("st changes ")
             && !matches!(path, "st changes list" | "st changes show"))
 }
@@ -147,6 +150,7 @@ mod tests {
             "st conversations reply",
             "st agents rename-id",
             "st missions rename-id",
+            "st missions retry",
         ] {
             assert_eq!(commands[path]["actor"], "required", "{path}");
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
@@ -156,10 +160,16 @@ mod tests {
         assert_eq!(commands["st missions show"]["can_carry_person"], false);
         assert_eq!(commands["st work show"]["can_carry_person"], false);
         assert_eq!(commands["st note"]["alternate_actor_option"], "actor");
+        assert_eq!(commands["st availability"]["alternate_actor_option"], "actor");
         for path in [
             "st note",
             "st note set",
             "st note clear",
+            "st availability",
+            "st availability show",
+            "st availability set",
+            "st availability clear",
+            "st availability presence",
             "st setup",
             "st ui",
             "st ui open",
@@ -206,6 +216,25 @@ mod tests {
     }
 
     #[test]
+    fn archive_candidates_contract_has_no_actor_or_configured_person() {
+        let value = generate(super::super::command_graph());
+        let command = &value["contract"]["commands"]["st replication archive-candidates"];
+        assert_eq!(
+            command,
+            &json!({
+                "actor": "none",
+                "accepts_person": false,
+                "can_carry_person": false,
+                "as_role": "none",
+                "alternate_actor_option": null,
+                "actor_environment": null,
+                "ignores_actor": false,
+            }),
+            "offline analysis neither accepts an actor nor inherits configured-person authority"
+        );
+    }
+
+    #[test]
     fn harness_question_contract_requires_an_explicit_person_for_every_command() {
         let value = generate(super::super::command_graph());
         for path in [
@@ -221,10 +250,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn continuity_contract_distinguishes_read_previews_from_attributed_recovery() {
+        let value = generate(super::super::command_graph());
+        let commands = &value["contract"]["commands"];
+        for path in [
+            "st missions run continuity preview",
+            "st missions run continuity startup-preview",
+        ] {
+            assert_eq!(commands[path]["actor"], "none", "{path}");
+            assert_eq!(commands[path]["can_carry_person"], false, "{path}");
+        }
+        let recover = &commands["st missions run continuity recover"];
+        assert_eq!(recover["actor"], "required");
+        assert_eq!(recover["accepts_person"], true);
+        assert_eq!(recover["can_carry_person"], true);
+        assert_eq!(recover["as_role"], "actor");
+        assert_eq!(recover["actor_environment"], Value::Null);
+    }
+
     fn assert_reviewed_configured_person_families(command: clap::Command) {
         let inventory = super::super::read_contract_inventory_for_command(command);
         let paths = inventory["commands"].as_array().unwrap();
         let reviewed = [
+            "st availability",
+            "st availability clear",
+            "st availability presence",
+            "st availability set",
+            "st availability show",
             "st changes list",
             "st changes show",
             "st changes sync",
@@ -239,7 +292,7 @@ mod tests {
             .iter()
             .map(|path| path.as_str().unwrap())
             .filter(|path| {
-                ["st setup", "st ui", "st note", "st changes"]
+                ["st setup", "st ui", "st note", "st availability", "st changes"]
                     .into_iter()
                     .any(|family| *path == family || path.starts_with(&format!("{family} ")))
             })

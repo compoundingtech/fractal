@@ -56,7 +56,7 @@ it.each(['dark', 'light'] as const)('completed todo text meets WCAG AA on the %s
   const root = createRoot(host)
   try {
     await act(async () => root.render(<AgentTodos placement="resources" state={projectTodos({ feed: { _tag: 'Observed', freshness: 'live', value: [todoAgent] }, agentRef: todoAgentRef })} />))
-    const completed = host.querySelector('[aria-label="Completed"]')!.nextElementSibling!
+    const completed = host.querySelector('[aria-label="Completed"]')!.nextElementSibling!.firstElementChild!
     const style = JSON.parse(completed.getAttribute('data-sx')!) as { color: string }
     const foreground = luminance(resolve(scheme, style.color))
     const background = luminance(resolve(scheme, colorVars.raised))

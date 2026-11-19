@@ -106,7 +106,21 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_fold_batches",
         "local_client_message_publications",
         "local_client_message_cut_epoch",
+        // Like message cut epochs, desired write generations invalidate local cursors.
+        "local_desired_write_witness",
+        // Rebuildable daily-digest arrival indexes, dependency work and staging:
+        // replicated notice/document claims, not these cursors, are the authority.
+        "local_ask_digest_pending",
+        "local_ask_digest_emitted",
+        "local_ask_digest_sources",
+        "local_ask_digest_source_history",
+        "local_ask_digest_draft",
+        "local_ask_digest_deferred",
+        "local_ask_digest_retry",
         "local_idle_messages",
+        // Disposable wake metadata and pending folds; graph/shard mail remains authoritative.
+        "local_wake_demand_v1",
+        "local_wake_demand_pending_v1",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
         "local_message_staged",
@@ -125,6 +139,9 @@ fn every_persistent_table_has_a_projection_scope() {
         // Live gate runners, kept from the claims by triggers: member-local.
         "local_gate_runners",
         "local_gate_runners_backfill",
+        // Work-wake candidates and their resumable copy cursor: member-local.
+        "local_work_wake_tags",
+        "local_work_wake_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",
@@ -144,14 +161,26 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
         "local_usage_spend",
+        "local_step_execution_spend",
         "local_usage_provenance",
         "local_usage_responses",
         "local_limit_stops",
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
+        "local_usage_credit_heads",
+        "local_usage_credit_pending",
+        "local_usage_credit_progress",
         "local_latest_slots",
+        // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
+        "local_objective_times_v1",
+        "local_objective_times_pending_v1",
         "local_resource_projection_pending",
+        // Member-local mission-head work, rebuilt from selected published revisions.
+        "local_mission_supersession_heads_v3",
+        // Rebuildable active-run capacity summaries; canonical headers/definitions are authority.
+        "mission_run_capacity_v1",
+        "mission_run_capacity_totals_v1",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.
         "local_run_eta_pending",
         "local_run_eta_dirty",
@@ -172,9 +201,35 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_completion_health_v1_pending",
         "local_completion_health_v1_backfill",
         "local_glass_head_pending",
+        // Retained member-local mail lifecycle/accounting projections and native harness
+        // acceptance custody; none participates in the shared projection digest.
+        "local_mail_delivery_source_v1",
+        "local_mail_delivery_steps_v1",
+        "local_mail_delivery_pending_v1",
+        "local_mail_input_acceptance_v1",
+        "local_mail_acceptance_frontier_v1",
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
+        // Person read positions: an order-free max register refolded from replicated claims on
+        // open, repair and replay; the claims carry the shared digest coverage.
+        "read_positions",
+        // Host-authoritative admission state is local, not a replicated projection.
+        "local_host_holds",
+        // The connected host's expiring launch barrier is never replicated.
+        "local_launch_freeze",
+        // Host-local execution authority, immutable lane policies and membership custody;
+        // these are authoritative local records, not replicated claim projections.
+        "resource_authorities_v1",
+        "resource_lane_policies_v1",
+        "resource_memberships_v1",
+        "shell_resources_v1",
+        // Settled teardown receipts belong only to this host's runtime cleanup.
+        "local_runtime_cleanup_settled",
+        // Person attention controls: order-free earliest-seen and newest-snooze registers
+        // refolded from replicated claims on open, repair and replay; the claims carry the
+        // shared digest coverage.
+        "person_attention_controls",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",
@@ -191,6 +246,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_counts",
         "claim_signature_writer_counts",
         "claim_signature_migration",
+        "claim_signature_originals",
+        "claim_signature_reference_migration",
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",
@@ -200,6 +257,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "held_keys",
         "fleet_invite_tokens",
         "replica_envelope_holds",
+        "replica_restore_quarantine",
         "checkpoint_envelopes",
         "checkpoint_claims",
         "checkpoint_capture_epoch",
@@ -213,6 +271,8 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
+    // Exercise the lazily installed credit tables as well as the always-present schema.
+    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,
@@ -912,6 +972,7 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

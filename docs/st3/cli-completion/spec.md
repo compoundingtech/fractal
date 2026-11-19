@@ -121,7 +121,7 @@ replaces the struct's `Work(Any)` completer with its own through `mut_arg`.
 These arguments have no entity completer:
 
 - Arguments that name any subject kind: `subject show`, `trace`, `trace wait`, `claim`,
-  `schema`, `alerts request --target`, and review targets.
+  `claims ls --subject` and `--subject-prefix`, `schema`, `alerts request --target`, and review targets.
 - Arguments whose candidates depend on another argument on the same line: lane entries, launch
   variants and decisions, mission requests, and revision proposals. The completion engine passes
   a completer only the word being completed.

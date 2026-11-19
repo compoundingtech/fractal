@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read retained readiness evidence through the existing SLO endpoint",
+  "replay": {"status": "none", "detail": "The reader does not write claims or checkpoints."},
+  "schema": {"status": "none", "detail": "No persisted state schema changes."},
+  "rules": {"status": "none", "detail": "The optional five-minute reading is observational. Weekly fault policy is unchanged."},
+  "compatibility": {"status": "none", "detail": "The optional retained-pairs configuration defaults to absent and uses a separate evidence file."},
+  "downtime": {"status": "none", "detail": "Existing configurations keep their current behavior."},
+  "manual": {"status": "none", "detail": "Configure the optional file only on a commissioned observer with the paired producer."},
+  "recovery": {"status": "none", "detail": "Invalid, stale, or missing retained evidence is reported as unknown."}
+}

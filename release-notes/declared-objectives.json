@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A fleet declares objectives with fractal apply: an `objective` named NAMESPACE/NAME whose interval indicator measures work from custom claims, with labels, a window, min-samples, open samples counted at their age once over target, and an optional on-breach fault for an owner agent; fractal slo ls, explain and chart read its rows beside the shipped ones",
+  "replay": {
+    "status": "none",
+    "detail": "No new claim kind. A declaration is the subject's intent.desired claim, projected into the desired table like an account; the rows are evaluated in memory from claims."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The schema registry adds the `objective` subject family (objective/NAME) and lists `objective` among intent.desired's source declarations, so the registry digest changes. No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "An older daemon does not know the `objective` subject family and refuses a replicated objective/ intent.desired claim. Publish an objective only after every member runs this build. fractal slo chart now percent-encodes the whole row id, so ids with `{label=value}` reach /v1/slo/history intact."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Upgrade every member, then apply objective declarations."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery change; retiring an objective's subject removes it and its rows."
+  }
+}

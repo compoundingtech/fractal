@@ -105,12 +105,14 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&database, "studio").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "studio".into(),
+        api_socket: dir.join("api.sock"),
         state_dir: dir.clone(),
         pty_root: dir.join("pty"),
         pty_binary: PathBuf::from("pty"),

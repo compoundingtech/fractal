@@ -765,18 +765,19 @@ agent "example/bridge" {
             accept_message(
                 &state,
                 MessageSendRequest {
-                    idempotency_key: key.into(),
-                    from: from.into(),
-                    to: to.into(),
-                    content: String::new(),
-                    title: None,
-                    in_reply_to: None,
-                    tags: Vec::new(),
-                    attachments: vec![AttachmentInput {
-                        blob,
-                        media_type: "image/png".into(),
-                        name: Some("/Users/example/Screen Shot.png".into()),
-                    }],
+                owner: None,
+                idempotency_key: key.into(),
+                from: from.into(),
+                to: to.into(),
+                content: String::new(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: vec![AttachmentInput {
+                    blob,
+                    media_type: "image/png".into(),
+                    name: Some("/Users/example/Screen Shot.png".into()),
+                }],
                 },
                 None,
                 None,
@@ -818,19 +819,20 @@ agent "example/bridge" {
         let refused = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "many".into(),
-                from: "person/alex".into(),
-                to: "agent/robin".into(),
-                content: "x".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: (0..5)
-                    .map(|index| AttachmentInput {
-                        blob: format!("blob/{}", hex::encode(Sha256::digest([index]))),
-                        ..too_many.clone()
-                    })
-                    .collect(),
+            owner: None,
+            idempotency_key: "many".into(),
+            from: "person/alex".into(),
+            to: "agent/robin".into(),
+            content: "x".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: (0..5)
+                .map(|index| AttachmentInput {
+                    blob: format!("blob/{}", hex::encode(Sha256::digest([index]))),
+                    ..too_many.clone()
+                })
+                .collect(),
             },
             None,
             None,

@@ -28,14 +28,15 @@ fn send_to(state: &AppState, to: &str, key: &str, content: &str) -> Result<Messa
     accept_message_receipt(
         state,
         MessageSendRequest {
-            idempotency_key: key.into(),
-            from: "person/alex".into(),
-            to: to.into(),
-            content: content.into(),
-            title: Some("notes".into()),
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: "person/alex".into(),
+        to: to.into(),
+        content: content.into(),
+        title: Some("notes".into()),
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         },
         None,
         None,
@@ -288,9 +289,11 @@ fn node_state(root: &Path, name: &str) -> AppState {
     let store = Store::open(&dir.join("graph.db"), name).unwrap();
     store.bind_fleet(FLEET).unwrap();
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: Arc::new(store),
         node: name.into(),
+        api_socket: dir.join("api.sock"),
         state_dir: dir,
         ..super::tests::state(root)
     }
@@ -462,14 +465,15 @@ async fn a_refused_or_failed_send_leaves_no_file_and_a_repeat_heals_a_lost_one()
     let error = accept_message_receipt(
         &state,
         MessageSendRequest {
-            idempotency_key: "signed-whole".into(),
-            from: "person/alex".into(),
-            to: "agent/worker".into(),
-            content: body.clone(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "signed-whole".into(),
+        from: "person/alex".into(),
+        to: "agent/worker".into(),
+        content: body.clone(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         },
         None,
         Some(legacy),

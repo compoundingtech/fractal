@@ -15,6 +15,7 @@ vi.mock('../data/react.tsx', () => ({
 }))
 
 import { MissionsPane } from './MissionsPane.tsx'
+import { credentialExpiredMessage, unavailable } from '../data/source.ts'
 
 const at = DateTime.makeUnsafe('2026-10-14T11:00:00Z')
 const mission = (id: string, title: string, state: string, steps: unknown[], fields: Record<string, unknown> = {}) => ({
@@ -69,6 +70,11 @@ it('lists missions by word with who must act, folds away Fractal\'s own, and ope
   served.run_details[0]!.status = 'completed'
   await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
   expect(container.querySelector('[data-mission-eta]')).toBeNull()
+  data.missions = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+  await act(async () => root.render(<MissionsPane />))
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+  expect(container.querySelector('[role="alert"]')).toBeNull()
+  expect(container.textContent).not.toMatch(/private diagnostic|Retry/)
   act(() => root.unmount())
   container.remove()
 })

@@ -27,6 +27,10 @@ mod stage;
 pub use stage::stage_fractal;
 #[cfg(unix)]
 pub mod launchd_domain;
+#[cfg(unix)]
+pub mod launchctl;
+#[cfg(unix)]
+pub mod launchd_health;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
@@ -302,11 +306,8 @@ pub fn preflight(enabled: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn permissions(open: bool) -> Result<()> {
+pub fn permissions() -> Result<()> {
     print!("{}", permissions_guidance()?);
-    if open {
-        open_permissions_settings()?;
-    }
     Ok(())
 }
 
@@ -325,32 +326,15 @@ pub fn permissions_guidance() -> Result<String> {
     }
 }
 
-pub fn open_permissions_settings() -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        run_command(
-            "open",
-            &["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
-        )?;
-        run_command(
-            "open",
-            &["x-apple.systempreferences:com.apple.preference.security?Privacy_DeveloperTools"],
-        )?;
-    }
-    Ok(())
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn macos_permission_guidance(executable: &Path) -> String {
     format!(
         "Fractal executable\t{}\n\
-1. Open System Settings > Privacy & Security > Full Disk Access.\n\
-2. Add the Fractal executable and enable it.\n\
-3. Open System Settings > Privacy & Security > Developer Tools.\n\
-4. Add the Fractal executable and enable it.\n\
-5. Run `fractal service restart` after an approval changes.\n\
-macOS assigns service-owned file and developer access to Fractal, not to the terminal that installed it.\n\
-A launchd property list cannot grant these approvals.\n",
+Do not grant Full Disk Access, Developer Tools, Accessibility, or Screen Recording to the daemon or agents.\n\
+Keep agent work roots outside Desktop, Documents, Downloads, iCloud Drive, and removable volumes.\n\
+If an agent touches a protected folder, macOS may deny access (Operation not permitted) or present a privacy prompt.\n\
+Do not approve broad access to bypass that failure; move the work or explicitly selected input to an unprotected workspace.\n\
+The protected-operation helper allowlist is empty. Build a helper and its disposable consent-retention probe only when a real protected operation requires them.\n",
         executable.display()
     )
 }
@@ -764,30 +748,19 @@ fn stop_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
-    let output = host_command("systemctl")
-        .args(arguments)
-        .output()
+    let output = fractal_runtime::systemd::output(host_command("systemctl").args(arguments))
         .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
     if output.status.success() {
+        fractal_runtime::systemd::invalidate();
         return Ok(());
     }
-    // A unit file may be gone while its service remains loaded. Only the manager can
-    // establish that a failed stop/disable addressed an absent, inactive unit.
-    let status = host_command("systemctl")
-        .args([
-            "--user",
-            "show",
-            name,
-            "--property=LoadState",
-            "--property=ActiveState",
-            "--no-pager",
-        ])
-        .output()
-        .with_context(|| format!("check whether {name} is absent"))?;
-    let states = String::from_utf8_lossy(&status.stdout);
+    // Absence requires both no installed unit file and no active loaded unit.
+    // A failed mutation of an installed-but-unloaded unit is still an error.
+    let snapshot = fractal_runtime::systemd::snapshot_after_admission()?;
     anyhow::ensure!(
-        states.lines().any(|line| line == "LoadState=not-found")
-            && states.lines().any(|line| line == "ActiveState=inactive"),
+        !lookup::systemd_installed(name) && snapshot.units.get(name).is_none_or(|unit| {
+            unit.load == "not-found" && unit.active == "inactive"
+        }),
         "systemctl {} failed with {}: {}",
         arguments.join(" "),
         output.status,
@@ -826,9 +799,8 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 #[cfg(target_os = "macos")]
 fn launchd_service_status(label: &str, plist: &Path) -> Result<ServiceStatus> {
     let target = format!("{}/{label}", launch_domain());
-    let output = host_command("launchctl")
-        .args(["print", &target])
-        .output()
+    let output = launchctl::output(host_command("launchctl")
+        .args(["print", &target]))
         .with_context(|| format!("run launchctl print {target}"))?;
     anyhow::ensure!(
         output.status.success() || output.status.code() == Some(113),
@@ -867,9 +839,8 @@ fn restart_native_service(config: &Config) -> Result<()> {
     let services = lookup::native()?;
     let domain = launch_domain();
     let replication_service = format!("{domain}/{}", services.replication.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &replication_service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &replication_service]));
     run_command(
         "launchctl",
         &["kickstart", "-k", &format!("{domain}/{}", services.daemon.name)],
@@ -888,19 +859,15 @@ fn restart_native_service(config: &Config) -> Result<()> {
 fn uninstall_native_service() -> Result<()> {
     let services = lookup::native()?;
     let service = format!("{}/{}", launch_domain(), services.daemon.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &service])
-        .status();
-    let _ = host_command("launchctl")
-        .args(["disable", &service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &service]));
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["disable", &service]));
     let replication_service = format!("{}/{}", launch_domain(), services.replication.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &replication_service])
-        .status();
-    let _ = host_command("launchctl")
-        .args(["disable", &replication_service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &replication_service]));
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["disable", &replication_service]));
     let plist = lookup::launchd_path(&services.daemon.name)?;
     if plist.exists() {
         fs::remove_file(plist)?;
@@ -915,12 +882,11 @@ fn uninstall_native_service() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn stop_native_service() -> Result<()> {
     let services = lookup::native()?;
-    let _ = host_command("launchctl")
+    let _ = launchctl::output(host_command("launchctl")
         .args([
             "bootout",
             &format!("{}/{}", launch_domain(), services.replication.name),
-        ])
-        .status();
+        ]));
     run_command(
         "launchctl",
         &["bootout", &format!("{}/{}", launch_domain(), services.daemon.name)],
@@ -977,55 +943,22 @@ fn status_systemd_user() -> Result<ServiceStatusReport> {
 }
 
 #[cfg(target_os = "linux")]
-fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
-    let output = host_command("systemctl")
-        .args([
-            "--user",
-            "show",
-            name,
-            "--property=LoadState",
-            "--property=ActiveState",
-            "--property=SubState",
-            "--no-pager",
-        ])
-        .output()
-        .with_context(|| format!("run systemctl --user show {name}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    anyhow::ensure!(
-        output.status.success() || !stdout.trim().is_empty(),
-        "systemctl failed with {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    parse_systemd_service_status(name, &stdout)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_systemd_service_status(name: &str, stdout: &str) -> Result<ServiceStatus> {
-    let value = |key: &str| {
-        stdout
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")))
-            .filter(|value| !value.is_empty())
-            .with_context(|| format!("systemctl show {name} omitted {key}"))
+fn systemd_service_status(name: &str, unit: Option<&fractal_runtime::systemd::Unit>) -> ServiceStatus {
+    let Some(unit) = unit else {
+        return ServiceStatus {
+            name: name.into(), installed: false, running: false, state: "not-installed".into(),
+        };
     };
-    let load = value("LoadState")?;
-    let active = value("ActiveState")?;
-    let sub = value("SubState")?;
-    anyhow::ensure!(
-        matches!(load, "loaded" | "error" | "masked" | "not-found" | "bad-setting" | "stub" | "merged"),
-        "systemctl show {name} returned an invalid LoadState: {load}"
-    );
-    Ok(ServiceStatus {
+    ServiceStatus {
         name: name.into(),
-        installed: load != "not-found",
-        running: active == "active",
-        state: if load == "not-found" {
+        installed: unit.load != "not-found",
+        running: unit.active == "active",
+        state: if unit.load == "not-found" {
             "not-installed".into()
         } else {
-            format!("{active}/{sub}")
+            format!("{}/{}", unit.active, unit.sub)
         },
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1269,26 +1202,113 @@ WantedBy=default.target\n",
     )
 }
 
+#[cfg(target_os = "linux")]
+struct WorkerResolution<I = fractal_runtime::PeerProcessIdentity> {
+    snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
+    identity: std::result::Result<I, std::sync::Arc<str>>,
+}
+
+#[cfg(target_os = "linux")]
+fn cached_worker_pid<I>(
+    cached: &mut Option<WorkerResolution<I>>,
+    snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
+    resolve: impl FnOnce(&fractal_runtime::systemd::Snapshot) -> Result<I>,
+    validate: impl FnOnce(&I) -> Result<u32>,
+) -> Result<u32> {
+    if !cached.as_ref().is_some_and(|cached| std::sync::Arc::ptr_eq(&cached.snapshot, &snapshot)) {
+        let identity = resolve(&snapshot).map_err(|error| std::sync::Arc::<str>::from(format!("{error:#}")));
+        *cached = Some(WorkerResolution { snapshot, identity });
+    }
+    let identity = cached.as_ref().expect("worker resolution cached").identity.as_ref()
+        .map_err(|error| anyhow::Error::msg(error.to_string()))?;
+    validate(identity)
+}
+
 /// Observe the worker through its supervisor, never through caller-supplied argv.
 pub(crate) fn replication_worker_pid() -> Result<u32> {
-    let service = lookup::native()?.replication;
     #[cfg(target_os = "linux")]
-    let output = host_command("systemctl")
-        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
-        .output()?;
+    {
+        // Resolve both namespaces and the PID from one complete loaded-unit
+        // snapshot. Request traffic never issues per-alias or per-PID queries.
+        let snapshot = fractal_runtime::systemd::snapshot()?;
+        static WORKER: std::sync::Mutex<Option<WorkerResolution>> = std::sync::Mutex::new(None);
+        let mut worker = WORKER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cached_worker_pid(&mut worker, snapshot, |snapshot| {
+            let service = lookup::systemd(snapshot)?.replication;
+            snapshot.worker_identity(&service.name)
+        }, |identity| {
+            identity.validate()?;
+            Ok(identity.pid())
+        })
+    }
     #[cfg(target_os = "macos")]
-    let output = host_command("launchctl")
-        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
-        .output()?;
-    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
-    let text = std::str::from_utf8(&output.stdout)?;
-    #[cfg(target_os = "linux")]
-    let pid = text.trim().parse::<u32>()?;
-    #[cfg(target_os = "macos")]
-    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
-        .context("replication worker has no supervised PID")?.parse::<u32>()?;
-    anyhow::ensure!(pid != 0, "replication worker is not running");
-    Ok(pid)
+    {
+        let service = lookup::native()?.replication;
+        let output = launchctl::output(host_command("launchctl")
+            .args(["print", &format!("{}/{}", launch_domain(), service.name)]))?;
+        anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+        let text = std::str::from_utf8(&output.stdout)?;
+        let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+            .context("replication worker has no supervised PID")?.parse::<u32>()?;
+        anyhow::ensure!(pid != 0, "replication worker is not running");
+        Ok(pid)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod worker_snapshot_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn worker_alias_resolution_is_once_per_snapshot_even_when_absent() {
+        let mut cached = None;
+        let calls = std::cell::Cell::new(0);
+        let snapshot = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        });
+        for _ in 0..1000 {
+            assert!(cached_worker_pid(&mut cached, Arc::clone(&snapshot), |_| {
+                calls.set(calls.get() + 1);
+                anyhow::bail!("worker is absent")
+            }, |pid: &u32| Ok(*pid)).is_err());
+        }
+        assert_eq!(calls.get(), 1);
+        let changed = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        });
+        for _ in 0..1000 {
+            assert_eq!(cached_worker_pid(&mut cached, Arc::clone(&changed), |_| {
+                calls.set(calls.get() + 1);
+                Ok(42)
+            }, |pid: &u32| Ok(*pid)).unwrap(), 42);
+        }
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn an_exited_cached_worker_cannot_transfer_authority_to_a_reused_pid() {
+        let mut cached = None;
+        let live = std::cell::Cell::new(true);
+        let snapshot = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        });
+        let validate = |pid: &u32| {
+            anyhow::ensure!(live.get(), "pinned generation has exited");
+            Ok(*pid)
+        };
+        assert_eq!(cached_worker_pid(&mut cached, Arc::clone(&snapshot), |_| Ok(42), validate).unwrap(), 42);
+        live.set(false);
+        assert!(cached_worker_pid(&mut cached, snapshot, |_| {
+            panic!("must not recapture a replacement process at the cached PID")
+        }, validate).is_err());
+    }
 }
 
 pub(crate) fn daemon_is_service_managed() -> Result<bool> {
@@ -1702,6 +1722,9 @@ mod tests {
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
         quota_source: None,
+        usage_limits: None,
+        host_envelope_file: None,
+        usage_hub: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
@@ -1710,7 +1733,10 @@ mod tests {
         unlaned_seat: None,
         seat_admission: None,
         lanes: None,
+        finite_resources: None,
         person: None,
+        browser_pairing_login: None,
+        pairing_legacy_allowances: Vec::new(),
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
@@ -1727,15 +1753,20 @@ mod tests {
             url: "http://127.0.0.1:31314".into(),
         }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
         github: crate::config::GithubConfig::default(),
+        agent_population_enabled: false,
+        agent_population_repositories: Vec::new(),
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,
+        readiness_slo: None,
+        agents_request_slo_fault: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);
@@ -1812,12 +1843,17 @@ mod tests {
     }
 
     #[test]
-    fn macos_permission_guidance_names_the_exact_binary_and_manual_steps() {
+    fn macos_permission_guidance_keeps_agents_out_of_protected_folders() {
         let guidance = macos_permission_guidance(Path::new("/Users/example/bin/st3"));
         assert!(guidance.contains("Fractal executable\t/Users/example/bin/st3"));
-        assert!(guidance.contains("Full Disk Access"));
-        assert!(guidance.contains("Developer Tools"));
-        assert!(guidance.contains("cannot grant"));
+        assert!(guidance.contains("Do not grant Full Disk Access"));
+        for folder in ["Desktop", "Documents", "Downloads", "iCloud Drive", "removable volumes"] {
+            assert!(guidance.contains(folder));
+        }
+        assert!(guidance.contains("Operation not permitted"));
+        assert!(guidance.contains("allowlist is empty"));
+        assert!(!guidance.contains("Open System Settings"));
+        assert!(!guidance.contains("service restart"));
     }
 
     #[test]

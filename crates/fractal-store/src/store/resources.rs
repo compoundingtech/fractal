@@ -18,7 +18,10 @@ pub(super) fn flush_deferred_preparation(transaction: &Transaction<'_>, budget: 
 #[path = "resources_preparation_tests.rs"]
 mod preparation_tests;
 
-const VERSION: &str = "2";
+// Version 3 re-derives historical attribution-only receipts whose persisted facts predate
+// `receipt_only`. The existing atomic version gate rebuilds resource and preparation projections
+// once from retained claims; matching-version opens only flush genuinely pending subjects.
+const VERSION: &str = "3";
 const PENDING_TRIGGER_VERSION: &str = "2";
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdacd067611e1 owner=fractal_store::store::resources TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS resource_observations (
@@ -123,11 +126,17 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
         )
         .optional()?;
     if version.as_deref() != Some(VERSION) {
+        let timing = std::env::var_os("ST3_PROJECTION_MIGRATION_TIMING")
+            .map(|_| std::time::Instant::now());
         rebuild(transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h410ffbe8c264 owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_observations_version',?1)",
             [VERSION],
         )?;
+        if let Some(started) = timing {
+            tracing::info!(migration = "resource_observations", version = VERSION,
+                elapsed_ms = %started.elapsed().as_millis(), "projection migration completed");
+        }
     } else {
         flush(transaction)?;
     }
@@ -175,6 +184,9 @@ pub fn merge_observation(
                 return;
             }
             let initial = current.is_empty();
+            if initial {
+                current.insert("receipt_only".into(), Value::Bool(true));
+            }
             for name in ["repository", "number", "url", "opened_by", "opened_by_run"] {
                 if (initial || matches!(name, "opened_by" | "opened_by_run")) && let Some(value) = incoming.get(name) {
                     current.entry(name).or_insert_with(|| value.clone());
@@ -234,6 +246,11 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
             Some(fields) => serde_json::from_value(fields)?,
         };
         let mut facts = resource_facts(&fields).map_err(anyhow::Error::new)?;
+        if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener)
+            && fields.get("attribution_only") == Some(&Value::Bool(true))
+        {
+            facts.insert("receipt_only".into(), Value::Bool(true));
+        }
         if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener) {
             let first_opener = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-h4c329b1274fe owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
@@ -541,10 +558,15 @@ impl Store {
         };
         let upper = prefix_successor(&prefix).unwrap_or_default();
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
+        // Old global operations and new observation operations share the event subject.
+        // Select its canonical first observation before applying the listing limit.
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h05417f7bc8ab owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT subject, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
-             WHERE subject>=?1 AND subject<?2 AND kind='github.event'",
-        )?;
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'
+               AND id=(SELECT request.id FROM claims request
+                       WHERE request.subject=claims.subject AND request.kind='github.event'
+                       ORDER BY CANONICAL_ASC(request) LIMIT 1)",
+        ))?;
         let mut events = statement
             .query_map(params![prefix, upper], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
@@ -570,7 +592,9 @@ impl Store {
                 })))
             })
             .collect::<Vec<_>>();
-        events.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        events.sort_by(|(left_at, left), (right_at, right)| {
+            right_at.cmp(left_at).then_with(|| left["subject"].as_str().cmp(&right["subject"].as_str()))
+        });
         events.truncate(limit);
         Ok(events.into_iter().map(|(_, event)| event).collect())
     }
@@ -707,6 +731,125 @@ mod tests {
                 idempotency_key: None,
             })
             .unwrap();
+    }
+
+    const RECEIPT_SUBJECT: &str = "resource/github/acme/garden/pull-request/52";
+
+    fn receipt_facts() -> Value {
+        json!({
+            "number": 52,
+            "opened_by": "agent/example/reviewer",
+            "repository": "resource/github/acme/garden",
+            "url": "https://github.com/acme/garden/pull/52",
+        })
+    }
+
+    fn receipt(store: &Store) {
+        store.append_claim(&ClaimInput {
+            subject: RECEIPT_SUBJECT.into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("attribution_only".into(), json!(true)),
+                ("kind".into(), json!("vcs.pull-request")),
+                ("facts".into(), receipt_facts()),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn receipt_rows(store: &Store) -> Vec<Value> {
+        store.resource_collection_page(None, None, Some(RECEIPT_SUBJECT), None, 10).unwrap()
+    }
+
+    #[test]
+    fn attribution_only_receipt_incremental_and_rebuild_facts_match() {
+        let store = Store::open_memory("receipt-history").unwrap();
+        receipt(&store);
+        let incremental = receipt_rows(&store);
+        let mut expected = receipt_facts();
+        expected["receipt_only"] = json!(true);
+        assert_eq!(incremental.len(), 1);
+        assert_eq!(incremental[0]["facts"], expected);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let claims: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM claims", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(claims, 1, "the witness contains only the retained receipt");
+            rebuild(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(receipt_rows(&store), incremental);
+    }
+
+    #[test]
+    fn attribution_only_receipt_historical_reopen_repairs_once_without_claim_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt-history.sqlite3");
+        let store = Store::open(&path, "receipt-history").unwrap();
+        receipt(&store);
+        let expected = receipt_rows(&store);
+        {
+            // Reproduce a historical materialization with no pending work and a matching v2
+            // marker: it lacks only the derived receipt flag, not any retained claim data.
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                "UPDATE resource_observations SET facts=?1 WHERE subject=?2",
+                params![receipt_facts().to_string(), RECEIPT_SUBJECT],
+            ).unwrap();
+            transaction.execute(
+                "UPDATE meta SET value='2' WHERE key='resource_observations_version'", [],
+            ).unwrap();
+            let pending: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM local_resource_projection_pending", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(pending, 0);
+            transaction.execute_batch(
+                "CREATE TRIGGER receipt_test_no_claim_insert BEFORE INSERT ON claims
+                 BEGIN SELECT RAISE(ABORT, 'receipt repair must not insert claims'); END;
+                 CREATE TRIGGER receipt_test_no_claim_update BEFORE UPDATE ON claims
+                 BEGIN SELECT RAISE(ABORT, 'receipt repair must not update claims'); END;
+                 CREATE TRIGGER receipt_test_no_claim_delete BEFORE DELETE ON claims
+                 BEGIN SELECT RAISE(ABORT, 'receipt repair must not delete claims'); END;",
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert!(receipt_rows(&store)[0]["facts"].get("receipt_only").is_none());
+        drop(store);
+
+        let repaired = Store::open(&path, "receipt-history").unwrap();
+        assert_eq!(receipt_rows(&repaired), expected);
+        {
+            let mut connection = repaired.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let version: String = transaction.query_row(
+                "SELECT value FROM meta WHERE key='resource_observations_version'", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(version, VERSION);
+            let claims: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM claims", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(claims, 1);
+            // Persist guards after the repair. A second rebuild or even a redundant refresh
+            // would write the resource table and fail the next open.
+            transaction.execute_batch(
+                "CREATE TRIGGER receipt_test_no_projection_insert BEFORE INSERT ON resource_observations
+                 BEGIN SELECT RAISE(ABORT, 'unchanged reopen must not insert resources'); END;
+                 CREATE TRIGGER receipt_test_no_projection_update BEFORE UPDATE ON resource_observations
+                 BEGIN SELECT RAISE(ABORT, 'unchanged reopen must not update resources'); END;
+                 CREATE TRIGGER receipt_test_no_projection_delete BEFORE DELETE ON resource_observations
+                 BEGIN SELECT RAISE(ABORT, 'unchanged reopen must not delete resources'); END;",
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        drop(repaired);
+        let unchanged = Store::open(&path, "receipt-history").unwrap();
+        assert_eq!(receipt_rows(&unchanged), expected);
     }
 
     #[test]

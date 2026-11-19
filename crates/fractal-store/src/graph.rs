@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
+use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
@@ -26,6 +27,10 @@ const ROOT_NODES: &[&str] = &[
     "mission-run",
     "planning-session",
     "message",
+    "objective",
+    "github-source",
+    "github-scope",
+    "notice-owner",
     "repair",
     "schedule",
     "stop",
@@ -234,6 +239,7 @@ pub fn parse_intent_with_owner(
         .map_err(|error| FractalError::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
+    lower_context_references(&mut document);
     let canonical_document = document.clone();
     lower_terminal_declarations(&mut document);
     let declarations = document
@@ -379,6 +385,24 @@ fn parse_desired_node(
             "an account declaration must be at the root",
         ));
     }
+    if kind == "objective" && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
+        ));
+    }
+    if matches!(kind, "github-source" | "github-scope") && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "github-configuration-inside-mission",
+            "GitHub acquisition and effective-dated membership are root declarations",
+        ));
+    }
+    if kind == crate::notice_owner::KIND && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "notice-owner-inside-mission",
+            "a notice-owner declaration must be at the root",
+        ));
+    }
     match kind {
         "host" => parse_host(node, context),
         "agent" => parse_agent(node, enclosing_host, context),
@@ -389,6 +413,7 @@ fn parse_desired_node(
         "resource" => parse_resource_declaration(node, context),
         "repair" => parse_replica_repair(node, context),
         "stop" => parse_stop(node, context),
+        "notice-owner" => parse_notice_owner(node, context),
         _ => parse_structure(node, kind, context),
     }
 }
@@ -431,6 +456,7 @@ fn parse_mission_run_declaration(
         body,
         &[
             "mission",
+            "follow-head",
             "workspace",
             "requester",
             "mode",
@@ -449,6 +475,7 @@ fn parse_mission_run_declaration(
         matches!(
             child.name().value(),
             "mission"
+                | "follow-head"
                 | "workspace"
                 | "requester"
                 | "mode"
@@ -461,6 +488,14 @@ fn parse_mission_run_declaration(
     let creation = if has_creation {
         let mission_ref = required_child_string(body, "mission", &subject)?;
         let (mission, revision) = exact_mission_revision(&mission_ref)?;
+        let follow_head = match child_string(body, "follow-head")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => return Err(FractalError::new(
+                "invalid-follow-head",
+                format!("`follow-head` is `true` when present, not `{other}`"),
+            )),
+        };
         let workspace = required_child_string(body, "workspace", &subject)?;
         if !workspace.starts_with('/') {
             return Err(FractalError::new(
@@ -540,6 +575,7 @@ fn parse_mission_run_declaration(
         Some(MissionRunCreation {
             mission,
             revision,
+            follow_head,
             workspace,
             requester,
             inputs,
@@ -1338,6 +1374,7 @@ fn parse_agent(
         || format!("agent/{bus_id}"),
         |run| format!("agent/{}/{identity}", owner_run_id(run)),
     );
+    let admission = fractal_missions_base::declared_admission::parse(children, "agent", &subject)?;
     let runtime_id = context.owner_run.as_ref().map_or_else(
         || bounded_runtime_id(&bus_id.replace('/', ".")),
         |run| {
@@ -1485,6 +1522,9 @@ fn parse_agent(
     }
 
     if let Some(member) = primary.as_mut() {
+        member.declared_priority = admission.priority;
+        member.declared_lane = admission.lane;
+        member.declared_budgets = admission.budgets;
         member.one_shot = unique_child(children, "one-shot")?.is_some();
         member.capacity = unique_child(children, "capacity")?
             .map(parse_capacity)
@@ -1499,6 +1539,19 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
+    // Memberless roots need placement in their declaration. Launched roots already
+    // retain resolved placement in MemberSpec; keep their historical revisions stable.
+    if primary.is_none() {
+        let canonical_children = desired
+            .as_object_mut()
+            .expect("canonical node is an object")
+            .entry("children")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("canonical children are an array");
+        canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
+        canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
+    }
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
@@ -1600,11 +1653,14 @@ fn parse_agent(
             },
         )?;
     }
+    // A top-level root may be an inert identity/mail owner. A run-owned agent must
+    // still supply work to execute; declared launches were validated above.
     if context
         .subjects
         .get(&subject)
         .is_some_and(|subject| subject.member.is_none())
         && task_names.is_empty()
+        && context.owner_run.is_some()
     {
         return Err(FractalError::new(
             "missing-agent-launch",
@@ -1683,6 +1739,15 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     validate_name(&name, false)?;
     match kind {
         "account" => validate_account(node)?,
+        "objective" => validate_objective(node)?,
+        "github-source" => {
+            fractal_schema::github_capture::declarations::parse_source(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-source", message))?;
+        }
+        "github-scope" => {
+            fractal_schema::github_capture::declarations::parse_roster(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-scope", message))?;
+        }
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -1698,6 +1763,8 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     }
     let subject = match kind {
         "doc" => format!("doc/{name}"),
+        // The kernel reader names the subject, so `objective "objective/x"` is not `objective/x`.
+        "objective" => format!("objective/{name}"),
         "lane" | "observer" | "subscription" | "schedule" if context.owner_run.is_some() => {
             format!(
                 "{kind}/{}/{}",
@@ -1733,6 +1800,43 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
             &name,
         )?;
         context.document_refs.insert(format!("doc/{name}@{hash}"));
+    }
+    Ok(())
+}
+
+/// The fleet's single notice owner, read by the kernel's strict reader. Its subject is fixed, so
+/// a handover edits the one declaration and no apply can leave two owners behind.
+fn parse_notice_owner(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
+    let desired = canonical_node(node)?;
+    crate::notice_owner::parse(&desired)?;
+    insert_subject(
+        context,
+        DesiredSubject {
+            accountable: None,
+            subject: crate::notice_owner::SUBJECT.into(),
+            kind: crate::notice_owner::KIND.into(),
+            desired,
+            member: None,
+            owner_run: None,
+            owner_generation: None,
+            owner_step: None,
+        },
+    )
+}
+
+/// An objective a fleet declares: the kernel's strict reader, and only an interval or count over
+/// claims named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
+fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
+    let objective = crate::objective::parse(&canonical_node(node)?)?;
+    if !objective.declarable() {
+        return Err(FractalError::new(
+            "objective-not-declarable",
+            format!(
+                "objective `{}`: a fleet declares an `interval` or `count` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
+                objective.name,
+                objective.indicator.kind()
+            ),
+        ));
     }
     Ok(())
 }
@@ -2400,6 +2504,9 @@ fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, FractalE
 
 fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), FractalError> {
     const ALLOWED: &[&str] = &[
+        "declared-priority",
+        "declared-lane",
+        "declared-budgets",
         "identity",
         "name",
         "description",
@@ -2410,6 +2517,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "under",
         "restart",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2456,6 +2564,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "workspace",
         "checkout",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2503,6 +2612,23 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
             return Err(FractalError::new(
                 "invalid-agent-lifecycle",
                 format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
+    }
+    if let Some(policy) = unique_child(document, "idle-suspend")? {
+        ensure_no_properties(policy)?;
+        ensure_no_children(policy)?;
+        if policy.ty().is_some() || policy.entries().iter().any(|entry| entry.ty().is_some()) {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend cannot have type annotations",
+            ));
+        }
+        let value = one_string(policy)?;
+        if crate::model::AgentIdleSuspend::parse(&value).is_none() {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend must be never or member",
             ));
         }
     }
@@ -2598,11 +2724,14 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         ));
     }
     if let Some(description) = child_string(document, "description")?
-        && description.len() > 1_000
+        && description.len() > agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
     {
         return Err(FractalError::new(
             "description-too-long",
-            "an agent description cannot exceed 1,000 bytes",
+            format!(
+                "an agent description, its charter, cannot exceed {} bytes",
+                agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
+            ),
         ));
     }
     parse_workspace(document)?;
@@ -4392,7 +4521,10 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
         let gate = node.name().value() == "gate";
         let mission = node.name().value() == "mission";
         for child in children.nodes() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 collect_document_refs(child, output)?;
             }
         }
@@ -4409,54 +4541,6 @@ fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result
         ));
     }
     Ok(())
-}
-
-fn canonical_node(node: &KdlNode) -> Result<Value, FractalError> {
-    let mut properties = BTreeMap::<String, Value>::new();
-    let mut arguments = Vec::new();
-    for entry in node.entries() {
-        let value = json_value(entry.value())?;
-        if let Some(name) = entry.name() {
-            if properties.insert(name.value().into(), value).is_some() {
-                return Err(FractalError::new(
-                    "duplicate-property",
-                    format!(
-                        "node `{}` repeats property `{}`",
-                        node.name().value(),
-                        name.value()
-                    ),
-                ));
-            }
-        } else {
-            arguments.push(value);
-        }
-    }
-    let children = node
-        .children()
-        .map(|document| {
-            document
-                .nodes()
-                .iter()
-                .map(canonical_node)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut output = Map::new();
-    output.insert("name".into(), Value::String(node.name().value().into()));
-    if !arguments.is_empty() {
-        output.insert("arguments".into(), Value::Array(arguments));
-    }
-    if !properties.is_empty() {
-        output.insert(
-            "properties".into(),
-            serde_json::to_value(properties).expect("BTreeMap serializes"),
-        );
-    }
-    if !children.is_empty() {
-        output.insert("children".into(), Value::Array(children));
-    }
-    Ok(Value::Object(output))
 }
 
 fn hash_json(value: &Value) -> String {
@@ -4516,6 +4600,65 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_launch_agents_retain_resolved_host_placement() {
+        for (source, expected) in [
+            ("version 2\nagent \"example/owner\" { host \"other\" }", "other"),
+            ("version 2\nhost \"other\" { agent \"example/owner\" {} }", "other"),
+            ("version 2\nagent \"example/owner\" { host \"local\" }", "node"),
+            ("version 2\nagent \"example/owner\" {}", "node"),
+        ] {
+            let intent = parse_intent(source, "node").unwrap();
+            let owner = &intent.subjects["agent/example/owner"];
+            assert!(owner.member.is_none());
+            assert_eq!(
+                canonical_child_value(&owner.desired, "host").and_then(Value::as_str),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn inert_roots_do_not_relax_run_owned_or_declared_launch_validation() {
+        assert_eq!(
+            parse_execution_intent(
+                "version 2\nagent \"owner\" { host \"node\"; }",
+                "node",
+                "run-1",
+            )
+            .unwrap_err()
+            .code,
+            "missing-agent-launch",
+        );
+        assert!(parse_intent(
+            "version 2\nagent \"example/owner\" { host \"node\"; command \"true\"; argv \"false\"; }",
+            "node",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
+        let agent = |description: &str| {
+            format!("version 2\nagent \"example/chartered\" {{\n  description {description:?}\n  command \"true\"\n}}\n")
+        };
+        // Nine bytes per line: a three-byte character, ASCII, and a newline.
+        let at_limit = format!("{}ab", "界 line\n".repeat(910));
+        assert_eq!(at_limit.len(), agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES);
+        let intent = parse_intent(&agent(&at_limit), "node").unwrap();
+        assert_eq!(
+            crate::model::canonical_child_string(
+                &intent.subjects["agent/example/chartered"].desired,
+                "description"
+            )
+            .as_deref(),
+            Some(at_limit.as_str())
+        );
+        let error = parse_intent(&agent(&format!("{at_limit}c")), "node").unwrap_err();
+        assert_eq!(error.code, "description-too-long");
+        assert!(error.message.contains("8192 bytes"), "{}", error.message);
+    }
 
     #[test]
     fn an_agent_checkout_needs_a_workspace_and_git_ref_names() {
@@ -4760,6 +4903,72 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    const OBJECTIVE: &str = r#"
+version 2
+
+objective "ops/change-rollout" {
+  about "A change, from its author marking it ready to every member that serves it"
+  indicator "interval" {
+    subject-prefix "custom/acme/change/"
+    start "custom.acme.change-ready" at="ready_at"
+    expect "custom.acme.change-merged" set="hosts" at="merged_at"
+    stop "custom.acme.change-applied" member="host" at="applied_at"
+    cancel "custom.acme.change-abandoned"
+    label "class"
+  }
+  window "7d" min-samples=3
+  target "p50" within="60s"
+  target "p95" within="5m"
+  on-breach "fault" owner="agent/ops/release-manager" backup="agent/ops/observability" condition="change-rollout-slo-missed"
+}
+"#;
+
+    #[test]
+    fn an_objective_is_a_root_declaration_the_kernel_reads() {
+        let intent = parse_intent(OBJECTIVE, "node").unwrap();
+        let desired = &intent.subjects["objective/ops/change-rollout"];
+        assert_eq!((desired.kind.as_str(), desired.member.is_none()), ("objective", true));
+        let objective = crate::objective::parse(&desired.desired).unwrap();
+        assert_eq!(objective.name, "ops/change-rollout");
+        assert!(objective.declarable());
+
+        let nested = parse_execution_intent(OBJECTIVE, "node", "run-1").expect_err("a run cannot own an objective");
+        assert_eq!(nested.code, "objective-inside-mission");
+        let body = OBJECTIVE.trim_start().trim_start_matches("version 2").trim();
+        for inside in [
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  {body}\n  step \"work\" {{ agentless }}\n}}\n"),
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  step \"work\" {{\n    {body}\n  }}\n}}\n"),
+        ] {
+            assert_eq!(parse_intent(&inside, "node").unwrap_err().code, "objective-inside-mission", "{inside}");
+        }
+    }
+
+    #[test]
+    fn only_an_interval_named_namespace_slash_name_is_declarable() {
+        let one_segment = OBJECTIVE.replace("\"ops/change-rollout\"", "\"change-rollout\"");
+        assert_eq!(parse_intent(&one_segment, "node").unwrap_err().code, "objective-not-declarable");
+
+        let native = r#"
+version 2
+objective "ops/statement" {
+  about "One SQL statement"
+  indicator "statement"
+  target "p99" within="25ms"
+  target "max" within="250ms"
+}
+"#;
+        assert_eq!(parse_intent(native, "node").unwrap_err().code, "objective-not-declarable");
+
+        for broken in [
+            OBJECTIVE.replace("  window \"7d\" min-samples=3\n", ""),
+            OBJECTIVE.replace("target \"p95\" within=\"5m\"", "target \"p95\" max=5"),
+            OBJECTIVE.replace("    label \"class\"\n", "    label \"class\"\n    retry \"x\"\n"),
+            OBJECTIVE.replace("backup=\"agent/ops/observability\"", "backup=\"agent/ops/release-manager\""),
+        ] {
+            assert_eq!(parse_intent(&broken, "node").unwrap_err().code, "invalid-objective", "{broken}");
+        }
     }
 
     #[test]
@@ -5776,6 +5985,51 @@ version 2
     }
 
     #[test]
+    fn fractal_context_references_publish_the_same_mission_as_st_references() {
+        let source = |run: &str, workspace: &str, step: &str| {
+            format!(
+                r#"version 2
+agent "helper" {{ workspace "/tmp"; command "echo ${{FRACTAL_MISSION_RUN}}"; }}
+mission "spelling" state="ready" {{
+  goal "Work in {workspace}; keep $${{FRACTAL_MISSION_RUN}} literal."
+  agent "builder" {{ workspace "{workspace}/builder"; command "true"; }}
+  step "build" {{
+    assigned-to "agent/{run}/builder"
+    goal "Build {step} of {run}."
+    gate "prepared" {{ field "exit_code" "exec/{run}/prepare" is 0; }}
+  }}
+}}
+"#
+            )
+        };
+        let st = parse_test_intent(
+            &source("${ST_MISSION_RUN}", "${ST_WORKSPACE}", "${ST_STEP}"),
+            "node",
+        )
+        .unwrap();
+        let fractal = parse_test_intent(
+            &source("${FRACTAL_MISSION_RUN}", "${FRACTAL_WORKSPACE}", "${FRACTAL_STEP}"),
+            "node",
+        )
+        .unwrap();
+        assert_eq!(fractal.missions, st.missions);
+        assert_eq!(fractal.missions["spelling"].revision, st.missions["spelling"].revision);
+        assert_eq!(fractal.source_hash, st.source_hash);
+        assert_eq!(fractal.normalized, st.normalized);
+        assert!(fractal.missions["spelling"].goals[0].contains("$${FRACTAL_MISSION_RUN}"));
+        // Outside a mission `${…}` is shell text, not a context reference.
+        assert!(serde_json::to_string(&fractal.subjects["agent/node.helper"].desired)
+            .unwrap()
+            .contains("${FRACTAL_MISSION_RUN}"));
+        let unknown = parse_test_intent(
+            "version 2\nmission \"unknown\" state=\"ready\" { goal \"Use ${FRACTAL_UNKNOWN}.\"; step \"work\" { agentless; goal \"Work.\"; } }\n",
+            "node",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code, "unknown-variable");
+    }
+
+    #[test]
     fn under_is_repeatable_non_owning_agent_metadata() {
         let source = r#"
 version 2
@@ -6305,5 +6559,284 @@ schedule "orchard" {{ host "ivory"; {standby}
         let parsed = parse_intent(&local, "ivory").unwrap();
         assert_eq!(schedule_spec(&parsed.subjects["schedule/orchard"].desired, "ivory").unwrap().host, "ivory");
         assert!(parse_intent(&source(r#"standby { host "ivory"; after "5m" }"#).replace("host \"ivory\";", "host \"local\";"), "ivory").is_err());
+    }
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+    use crate::model::{DeclaredBudgets, DeclaredLane, DeclaredPriority};
+
+    const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { memory-max "8G"; disk-max "20G"; }"#;
+
+    #[test]
+    fn agent_and_mission_authoring_roundtrip() {
+        let source = format!(
+            "version 2\nagent \"example/worker\" {{ command \"true\"; {FIELDS} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {FIELDS} }}"
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let member = intent.subjects["agent/example/worker"].member.as_ref().unwrap();
+        let mission = &intent.missions["example/work"];
+        assert_eq!(member.declared_priority, Some(DeclaredPriority::Normal));
+        assert_eq!(member.declared_lane, Some(DeclaredLane::Check));
+        assert_eq!(member.declared_budgets, mission.declared_budgets);
+        assert_eq!(mission.declared_budgets.as_ref().unwrap().memory_max.as_deref(), Some("8G"));
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+        let json = serde_json::to_value(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets, mission.declared_budgets);
+        assert_eq!(decoded.subjects["agent/example/worker"].member.as_ref().unwrap().declared_lane, member.declared_lane);
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.subjects["agent/example/worker"].member.as_ref().unwrap().declared_budgets, member.declared_budgets);
+    }
+
+    #[test]
+    fn mission_numeric_budgets_authoring_roundtrip() {
+        let source = r#"version 2
+mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seconds 300; token-budget 100000; attention "person/reviewer" asks=3; } }
+"#;
+        let intent = parse_intent(source, "node").unwrap();
+        let budgets = intent.missions["example/work"].declared_budgets.as_ref().unwrap();
+        assert_eq!(budgets.cpu_seconds, Some(300));
+        assert_eq!(budgets.token_budget, Some(100_000));
+        assert_eq!(budgets.attention[0].person, "person/reviewer");
+        assert_eq!(budgets.attention[0].asks, 3);
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+    }
+
+    #[test]
+    fn agent_authoring_refuses_mission_only_numeric_budgets() {
+        for (child, field) in [("cpu-seconds", "cpu_seconds"), ("token-budget", "token_budget")] {
+            let source = format!("version 2\nagent \"example/worker\" {{ command \"true\"; declared-budgets {{ {child} 300; }} }}");
+            let error = parse_intent(&source, "node").unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], format!("declared_budgets.{field}"));
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
+    }
+
+    #[test]
+    fn both_declaration_kinds_refuse_invalid_fields() {
+        for fields in [
+            "declared-priority \"urgent\"",
+            "declared-lane \"other\"",
+            "declared-budgets { cpu-seconds 0; }",
+            "declared-budgets { disk-max \"16777216T\"; }",
+            "declared-budgets { memory-max \"8GB\"; }",
+        ] {
+            for source in [
+                format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields}; }}"),
+                format!("version 2\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields}; }}"),
+            ] {
+                assert_eq!(parse_intent(&source, "node").unwrap_err().code, "invalid-declared-admission");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_publication_validation_cannot_bypass_kdl_rules() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }\nmission \"example/work\" state=\"ready\" { goal \"Work.\"; }",
+            "node",
+        ).unwrap();
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = Some(DeclaredPriority::Unknown("urgent".into()));
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_priority");
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = None;
+        for (budgets, field) in [
+            (DeclaredBudgets { cpu_seconds: Some(300), ..DeclaredBudgets::default() }, "declared_budgets.cpu_seconds"),
+            (DeclaredBudgets { token_budget: Some(100_000), ..DeclaredBudgets::default() }, "declared_budgets.token_budget"),
+            (DeclaredBudgets { attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 3 }], ..Default::default() }, "declared_budgets.attention"),
+        ] {
+            intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = Some(budgets);
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], field);
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = None;
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets { token_budget: Some(0), ..DeclaredBudgets::default() });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_budgets.token_budget");
+        assert_eq!(error.details["subject"], "mission/example/work");
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets {
+            attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 0 }], ..Default::default()
+        });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.code, "invalid-declared-admission");
+        assert_eq!(error.details["field"], "declared_budgets.attention[person/reviewer].asks");
+        assert_eq!(error.details["subject"], "mission/example/work");
+    }
+
+    #[test]
+    fn omission_and_empty_budgets_do_not_serialize_new_fields() {
+        for fields in ["", "declared-budgets {}"] {
+            let intent = parse_intent(&format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields} }}"), "node").unwrap();
+            let member = serde_json::to_value(intent.subjects["agent/example/worker"].member.as_ref().unwrap()).unwrap();
+            let mission = serde_json::to_value(&intent.missions["example/work"]).unwrap();
+            for value in [&member, &mission] {
+                for key in ["declared_priority", "declared_lane", "declared_budgets"] {
+                    assert!(value.get(key).is_none(), "{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_publication_refuses_admission_representation_drift() {
+        for fields in ["", "declared-priority \"normal\";"] {
+            let mut intent = parse_intent(
+                &format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}"),
+                "node",
+            ).unwrap();
+            fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+            let member = intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap();
+            member.declared_priority = if fields.is_empty() { Some(DeclaredPriority::Normal) } else { None };
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_priority");
+        }
+    }
+
+    #[test]
+    fn non_agent_desired_children_pass_both_typed_entrypoints() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let desired = intent.subjects.get_mut("agent/example/worker").unwrap();
+        desired.kind = "resource".into();
+        desired.member = None;
+        desired.desired = serde_json::json!({"children": [{"name": "declared-priority"}]});
+        let body = serde_json::to_value(&*desired).unwrap();
+        fractal_missions_base::declared_admission::validate_claim(
+            "intent.desired", &desired.subject, &body,
+        ).unwrap();
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+    }
+    #[test]
+    fn attention_refuses_agents_steps_and_deferred_agents() {
+        let fields = r#"declared-budgets { attention "person/reviewer" asks=3; }"#;
+        for declaration in [
+            format!(r#"agent "example/worker" {{ command "true"; {fields}; }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; step "one" {{ goal "Work."; {fields}; }} }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; agent "worker" {{ command "true"; {fields}; }}; step "work" {{ goal "Work."; }} }}"#),
+        ] {
+            let error = parse_intent(&format!("version 2\n{declaration}"), "node")
+                .and_then(|intent| fractal_missions_base::declared_admission::validate_publication(&intent).map(|()| intent))
+                .unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_budgets.attention");
+            assert!(error.details["subject"].is_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod github_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_effective_scope_are_root_declarations() {
+        let intent = parse_intent(r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+github-scope "public-example" {
+    revision "authored-one"
+    repository "R_example" from-ms=100
+}
+"#, "member-one").unwrap();
+        assert_eq!(intent.subjects["github-source/public-example"].kind, "github-source");
+        assert_eq!(intent.subjects["github-scope/public-example"].kind, "github-scope");
+    }
+
+    #[test]
+    fn enabling_source_without_authority_is_a_typed_validation_error() {
+        let source = r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#;
+        assert_eq!(parse_intent(source, "member-one").unwrap_err().code, "invalid-github-source");
+        let disabled = source.replace("enabled #true", "enabled #false");
+        assert!(parse_intent(&disabled, "member-one").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod idle_suspend_tests {
+    use super::*;
+    use crate::model::{AgentIdleSuspend, declared_idle_suspend};
+
+    #[test]
+    fn idle_suspend_is_optional_typed_declaration_metadata() {
+        let baseline = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let original = &baseline.subjects["agent/example/worker"];
+        assert_eq!(declared_idle_suspend(Some(&original.desired)), None);
+        assert_eq!(declared_idle_suspend(None), None);
+        for (value, expected) in [
+            ("never", AgentIdleSuspend::Never),
+            ("member", AgentIdleSuspend::Member),
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; idle-suspend \"{value}\"; }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let desired = &intent.subjects["agent/example/worker"];
+            assert_eq!(declared_idle_suspend(Some(&desired.desired)), Some(expected));
+            assert_ne!(desired.desired, original.desired);
+            assert_eq!(desired.member, original.member, "policy is not launch metadata");
+            assert!(desired.member.as_ref().unwrap()
+                .launch_changes(original.member.as_ref().unwrap()).is_empty());
+            let decoded: NormalizedIntent = serde_json::from_value(
+                serde_json::to_value(&intent).unwrap(),
+            ).unwrap();
+            assert_eq!(
+                declared_idle_suspend(Some(&decoded.subjects["agent/example/worker"].desired)),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn idle_suspend_refuses_duplicates_and_malformed_children() {
+        for policy in [
+            "idle-suspend",
+            "idle-suspend #true",
+            "idle-suspend 1",
+            "(policy)idle-suspend \"never\"",
+            "idle-suspend (policy)\"never\"",
+            "idle-suspend \"always\"",
+            "idle-suspend \"Never\"",
+            "idle-suspend \"never\" \"member\"",
+            "idle-suspend \"never\" mode=\"member\"",
+            "idle-suspend \"never\" {}",
+            "idle-suspend \"never\"; idle-suspend \"member\"",
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; {policy}; }}"
+            );
+            assert!(parse_intent(&source, "node").is_err(), "{policy}");
+        }
     }
 }

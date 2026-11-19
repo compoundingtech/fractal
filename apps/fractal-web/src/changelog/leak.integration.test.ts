@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -45,12 +45,14 @@ const buildPublic = async (main: string, registries: { readonly public: string; 
     `globalThis.changelog = { changelogManifest: getChangelogManifest(${JSON.stringify(machineVersion)}), changelogEntryIds }`,
     main,
   ].join('\n'))
+  const html = join(root, 'index.html')
+  writeFileSync(html, '<script>globalThis.earlyClient = "__FRACTAL_WEB_CLIENT__"</script><script type="module" src="/main.js"></script>')
   const output = await build({
     configFile: false,
     root,
     logLevel: 'silent',
     plugins: [identity, extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false, changelogRegistries: registries })],
-    build: { write: false, minify: false, rolldownOptions: { input: entry } },
+    build: { write: false, minify: false, rolldownOptions: { input: html } },
   })
   const outputs = Array.isArray(output) ? output : [output]
   return outputs.flatMap((result) => 'output' in result ? result.output : []).map((item) => item.type === 'chunk' ? item.code : String(item.source)).join('\n')
@@ -60,6 +62,8 @@ describe('public changelog build gate', () => {
   it('replaces the changelog modules with the compiled public manifest for the exact build identity', async () => {
     const text = await buildPublic('', { public: publicRegistry, private: privateRegistry() })
     expect(text).toContain(machineVersion)
+    expect(text).toContain(`fractal-web ${machineVersion}`)
+    expect(text).not.toContain('__FRACTAL_WEB_CLIENT__')
     for (const { file } of changelogSources) {
       expect(text).toContain(file.replace(/\.ts$/, ''))
     }
@@ -75,6 +79,14 @@ describe('public changelog build gate', () => {
   it('fails when a private changelog module enters the public graph', async () => {
     const registry = privateRegistry()
     await expect(buildPublic(`import leaked from ${JSON.stringify(join(root, 'private/.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects a private module when the configured registry uses a symlink spelling', async () => {
+    privateRegistry()
+    const alias = join(root, 'private-alias')
+    symlinkSync(join(root, 'private'), alias, 'dir')
+    await expect(buildPublic(`import leaked from ${JSON.stringify(join(alias, '.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: join(alias, '.changelog/mod.ts') }))
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 

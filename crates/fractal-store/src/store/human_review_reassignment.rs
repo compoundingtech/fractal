@@ -41,6 +41,7 @@ pub(crate) fn assignment_sql(request: &str, moment: AssignmentMoment<'_>) -> Str
              FROM claims reassignment INDEXED BY claims_human_gate_reassignment_request_index
              WHERE reassignment.subject={request}.subject
                AND reassignment.kind='gate.reviewer-reassigned'
+               AND json_extract({request}.body, '$.fields.gate_kind') IS NOT 'agent-review'
                AND json_extract(reassignment.body, '$.fields.request')=+{request}.id
                AND json_extract(reassignment.body, '$.fields.owner')=json_extract({request}.body, '$.fields.owner')
                AND {accepted}
@@ -73,6 +74,28 @@ pub(super) fn reviewer_tx(connection: &Connection, request: &ClaimRecord) -> Res
             |row| row.get(0),
         )
         .context("the human review request does not name a reviewer")
+}
+
+pub(super) fn admit_reassignment(
+    connection: &Connection,
+    kind: &str,
+    fields: &BTreeMap<String, Value>,
+) -> std::result::Result<(), FractalError> {
+    if kind == "gate.reviewer-reassigned"
+        && let Some(request) = fields.get("request").and_then(Value::as_str)
+        && let Some(request) = claim_by_id_tx(connection, request).map_err(internal)?
+        && request
+            .body
+            .pointer("/fields/gate_kind")
+            .and_then(Value::as_str)
+            == Some("agent-review")
+    {
+        return Err(FractalError::new(
+            "agent-review-reassignment-forbidden",
+            "agent reviewers require a new revision and request, never an in-place repair",
+        ));
+    }
+    Ok(())
 }
 
 /// Restrict inbox hydration to the requested effective reviewer and unresolved, newest

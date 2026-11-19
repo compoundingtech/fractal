@@ -306,6 +306,18 @@ impl<'de> Deserialize<'de> for DeclaredLane {
     }
 }
 
+/// The concrete person identity shape used by native person asks.
+pub fn person_subject(value: &str) -> bool {
+    value.starts_with("person/") && value.matches('/').count() == 1 && value != "person/"
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredAttentionBudget {
+    pub person: String,
+    pub asks: u64,
+}
+
 /// Declared, not enforced; absence does not mean zero or unlimited.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -318,6 +330,8 @@ pub struct DeclaredBudgets {
     pub disk_max: Option<String>,
     #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<DeclaredAttentionBudget>,
 }
 
 impl DeclaredBudgets {
@@ -326,6 +340,7 @@ impl DeclaredBudgets {
             && self.memory_max.is_none()
             && self.disk_max.is_none()
             && self.token_budget.is_none()
+            && self.attention.is_empty()
     }
 }
 
@@ -369,6 +384,9 @@ where
 {
     T::deserialize(deserializer).map(Some)
 }
+
+/// Native finite-execution context carried with the effective member launch.
+pub const RESOURCE_LANE_REQUEST_TAG: &str = "st3.resource-lane";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
@@ -433,6 +451,9 @@ impl MemberSpec {
         if authored_launch(&self.launch) != authored_launch(&launched.launch) {
             changes.push("launch");
         }
+        if self.tags.get(RESOURCE_LANE_REQUEST_TAG) != launched.tags.get(RESOURCE_LANE_REQUEST_TAG) {
+            changes.push("resource-lane");
+        }
         changes
     }
 }
@@ -490,6 +511,31 @@ pub fn declared_agent_lifecycle(desired: Option<&Value>) -> Option<AgentLifecycl
     let child = desired?.get("children")?.as_array()?.iter()
         .find(|child| child.get("name").and_then(Value::as_str) == Some("lifecycle"))?;
     AgentLifecycle::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
+}
+
+/// Authored idle-suspend participation, independent of the seat's launch contract.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentIdleSuspend {
+    Never,
+    Member,
+}
+
+impl AgentIdleSuspend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "never" => Some(Self::Never),
+            "member" => Some(Self::Member),
+            _ => None,
+        }
+    }
+}
+
+/// Absence and `member` inherit the current host policy; `never` opts this seat out.
+pub fn declared_idle_suspend(desired: Option<&Value>) -> Option<AgentIdleSuspend> {
+    let child = desired?.get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("idle-suspend"))?;
+    AgentIdleSuspend::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
 }
 
 /// Presentation is independent of the durable seat identity.
@@ -663,6 +709,23 @@ pub enum UsedMissionSpec {
 pub struct RetrySpec {
     pub attempts: u32,
     pub backoff_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule_ms: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error_tags: Vec<String>,
+}
+
+impl RetrySpec {
+    /// Delay after the given one-based failed attempt; the final scheduled delay repeats.
+    pub fn delay_ms(&self, attempt: u32) -> u64 {
+        self.schedule_ms
+            .get(attempt.saturating_sub(1) as usize)
+            .or_else(|| self.schedule_ms.last())
+            .copied()
+            .unwrap_or(self.backoff_ms)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -800,6 +863,9 @@ impl Default for RetrySpec {
         Self {
             attempts: 1,
             backoff_ms: 0,
+            schedule_ms: Vec::new(),
+            window_ms: None,
+            on_error_tags: Vec::new(),
         }
     }
 }
@@ -832,6 +898,9 @@ pub struct StepSpec {
     /// did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Raise>,
+    /// Finite exec admission policy; independent of an assigned seat's scoped capacity raise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_lane: Option<ResourceLaneSpec>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -857,11 +926,75 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// The declarative counterpart of `resources.lane`: one host-local admission policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLaneSpec {
+    pub name: String,
+    pub host: String,
+    pub max_members: u32,
+    pub capacity: Option<fractal_runtime::Capacity>,
+    pub coverage: ResourceLaneCoverage,
+    pub admission_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "fractal_runtime::RequestClass::is_agent")]
+    pub class: fractal_runtime::RequestClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<fractal_runtime::DiskRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io: Option<fractal_runtime::IoClass>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLaneCoverage {
+    Logical,
+    Enforced,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
+/// hash is part of the step's definition, so a mission revision binds exactly one program. The
+/// field is named `bundle_hash` so publishing the declaration promotes the stored blob and every
+/// replica receives it with the declaration; `bundle` is the author's path, kept as provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub bundle_hash: String,
+    /// How long the program may go without a new journal entry before its run reports it stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+}
+
+impl MissionSpec {
+    /// Every program this mission declares, with its step's path, including nested missions and
+    /// loop rounds.
+    pub fn programs(&self) -> Vec<(&str, &ProgramSpec)> {
+        let mut programs = Vec::new();
+        for step in self.steps.values() {
+            if let Some(program) = &step.program {
+                programs.push((step.path.as_str(), program));
+            }
+            if let Some(nested) = &step.nested_mission {
+                programs.extend(nested.programs());
+            }
+            if let Some(loop_spec) = &step.loop_spec {
+                for mission in [Some(&loop_spec.round), loop_spec.on_keep.as_ref(), loop_spec.on_discard.as_ref()].into_iter().flatten() {
+                    programs.extend(mission.programs());
+                }
+            }
+        }
+        programs
+    }
 }
 
 /// How the resource edge was authored. Older stored URI edges predate this discriminator.
@@ -884,6 +1017,39 @@ pub struct DeclaredResourceReference {
     pub reason: Option<String>,
 }
 
+/// One rule of a mission's `authority` block: what its runs may do as `mission-run/RUN`
+/// (docs/st3/program-engine.md §3). Mission verbs take a mission ID pattern, `write` a subject
+/// pattern; either is exact or a terminal `/*` namespace.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct AuthorityGrant {
+    pub verb: AuthorityVerb,
+    pub pattern: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorityVerb {
+    Publish,
+    Start,
+    Revise,
+    Cancel,
+    Write,
+}
+
+impl AuthorityVerb {
+    pub const ALL: [Self; 5] = [Self::Publish, Self::Start, Self::Revise, Self::Cancel, Self::Write];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Start => "start",
+            Self::Revise => "revise",
+            Self::Cancel => "cancel",
+            Self::Write => "write",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
@@ -896,6 +1062,10 @@ pub struct MissionSpec {
     pub system: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<DeclaredResourceReference>,
+    /// What runs of this mission may do as `mission-run/RUN`, in canonical order; empty grants
+    /// nothing. Omitted when empty, so an undeclared mission hashes as it did before the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority: Vec<AuthorityGrant>,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
@@ -1199,6 +1369,9 @@ pub struct NamedCancellation {
 pub struct MissionRunCreation {
     pub mission: String,
     pub revision: String,
+    /// The exact revision was resolved for admission, not explicitly pinned by the caller.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow_head: bool,
     pub workspace: String,
     pub requester: String,
     #[serde(default)]
@@ -1455,6 +1628,11 @@ pub struct GateCheckRequest {
     /// Values for the mission's inputs. A gate that reads an input without one is unchecked.
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
+    /// Check only these mission subjects' gates; omitted checks every mission in the intent. An
+    /// owned-set publication names the missions whose declaration differs from the selected
+    /// revision, so an unchanged member's gates do not run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missions: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -1517,6 +1695,41 @@ pub struct DeclarationDiff {
     pub after: Value,
     /// JSON pointers; arrays are compared as a whole, objects by field.
     pub fields: BTreeSet<String>,
+}
+
+/// An ad hoc change to a member of an owned set, accepted only with `--force --reason`
+/// (`store::owned_sets`). It stays open while the set revision it diverged from is selected;
+/// the next publication of that set closes it and reports it here as reverted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceDebt {
+    /// The `source.debt.recorded` claim.
+    pub id: String,
+    pub subject: String,
+    /// `apply` for a forced declaration, otherwise the lifecycle verb (`hold`).
+    pub verb: String,
+    pub set: String,
+    /// `owned-set/NAME@REVISION` the change diverged from.
+    pub set_revision: String,
+    pub repository: String,
+    pub r#ref: String,
+    pub sha: String,
+    /// The forced declaration claim, for `apply`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    pub actor: Option<String>,
+    pub reason: String,
+    /// Changed JSON pointers of the forced declaration against the set's.
+    #[serde(default)]
+    pub fields: BTreeSet<String>,
+    pub recorded_at: String,
+    /// In a publication report: `reverted` when the new source differs from the forced
+    /// declaration, `adopted` when the source now declares it, `closed` for runtime verbs
+    /// (`hold`, `suspend`, `resume`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The `source.debt.closed` claim and the set revision that wrote it, once closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1730,6 +1943,13 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// The bytes of each program bundle the intent declares, base64 by sha256 (the
+    /// `ProgramSpec::bundle_hash`). The daemon verifies and stores them before it publishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1744,6 +1964,15 @@ pub struct ApplyResponse {
     pub resolved_kdl: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<PlannedAction>,
+    /// Source debt this forced publication recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_recorded: Vec<SourceDebt>,
+    /// Open source debt this set publication closed, with each change it reverted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_reverted: Vec<SourceDebt>,
+    /// Set publications with `--source-map`: claims recorded or kept, file texts stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_maps: Option<fractal_schema::source_map::SourceMapCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2248,6 +2477,13 @@ impl AttentionItemView {
         attention_is_alert(&self.kind, self.is_update())
     }
 
+    /// Whether this item is urgent: the one server rule, priority `critical`
+    /// ([`fractal_schema::availability::urgent_priority`]). Interruptions `urgent`, the deadline
+    /// clock's `hold-routine` and spoken delivery read only this.
+    pub fn is_urgent(&self) -> bool {
+        fractal_schema::availability::urgent_priority(Some(&self.priority))
+    }
+
     /// Every agent conversation this item shows in: its own, and for a login, every seat that
     /// shares it, since one sign-in answers them all.
     pub fn conversations(&self) -> Vec<String> {
@@ -2265,10 +2501,10 @@ impl AttentionItemView {
 
 /// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
 /// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
-/// person published that is broken all are. An update asks nothing, and a message stays in its
-/// conversation.
+/// person published that is broken all are. An update asks nothing, a model-drift summary
+/// waits on nothing (its seats keep working), and a message stays in its conversation.
 pub fn attention_is_alert(kind: &str, update: bool) -> bool {
-    !update && kind != "unread-message"
+    !update && kind != "unread-message" && kind != "model-drift"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2419,6 +2655,16 @@ pub struct AttachmentInput {
     pub name: Option<String>,
 }
 
+/// The mission step attempt and runtime incarnation that own a native effect.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EffectOwner {
+    pub mission: String,
+    pub key: String,
+    pub step: String,
+    pub attempt: u32,
+    pub incarnation: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MessageSendRequest {
     pub idempotency_key: String,
@@ -2433,6 +2679,68 @@ pub struct MessageSendRequest {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInput>,
+    /// Absent for ordinary messages; binds a native effect to its mission owner when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<EffectOwner>,
+}
+
+#[cfg(test)]
+mod message_send_request_tests {
+    use super::{EffectOwner, MessageSendRequest};
+    use serde_json::json;
+
+    #[test]
+    fn unbound_owner_is_omitted_and_preserves_the_original_wire_shape() {
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": []
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert!(request.owner.is_none());
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn populated_owner_roundtrips_with_all_fields_required() {
+        let owner = EffectOwner {
+            mission: "mission/example".into(),
+            key: "notify-reviewer".into(),
+            step: "notify".into(),
+            attempt: 2,
+            incarnation: "incarnation/example".into(),
+        };
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": [],
+            "owner": {
+                "mission": "mission/example",
+                "key": "notify-reviewer",
+                "step": "notify",
+                "attempt": 2,
+                "incarnation": "incarnation/example"
+            }
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert_eq!(request.owner.as_ref(), Some(&owner));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        for field in ["mission", "key", "step", "attempt", "incarnation"] {
+            let mut incomplete = wire.clone();
+            incomplete["owner"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<MessageSendRequest>(incomplete).is_err());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2842,6 +3150,17 @@ pub struct MissionRunRequest {
     pub idempotency_key: String,
 }
 
+/// Start an independent run from a failed run without changing the failed run's history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunRetryRequest {
+    pub actor: String,
+    #[serde(default)]
+    pub same_revision: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
     #[serde(
@@ -2929,12 +3248,30 @@ pub struct MissionRunView {
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<MissionRunOutcomeView>,
+    /// The failed run this fresh run retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Independent retry runs linked to this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// The cancelled predecessor whose cleanup this replacement must await.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// The fresh replacement selected by a later mission publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Why a publication could not safely replace this still-active run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     #[serde(default)]
     pub steps: Vec<StepRunView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loops: Vec<LoopRunView>,
+    /// Each program step's current journal, computed for presentation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<crate::program_journal::ProgramRunView>,
     /// Unresolved exit-code field gates on terminal execs, computed for mission details.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stuck_gates: Vec<String>,
@@ -3030,12 +3367,26 @@ pub struct LoopRoundView {
     pub recorded_at_unix_ms: u128,
 }
 
+/// Durable native effect evidence attached to a step, including explicit abandonment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EffectRunView {
+    pub effect_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StepRunView {
     pub subject: String,
     pub run: String,
     pub generation: String,
     pub step: String,
+    /// Detail-read execution evidence; absent on lean work reads and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<crate::step_execution::StepExecution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectRunView>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3045,6 +3396,9 @@ pub struct StepRunView {
     pub definition_hash: String,
     pub status: String,
     pub attempt: u32,
+    /// The pinned step's native retry policy; omitted when no retries are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
     pub assigned_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_to: Vec<String>,
@@ -3397,6 +3751,10 @@ pub struct PersonRenameReport {
     pub namespace_notice: String,
 }
 
+/// The requester of a program step's person asks (docs/st3/program-engine.md §6). The daemon asks
+/// on the program's behalf: a program step has no claimant, so its attempt fences the ask instead.
+pub const PROGRAM_ASKER: &str = "daemon/program";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersonAskRequest {
     #[serde(skip)]
@@ -3424,6 +3782,11 @@ pub struct PersonAskRequest {
     /// the ask resolves as timed out with no answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_answer: Option<String>,
+    /// `critical`, `high`, `normal` or `low` ([`fractal_schema::availability::PRIORITIES`]);
+    /// absent is `normal`. Only `critical` is urgent: it keeps running under `hold-routine` and
+    /// may interrupt a person whose interruptions are `urgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -3444,6 +3807,14 @@ pub struct PersonStepResponse {
     pub idempotency_key: String,
 }
 
+/// A person's note about a named option other than their chosen answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OptionNote {
+    pub id: String,
+    pub text: String,
+}
+
 /// A person's answer as submitted: a named answer `id`, text, or both (`person_request`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3452,6 +3823,9 @@ pub struct AnswerInput {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Notes on other named options; the chosen answer's note remains `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<OptionNote>,
 }
 
 /// A response to a person ask, including answers submitted by an authorized assistant.
@@ -3565,6 +3939,9 @@ pub struct MissionRunReportView {
 pub struct MissionRetireRequest {
     pub actor: String,
     pub idempotency_key: String,
+    /// Retire a member of an `enforce` owned set ad hoc, recording source debt with this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

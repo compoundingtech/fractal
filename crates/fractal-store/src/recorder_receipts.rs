@@ -505,7 +505,8 @@ mod tests {
         assert_eq!(actual["kind"], "vcs.issue");
         assert_eq!(actual["facts"], json!({
             "repository": "resource/github/acme/demo", "number": 8,
-            "url": value.url, "opened_by": "agent/builder", "opened_by_run": "mission-run/raw/run"
+            "url": value.url, "opened_by": "agent/builder", "opened_by_run": "mission-run/raw/run",
+            "receipt_only": true
         }));
         let claims = store.claims_page(Some(subject), None, 0, None, false, 100).unwrap().claims;
         assert_eq!(claims.len(), 1);

@@ -431,12 +431,14 @@ impl Node {
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
             node: name.into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),
@@ -725,7 +727,11 @@ async fn move_running_seat(terminal: bool) {
         "waiting-for-destination"
     );
     cobalt.pass();
-    assert_eq!(cobalt.show().await["handoff"]["phase"], "starting");
+    assert_eq!(cobalt.show().await["handoff"]["phase"], "running");
+    assert_eq!(
+        cobalt.store.latest_observation(SEAT, "runtime.observed").unwrap().unwrap().body["fields"]["adopted"],
+        true
+    );
     cobalt.pass();
     assert_eq!(cobalt.running(), 1);
     assert_eq!(cobalt.show().await["handoff"]["phase"], "running");

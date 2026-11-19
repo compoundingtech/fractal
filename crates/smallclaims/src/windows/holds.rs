@@ -57,6 +57,7 @@ struct Asked {
     observer: Option<Arc<Observed>>,
     /// The `Stages` scope this thread was in when it asked.
     stages: Option<Arc<Mutex<StageClock>>>,
+    receive: Option<crate::receive_metrics::Context>,
 }
 
 impl Holder {
@@ -83,15 +84,26 @@ impl Holder {
             asked: Instant::now(),
             observer,
             stages,
+            receive: crate::receive_metrics::capture(),
         }))
     }
 
+    pub(crate) fn receive(&self) -> Option<&crate::receive_metrics::Context> {
+        self.0.receive.as_ref()
+    }
+
     fn json(&self) -> Value {
-        json!({
+        let mut row = json!({
             "holder": &*self.0.label,
             "client": self.0.client.as_deref(),
             "at": format!("{}:{}", self.0.at.file(), self.0.at.line()),
-        })
+        });
+        if let Some(clock) = &self.0.stages
+            && let Some((processed, total)) = clock.lock().unwrap_or_else(PoisonError::into_inner).progress {
+            row["processed"] = json!(processed);
+            row["total"] = json!(total);
+        }
+        row
     }
 }
 
@@ -366,6 +378,7 @@ pub struct WriterHold {
     stages: Option<Vec<(&'static str, Duration)>>,
     /// A staged lend's rebuilt aggregates, taken when the hold ends.
     rebuilt: Vec<(&'static str, Rebuilt)>,
+    receive_shared_batch: Option<u64>,
 }
 
 impl WriterHold {
@@ -387,7 +400,12 @@ impl WriterHold {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
+    }
+
+    pub(crate) fn shared_receive_batch(&mut self, batch_id: u64) {
+        self.receive_shared_batch = Some(batch_id);
     }
 
     /// A batched write from `holder` begins in this hold.
@@ -426,6 +444,13 @@ impl WriterHold {
         tracing::warn!(
             holder = &*holder.label,
             client = holder.client.as_deref().unwrap_or("-"),
+            correlation_id = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(crate::receive_metrics::Context::correlation_id)
+            } else { None },
+            receive_phase = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(|context| context.stage().name())
+            } else { None },
+            shared_batch_id = self.receive_shared_batch,
             at = %format_args!("{}:{}", holder.at.file(), holder.at.line()),
             kind = self.kind.name(),
             held_ms = ms(held).round() as u64,
@@ -593,6 +618,7 @@ struct StageClock {
     spent: Vec<(&'static str, Duration)>,
     rebuilt: Vec<(&'static str, Rebuilt)>,
     closed: bool,
+    progress: Option<(u64, u64)>,
 }
 
 impl StageClock {
@@ -739,6 +765,16 @@ pub fn rebuilt(claims: usize) {
     }
 }
 
+/// Publish the current fold's progress on its live and completed writer-hold row.
+pub fn fold_progress(processed: usize, total: usize) {
+    if let Some(clock) = STAGES.with(|stages| stages.borrow().clone()) {
+        let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+        if !clock.closed {
+            clock.progress = Some((processed as u64, total as u64));
+        }
+    }
+}
+
 /// A staged lend's stages and rebuilt aggregates, as the writer closed them.
 #[cfg(any(test, feature = "test-support"))]
 pub type StagedLend = (Vec<(&'static str, Duration)>, Vec<(&'static str, Rebuilt)>);
@@ -848,6 +884,7 @@ mod tests {
             asked: Instant::now(),
             observer: None,
             stages: None,
+            receive: None,
         }))
     }
 
@@ -861,6 +898,7 @@ mod tests {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
     }
 
@@ -1162,6 +1200,7 @@ mod tests {
                     claims: 40,
                 },
             )],
+            receive_shared_batch: None,
         };
         record.held(now, 1_000_000, &mut lend, Duration::from_millis(200), true);
         std::mem::forget(lend);
@@ -1224,5 +1263,15 @@ mod tests {
         // Once the writer has closed the lend, a late rebuild is not counted.
         rebuilt(9);
         assert_eq!(stages.clock.lock().unwrap().rebuilt.len(), 2);
+    }
+
+    #[test]
+    fn fold_progress_is_visible_on_the_writer_hold_row() {
+        let _stages = Stages::begin();
+        let holder = Holder::current();
+        fold_progress(17, 42);
+        let row = holder.json();
+        assert_eq!(row["processed"], 17);
+        assert_eq!(row["total"], 42);
     }
 }

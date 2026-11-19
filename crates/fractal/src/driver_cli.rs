@@ -1,7 +1,143 @@
 use super::*;
 
+/// Capture only a system-bound native work input, after its final envelope is
+/// assembled and before provider delivery. A standing turn must never inherit
+/// FRACTAL_INVOCATION_ID from the process launch.
+async fn publish_native_invocation_input(
+    client: &Client,
+    agent: &str,
+    incarnation: &str,
+    message: &MessageView,
+    text: &str,
+) -> Result<()> {
+    let Some(invocation_id) = message.tags.iter()
+        .find_map(|tag| tag.strip_prefix("fractal-invocation:")) else { return Ok(()); };
+    let result: Result<Value> = client.post("/v1/invocation-input", &json!({
+        "agent":agent, "incarnation":incarnation, "invocation_id":invocation_id,
+        "message_id":message.subject, "text":text,
+    })).await;
+    if let Err(error) = result {
+        // Evidence capture must not prevent delivery. Persist its failure when
+        // the daemon is reachable; an outage still surfaces through channel warnings.
+        let diagnostic: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+            subject: agent.into(), kind: "harness.diagnostic".into(), actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("status".into(), json!("unavailable")),
+                ("code".into(), json!("invocation-input-unavailable")),
+                ("reason".into(), json!(format!("native input capture failed for {}: {error}", message.subject))),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("invocation_id".into(), json!(invocation_id)),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("invocation-input-unavailable:{invocation_id}:{}", message.subject)),
+        }).await;
+        if let Err(diagnostic_error) = diagnostic {
+            return Err(error.context(format!("also could not publish unavailable evidence: {diagnostic_error}")));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn managed_declaration_result(
+    result: std::result::Result<Value, GeneratedClientError>,
+) -> Result<Value> {
+    match result {
+        Ok(tree) => Ok(tree),
+        Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => Ok(Value::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) async fn prepare_managed_provider(
+    client: &Client,
+    subject: &str,
+    harness: &str,
+    argv: &mut [String],
+) -> Result<()> {
+    let actor = client.person.as_deref().unwrap_or(subject);
+    let declaration = retry_while_daemon_unreachable(subject, || async {
+        let gateway = generated_client(&client.endpoint, Some(actor))?;
+        managed_declaration_result(
+            gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
+        )
+    }).await?;
+    fractal_drivers::managed_launch::resolve(harness, argv, &declaration, subject)
+}
+
+#[cfg(test)]
+mod managed_declaration_tests {
+    use super::*;
+
+    fn api_error(code: ClientErrorCode) -> GeneratedClientError {
+        let envelope = fractal_client::ErrorEnvelope { applied: None,
+            api_version: "st3.client.v0".into(),
+            error_version: "st3.client.error.v0".into(),
+            request_id: "test".into(),
+            code: code.clone(),
+            message: "declaration read failed".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: BTreeMap::new(),
+        };
+        GeneratedClientError::Api(code, envelope.message.clone(), Box::new(envelope))
+    }
+
+    #[test]
+    fn confirmed_not_found_allows_persona_fallback() {
+        assert_eq!(managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap(), Value::Null);
+        let spec = json!({"children": [{"name": "name", "arguments": ["Managed seat"]}]});
+        assert_eq!(managed_declaration_result(Ok(spec.clone())).unwrap(), spec);
+    }
+
+    #[test]
+    fn declaration_failures_do_not_become_missing_specs() {
+        for code in [ClientErrorCode::Forbidden, ClientErrorCode::Internal] {
+            assert!(managed_declaration_result(Err(api_error(code))).is_err());
+        }
+        assert!(managed_declaration_result(Err(GeneratedClientError::Transport("unavailable".into()))).is_err());
+        assert!(managed_declaration_result(Err(GeneratedClientError::Protocol("invalid JSON".into()))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_resume_and_flagless_agent_calls_select_the_managed_wrapper() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("codex");
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let environment = BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string()),
+            ("PATH".into(), "/native/bin".into()),
+        ]);
+        for program in ["codex", "/native/bin/codex"] {
+            // Legacy re-exec preserves these flagless arguments from the previous image.
+            let Command::Driver(mut args) = Cli::try_parse_from([
+                "fractal", "driver", "codex", "--subject", "agent/example", "--", program,
+            ]).unwrap().command else { panic!("driver expected") };
+            let declaration = managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap();
+            fractal_drivers::managed_launch::resolve_with_environment(
+                &args.driver, &mut args.argv, &declaration, &environment, &|_| Ok(()),
+            ).unwrap();
+            assert_eq!(Path::new(&args.argv[0]), wrapper);
+        }
+    }
+}
+
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
+    fractal_client::set_client_name(format!(
+        "fractal-driver-hook {}",
+        fractal_drivers::version::machine_version()
+    ));
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
@@ -146,10 +282,21 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
-        if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
+        let resume = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV);
+        // Fresh drivers keep the existing runtime wait across daemon restarts. Adopting
+        // drivers cannot wait on a new incarnation, but their declaration read retries outages.
+        let incarnation = if resume.is_none() {
+            Some(wait_for_agent_incarnation(client, subject).await?)
+        } else {
+            None
+        };
+        if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
+            prepare_managed_provider(client, subject, &args.driver, &mut argv).await?;
+        }
+        if let Some(state) = resume {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
-        let incarnation = wait_for_agent_incarnation(client, subject).await?;
+        let incarnation = incarnation.context("fresh driver has no runtime incarnation")?;
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = fractal_daemon::native_seed::first_launch(
@@ -675,6 +822,7 @@ async fn drive_st2_native_loop(
     task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
+    paths.delivery_gate.bind_incarnation(&incarnation);
     let NativePaths {
         session_dir,
         agent_dir,
@@ -1483,6 +1631,33 @@ async fn publish_harness_state(
     Ok(())
 }
 
+fn activate_channel_input_acceptance(
+    catalog: &Path, subject: &str, state: &mut PiChannelResume,
+) -> Result<()> {
+    let seat = hex::encode(Sha256::digest(subject.as_bytes()));
+    let incarnation = hex::encode(Sha256::digest(state.incarnation.as_bytes()));
+    let dir = catalog.join(".st3-input-acceptance").join(seat).join(incarnation);
+    fs::create_dir_all(&dir)?;
+    if let Some(previous) = &state.pending.input_source_dir {
+        if previous != &dir {
+            for (message, timestamp) in fractal_drivers::native_channel::input_attempts(previous)? {
+                fractal_drivers::native_channel::record_input_attempt(&dir, &message, timestamp)?;
+            }
+            for (message, timestamp) in fractal_drivers::native_channel::input_acceptances(previous)? {
+                fractal_drivers::native_channel::record_input_acceptance(&dir, &message, timestamp)?;
+            }
+        }
+    } else {
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    state.pending.input_source_dir = Some(dir);
+    Ok(())
+}
+
 fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
@@ -1603,6 +1778,7 @@ async fn run_pi_channel(
     } else {
         None
     };
+    activate_channel_input_acceptance(catalog, subject, &mut state)?;
     let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
@@ -1860,7 +2036,7 @@ async fn run_pi_channel(
                 let mut report: Value = serde_json::from_str(&native_delivery_report(&transport, None))?;
                 report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
                 if !state.first_idle_seen {
-                    report["reason"] = json!("the channel has not received the provider's initial idle proof");
+                    report["reason"] = json!("the channel has not received the provider's handoff readiness proof");
                 } else if !state.failed_handoffs.is_empty() {
                     report["reason"] = json!("the provider rejected a native handoff; the channel keeps retrying");
                 }
@@ -1934,7 +2110,15 @@ async fn run_pi_channel(
                             continue;
                         }
                     };
-                    let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    let frame = pi_family_message_frame(&message, &body, identity, &incarnation, &attachments);
+                    if let Some(text) = frame["content"].as_str()
+                        && let Err(error) = publish_native_invocation_input(
+                            client, subject, &incarnation, &message, text,
+                        ).await
+                    {
+                        warn_pi_channel(subject, &error, &mut last_warning);
+                    }
+                    state.record_input_attempt(&message.subject)?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
@@ -2155,6 +2339,7 @@ fn legacy_delivery_hold(
         reason: "Unexpired delivery hold adopted from the previous native driver".into(),
         idempotency_key: format!("delivery-hold-adoption:{subject}:{until_unix_ms}"),
         legacy_adoption: true,
+        force: false,
     })
 }
 
@@ -2975,6 +3160,41 @@ async fn run_channel_renewals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_family_acceptance_storage_is_independent_of_optional_todo_observation() {
+        for mode in ["pi", "omp-observed", "omp-todo"] {
+            let root = tempfile::tempdir().unwrap();
+            let subject = format!("agent/{mode}");
+            let mut state = PiChannelResume {
+                incarnation: "runtime-a".into(),
+                ..Default::default()
+            };
+            activate_channel_input_acceptance(root.path(), &subject, &mut state).unwrap();
+            let source = state.pending.input_source_dir.clone().unwrap();
+            if mode == "omp-todo" {
+                state.todo_outbox = Some(prepare_channel_todo_outbox(root.path(), &subject, "runtime-a").unwrap());
+            }
+            // Both Pi and observed OMP run without the optional todo observer; stopping it must
+            // also leave the mandatory pre-frame and acceptance ingress paths fully functional.
+            state.todo_outbox = None;
+            state.record_input_attempt("message/first").unwrap();
+            let mut observer = None;
+            accept_managed_channel_frame(&mut state, &mut observer, &json!({
+                "type":"delivered", "meta":{"messageId":"message/first","inputIncarnation":"runtime-a"},
+                "acceptedAtUnixMs":123,
+            }).to_string(), &subject).unwrap();
+            assert_eq!(state.pending.input_acceptances["message/first"], 123, "{mode}");
+            assert_eq!(fractal_drivers::native_channel::input_acceptances(&source).unwrap()["message/first"], 123);
+            prepare_channel_todo_outbox(root.path(), &subject, "runtime-b").unwrap();
+            assert!(source.join("input-attempts.json").is_file(), "todo cleanup removed {mode} acceptance evidence");
+            let mut replacement = PiChannelResume { incarnation:"runtime-b".into(), ..Default::default() };
+            activate_channel_input_acceptance(root.path(), &subject, &mut replacement).unwrap();
+            assert_ne!(replacement.pending.input_source_dir.as_ref(), Some(&source));
+            assert!(source.join("input-acceptances.json").is_file(), "restart removed old source evidence");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn binding_longer_than_a_lease_keeps_renewing() {
         binding_renewal_case(false).await;

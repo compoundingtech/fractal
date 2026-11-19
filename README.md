@@ -42,7 +42,9 @@ setup still need a manual rehearsal; native builds do not establish that evidenc
 server. If no browser opener is available, it prints the URL instead.
 
 The legacy executable names `st` and `st3` emit a deprecation warning on stderr,
-including in JSON mode, and will be removed on 2026-11-16. Use `fractal` instead.
+including in JSON mode. Use `fractal` instead. The names are removed once every host
+has adopted `fractal` and an audit finds no remaining caller of `st` or `st3`; no
+calendar date removes them.
 Scripts that need the old names temporarily can set `FRACTAL_SUPPRESS_DEPRECATION=1`
 to suppress this warning; stdout and exit status are unchanged.
 Shell-completion callbacks stay silent. Managed background services and internal
@@ -67,11 +69,17 @@ when you need them.
 - [Troubleshooting](docs/site/guides/troubleshooting.md): diagnose startup and health problems.
 - [iOS app](docs/site/guides/ios-app.md): build and pair the phone client.
 
-## Pre-signing your checks
+## PR proof and pre-signing
 
-Run the per-PR checks on your own machine and sign them before you push, so CI can skip them and your pull request goes green at
-once. **Pre-signing is not required today:** a push without a signature just runs CI as before. It **will be required** for every
-contributor's pull requests later, so set it up now.
+For this repository, **PR proof is hosted CI at the exact head**. Agents must not run
+`scripts/fractal-test` (or `scripts/st-test`) locally for PR proof. The accepted
+`"pr-proof": "hosted"` policy in `.st/prepush-policy.json` on `main` makes the pre-push hook
+skip all local evidence work, including for agents with listed signers, and record `hosted_proof`.
+It is repository policy, not a per-push `ST_EVIDENCE_LOCAL=off` bypass. The public-content guard still blocks unsafe pushes.
+Policy is read from the base, preferring `.fractal/prepush-policy.json` when present; candidate policy cannot enable it.
+Unreadable, malformed or non-object policy and unknown `pr-proof` values print a diagnostic and retain the default local evidence flow.
+
+The local pre-signing flow below applies only where accepted policy does not select hosted proof:
 
 **You need** a Linux x86_64 machine with Nix. On our machines a run peaks at about 16 cores and 18 GB of RAM. The kept build
 folder takes 60 to 110 GB of disk. A full warm run takes about 12 minutes (our target is 12 minutes or less).

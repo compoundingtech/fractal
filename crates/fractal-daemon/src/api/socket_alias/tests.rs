@@ -26,7 +26,7 @@ async fn primary_and_legacy_clients_reach_the_same_handler() {
         assert_eq!(fs::read_link(&alias).unwrap(), Path::new(primary));
         assert!(tokio::net::UnixStream::connect(&alias).await.is_err());
         let (ready, serving) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(serve_reserved_unix_with_ready(reserved, app, None, || {
+        let server = tokio::spawn(serve_reserved_unix_with_ready(reserved, app, None, None, || {
             let _ = ready.send(());
         }));
         serving.await.unwrap();
@@ -73,7 +73,7 @@ async fn legacy_state_discovery_reaches_a_custom_control_socket() {
     let (ready, serving) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ready(
         reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
-        None, || { let _ = ready.send(()); },
+        None, None, || { let _ = ready.send(()); },
     ));
     serving.await.unwrap();
     let client = crate::client::Client::new(crate::client::Endpoint::Unix(legacy.clone()));
@@ -123,7 +123,7 @@ async fn overlong_primary_names_serve_only_reachable_legacy_paths() {
         let (ready, serving) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve_reserved_unix_with_ready(
             reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
-            None, || { let _ = ready.send(()); },
+            None, None, || { let _ = ready.send(()); },
         ));
         serving.await.unwrap();
         for path in [legacy_socket, legacy_discovery] {
@@ -156,7 +156,7 @@ async fn explicit_legacy_listener_is_not_reserved_as_its_own_discovery_alias() {
         let (ready, serving) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve_reserved_unix_with_ready(
             reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
-            None, || { let _ = ready.send(()); },
+            None, None, || { let _ = ready.send(()); },
         ));
         serving.await.unwrap();
         for path in [socket, discovery] {
@@ -193,7 +193,7 @@ async fn short_parent_symlinks_keep_alias_probes_addressable() {
             let (ready, serving) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(serve_reserved_unix_with_ready(
                 reserved, Router::new().route("/test", axum::routing::get(|| async { response(42) })),
-                None, || { let _ = ready.send(()); },
+                None, None, || { let _ = ready.send(()); },
             ));
             serving.await.unwrap();
             for path in [published, alias.clone()] {

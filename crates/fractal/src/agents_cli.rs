@@ -194,6 +194,7 @@ pub(super) async fn run_agents(
                                 .context("setting or releasing a hold needs --reason")?,
                             idempotency_key: format!("delivery-hold:{}", uuid::Uuid::now_v7()),
                             legacy_adoption: false,
+                            force: args.force,
                         },
                     )
                     .await?;
@@ -257,6 +258,9 @@ pub(super) async fn run_agents(
         }
         AgentsCommand::RenameId(args) => {
             run_identity_rename(endpoint, args, true, json_output).await
+        }
+        AgentsCommand::RenameProof(args) => {
+            run_identity_rename_proof(endpoint, args, true, json_output).await
         }
         AgentsCommand::Queue(args) => {
             run_agent_queue(endpoint, configured_person, args, json_output).await
@@ -331,6 +335,7 @@ pub(super) async fn run_agents(
                     no_gate_check: true,
                     check: false,
                     inputs: vec![],
+                    force_reason: None,
                 },
                 json_output,
             )
@@ -380,6 +385,15 @@ pub(super) async fn run_agents(
                     )
                     .await?
             } else {
+                let workspace = resolve_start_workspace(
+                    &client,
+                    endpoint,
+                    &args,
+                    existing.as_ref(),
+                    configured_person,
+                    &subject,
+                )
+                .await?;
                 let mut uris = BTreeMap::new();
                 if let Some(existing) = &existing {
                     for reference in fractal_daemon::graph::declared_resources(&existing.desired) {
@@ -395,7 +409,7 @@ pub(super) async fn run_agents(
                         }
                     }
                 }
-                let kdl = agent_start_document(&args, existing.as_ref(), &uris)?;
+                let kdl = agent_start_document(&args, existing.as_ref(), &uris, &workspace)?;
                 if args.print_kdl {
                     print!("{kdl}");
                     return Ok(());
@@ -406,6 +420,7 @@ pub(super) async fn run_agents(
                     format!("st agents start {}", args.identity),
                     args.actor.clone(),
                     Some((&subject, &tokens)),
+                    args.force.then(|| args.reason.clone()).flatten(),
                 )
                 .await?
             };
@@ -495,9 +510,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/suspend",
                 &subject,
-                &args.actor,
-                args.reason.as_deref(),
-                None,
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: None,
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -523,9 +541,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/resume",
                 &subject,
-                &args.actor,
-                None,
-                args.host.as_deref(),
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: args.host.as_deref(),
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -579,11 +600,22 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "from_stale_handoff": args.from_stale_handoff,
                         "ignore_fit": args.ignore_fit,
                         "reason": args.reason,
                     }),
                 )
                 .await?;
+            if request.body["fields"]["fresh_session"] == true
+                && request.body["fields"]["operation"] != fractal_daemon::handoff::RESTART_NOW_OPERATION
+            {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Fresh-session restart pending for {subject}: waiting for the agent to write or mark its handoff ready; no deadline forces the restart");
+                    Ok(())
+                };
+            }
             if request.body["fields"]["action"] == "restart-when-idle" {
                 return if json_output {
                     print_value(&request, true)
@@ -720,11 +752,13 @@ pub(super) async fn run_agents(
                 print!("{kdl}");
                 return Ok(());
             }
-            let response = publish_text(
+            let response = publish_text_with_expected(
                 &cli_client(endpoint),
                 kdl,
                 format!("st agents stop {subject}"),
                 args.actor,
+                None,
+                args.force.then(|| args.reason.clone()).flatten(),
             )
             .await?;
             print_value(&response, json_output)?;
@@ -970,6 +1004,86 @@ async fn agent_start_declaration(
             .get(&format!("/v1/claims/by-id/{}", claim.predecessors[0]))
             .await?;
     }
+}
+
+/// The workspace `agents start` publishes: the declaration's own when a declared agent starts
+/// without `--workspace`, otherwise a path resolved for the placement host. The caller only
+/// canonicalizes paths on its own host; a path for another member is taken as written, and a
+/// new agent on another member without `--workspace` gets the directory that host names.
+async fn resolve_start_workspace(
+    client: &Client,
+    endpoint: &Endpoint,
+    args: &AgentStartArgs,
+    existing: Option<&fractal_daemon::model::DesiredSubject>,
+    configured_person: Option<&str>,
+    subject: &str,
+) -> Result<StartWorkspace> {
+    if existing.is_some() && args.workspace.is_none() {
+        return Ok(StartWorkspace::Keep);
+    }
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let placement = args
+        .host
+        .as_deref()
+        .or_else(|| {
+            existing.and_then(|seat| seat.member.as_ref().map(|member| member.host.as_str()))
+        })
+        .unwrap_or(local);
+    let placement = placement.strip_prefix("host/").unwrap_or(placement);
+    let placement = if placement == "local" { local } else { placement };
+    if let Some(workspace) = &args.workspace {
+        if placement == local {
+            let workspace = fs::canonicalize(workspace)
+                .with_context(|| format!("resolve workspace {}", workspace.display()))?;
+            return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+        }
+        anyhow::ensure!(
+            workspace.is_absolute(),
+            "a workspace on {placement} must be an absolute path on that host"
+        );
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    if placement == local {
+        let workspace = fs::canonicalize(Path::new(".")).context("resolve workspace .")?;
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    // Another host's home is only known there, so it names the new agent's directory itself,
+    // like `agents new`: the placement host creates it when the agent starts. A placement no
+    // member can reach names nothing, and the caller's own default is no path on that host.
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!(
+            "asking {placement} for a workspace needs the local Unix endpoint; pass --workspace"
+        );
+    };
+    let person = Some(args.actor.as_str())
+        .filter(|actor| actor.starts_with("person/"))
+        .or(configured_person)
+        .with_context(|| {
+            format!(
+                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+            )
+        })?;
+    let path = format!(
+        "/v1/hosts/{}/agent-workspace?identity={}",
+        urlencoding::encode(placement),
+        urlencoding::encode(subject)
+    );
+    let answer: Value = Client::unix_as(socket.as_ref(), person)?
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+        .get(&path)
+        .await
+        .with_context(|| {
+            format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
+        })?;
+    let workspace = answer
+        .get("workspace")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{placement} returned no workspace"))?;
+    Ok(StartWorkspace::Set(workspace.to_owned(), true))
 }
 
 async fn run_agent_new(
@@ -1388,10 +1502,25 @@ async fn run_agent_inspection(
                     current.push(step);
                 }
             }
+            // The charter is the description of the declaration the seat runs now; a stopped or
+            // retired seat's current declaration is not an agent and has none.
+            let charter = status_for(&client, &agent.header.id)
+                .await?
+                .subjects
+                .into_iter()
+                .find(|status| status.subject == agent.header.id)
+                .and_then(|status| status.desired)
+                .filter(|desired| desired.get("name").and_then(Value::as_str) == Some("agent"))
+                .and_then(|desired| {
+                    fractal_daemon::model::canonical_child_string(&desired, "description")
+                });
             print!(
                 "{}",
                 render_client_agent(&agent, &current, current_unix_ms()?)
             );
+            if let Some(charter) = charter {
+                print!("{}", render_agent_charter(&charter));
+            }
             return Ok(());
         }
         AgentsCommand::New(_)
@@ -1413,6 +1542,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Resume(_)
         | AgentsCommand::Rename(_)
         | AgentsCommand::RenameId(_)
+        | AgentsCommand::RenameProof(_)
         | AgentsCommand::Queue(_)
         | AgentsCommand::Hold(_) => {
             unreachable!("agent mutation and queue commands return before inspection")
@@ -1573,38 +1703,48 @@ async fn run_agent_queue(
     Ok(())
 }
 
+/// What a suspend or resume request asks for, apart from its subject.
+struct SuspensionRequest<'a> {
+    actor: &'a str,
+    reason: Option<&'a str>,
+    host: Option<&'a str>,
+    force: bool,
+}
+
 /// Ask the daemon to suspend or resume `subject`, then wait for the request to finish: the seat
 /// suspended, or resumed with its harness bound to the suspended native session.
 async fn request_suspension(
     endpoint: &Endpoint,
     route: &str,
     subject: &str,
-    actor: &str,
-    reason: Option<&str>,
-    host: Option<&str>,
+    request: SuspensionRequest<'_>,
     timeout_text: &str,
 ) -> Result<fractal_client::Agent> {
     let timeout = fractal_daemon::graph::parse_duration(timeout_text, false)?;
     let client = cli_client(endpoint);
-    let request: ClaimRecord = client
+    let claim: ClaimRecord = client
         .post(
             route,
             &json!({
                 "subject": subject,
-                "actor": actor,
-                "reason": reason,
-                "host": host,
+                "actor": request.actor,
+                "reason": request.reason,
+                "host": request.host,
+                "force": request.force,
                 "idempotency_key": uuid::Uuid::now_v7().to_string(),
             }),
         )
         .await?;
     let resume = route.ends_with("/resume");
+    // A manual conversion completes in place; follow the operation whose hold it preserves.
+    let operation = claim.body.pointer("/fields/operation_id")
+        .and_then(Value::as_str).unwrap_or(&claim.id);
     let gateway = generated_client(endpoint, None)?;
     let wait = async {
         loop {
             if let ClientResource::Agent(agent) = gateway.agents_get(subject).await?.value
                 && let Some(suspension) = agent.suspension.clone()
-                && suspension.operation_id == request.id
+                && suspension.operation_id == operation
             {
                 let failure = || {
                     let blocking = if suspension.blocking.is_empty() {

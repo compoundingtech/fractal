@@ -1,5 +1,398 @@
 use super::*;
 use super::identities;
+use crate::model::MissionRunRetryRequest;
+
+/// Run scratch must not become untracked content in somebody else's checkout.
+/// Resolve existing ancestors first so missing run directories and symlinked roots
+/// receive the same admission check, without creating anything on disk.
+fn validate_run_workspace(workspace: &std::path::Path) -> Result<(), FractalError> {
+    use std::path::Component;
+
+    let unavailable = |error: std::io::Error| FractalError::new(
+        "mission-workspace-unavailable",
+        format!("cannot inspect mission workspace {}: {error}", workspace.display()),
+    );
+    let absolute = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(&unavailable)?.join(workspace)
+    };
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => { resolved.pop(); }
+            _ => {
+                resolved.push(component);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // Missing descendants are safe to inspect without creating them,
+                        // but a dangling symlink must not hide its unresolved target.
+                        if std::fs::symlink_metadata(&resolved).is_ok() {
+                            return Err(unavailable(error));
+                        }
+                    }
+                    Err(error) => return Err(unavailable(error)),
+                }
+            }
+        }
+    }
+    for directory in resolved.ancestors() {
+        match std::fs::symlink_metadata(directory.join(".git")) {
+            Ok(_) => return Err(FractalError::new(
+                "mission-workspace-in-worktree",
+                format!(
+                    "mission workspace {} is inside Git worktree {}; use a per-seat state directory for run scratch and declare repository checkouts separately",
+                    workspace.display(), directory.display(),
+                ),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unavailable(error)),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::validate_run_workspace;
+
+    #[test]
+    fn run_scratch_outside_checkout_can_be_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("seat/runs/new");
+        validate_run_workspace(&workspace).unwrap();
+        assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn run_scratch_rejects_normal_and_linked_checkout_markers() {
+        let root = tempfile::tempdir().unwrap();
+        for linked in [false, true] {
+            let checkout = root.path().join(if linked { "linked" } else { "checkout" });
+            std::fs::create_dir(&checkout).unwrap();
+            if linked {
+                std::fs::write(checkout.join(".git"), "gitdir: /unused/worktrees/linked\n").unwrap();
+            } else {
+                std::fs::create_dir(checkout.join(".git")).unwrap();
+            }
+            for workspace in [&checkout, &checkout.join("missing/run")] {
+                let error = validate_run_workspace(workspace).unwrap_err();
+                assert_eq!(error.code, "mission-workspace-in-worktree");
+            }
+            assert!(!checkout.join("missing").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_scratch_resolves_symlinked_checkout_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let alias = root.path().join("seat");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        let error = validate_run_workspace(&alias.join("missing/run")).unwrap_err();
+        assert_eq!(error.code, "mission-workspace-in-worktree");
+        assert!(!checkout.join("missing").exists());
+    }
+
+    #[test]
+    fn run_scratch_resolves_parent_components_without_creating_missing_directories() {
+        let root = tempfile::tempdir().unwrap();
+        validate_run_workspace(&root.path().join("missing/../run")).unwrap();
+        assert!(!root.path().join("missing").exists());
+        assert!(!root.path().join("run").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_scratch_cannot_hide_a_checkout_behind_missing_and_parent_components() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let alias = root.path().join("seat");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        let error = validate_run_workspace(&root.path().join("missing/../seat/run")).unwrap_err();
+        assert_eq!(error.code, "mission-workspace-in-worktree");
+        assert!(!root.path().join("missing").exists());
+        assert!(!checkout.join("run").exists());
+    }
+}
+
+/// Read pin intent from immutable creation evidence, not the currently published head.
+pub(super) fn mission_run_revision_pinned(
+    connection: &Connection,
+    source: &MissionRunView,
+) -> Result<bool, FractalError> {
+    if let Some(pinned) = mission_run_recorded_revision_pin(connection, &source.subject)? {
+        return Ok(pinned);
+    }
+    // Older creation receipts did not retain standalone request pin intent.
+    // A uses-mission child still has its exact contract in its parent's original
+    // generation, even after that parent has adopted another revision.
+    let Some(parent_step) = source.parent_step_run.as_deref() else {
+        return Ok(false);
+    };
+    let parent: Option<(String, String)> = connection.query_row(
+        "SELECT revision.body, step.step_path FROM step_runs step
+         JOIN run_generations generation ON generation.id=step.generation_id
+         JOIN mission_runs run ON run.id=step.run_id
+         JOIN mission_revisions revision ON revision.mission_id=run.mission_id
+           AND revision.revision=generation.revision
+         WHERE step.subject=?1",
+        [parent_step], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(internal)?;
+    let Some((body, path)) = parent else { return Ok(false) };
+    let mission: MissionSpec = serde_json::from_str(&body).map_err(internal)?;
+    Ok(flatten_mission_step_specs(&mission).iter()
+        .any(|step| step.path == path && step.uses_mission.is_some()))
+}
+
+fn mission_run_recorded_revision_pin(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<bool>, FractalError> {
+    connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h9a87c0860583 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */
+        &canonical_sql(
+            "SELECT json_extract(body,'$.revision_pinned') FROM claims
+             WHERE subject=?1 AND kind='mission-run.created'
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        ),
+        [subject], |row| row.get(0),
+    ).optional().map_err(internal).map(Option::flatten)
+}
+
+enum RunCreationSource<'a> {
+    Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
+    Supersession(&'a MissionRunView, &'a str),
+    Declaration(MissionWorkspaceDeclaration),
+}
+pub(super) fn continuity_step_paths_tx(
+    connection: &Connection,
+    source: &MissionRunView,
+    target: &MissionRunView,
+) -> Result<BTreeSet<String>, FractalError> {
+    if source.mission != target.mission
+        || source.workspace != target.workspace
+        || source.requester != target.requester
+        || source.inputs.len() != target.inputs.len()
+        || source.inputs.iter().any(|(name, previous)| {
+            target.inputs.get(name).is_none_or(|next| {
+                previous.kind != next.kind || previous.value != next.value
+                    || previous.subject != next.subject || previous.claim_id != next.claim_id
+            })
+        })
+    {
+        return Ok(BTreeSet::new());
+    }
+    let previous = mission_spec_at(connection, &source.mission, Some(&source.revision))
+        .map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-mission-revision", "the evidence revision is unavailable"))?;
+    let next = mission_spec_at(connection, &target.mission, Some(&target.revision))
+        .map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-mission-revision", "the successor revision is unavailable"))?;
+    if previous.authority != next.authority
+        || previous.revision_owners != next.revision_owners
+        || previous.revisions_human_only != next.revisions_human_only
+        || previous.revision_reviewer != next.revision_reviewer
+    {
+        return Ok(BTreeSet::new());
+    }
+    Ok(compatible_step_paths(&previous, &next))
+}
+
+pub(super) fn continuity_carryable_steps_tx(
+    connection: &Connection,
+    source: &MissionRunView,
+    target: &MissionRunView,
+    confirmed_legacy: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, FractalError> {
+    let mut compatible = continuity_step_paths_tx(connection, source, target)?;
+    let next = mission_spec_at(connection, &target.mission, Some(&target.revision))
+        .map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-mission-revision", "the successor revision is unavailable"))?;
+    for previous in &source.steps {
+        let Some(successor) = target.steps.iter().find(|step| step.step == previous.step) else {
+            compatible.remove(&previous.step);
+            continue;
+        };
+        if previous.status != "completed"
+            || successor.status != "pending"
+            || effects::step_has_unresolved_effect_tx(connection, &previous.subject).map_err(internal)?
+            || !person_work::step_answers_eligible_tx(
+                connection, previous, successor, confirmed_legacy.contains(&previous.subject),
+            ).map_err(internal)?
+        {
+            compatible.remove(&previous.step);
+        }
+    }
+    let dependencies = flattened_dependencies(&next);
+    loop {
+        let invalid = compatible.iter().filter(|path| {
+            dependencies.get(*path).is_some_and(|parents| {
+                parents.iter().any(|parent| !compatible.contains(parent))
+            })
+        }).cloned().collect::<Vec<_>>();
+        if invalid.is_empty() {
+            break;
+        }
+        for path in invalid {
+            compatible.remove(&path);
+        }
+    }
+    Ok(source.steps.iter().filter(|step| compatible.contains(&step.step))
+        .map(|step| step.subject.clone()).collect())
+}
+
+pub(super) fn carry_completed_run_steps_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    actor: &str,
+    source: &MissionRunView,
+    target: &MissionRunView,
+) -> Result<(), FractalError> {
+    carry_completed_run_steps_with_legacy_tx(
+        transaction, origin, actor, source, target, &BTreeSet::new(),
+    )
+}
+
+pub(super) fn plan_continuity_declarations_tx(
+    transaction: &Connection,
+    source: &MissionRunView,
+    target: &MissionRunView,
+    compatible: &BTreeSet<String>,
+) -> Result<Vec<(DesiredSubject, Option<String>)>, FractalError> {
+    let next = mission_spec_at(transaction, &target.mission, Some(&target.revision))
+        .map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-mission-revision", "the successor revision is unavailable"))?;
+    let paths = source.steps.iter().filter(|step| compatible.contains(&step.subject))
+        .map(|step| step.step.clone()).collect();
+    let mut planned = revision_seats::plan_completed_agents_tx(
+        transaction, source, &next, &paths, &target.generation,
+    )?;
+    let specs = flatten_mission_step_specs(&next);
+    let mut declared_subjects = BTreeMap::new();
+    for (desired, previous_step) in &mut planned {
+        let previous = source.steps.iter().find(|step| Some(&step.subject) == previous_step.as_ref())
+            .ok_or_else(|| FractalError::new("unsafe-completed-declaration-carry", "the declaring evidence is unavailable"))?;
+        let successor = target.steps.iter().find(|step| step.step == previous.step)
+            .ok_or_else(|| FractalError::new("unsafe-completed-declaration-carry", "the successor declaring step is unavailable"))?;
+        let spec = specs.iter().find(|step| step.path == previous.step)
+            .ok_or_else(|| FractalError::new("unsafe-completed-declaration-carry", "the declaring contract is unavailable"))?;
+        let variables = |run: &MissionRunView, step: &StepRunView| {
+            let mut variables = mission_run_variables(run, &run.revision);
+            variables.extend(BTreeMap::from([
+                ("ST_STEP".into(), step.step.clone()),
+                ("ST_STEP_RUN".into(), step.subject.clone()),
+                ("ST_ATTEMPT".into(), step.attempt.to_string()),
+                ("ST_ASSIGNEE".into(), step.assigned_to.clone().unwrap_or_default()),
+            ]));
+            variables
+        };
+        let previous_variables = variables(source, previous);
+        let successor_variables = variables(target, successor);
+        if let Some(declarations) = &spec.declarations_kdl
+            && crate::mission::interpolate_kdl(declarations, &previous_variables)?
+                != crate::mission::interpolate_kdl(declarations, &successor_variables)?
+        {
+            return Err(FractalError::new("unsafe-completed-declaration-carry",
+                "the completed declaration changes under the successor run's bindings"));
+        }
+        if !declared_subjects.contains_key(&previous.step) {
+            let declarations = spec.declarations_kdl.as_deref().ok_or_else(|| {
+                FractalError::new("unsafe-completed-declaration-carry", "the declaring contract is unavailable")
+            })?;
+            let declarations = crate::mission::interpolate_kdl(declarations, &successor_variables)?;
+            let host = desired.member.as_ref().map(|member| member.host.as_str()).unwrap_or("local");
+            let intent = crate::graph::parse_execution_intent(&declarations, host, &target.id)?;
+            declared_subjects.insert(previous.step.clone(), intent.subjects.into_keys().collect::<BTreeSet<_>>());
+        }
+        if !declared_subjects[&previous.step].contains(&desired.subject) {
+            return Err(FractalError::new("unsafe-completed-declaration-carry",
+                "the completed declaration has a different resolved identity in the successor run"));
+        }
+        if !mission_supersession::runtime_execution_quiescent(transaction, &desired.subject)? {
+            return Err(FractalError::new("unsafe-completed-declaration-carry",
+                "a completed declaration must have confirmed runtime quiescence before cross-run transfer"));
+        }
+        desired.owner_run = Some(target.subject.clone());
+        if let Some(member) = &mut desired.member {
+            for (name, value) in successor_variables {
+                if member.environment.contains_key(&name) {
+                    member.environment.insert(name, value);
+                }
+            }
+        }
+    }
+    Ok(planned)
+}
+
+pub(super) fn carry_completed_run_steps_with_legacy_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    actor: &str,
+    source: &MissionRunView,
+    target: &MissionRunView,
+    confirmed_legacy: &BTreeSet<String>,
+) -> Result<(), FractalError> {
+    let compatible = continuity_carryable_steps_tx(transaction, source, target, confirmed_legacy)?;
+    for (desired, previous_step) in plan_continuity_declarations_tx(
+        transaction, source, target, &compatible,
+    )? {
+        let predecessors = intent_leaves_tx(transaction, &desired.subject).map_err(internal)?;
+        let mut body = serde_json::to_value(&desired).map_err(internal)?;
+        body["previous_owner_generation"] = json!(source.generation);
+        body["previous_owner_step"] = json!(previous_step);
+        let claim = append_claim_tx(transaction, origin, &desired.subject, "intent.desired",
+            Some("daemon/runtime"), &body, &predecessors, None).map_err(internal)?;
+        select_replicated_desired(transaction, &claim, &desired)?;
+    }
+    for previous in &source.steps {
+        if !compatible.contains(&previous.subject) {
+            continue;
+        }
+        let Some(successor) = target.steps.iter().find(|step| step.step == previous.step) else {
+            continue;
+        };
+        if successor.status != "pending"
+            || effects::step_has_unresolved_effect_tx(transaction, &previous.subject).map_err(internal)?
+        {
+            continue;
+        }
+        let mut fields = json!({
+            "source_step_run": previous.subject,
+            "source_generation": source.generation,
+            "source_attempt": previous.attempt,
+            "status": "completed",
+            "attempt": previous.attempt,
+            "worker_reported": previous.worker_reported,
+        });
+        let mut evidence = Vec::new();
+        if confirmed_legacy.contains(&previous.subject) {
+            if !actor.starts_with("person/") {
+                return Err(FractalError::new("legacy-confirmation-needs-person",
+                    "only a person can confirm unbound historical person evidence"));
+            }
+            if let Some(confirmation) = person_work::continuity::legacy_step_confirmation_tx(
+                transaction, previous, successor,
+            ).map_err(internal)? {
+                evidence = confirmation["evidence"].as_array().into_iter().flatten()
+                    .filter_map(Value::as_str).map(str::to_owned).collect();
+                fields["person_continuity"] = confirmation;
+            }
+        }
+        let claim = append_claim_tx(
+            transaction, origin, &successor.subject, "step-run.carried", Some(actor),
+            &json!({"fields":fields,"evidence":evidence}), &evidence, None,
+        ).map_err(smallclaims::error::typed)?;
+        reconcile_carried_step_tx(transaction, &claim)?;
+    }
+    Ok(())
+}
+
 
 fn agent_metadata_only(previous: &Value, next: &Value) -> bool {
     fn operational_children(desired: &Value) -> impl Iterator<Item = &Value> {
@@ -101,6 +494,97 @@ pub fn normalize_intent_missions(
     Ok(())
 }
 
+/// The launcher declaration, not the requester or a coincidentally matching path, owns this root.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissionWorkspaceDeclaration {
+    pub subject: String,
+    pub suffix: String,
+}
+
+fn mission_workspace_declaration(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<MissionWorkspaceDeclaration>, FractalError> {
+    let body: Option<String> = connection.query_row(
+        "SELECT json_extract(body,'$.fields.workspace_declaration')
+         FROM claims WHERE subject=?1 AND kind='mission-run.created'
+         ORDER BY store_index LIMIT 1",
+        [subject], |row| row.get(0),
+    ).optional().map_err(internal)?.flatten();
+    body.map(|body| serde_json::from_str(&body).map_err(internal)).transpose()
+}
+
+pub(super) fn resolved_supersession_workspace(
+    connection: &Connection,
+    source: &MissionRunView,
+) -> Result<String, FractalError> {
+    let Some(declaration) = mission_workspace_declaration(connection, &source.subject)? else {
+        // Explicit launches and historical runs have no declaration inheritance to re-resolve.
+        return Ok(source.workspace.clone());
+    };
+    let unavailable = || FractalError::new("mission-workspace-unavailable",
+        format!("workspace declaration `{}` is unavailable or no longer launches this mission", declaration.subject));
+    let suffix = std::path::Path::new(&declaration.suffix);
+    if declaration.suffix.is_empty() || suffix.components().count() != 1
+        || !matches!(suffix.components().next(), Some(std::path::Component::Normal(_)))
+    {
+        return Err(unavailable());
+    }
+    let (kind, body): (String, String) = connection.query_row(
+        "SELECT kind, body FROM desired WHERE subject=?1",
+        [&declaration.subject], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(internal)?.ok_or_else(unavailable)?;
+    let desired: Value = serde_json::from_str(&body).map_err(internal)?;
+    let (mission, root) = match kind.as_str() {
+        "schedule" => {
+            let spec = crate::graph::schedule_spec(&desired, "local").ok_or_else(unavailable)?;
+            if spec.stopped { return Err(unavailable()); }
+            let work = spec.work.ok_or_else(unavailable)?;
+            (work.mission, work.workspace)
+        }
+        "subscription" => {
+            let spec = crate::graph::subscription_spec(&desired).ok_or_else(unavailable)?;
+            if spec.stopped || spec.delivery != "mission" { return Err(unavailable()); }
+            (spec.mission.ok_or_else(unavailable)?, spec.workspace.ok_or_else(unavailable)?)
+        }
+        _ => return Err(unavailable()),
+    };
+    if mission_storage_id(connection, &mission)? != mission_storage_id(connection, &source.mission)?
+        || !std::path::Path::new(&root).is_absolute()
+    {
+        return Err(unavailable());
+    }
+    Ok(std::path::Path::new(&root).join(suffix).to_string_lossy().into_owned())
+}
+
+pub(super) fn mission_spec_at(
+    connection: &Connection,
+    mission_id: &str,
+    revision: Option<&str>,
+) -> Result<Option<MissionSpec>> {
+    let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
+    smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
+    let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h6a343d94790f owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+             SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
+         )
+         SELECT r.body, requested.identity, COALESCE(h.unavailable,
+             (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+              FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+              AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+         FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+         LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
+         LEFT JOIN mission_revisions r ON r.mission_id=substr(requested.identity,9)
+             AND r.revision=COALESCE(?2,d.revision)",
+        params![mission_id, revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if let Some(reason) = blocked {
+        return Err(identities::unavailable(&identity, &reason).into());
+    }
+    body.map(|body| serde_json::from_str(&body)).transpose().map_err(Into::into)
+}
+
 impl Store {
     /// Incoming named edges, using the target index rather than scanning declaration bodies.
     /// While a preexisting store's edge index is still being folded in bounded background
@@ -128,27 +612,8 @@ impl Store {
         mission_id: &str,
         revision: Option<&str>,
     ) -> Result<Option<MissionSpec>> {
-        smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
         let connection = self.readers.get();
-        let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
-        let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
-            /* sqlite-large-value: allow-for-now lv-h9d524e52ffa5 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
-                 SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
-             )
-             SELECT r.body, requested.identity, COALESCE(h.unavailable,
-                 (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
-                  FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
-                  AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
-             FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
-             LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
-             LEFT JOIN mission_revisions r ON r.mission_id=substr(requested.identity,9)
-                 AND r.revision=COALESCE(?2,d.revision)",
-            params![mission_id, revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        if let Some(reason) = blocked {
-            return Err(identities::unavailable(&identity, &reason).into());
-        }
-        body.map(|body| serde_json::from_str(&body)).transpose().map_err(Into::into)
+        mission_spec_at(&connection, mission_id, revision)
     }
 
     /// Name steps for display in one read: each step's mission, run, path, title, first goal,
@@ -216,6 +681,35 @@ impl Store {
         )
     }
 
+    pub fn retry_mission_run(
+        &self,
+        run: &str,
+        options: &MissionRunRetryRequest,
+    ) -> Result<MissionRunView, FractalError> {
+        let source = self.mission_run(run).map_err(internal)?.ok_or_else(|| {
+            FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist"))
+        })?;
+        let request = MissionRunRequest {
+            mission: source.mission.clone(),
+            revision: (options.same_revision || mission_run_revision_pinned(&self.readers.get(), &source)?)
+                .then(|| source.revision.clone()),
+            workspace: resolved_supersession_workspace(&self.readers.get(), &source)?,
+            requester: Some(source.requester.clone()),
+            mode: Some(source.mode.clone()),
+            inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            idempotency_key: options.idempotency_key.clone(),
+        };
+        self.create_mission_run_context(
+            &request, None, None, None,
+            Some(RunCreationSource::Retry(&source, options)), None,
+        )
+    }
+
+    pub fn enrich_mission_run_lineage(&self, run: &mut MissionRunView) -> Result<()> {
+        enrich_mission_run_lineage_tx(&self.readers.get(), run)?;
+        Ok(())
+    }
+
     pub fn create_mission_run_inner(
         &self,
         request: &MissionRunRequest,
@@ -223,7 +717,141 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, FractalError> {
-        let mission_identity = mission_storage_id(&self.readers.get(), &request.mission)?;
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
+    }
+
+    /// Check scratch admission before a launcher creates a directory or a run.
+    pub fn validate_mission_run_workspace(workspace: &std::path::Path) -> Result<(), FractalError> {
+        validate_run_workspace(workspace)
+    }
+
+    /// Start from a launcher's workspace root, retaining its identity for later supersession.
+    pub fn create_declared_workspace_mission_run(
+        &self,
+        request: &MissionRunRequest,
+        child: Option<ChildMissionContext>,
+        occurrence_subject: Option<&str>,
+        latest_ref: Option<(&str, &str)>,
+        workspace_declaration: MissionWorkspaceDeclaration,
+    ) -> Result<MissionRunView, FractalError> {
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref,
+            Some(RunCreationSource::Declaration(workspace_declaration)), None)
+    }
+
+    /// Complete an authorized revision cutover inside its approval transaction.
+    /// The caller fences the proposal; ordinary start admission still precedes cancellation.
+    pub fn supersede_mission_run_at_revision_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        source: &MissionRunView,
+        revision: &str,
+    ) -> Result<MissionRunView, FractalError> {
+        let owned: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims
+             WHERE subject=?1 AND kind='mission-run.created' AND origin=?2)",
+            params![source.subject, self.origin], |row| row.get(0),
+        ).map_err(internal)?;
+        if !owned {
+            return Err(FractalError::new("mission-run-not-owned",
+                "only the source run's owner may supersede it"));
+        }
+        let current = mission_run_header_tx(transaction, &source.id).map_err(internal)?;
+        if current.generation != source.generation {
+            return Err(FractalError::new("stale-revision-proposal",
+                "the revision proposal does not target the current generation"));
+        }
+        if let Some(successor) = mission_run_lineage_tx(transaction, &source.subject)
+            .map_err(internal)?.superseded_by
+        {
+            let replacement = mission_run_view_tx(
+                transaction, successor.trim_start_matches("mission-run/"),
+            ).map_err(internal)?;
+            if replacement.revision != revision {
+                return Err(FractalError::new("mission-run-already-superseded",
+                    "the source run already has a replacement at a different revision"));
+            }
+            return Ok(replacement);
+        }
+        let mission = mission_storage_id(transaction, &source.mission)?;
+        let publication: String = transaction.query_row(
+            "SELECT claim_id FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
+            params![mission, revision], |row| row.get(0),
+        ).optional().map_err(internal)?.ok_or_else(|| FractalError::new(
+            "missing-mission-revision", "the proposed mission revision is unavailable",
+        ))?;
+        let replacement = self.create_superseding_mission_run_tx(
+            transaction, source, &publication, Some(revision),
+        )?;
+        if !is_terminal_run_state(&current.status) {
+            cancel_mission_run_tx(transaction, &self.origin, &source.subject,
+                &format!("superseded by {} at revision {revision}", replacement.subject),
+                None, now_ms())?;
+        }
+        Ok(replacement)
+    }
+
+    pub(super) fn create_superseding_mission_run_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        source: &MissionRunView,
+        publication: &str,
+        revision: Option<&str>,
+    ) -> Result<MissionRunView, FractalError> {
+        let (starter, selector): (Option<String>, Option<String>) = transaction
+            .query_row(
+                "SELECT actor, json_extract(body,'$.fields.default_selector')
+                 FROM claims WHERE subject=?1 AND kind='mission-run.created'
+                 ORDER BY store_index LIMIT 1",
+                [&source.subject],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(internal)?;
+        let child = source.parent_step_run.as_ref().map(|parent_step_run| {
+            Ok::<_, FractalError>(ChildMissionContext {
+                root_revision: source.root_revision.clone(),
+                root_run_id: source.root_mission_run
+                    .trim_start_matches("mission-run/").to_owned(),
+                parent_step_run: parent_step_run.clone(),
+                default_selector: selector.as_deref()
+                    .map(serde_json::from_str).transpose().map_err(internal)?,
+                started_by: starter.clone(),
+            })
+        }).transpose()?;
+        let request = MissionRunRequest {
+            mission: source.mission.clone(),
+            revision: revision.map(str::to_owned),
+            workspace: resolved_supersession_workspace(transaction, source)?,
+            requester: Some(source.requester.clone()),
+            mode: Some(source.mode.clone()),
+            inputs: source.inputs.iter()
+                .map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            idempotency_key: format!("mission-supersede:{}:{publication}", source.subject),
+        };
+        self.create_mission_run_context(
+            &request, child, None, None,
+            Some(RunCreationSource::Supersession(source, publication)), Some(transaction),
+        )
+    }
+
+    fn create_mission_run_context(
+        &self,
+        request: &MissionRunRequest,
+        child: Option<ChildMissionContext>,
+        occurrence_subject: Option<&str>,
+        latest_ref: Option<(&str, &str)>,
+        source: Option<RunCreationSource<'_>>,
+        provided_transaction: Option<&Transaction<'_>>,
+    ) -> Result<MissionRunView, FractalError> {
+        let (retry, supersession, workspace_declaration) = match source {
+            Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
+            Some(RunCreationSource::Supersession(source, publication)) => (None, Some((source, publication)), None),
+            Some(RunCreationSource::Declaration(declaration)) => (None, None, Some(declaration)),
+            None => (None, None, None),
+        };
+        let mission_identity = match provided_transaction {
+            Some(transaction) => mission_storage_id(transaction, &request.mission)?,
+            None => mission_storage_id(&self.readers.get(), &request.mission)?,
+        };
         let mission_id = mission_identity.as_str();
         // Normalize only the name, not the run key, revision or generation. Retrying
         // through a historical or current spelling hashes the same physical request.
@@ -245,49 +873,34 @@ impl Store {
                 "an embedded loop mission can start only through its parent loop",
             ));
         }
-        owned_sets::guard_mission_start(&self.readers.get(), mission_id)?;
-        let mission = self
-            .mission_spec(mission_id, request.revision.as_deref())
-            .map_err(smallclaims::error::typed)?
-            .ok_or_else(|| {
-                FractalError::new(
-                    "missing-mission",
-                    format!("mission `{mission_id}` does not exist"),
-                )
-            })?;
-        if mission.state == MissionState::Retired {
-            return Err(FractalError::new(
-                "mission-retired",
-                format!(
-                    "mission `{mission_id}` is retired; publish a ready revision to start it again"
-                ),
-            ));
+        let mut request_identity = json!({
+            "request": request,
+            "parent": child.as_ref().map(|child| json!({
+                "root_revision": child.root_revision,
+                "root_run_id": child.root_run_id,
+                "parent_step_run": child.parent_step_run,
+                "default_selector": child.default_selector,
+            })),
+        });
+        if let Some((source, options)) = retry {
+            request_identity["retry"] = json!((&source.subject, options));
         }
-        if mission.state != MissionState::Ready {
-            return Err(FractalError::new(
-                "mission-not-ready",
-                format!("mission `{mission_id}` is not ready"),
-            ));
+        if let Some((source, publication)) = supersession {
+            request_identity["supersession"] = json!((&source.subject, publication));
         }
         let request_hash = hex::encode(Sha256::digest(
-            serde_json::to_vec(&json!({
-                "request": request,
-                "parent": child.as_ref().map(|child| json!({
-                    "root_revision": child.root_revision,
-                    "root_run_id": child.root_run_id,
-                    "parent_step_run": child.parent_step_run,
-                    "default_selector": child.default_selector,
-                })),
-            }))
-            .map_err(internal)?,
+            serde_json::to_vec(&request_identity).map_err(internal)?,
         ));
-        // The lend records where its hold goes; scheduled starts at :00 and :30 queue every write
-        // behind it. Nothing in it asks this thread for another writer loan.
+        // Admission and capacity decisions see all pending run parts under one writer fence.
         let stages = holds::Stages::begin();
-        let mut connection = self.connection.write();
+        let create = |transaction: &Transaction<'_>| {
+        let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
+            self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
+        });
+        // The wrapper drains every run before checking an occurrence or global capacity.
         stages.enter("existing-occurrence");
         if let Some(subject) = occurrence_subject
-            && let Some(run) = connection
+            && let Some(run) = transaction
                 .query_row(
                     "SELECT id FROM mission_runs WHERE id=?1",
                     [subject.trim_start_matches("mission-run/")],
@@ -296,13 +909,12 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
-            // The occurrence's run is committed: build its view on a reader, not the writer.
-            drop(connection);
-            return mission_run_view_tx(&self.readers.get(), &run).map_err(internal);
+            let view = mission_run_view_tx(transaction, &run).map_err(internal)?;
+            return Ok(view);
         }
         stages.enter("idempotency");
-        smallclaims::store::idempotency::cached_response(&connection, &request.idempotency_key)?;
-        if let Some((response, stored_hash)) = connection
+        smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?;
+        if let Some((response, stored_hash)) = transaction
             .query_row(
                 "SELECT i.response, r.request_hash FROM idempotency i JOIN mission_run_requests r ON r.operation_id=i.operation_id WHERE i.operation_id=?1",
                 [opaque_cache_key(&request.idempotency_key)],
@@ -317,27 +929,88 @@ impl Store {
                     "the mission-run idempotency key was used with different input",
                 ));
             }
-            return serde_json::from_str(&response).map_err(internal);
+            let view = serde_json::from_str(&response).map_err(internal)?;
+            return Ok(view);
         }
         stages.enter("admission");
-        let transaction = connection.transaction().map_err(internal)?;
-        owned_sets::guard_mission_start(&transaction, mission_id)?;
+        Self::validate_mission_run_workspace(std::path::Path::new(&request.workspace))?;
+        owned_sets::guard_mission_start(transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
         // rename must not admit a new run between the read and transaction.
-        mission_storage_id(&transaction, mission_id)?;
+        mission_storage_id(transaction, mission_id)?;
+        if let Some((source, _)) = retry {
+            let current = mission_run_header_tx(transaction, &source.id).map_err(internal)?;
+            if current.status != "failed" || current.phase != "terminal" {
+                return Err(FractalError::new(
+                    "mission-run-not-retryable",
+                    format!("mission run `{}` is {} in its {} phase; retry requires a failed terminal run",
+                        current.subject, current.status, current.phase),
+                ));
+            }
+            if current.generation != source.generation {
+                return Err(FractalError::new(
+                    "stale-run-generation",
+                    format!("mission run `{}` changed generation before retry", current.subject),
+                ));
+            }
+        }
+        let mission = mission_spec_at(transaction, mission_id, request.revision.as_deref())
+            .map_err(smallclaims::error::typed)?
+            .ok_or_else(|| FractalError::new("missing-mission", format!("mission `{mission_id}` does not exist")))?;
+        if mission.state == MissionState::Retired {
+            return Err(FractalError::new(
+                "mission-retired",
+                format!("mission `{mission_id}` is retired; publish a ready revision to start it again"),
+            ));
+        }
+        if mission.state != MissionState::Ready {
+            return Err(FractalError::new("mission-not-ready", format!("mission `{mission_id}` is not ready")));
+        }
+        let after = supersession.and_then(|(source, _)| source.after.as_deref());
+        let mission = crate::mission::run_mission(mission, after)?;
         if let Some((resource, discovery)) = latest_ref
-            && let Some(reason) = stale_ref_request_tx(&transaction, resource, discovery).map_err(internal)? {
+            && let Some(reason) = stale_ref_request_tx(transaction, resource, discovery).map_err(internal)? {
             return Err(FractalError::new("stale-ref-head", reason));
         }
         stages.enter("inputs");
-        let inputs = resolve_mission_run_inputs(&transaction, &mission, &request.inputs)?;
+        let input_source = retry.map(|(source, _)| source)
+            .or_else(|| supersession.map(|(source, _)| source));
+        let incompatible = |cause: FractalError| {
+            let Some(source) = input_source else { return cause };
+            let (code, verb) = if supersession.is_some() {
+                ("mission-supersession-incompatible", "supersede")
+            } else {
+                ("mission-retry-incompatible", "retry")
+            };
+            FractalError::new(
+                code,
+                format!("cannot {verb} `{}` from revision {} on revision {}: {}",
+                    source.subject, source.revision, mission.revision, cause.message),
+            )
+            .with_detail("source_revision", source.revision.clone())
+            .with_detail("target_revision", mission.revision.clone())
+            .with_detail("cause", json!({"code": cause.code, "message": cause.message, "details": cause.details}))
+        };
+        if let Some(source) = input_source {
+            for (name, input) in &source.inputs {
+                if let Some(declaration) = mission.inputs.get(name)
+                    && declaration.kind != input.kind
+                {
+                    return Err(incompatible(FractalError::new(
+                        "invalid-mission-inputs",
+                        format!("mission input `{name}` changed kind from {:?} to {:?}", input.kind, declaration.kind),
+                    )));
+                }
+            }
+        }
+        let inputs = resolve_mission_run_inputs(transaction, &mission, &request.inputs).map_err(incompatible)?;
         if let Some((resource, discovery)) = latest_ref {
-            if let Some(reason) = stale_pull_request_request_tx(&transaction, resource, discovery)
+            if let Some(reason) = stale_pull_request_request_tx(transaction, resource, discovery)
                 .map_err(internal)?
             {
                 return Err(FractalError::new("stale-pull-request", reason));
             }
-            let is_pull_request = claim_by_id_tx(&transaction, discovery)
+            let is_pull_request = claim_by_id_tx(transaction, discovery)
                 .map_err(internal)?
                 .map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim })
                 .is_some_and(|claim| {
@@ -367,11 +1040,10 @@ impl Store {
             }
         }
         stages.enter("capacity");
-        enforce_mission_run_capacity(&transaction, &mission)?;
+        enforce_mission_run_capacity_excluding(
+            transaction, &mission, supersession.map(|(source, _)| source.id.as_str()),
+        )?;
         stages.enter("run-rows");
-        let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
-            self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
-        });
         let run_id = subject.trim_start_matches("mission-run/").to_owned();
         let generation_key = occurrence_subject.map_or_else(
             || format!("{}:{}:generation:1", self.origin, request.idempotency_key),
@@ -396,6 +1068,10 @@ impl Store {
             request.requester.as_deref().unwrap_or("person/requester"),
             "person",
         );
+        // Retrying preserves the requester's semantic binding but authenticates the retry author.
+        let starter = retry.map(|(_, options)| options.actor.clone())
+            .or_else(|| child.as_ref().and_then(|child| child.started_by.clone()))
+            .unwrap_or_else(|| requester.clone());
         let mode = request.mode.as_deref().unwrap_or("run");
         if !matches!(mode, "run" | "eval") {
             return Err(FractalError::new(
@@ -429,15 +1105,28 @@ impl Store {
         }
         extend_loop_variables(&mut variables, &inputs);
         let now = now_ms();
+        let phase = if supersession.is_some() { "supersession-waiting" } else { "normal" };
+        let admission_publication: Option<String> = transaction.query_row(
+            "SELECT claim_id FROM mission_definitions WHERE mission_id=?1",
+            [&mission.id], |row| row.get(0),
+        ).optional().map_err(internal)?;
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h32d92a921bc0 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)",
-                params![run_id, mission.id, mission.revision, generation_id, root_revision, root_run_id, parent_step_run, request.workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, now.to_string()],
+                /* sqlite-large-value: allow-for-now lv-h0116cd447a86 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?13, ?12, ?12)",
+                params![run_id, mission.id, mission.revision, generation_id, root_revision, root_run_id, parent_step_run, request.workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, now.to_string(), phase],
             )
             .map_err(internal)?;
-        let deadline_at_unix_ms =
-            insert_mission_deadline_tx(&transaction, &run_id, mission.timeout_ms, Some(now))?;
+        if let Some(after) = after {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hf65d172e23b9 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_after(run_id, after_run) VALUES (?1, ?2)",
+                params![run_id, after],
+            ).map_err(internal)?;
+        }
+        let deadline_at_unix_ms = insert_mission_deadline_tx(
+            transaction, &run_id, mission.timeout_ms,
+            (after.is_none() && supersession.is_none()).then_some(now),
+        )?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h84ce21b8d58b owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
@@ -451,7 +1140,7 @@ impl Store {
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
             let storage_party = |party: String| {
-                identities::resolve_reference_conn(&transaction, &party)
+                identities::resolve_reference_conn(transaction, &party)
             };
             let assignee = assignee.map(storage_party).transpose()?;
             let available_to = available_to.into_iter().map(storage_party)
@@ -489,8 +1178,13 @@ impl Store {
         }
         stages.enter("claims");
         let body = json!({
+            // Signed body metadata lets older peers admit the unchanged field schema.
+            "revision_pinned": request.revision.is_some(),
             "fields": {
                 "status": "running",
+                "phase": phase,
+                "admission_publication": admission_publication,
+                "after": after,
                 "mission": mission.subject,
                 "revision": mission.revision,
                 "initial_revision": mission.revision,
@@ -508,25 +1202,37 @@ impl Store {
             }
         });
         let mut body = body;
+        let workspace_declaration = match workspace_declaration {
+            Some(declaration) => Some(declaration),
+            None => match retry.map(|(source, _)| source).or_else(|| supersession.map(|(source, _)| source)) {
+                Some(source) => mission_workspace_declaration(transaction, &source.subject)?,
+                None => None,
+            },
+        };
+        if let Some(declaration) = workspace_declaration {
+            body["fields"]["workspace_declaration"] = serde_json::to_value(declaration).map_err(internal)?;
+        }
         add_run_report_fields(&mut body, &mission, None, false);
         append_receipt_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &subject,
             "mission-run.created",
-            Some(&requester),
+            Some(&starter),
             &body,
             &[],
             None,
             &request.idempotency_key,
         )
-        .map_err(internal)?;
+        // A typed refusal, such as a starter without the authority to start this mission, keeps
+        // its code.
+        .map_err(smallclaims::error::typed)?;
         append_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &generation_subject,
             "run-generation.created",
-            Some(&requester),
+            Some(&starter),
             &json!({"fields": {
                 "run": subject,
                 "revision": mission.revision,
@@ -536,9 +1242,46 @@ impl Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
+        if let Some((source, options)) = retry {
+            let mut fields = json!({"source": source.subject, "retry": subject});
+            if let Some(reason) = &options.reason {
+                fields["reason"] = Value::String(reason.clone());
+            }
+            for endpoint in [&source.subject, &subject] {
+                append_claim_tx(
+                    transaction,
+                    &self.origin,
+                    endpoint,
+                    "mission-run.retry-linked",
+                    Some(&starter),
+                    &json!({"fields": fields}),
+                    &[],
+                    None,
+                ).map_err(smallclaims::error::typed)?;
+            }
+        }
+        if let Some((source, publication)) = supersession {
+            let body = json!({"fields": {
+                "source": source.subject, "replacement": subject, "publication": publication,
+            }});
+            for endpoint in [&source.subject, &subject] {
+                append_claim_tx(
+                    transaction, &self.origin, endpoint, "mission-run.supersede-linked",
+                    None, &body, &[], None,
+                ).map_err(smallclaims::error::typed)?;
+            }
+        }
+        if let Some(source) = input_source {
+            let source = mission_run_view_tx(transaction, &source.id).map_err(internal)?;
+            let target = mission_run_view_tx(transaction, &run_id).map_err(internal)?;
+            carry_completed_run_steps_tx(transaction, &self.origin, &starter, &source, &target)?;
+            person_work::continuity::carry_root_gate_answers_tx(
+                transaction, &self.origin, &source, &target, &starter, &BTreeSet::new(),
+            ).map_err(internal)?;
+        }
         stages.enter("view");
-        let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        let view = created_mission_run_view_tx(transaction, &run_id).map_err(internal)?;
         stages.enter("idempotency-record");
         transaction
             .execute(
@@ -555,9 +1298,12 @@ impl Store {
                 params![opaque_cache_key(&request.idempotency_key), request_hash],
             )
             .map_err(internal)?;
-        stages.enter("commit");
-        transaction.commit().map_err(internal)?;
         Ok(view)
+        };
+        match provided_transaction {
+            Some(transaction) => create(transaction),
+            None => self.with_all_runs_fenced(create),
+        }
     }
 
     pub fn mission_run(&self, run: &str) -> Result<Option<MissionRunView>> {
@@ -636,15 +1382,16 @@ impl Store {
         let connection = self.readers.get();
         let orders = seat_run_orders_tx(&connection, selected_agent)?;
         let rows = seat_step_rows_tx(&connection, selected_agent)?;
-        let mut seats = BTreeMap::<&str, Vec<SeatStep<'_>>>::new();
+        let mut seats = BTreeMap::<std::borrow::Cow<'_, str>, Vec<SeatStep<'_>>>::new();
         for row in &rows {
             let step = row.seat_step();
             for agent in [row.assignee.as_deref(), row.claimant.as_deref()]
                 .into_iter()
                 .flatten()
+                .filter_map(fractal_schema::canonical_agent_actor)
                 .collect::<BTreeSet<_>>()
             {
-                if selected_agent.is_some_and(|selected| selected != agent) {
+                if selected_agent.is_some_and(|selected| !work_actor_matches(Some(&agent), selected)) {
                     continue;
                 }
                 seats.entry(agent).or_default().push(step);
@@ -652,13 +1399,13 @@ impl Store {
         }
         let mut queues = BTreeMap::<String, AgentWorkQueue>::new();
         for (agent, steps) in seats {
-            let order = orders.get(agent).map(Vec::as_slice).unwrap_or_default();
-            let selection = seat_queue::select(agent, &steps, order);
+            let order = orders.get(agent.as_ref()).map(Vec::as_slice).unwrap_or_default();
+            let selection = seat_queue::select(&agent, &steps, order);
             if selection.held.is_empty() && selection.ready.is_empty() {
                 continue;
             }
             queues.insert(
-                agent.to_owned(),
+                agent.into_owned(),
                 AgentWorkQueue {
                     current_work_ids: selection
                         .held
@@ -685,18 +1432,28 @@ impl Store {
     pub fn step_run(&self, subject: &str) -> Result<Option<StepRunView>> {
         let subject = normalize_step_run(subject);
         let connection = self.readers.get();
+        Self::step_run_view(&connection, &subject)
+    }
+
+    /// Mutation prechecks need the admitted tree; ordinary read endpoints use `step_run`.
+    pub fn step_run_fenced(&self, subject: &str) -> Result<Option<StepRunView>> {
+        let subject = normalize_step_run(subject);
+        self.with_run_fence(&subject, |transaction| Self::step_run_view(transaction, &subject))
+    }
+
+    fn step_run_view(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
         let mut view = connection
             .query_row(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                         lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
                  FROM step_runs WHERE subject=?1",
-                [subject],
+                [&subject],
                 step_run_from_row,
             )
             .optional()
             .map_err(anyhow::Error::from)?;
         if let Some(view) = &mut view {
-            enrich_step_queue(&connection, view)?;
+            enrich_step_queue(connection, view)?;
         }
         Ok(view)
     }
@@ -1317,6 +2074,8 @@ fn prepare_mission_run_declaration(
                 .collect::<BTreeMap<_, _>>();
             if mission != &creation.mission
                 || revision != &creation.revision
+                || mission_run_recorded_revision_pin(connection, &declaration.subject)?
+                    .is_some_and(|pinned| pinned == creation.follow_head)
                 || workspace != &creation.workspace
                 || requester != &creation.requester
                 || stored_values != creation.inputs
@@ -1771,10 +2530,19 @@ pub fn note_run_view_reads(view: &MissionRunView) {
 
 /// Current held and ready agent steps, for every seat or for one seat.
 pub fn seat_step_rows_tx(connection: &Connection, agent: Option<&str>) -> Result<Vec<RosterStepRow>> {
+    seat_step_rows_with_spellings_tx(connection, agent.map(work_actor_spellings_json))
+}
+
+/// Current held and ready steps eligible for literal mutation admission.
+pub fn seat_step_rows_literal_tx(connection: &Connection, agent: &str) -> Result<Vec<RosterStepRow>> {
+    seat_step_rows_with_spellings_tx(connection, Some(serde_json::to_string(&[agent])?))
+}
+
+fn seat_step_rows_with_spellings_tx(connection: &Connection, spellings: Option<String>) -> Result<Vec<RosterStepRow>> {
     let snapshot_unix_ms = now_ms();
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0096cec23ed6 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ SEAT_STEP_ROWS)?;
     let mut rows = statement
-        .query_map(params![agent, snapshot_unix_ms.to_string()], |row| {
+        .query_map(params![spellings, snapshot_unix_ms.to_string()], |row| {
             let mut status: String = row.get(3)?;
             let mut claimant = row.get(5)?;
             let expires: Option<String> = row.get(8)?;

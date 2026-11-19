@@ -189,7 +189,7 @@ fn rollout_replacement_uses_liveness_when_operation_was_requested() {
         let mut options = crate::store::owned_sets::Options {
             set: "workers".into(), expected_set: "absent".into(),
             source: crate::store::owned_sets::Source { repository: "test/workers".into(), r#ref: "refs/heads/main".into(), sha: format!("{:040x}", 1), sequence: 1 },
-            rollout: None, adopt: Default::default(), allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+            rollout: None, adopt: Default::default(), allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&intent, &options).unwrap();
         options.confirm_retire = Some(preview.digest); options.expected_subjects = preview.expected_subjects;

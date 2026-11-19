@@ -95,7 +95,7 @@ type Stash = {
    */
   lastCostUsd?: number;
   label?: string;
-  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean; acceptedAtUnixMs?: number }>;
 
 };
 
@@ -336,7 +336,7 @@ export default function (pi: ExtensionAPI) {
           state.reconnectAttempt = 0;
           await applyLabel(ctx);
           for (const accepted of state.accepted?.values() ?? []) {
-            send({ type: "delivered", meta: accepted.meta });
+            send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
           // The native session this channel serves: st resumes a suspended seat on it and checks
@@ -350,6 +350,7 @@ export default function (pi: ExtensionAPI) {
             const sessionFile = sessions.getSessionFile?.();
             send({
               type: "ready",
+              inputAcceptanceClock: true,
               sessionId: nativeSessionId,
               ...(typeof sessionFile === "string" ? { sessionFile } : {}),
             });
@@ -363,7 +364,7 @@ export default function (pi: ExtensionAPI) {
         const messageId = frame.meta?.messageId;
         if (typeof messageId === "string" && state.accepted?.has(messageId)) {
           const accepted = state.accepted.get(messageId)!;
-          send({ type: "delivered", meta: accepted.meta });
+          send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
           if (accepted.read) send({ type: "read", meta: accepted.meta });
           return;
         }
@@ -382,7 +383,12 @@ export default function (pi: ExtensionAPI) {
           } else {
             await pi.sendUserMessage(frame.content, { deliverAs: frame.deliverAs ?? "steer" });
           }
-          send({ type: "delivered", meta: frame.meta });
+          const acceptedAtUnixMs = Date.now();
+          if (typeof messageId === "string") {
+            const accepted = state.accepted?.get(messageId);
+            if (accepted) accepted.acceptedAtUnixMs ??= acceptedAtUnixMs;
+          }
+          send({ type: "delivered", meta: frame.meta, acceptedAtUnixMs });
         } catch (error) {
           if (typeof messageId === "string" && state.accepted?.get(messageId)?.read) {
             send({ type: "delivered", meta: frame.meta });
@@ -465,24 +471,42 @@ export default function (pi: ExtensionAPI) {
     const usage = message.usage && typeof message.usage === "object"
       ? message.usage as Record<string, unknown>
       : undefined;
-    // Per-response spend: the provider's disjoint token buckets, its model, and the cost the
-    // harness itself computed. Nothing else about the request leaves the harness.
+    // Only observed response metadata and numeric usage leave the harness, never raw requests.
     const cost = usage?.cost && typeof usage.cost === "object"
       ? usage.cost as Record<string, unknown>
       : undefined;
+    const cttl = usage?.cttl && typeof usage.cttl === "object"
+      ? usage.cttl as Record<string, unknown>
+      : undefined;
     return { message: {
       id: boundedTimelineString(message.id, 256),
+      responseId: boundedTimelineString(message.responseId, 256),
       role: boundedTimelineString(message.role, 32),
       content,
       model: boundedTimelineString(message.model, 128),
       provider: boundedTimelineString(message.provider, 64),
+      api: boundedTimelineString(message.api, 128),
+      stopReason: boundedTimelineString(message.stopReason, 64),
+      timestamp: finiteOrNull(message.timestamp),
+      completedAt: finiteOrNull(message.completedAt),
+      duration: finiteOrNull(message.duration),
+      ttft: finiteOrNull(message.ttft),
       usage: usage ? {
         input: finiteOrNull(usage.input ?? usage.inputTokens),
         output: finiteOrNull(usage.output ?? usage.outputTokens),
         cacheRead: finiteOrNull(usage.cacheRead),
         cacheWrite: finiteOrNull(usage.cacheWrite),
         totalTokens: finiteOrNull(usage.totalTokens),
-        cost: cost ? finiteOrNull(cost.total) : null,
+        reasoningTokens: finiteOrNull(usage.reasoningTokens),
+        cttl: cttl ? { ephemeral1h: finiteOrNull(cttl.ephemeral1h) } : undefined,
+        cost: cost ? {
+          input: finiteOrNull(cost.input),
+          output: finiteOrNull(cost.output),
+          cacheRead: finiteOrNull(cost.cacheRead),
+          cacheWrite: finiteOrNull(cost.cacheWrite),
+          total: finiteOrNull(cost.total),
+        } : finiteOrNull(usage.cost),
+        premiumRequests: finiteOrNull(usage.premiumRequests),
       } : undefined,
     } };
   };

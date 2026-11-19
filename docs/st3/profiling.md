@@ -51,6 +51,68 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Replication receive costs
+
+Each completed graph receive handler emits one `replication receive summary` INFO record,
+including errors. `correlation_id` is the canonical UUID from `x-fractal-exchange-id`, or a
+generated UUID when that header is missing or invalid. The receive's slow-request and
+independent writer-hold diagnostics use the same ID. IDs are log fields, never metric labels;
+request bodies and invalid header values are not logged.
+
+The summary has six named phase records, each with `elapsed`, `writer_wait` and `writer_hold`
+durations: `receipt_ingest` (initial state inspection, exchange receipt and transport observation),
+`admission_prelude` (local sealing and judging), `admission` (backlog validation, including its
+admission mutex), `repairs`, `projection`, and `response_postcommit` (response construction and
+notifications after projection). Unreached phases remain zero. `admit_ms` describes admission
+only, excluding the separately reported prelude and repairs. `project_ms` retains projection
+wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
+include response-envelope serialization or network delivery.
+
+Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
+loans measure borrower ownership through transaction finalization and postcommit observer
+cleanup, before connection return. Batched callbacks measure their queue wait and exclusive
+savepoint execution on the writer thread. Captured request and phase scopes restore the
+previous thread context after callback return or unwind. Phase wall time contains writer
+wait/hold and nested rebuild/final-drain work: these costs are **non-additive**.
+
+A group commit emits one `replication receive shared finalization` event if any receive
+participated. It reports a process-local `batch_id`, `prepare_ms`, `finalization_ms` (finalizers,
+COMMIT or rollback, and postcommit observers), and the participating `(correlation_id, phase)`
+pairs. It is explicitly `shared=true`, `additive=false`: no request owns that shared duration.
+Its participant set is bounded by the existing writer batch limit, including distinct phases
+of the same request. Shared hold diagnostics carry `shared_batch_id`, not one receive ID.
+Non-receive writer diagnostics retain their existing attribution.
+
+The summary's `shared_event_join` equals its `correlation_id`: join that ID against **all**
+shared events' participant pairs for the authoritative links. `shared_finalizations` counts
+distinct participating batches; optional `first_shared_batch` and `last_shared_batch` are
+only bounded index hints, **not an exhaustive list**. Summaries retain no growing batch-ID
+list. Shared event timing and links finish before batched acknowledgements, so a completed
+request cannot snapshot before its shared accounting arrives.
+
+## Conversation relay reads
+
+`st.conversation.relay_read.duration` is one histogram in seconds, recorded for successful
+and failed conversation relays (not dependent on trace sampling). Its only labels are
+`st.conversation.owner` (the provenance's `host/<configured-peer>`, `local`, or `unknown`)
+and `st.conversation.operation` (`timeline`, `session_detail`, `changes`, `first_snapshot`).
+`first_snapshot` means a changes request without an `after` cursor; long-poll durations
+include intentional waiting. Discovered, unconfigured owners collapse to `unknown`.
+No session or agent id becomes a metric label.
+
+Sampled owner timeline requests carry `st.conversation.*` attributes on the existing
+request span: `reader_admission_ms` (SQLite reader acquisition and snapshot establishment),
+`graph_sql_ms` (graph runtime/message query calls, including their reader admission),
+`fold_mutex_wait_ms`, `native_admission_ms` (bounded native-reader permit wait),
+`native_fold_ms`, `display_preparation_ms`, and `header_overlay_ms`. The graph timing
+includes row decoding but excludes session filtering and display conversion; it overlaps
+SQLite reader admission, so these attributes are not an additive partition.
+Repeated native refills and header/overlay work accumulate within the request.
+Counts are `requested_limit` (effective clamped page request), `native_read_limit`
+(sum of requested native slice sizes), `native_prepared_items` (before page truncation),
+and `graph_rows` (returned graph message rows before session filtering).
+Stages not reached are absent, not synthetic zero-duration work.
+
 ## Background task CPU
 
 The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
@@ -152,7 +214,7 @@ move observers after acknowledgements.
 
 ## Targets and live windows
 
-[`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
+[`slo/objectives.kdl`](../../slo/objectives.kdl) holds the objectives Fractal ships ([objectives](objectives.md)): reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
 the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
@@ -306,7 +368,7 @@ holds the history. Each point carries `target`, `series` (`owner` or `remote` fo
 the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
-figure from `slo/targets.toml`, so one query sets a host's number against its target),
+figure from `slo/objectives.kdl`, so one query sets a host's number against its target),
 `st_slo_cpu_cores` (the member's cores by `window`, sent only once known) and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
 phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
@@ -323,65 +385,182 @@ the part not yet used and a reset time. `fractal slo explain ID` says one row in
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
-The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
-percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
-`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
-over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
-hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
-series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
-time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
-workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
-nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
-not in the request-latency read, its gauges or `fractal doctor`.
+Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
+window, selecting the newest provider observation time across hosts (canonical claim order
+breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+A harness partial refresh emits only explicitly present windows: a 5h-only reading neither
+replaces weekly evidence nor advances weekly freshness.
+`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
+explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
+Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
+display labels cannot alter those decisions. The producer-inclusive fold is observational.
+Producer batches contain `readings` and `credit_readings`. Daemon configuration
+`[usage_limits] writers = ["agent/sample/usage-producer"]` admits local agent appends,
+each writing as itself, and filters quota and credit folds at read time. Absent or empty
+configuration denies local appends and folds no usage observations. Replication and backup
+restore retain every schema-valid observation regardless of local writers. Config changes
+and restart fold the already stored evidence without re-replication or digest changes.
+Quota retention is writer-local: a newer observation from an excluded producer cannot reclaim
+another writer's latest account/window evidence, including after a projection rebuild.
+Internal window metadata does not extend the public `/usage` wire contract; SLO rows expose
+its provenance.
+Older members retain this non-authority unknown kind for replay after upgrade without changing
+terminal/runtime routing.
 
-Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
-`main_performance_failures` also reads, with the same token, conditional cache and five-minute
-cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
-completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
-the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
-the member that runs that observer has them; every other member, and that one until its first
-read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
-fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
-first observer that read them; another repository's observer does not read them and logs a warning.
-If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
-workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
-reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
-jobs and no logs:
+Credit objectives read durable `usage.limits.observed` evidence from the currently configured
+omp-usage producers. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
+seven days, counted by expiry; each durable credit represents one window-equivalent.
+`CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
+`redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
+otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
+not host or friendly account reference. Terminal states are absorbing across writers and hosts:
+`redeemed` wins over `forfeited`, and `forfeited` wins over `available` or `unknown`, regardless
+of measurement time. Within a state class (`available` and `unknown` share one), the newest
+provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
+consistently across members. An incrementally maintained local projection retains the winning
+reading per provider/account/credit identity **and writer**, including excluded writers.
+The durable usage kind has no numeric retention bound. Store open does not scan retained usage
+history or wait for credit backfill: historical initialization resumes asynchronously from a
+persisted cursor in bounded batches, releasing the writer lock between batches. A missing
+inventory with no configured writers skips initialization; later configured access starts the
+same bounded catch-up, never a synchronous history fold.
+SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
+then apply the same state-class/time/claim-ID ordering across writers.
+Until catch-up completes, both CAM rows are unknown (`no-data`, null remaining percentage),
+even when partial evidence looks successful. Their `current` and `explain` text explicitly say
+`catching-up` with the processed store index and target index; progress counts the claim-store
+cut, not decoded credit readings. Clients display that text without parsing it.
+Read work depends on retained identities and writers, not the
+number of durable observations. An empty writer configuration returns unknown credit rows without
+credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,
+unreported/unsupported coverage or a future measurement
+is `no-data`; stale readings are `stale`, never success. The same freshness policy as account
+readings applies. These rows describe only observed credits and are observational: they do not
+stop seats, enforce quotas or redeem credits.
 
-- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
-  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
-  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
-- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
-  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
-  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
-  before GitHub creates the group's run and the merge after it are not counted, and a pull request
-  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
-- `flakes`: merge group runs that concluded `failure`, an ejected group, plus the tests nextest
-  passed only on a retry, in the runs that finished in the last hour. Workspace CI's four test lanes
-  name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
-  run that finished in the last hour, pull request or merge group, has its artifacts listed once
-  (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
-  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
-  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
-  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
-  a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
-  About one listing per Workspace CI run, a few hundred a day.
+CI's objectives are not in this file. `fractal/merge-latency`, `fractal/ci-critical-path` and
+`fractal/flakes` are declared objectives in `slo/fractal-ci.kdl`, over the `github.workflow-run`
+claims the repository's poller writes, one per completed Workspace CI run, so every member reads
+the same rows ([objectives](objectives.md#fractals-own-ci), [plugins](plugins.md#workflow-runs)).
+A missed one is a fault for the owner its `on-breach` names. The objectives this file declares open
+no fault.
 
-A duration's samples are the runs that finished in the last day; its value is the nearest-rank
-percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
-day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
-or one flaky test spends it all. A window without a sample, or without a finished pull request or
-merge group run for the count, is `no-data`.
+### Operator-selected API readiness
 
-A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
-objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
-`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
-subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
-agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
-fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
-that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
-before the observer has read any runs, neither opens nor ends one. The other objectives open no
-fault.
+An optional daemon policy accepts one independent, rolling API readiness
+objective. The configuration selects the single executor and reviewer;
+the producer does not choose either. For example:
+
+    [readiness_slo]
+    executor = "example-evaluator"
+    member = "example-member"
+    reviewer = "agent/example/observability"
+    evidence_file = "/run/fractal-slo-evidence/readiness.json"
+
+The evidence file must live directly under /run/fractal-slo-evidence.
+The file and its ancestors must be controlled by root, with no group or
+world write access and no symlinks. A trusted publisher atomically replaces the
+file with a bounded JSON document containing version (1), objective
+(fractal-api-readiness), member, start_ms, end_ms, observed_at_ms,
+expected (10,080), known, and good. The window ends on a UTC minute
+boundary. The known and good counts refer to distinct minute slots in that
+seven-day window. Probe selection is outside Fractal. The cut must be no
+more than three minutes old and may not be in the future. Republish the
+same document if retrying an already closed cut.
+
+Fractal computes the lower and upper readiness bounds from these counts. It
+routes one native fault to the named declared agent on a proven miss and
+resolves it only on a proven met reading. A stopped or retired reviewer
+receives no new fault, and an existing episode retains its reviewer without
+falling back to the fleet fault handler. A measured breach remains visible
+and the invalid binding appears in Usage and daemon logs. An unreachable but
+still-declared reviewer remains the owner. Missing, stale, invalid or
+indeterminate readings neither open nor resolve a fault. The local
+readiness-slo-cut.json checkpoint records a pending cut before routing and
+marks it committed after the idempotent transition. A restart replays an
+admitted pending cut before reading the next publication. Keep this checkpoint
+across restart and rollback while using
+the same source identity. The fault reports weekly objective compliance.
+Upgrade all fault readers before enabling the policy, since older readers do
+not recognize this no-fallback condition.
+
+Retained short readings are a separate, read-only opt-in via
+`retained_pairs_file`, a different root-controlled file in the same evidence
+directory. Its version-1 bundle contains up to four ordered `pairs`, each with
+the exact `weekly` document and a matching `short` document. Short documents
+carry version, objective, member, end_ms, observed_at_ms and up to five distinct
+minute observations (`at_ms`, `ready`) in the completed five-minute window.
+Missing minutes remain Unknown, not failed or successful. Usage reads never
+issue claims or advance either checkpoint.
+
+Set `shared_case = true` to replace independent weekly dispatch with one
+durable readiness case. This is off by default and requires retained pairs.
+Three failed minutes among at least four known minutes open an early phase;
+a proven weekly miss promotes that same case without changing its original
+owner. A weekly miss can also open a case directly. Each phase admits exactly
+one actionable owner notice. Optional `backup = "agent/example/backup"` selects
+a distinct, active agent for one held informational notice per phase, never
+an alternate owner. An unavailable backup cannot block owner delivery.
+Only one backup intent is retained per phase; undelivered informational intents
+are discarded on recovery rather than carried into later cases.
+Measured weekly recovery closes failure receipts without another owner notice;
+Unknown preserves the case. Pending legacy cuts are journaled and replayed
+through the legacy writer before reading a newer publication. Enabling the
+shared route uses drain-before-enable: every already-open weekly episode
+finishes under its existing writer and receives no shared-case primary notice.
+Only episodes opened after that drain belong to the shared sender.
+Fresh legacy-drain readings must strictly advance the durable case-journal
+cursor; older and equal cuts are not routed. Exact admitted pending work
+replays separately using its original observation clock.
+Receivers classify managed failures by their originating daemon and linked
+opening, independently of the receiver's local policy configuration.
+Committing recovery also advances the short-admission cursor through that
+weekly cut. A delayed companion at or before recovery cannot reopen the case,
+including after restart; a genuinely later short cut can open a new case.
+Keep `readiness-case.json` across
+restart: it journals phase transitions and notice intents before delivery and
+recognizes native receipts on replay. The legacy weekly checkpoint remains
+byte-for-byte unchanged while the shared route is enabled.
+
+Readiness operation receipts are accepted only when their daemon author,
+origin, subject and phase/notice fields match the intended record. An
+incompatible key occupant produces a visible operational conflict and a log
+entry, not a successful phase or a fatal sampling error. Continuation keys
+derive from the original key and the conflicting native claim ID; four such
+continuations are allowed. A longer chain leaves that operation pending while
+other notices and measured recovery continue. No secret or new journal state
+is needed to replay a continuation.
+Replicated operation conflicts remain occupied. Each read retains at most 16
+native occupants from a plain bounded seek of the existing operation-ID index;
+an extra row detects overflow. There is no receipt ranking or full-history sort.
+Expected receipts in the window are validated even on overflow. Without a
+matching receipt in the window, overflow blocks the operation, never marks it vacant.
+Existing continuations are searched before a new receipt is written. One shared
+64-visit allowance counts reads and occupant validations across all branches;
+exhaustion blocks that operation nonfatally. Conflict diagnostics and their log
+entry are deduplicated by the original operation key across replay and restart.
+No new index or startup migration is needed for bounded occupant discovery.
+Every receipt still requires full expected-record validation.
+A blocked phase lookup is not an absent failure: measured recovery remains
+incomplete, retaining the case and pending recovery even when an existing
+continuation receipt cannot be reached within the bounded window.
+
+**Disabling shared readiness cases**
+
+Do not turn off the sender with shared intents pending: receiving members
+continue to recognize managed phases and exclude them from generic delivery,
+independently of the sender's current configuration.
+
+1. Keep the executor's shared route enabled until its active case has measured
+   recovery and its journal has no pending phase transition or unrecorded owner
+   notices. Recovery discards undelivered informational backup intents.
+2. Inspect and resolve any reported readiness-operation conflicts before
+   disabling. A blocked receipt is not a completed notice.
+3. Disable `shared_case` and restart the selected executor only after that drain.
+   Retain the case journal and legacy weekly checkpoint across the change.
+4. If the sender was disabled prematurely, restore the same executor policy and
+   journal to finish admitted work first; do not delete or recreate the journal
+   to try to transfer pending delivery to generic receivers.
 
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
@@ -1274,3 +1453,64 @@ The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 
+
+### Agent-list performance fault delivery
+
+The GET agents objective measures the local member's completed eligible requests over seven days.
+A complete window with traffic is required. The objective is met when at least 95% succeed in
+100 ms or less. Measurement continues when the optional `agents_request_slo_fault` setting is
+absent. An explicit `member` must match the daemon origin and `reviewer` must name an active
+agent. The binding comes from the Factory response intent for `fractal-agents-success-fast`.
+
+Fault delivery is disabled by default. Keep the setting absent until the owner/member and
+reviewer assignment has been reviewed and a complete durable seven-day window exists.
+The Factory response proposal alone does not enable delivery; enabling the reviewed binding
+is a separate configuration decision.
+
+The doctor field `performance.agentsRequestSloShadow` reports the current counts along with
+`fault_pending`, `fault_quarantined`, `fault_delivery_blocked`, and `fault_outbox_overflow`.
+Use the daemon log for the blocked delivery error. To inspect the ledger directly, open
+`STATE/agents-request-slo-v1.sqlite3` read-only and query the following tables.
+
+```sql
+SELECT * FROM fault_outbox ORDER BY id;
+SELECT * FROM fault_quarantine ORDER BY id;
+SELECT * FROM fault_overflow;
+```
+
+A blocked head stays pending until the same reviewer becomes active and the graph can accept
+the native transition. Removing the setting pauses delivery and admission while measurements
+continue. Restoring the same binding resumes ordered replay. Enabling a different reviewer
+quarantines old pending intents before replay. A clock rewind quarantines pending cuts that used
+invalidated minutes. Quarantine keeps the latest 64 records for inspection and never replays them.
+The native episode is `slo-objective/NODE/fractal-agents-success-fast` on `daemon/NODE`.
+Inspect that episode and reconcile any open fault with its original reviewer.
+Changing the setting never reassigns an already-open fault.
+
+Before acknowledging a queued missed cut, the adapter delivers its notice through the existing
+native fault sender. A queued recovery cannot overtake that delivery, including when both cuts
+are replayed after a restart. Sender failure retains the missed cut and blocks later cuts;
+retrying after a sent notice reuses the native sender's episode idempotency key.
+
+Overflow means the 64-entry pending queue could not retain another transition. The daemon can
+replay retained entries but stops admitting new ones. The marker survives restart and changes to
+the binding. Before clearing it, an operator reviews the retained and quarantined decisions,
+records the accepted gap, and reconciles the native episode. Leave the marker in place if the
+episode or loss is still unresolved. Once the retained queue has drained, stop the daemon, back up
+the ledger, verify the `owner` row, and clear only the overflow marker in an explicit SQLite
+transaction. The conditional statement refuses to clear it while pending intents exist.
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM fault_overflow WHERE singleton = 1
+    AND NOT EXISTS (SELECT 1 FROM fault_outbox);
+SELECT changes() AS deleted_marker;
+SELECT EXISTS (SELECT 1 FROM fault_overflow) AS marker_present;
+COMMIT;
+```
+
+Confirm that one row was deleted, or independently confirm the marker was already absent.
+A zero-row deletion with the marker still present leaves delivery admission paused.
+
+Restarting with the binding enabled resumes admission at the next conclusive completed cut.
+An incomplete or zero-traffic window leaves the existing native fault unchanged.

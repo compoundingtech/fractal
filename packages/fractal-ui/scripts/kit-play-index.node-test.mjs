@@ -133,6 +133,20 @@ test('policy tags fail closed even before critical selection, and a new app fold
   assert.throws(() => playSetIdsFromIndex({ entries: { wide: { ...wide, tags: ['critical', 'both-widths', 'merge-only'] } } }), /both merge-only and both-widths/)
 })
 
+test('reserved kit policy tag families reject typos before selecting critical stories', () => {
+  for (const tag of ['merge-onyl', 'merge-Only', 'both-width', 'both-wdiths']) {
+    for (const tags of [[tag], ['critical', tag]]) {
+      assert.throws(
+        () => playSetIdsFromIndex({ entries: { story: { ...story, tags } } }),
+        { message: `Unknown kit policy tag "${tag}" on ${story.id}; expected merge-only or both-widths` },
+      )
+    }
+  }
+  assert.deepEqual(playSetIdsFromIndex({ entries: { story: { ...story, tags: ['dev', 'autodocs', 'application-tag'] } } }), {
+    mergeOnlyIds: [], bothWidthsIds: [],
+  })
+})
+
 test('transcript image contracts batch per commit without dropping the individual merge matrix', () => {
   const prefix = 'fractal-app-transcript-images--'
   const individualDepth = MERGE_ONLY.filter(id => id.startsWith(prefix))
@@ -154,6 +168,7 @@ const densityIds = ['fractal-narrow-layout--breakpoint-density', 'fractal-narrow
 const focusReturnId = 'fractal-narrow-layout--drawer-focus-return'
 const nativeOverlayId = 'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed'
 const usageIds = ['fractal-app-usagepane--all-states', 'fractal-app-usagepane--populated']
+const buildChangesIds = ['fractal-app-developer-bar-build-and-changes--narrow-unseen', 'fractal-app-developer-bar-build-and-changes--short-viewport-unseen']
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-composer--footer-width-budget-narrow-light',
@@ -179,6 +194,7 @@ test('the strict case set measures the filter once, keeps functional corners, an
     [focusReturnId, [['dark', 899], ['light', 440]]],
     ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
     ...usageIds.map(id => [id, [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]]),
+    ...buildChangesIds.map(id => [id, [['dark', 390], ['light', 390]]]),
   ])
   const omittedBenchmarkCases = [
     { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
@@ -245,15 +261,22 @@ test('Usage pane stories retain both themes and widths in full and per-commit ga
     assert.deepEqual(commitSetCases([id], { mergeOnlyIds: [], bothWidthsIds: [id] }).cases, expected)
   }
 })
+test('dev-bar build popover phone stories run at phone width in both themes in full and per-commit gates', () => {
+  for (const id of buildChangesIds) {
+    const expected = [{ id, scheme: 'dark', width: 390 }, { id, scheme: 'light', width: 390 }]
+    assert.deepEqual(fullCases([id]), expected)
+    assert.deepEqual(commitSetCases([id], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
+  }
+})
 test('kit-only fixtures scope their policy explicitly without making app cases optional in production', () => {
   const ids = [benchmarkId, nativeOverlayId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
-  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds])
+  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...buildChangesIds])
   assert.doesNotThrow(() => validateCaseOverrides(entries, KIT_CASE_OVERRIDES))
   assert.throws(() => validateCaseOverrides(entries), /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
-  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...buildChangesIds, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
   assert.doesNotThrow(() => validateCaseOverrides(entries))
   assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
@@ -327,7 +350,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...aliasIds, ...baseIds]
+    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...usageIds, ...buildChangesIds, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -339,8 +362,8 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 59)
-    assert.equal(receipt.omitted.cases, 65)
+    assert.equal(receipt.expectedCases, 63)
+    assert.equal(receipt.omitted.cases, 69)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)

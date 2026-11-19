@@ -94,6 +94,10 @@ pub struct Complete(pub Entity);
 
 impl ValueCompleter for Complete {
     fn complete(&self, current: &OsStr) -> Vec<CompletionCandidate> {
+        fractal_client::set_client_name(format!(
+            "fractal-completion {}",
+            fractal_drivers::version::machine_version()
+        ));
         let Some(prefix) = current.to_str() else {
             return Vec::new();
         };

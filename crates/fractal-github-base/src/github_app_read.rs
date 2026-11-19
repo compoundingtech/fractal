@@ -18,6 +18,15 @@ pub struct ReadSource {
     pub principal: String,
     pub token: Arc<String>,
     pub used_fallback: Arc<AtomicBool>,
+    /// The installation token's permissions, as its sidecar records them.
+    pub permissions: Arc<BTreeMap<String, String>>,
+}
+
+impl ReadSource {
+    /// Whether the installation token may read `permission`.
+    pub fn grants(&self, permission: &str) -> bool {
+        self.permissions.get(permission).is_some_and(|level| level == "read" || level == "write")
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,15 +139,27 @@ pub fn load(root: &Path, owner: &str, app: &str) -> std::result::Result<ReadSour
     if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control()) { return Err("unreadable"); }
     let principal = format!("app:{app}:{owner}:{}:{}:{}", metadata.installation_id, metadata.repository_selection,
         serde_json::to_string(&metadata.permissions).map_err(|_| "unreadable")?);
-    Ok(ReadSource { root: root.into(), owner: owner.into(), app: app.into(), principal, token: Arc::new(token), used_fallback: Arc::new(AtomicBool::new(false)) })
+    Ok(ReadSource { root: root.into(), owner: owner.into(), app: app.into(), principal, token: Arc::new(token), used_fallback: Arc::new(AtomicBool::new(false)), permissions: Arc::new(metadata.permissions) })
 }
 
 pub fn select(root: Option<&Path>, owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
     let Some(root) = root else { fallback(owner, app, "missing"); return pat.clone(); };
-    match load(root, owner, app) {
+    match load(root, owner, app).or_else(|reason| substitute(root, owner, app, reason)) {
         Ok(source) => GithubAuth::Read { source, pat: Box::new(pat.clone()) },
         Err(reason) => { fallback(owner, app, reason); pat.clone() }
     }
+}
+
+/// Issue reads use the gh-ci installation when no github-ledger installation is published
+/// for the owner and gh-ci's token grants Issues read. Otherwise the original reason stands.
+fn substitute(root: &Path, owner: &str, app: &str, reason: &'static str) -> std::result::Result<ReadSource, &'static str> {
+    if app != "github-ledger" || !matches!(reason, "missing" | "no-installation") { return Err(reason); }
+    load(root, owner, "gh-ci").ok().filter(|source| source.grants("issues")).ok_or(reason)
+}
+
+/// The gh-ci installation for commit status reads, when its token grants Commit statuses read.
+pub fn statuses_source(root: &Path, owner: &str) -> Option<ReadSource> {
+    load(root, owner, "gh-ci").ok().filter(|source| source.grants("statuses"))
 }
 
 pub fn route(url: &reqwest::Url) -> Option<(&str, &'static str, bool)> {
@@ -263,7 +284,7 @@ pub(crate) mod tests {
         }).await
     }
 
-    async fn server_with_headers(handler: impl Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync + 'static) -> Server {
+    pub(crate) async fn server_with_headers(handler: impl Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync + 'static) -> Server {
         async fn handle(State(handler): State<Arc<Handler>>, request: axum::extract::Request) -> axum::response::Response {
             let authorization = request.headers().get("authorization").unwrap().to_str().unwrap().to_owned();
             let path = request.uri().to_string();
@@ -329,6 +350,52 @@ pub(crate) mod tests {
         // A pruned key starts fresh, including its discarded suppression count.
         assert_eq!(warnings.emission("owner-1", "gh-ci", "missing", boundary), Some(0));
         assert_eq!(warnings.keys, 3);
+    }
+
+    fn grant(root: &Path, owner: &str, app: &str, permissions: Value) {
+        let path = root.join(app).join(format!("{owner}.json"));
+        let mut sidecar: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        sidecar["permissions"] = permissions;
+        std::fs::write(path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn issue_reads_use_gh_ci_only_when_it_grants_issues_and_no_ledger_is_published() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = "issue-substitute";
+        let pat = GithubAuth::test("fixture-pat");
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), owner, "gh-ci", "fixture-ci", expires);
+        assert_eq!(select(Some(root.path()), owner, "github-ledger", &pat).cache_principal(), "pat");
+        assert_eq!(count(owner, "github-ledger", "no-installation"), 1);
+        grant(root.path(), owner, "gh-ci", json!({"metadata": "read", "issues": "read"}));
+        let substituted = select(Some(root.path()), owner, "github-ledger", &pat);
+        assert!(matches!(&substituted, GithubAuth::Read { source, .. } if source.app == "gh-ci"));
+        assert_eq!(substituted.local_token().as_str(), "fixture-ci");
+        assert_eq!(count(owner, "github-ledger", "no-installation"), 1, "a substitute is not a fallback");
+        install(root.path(), owner, "github-ledger", "fixture-ledger", expires);
+        assert_eq!(select(Some(root.path()), owner, "github-ledger", &pat).local_token().as_str(), "fixture-ledger");
+        // A published but expired ledger installation is a fault, not a reason to substitute.
+        install(root.path(), owner, "github-ledger", "fixture-ledger", chrono::Utc::now() - chrono::Duration::seconds(1));
+        assert_eq!(select(Some(root.path()), owner, "github-ledger", &pat).cache_principal(), "pat");
+        assert_eq!(count(owner, "github-ledger", "expired"), 1);
+    }
+
+    #[test]
+    fn status_reads_use_gh_ci_once_it_grants_statuses() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = "status-route";
+        let pat = GithubAuth::test("fixture-pat");
+        install(root.path(), owner, "gh-ci", "fixture-ci", chrono::Utc::now() + chrono::Duration::minutes(60));
+        let auth = select(Some(root.path()), owner, "gh-ci", &pat);
+        let url = format!("https://api.github.com/repos/{owner}/repo/commits/abc/status");
+        assert_eq!(crate::github_http::read_auth_for_url(&url, &auth).cache_principal(), "pat");
+        assert_eq!(count(owner, "gh-ci", "statuses"), 1);
+        grant(root.path(), owner, "gh-ci", json!({"metadata": "read", "statuses": "read"}));
+        let selected = crate::github_http::read_auth_for_url(&url, &auth);
+        assert!(matches!(&selected, GithubAuth::Read { source, .. } if source.grants("statuses")));
+        assert_eq!(selected.local_token().as_str(), "fixture-ci");
+        assert_eq!(count(owner, "gh-ci", "statuses"), 1);
     }
 
     #[test]

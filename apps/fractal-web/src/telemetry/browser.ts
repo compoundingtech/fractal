@@ -383,7 +383,8 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
             closeExporter = () => { Effect.runForkWith(services)(shutdown) }
             // Normal startup remains paint-gated. Hidden tabs and failed startup still get a
             // bounded fallback; teardown shares this initializer instead of dropping its buffer.
-            yield* Effect.raceFirst(Deferred.await(ready), Effect.sleep('10 seconds')).pipe(
+            yield* Deferred.await(ready).pipe(
+              Effect.timeoutOrElse({ duration: '10 seconds', orElse: () => Effect.void }),
               Effect.andThen(Effect.suspend(() => shutdownRequested ? shutdown : initialize)),
               Effect.forkIn(scope),
             )

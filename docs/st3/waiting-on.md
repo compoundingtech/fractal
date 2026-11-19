@@ -19,8 +19,10 @@ The HTTP reads are `GET /v1/mission-runs/{run}/waiting-on` and `GET /v1/blocked-
 Neither read folds claims or replays history. They read state Fractal already keeps current:
 
 - The published work list: every open step of a current generation, with its effective state,
-  holder, lease, last progress, declared wait, wake attempts and blockers. Its refresher refolds
-  only the steps whose claims changed ([operational queries](operational-queries.md)).
+  holder, lease, last progress, declared wait, wake attempts and blockers, and for a program step
+  its innermost open journal key, read from its newest 64 journal entries when the row is folded.
+  Its refresher refolds only the steps whose claims changed ([operational queries](operational-queries.md)),
+  and each journal entry is a claim on its step.
 - The published missions list: the open human gates and the agents roster that mission
   presentations read, which gives each seat's state.
 - For one run, one primary-key read of the run and a range of its own `step_runs` rows. This
@@ -41,7 +43,7 @@ Each open step gets one kind. These five are causes:
 | --- | --- | --- |
 | `ask` | An open `work ask`, or a human gate, waits for an answer. This includes the step that asked. | the person |
 | `seat-down` | The seat that holds the step, or that would take it, is stopped, failed, suspended, down, retired or faulted. | the seat |
-| `no-progress` | A seat holds the step and has recorded no progress (or claim) for longer than the quiet limit. | the holder |
+| `no-progress` | A seat holds the step and has recorded no progress (or claim) for longer than the quiet limit, or a program step's journal has no new entry within its `stalled-after`. | the holder (Fractal for a program) |
 | `unclaimed` | Ready for longer than the quiet limit, and nobody claims it. | the assignee or the queue holding it |
 | `hold` | Blocked with a reason, in a declared `work wait`, in a retry backoff, or Fractal's wait for another run. | outside the fleet |
 
@@ -50,6 +52,7 @@ The rest are not causes:
 | Kind | Meaning |
 | --- | --- |
 | `working` | Progress within the quiet limit. |
+| `program` | A program step whose journal moved within its `stalled-after`. The detail names its innermost open key: the most recently started key without a result, and the child run or ask it waits on. A program's ask is an `ask`, named with its key. |
 | `verifying` | Submitted, and Fractal checks its gates. |
 | `ready` | Ready within the quiet limit. |
 | `queued` | Ready, waiting its turn behind other work on a busy seat. |

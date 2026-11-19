@@ -34,12 +34,8 @@ pub async fn seat_freshness(
         .map_err(|error| validation(format!("{error:#}")))?;
     let store = state.store.clone();
     blocking_store(move || {
-        let hosted = store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == received.from))
-            .map(|desired| desired.subject)
-            .collect::<BTreeSet<_>>();
+        let subjects = received.seats.iter().map(|seat| seat.agent.as_str()).collect::<Vec<_>>();
+        let hosted = store.hosted_subjects(&subjects, &received.from)?;
         // A host's clock may run ahead: a time past this node's now plus a minute is taken as
         // that, so a skewed clock cannot keep a seat looking fresh.
         let latest = smallclaims::store::now_ms() + SEAT_FRESHNESS_CLOCK_SKEW.as_millis();
@@ -70,20 +66,9 @@ pub async fn seat_freshness_read(
         .map_err(|error| validation(format!("{error:#}")))?;
     let store = state.store.clone();
     blocking_store(move || {
-        let hosted = store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| {
-                desired
-                    .member
-                    .as_ref()
-                    .is_some_and(|member| member.host == store.origin())
-            })
-            .map(|desired| desired.subject)
-            .collect::<BTreeSet<_>>();
         match received.read {
             SeatFreshnessRead::MessageMarks { messages } => {
-                let answers = crate::store::message_marks::host_marks(&store, &messages, &hosted)?;
+                let answers = crate::store::message_marks::host_marks(&store, &messages)?;
                 let messages = messages
                     .into_iter()
                     .zip(answers)

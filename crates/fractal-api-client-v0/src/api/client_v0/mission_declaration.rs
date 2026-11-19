@@ -23,8 +23,20 @@ pub async fn get(
             let value = state.store.mission_declaration(&query.mission, query.revision.as_deref(), index)?;
             let value = value.map(|(spec, published_at)| {
                 let rendered = crate::mission_render::render_mission_kdl(&spec)?;
-                Ok::<_, FractalError>(json!({"mission": spec.subject, "revision": spec.revision,
-                    "published_at": published_at, "text": rendered.text, "legacy": rendered.legacy}))
+                let mut value = json!({"mission": spec.subject, "revision": spec.revision,
+                    "published_at": published_at, "text": rendered.text, "legacy": rendered.legacy});
+                // The source a revision was rendered from, as its first publication recorded it.
+                if let Some(provenance) = state.store.mission_provenance(&spec.id, &spec.revision)
+                    .map_err(|error| FractalError::new("internal", error.to_string()))?
+                {
+                    value["provenance"] = json!({
+                        "repository": provenance.source.repository,
+                        "commit": provenance.source.commit,
+                        "path": provenance.source.path,
+                        "renderer": provenance.source.renderer,
+                    });
+                }
+                Ok::<_, FractalError>(value)
             }).transpose()?;
             Ok((client_snapshot_at(&state, index), value))
         })
@@ -75,6 +87,28 @@ mod tests {
         assert_eq!(read(&state, Some(first)).await.unwrap(), original);
         assert_eq!(read(&state, None).await.unwrap()["revision"], second);
         assert_eq!(read(&state, Some("missing".into())).await.unwrap_err().status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn mission_declaration_carries_the_recorded_provenance_when_there_is_one() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "declaration-node");
+        let first = publish(&state, "No source");
+        assert!(read(&state, Some(first)).await.unwrap().get("provenance").is_none());
+        let source = "version 2\nmission \"example/declaration\" state=\"ready\" {\n provenance {\n  reason \"Rendered from TypeScript.\"\n  source {\n   repository \"https://example.invalid/fleet/missions\"\n   commit \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n   path \"missions/declaration.ts\"\n   renderer \"fractal-declarations\"\n  }\n }\n goal \"Sourced goal\"\n}\n";
+        let intent = crate::graph::parse_intent(source, "declaration-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "sourced", Some("person/operator")).unwrap();
+        let sourced = read(&state, None).await.unwrap();
+        assert_eq!(sourced["provenance"], json!({
+            "repository": "https://example.invalid/fleet/missions",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path": "missions/declaration.ts",
+            "renderer": "fractal-declarations",
+        }));
+        assert!(!sourced["text"].as_str().unwrap().contains("Rendered from TypeScript."), "{sourced}");
     }
 
     #[tokio::test]

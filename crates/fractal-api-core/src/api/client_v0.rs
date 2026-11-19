@@ -53,6 +53,7 @@ pub mod published_missions;
 pub mod collection_ivm;
 pub mod summary;
 pub mod assistant;
+pub mod external_grants;
 pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
@@ -251,6 +252,13 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
     }
+    // A read position is shown only by its own collection, which shows nothing else.
+    if collection == fractal_schema::read_positions::COLLECTION {
+        return kind != fractal_schema::read_positions::KIND;
+    }
+    if kind == fractal_schema::read_positions::KIND {
+        return true;
+    }
     match collection {
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
@@ -313,6 +321,9 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -333,7 +344,11 @@ const ACTIONS: &[&str] = &[
     "arrangement.edit",
     "harness.answer",
     "arrangement.membership.edit",
+    "read-position.advance",
     "attention.resolve",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -355,6 +370,7 @@ const ACTIONS: &[&str] = &[
     "custom.reply",
     "prompt.respond",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -396,6 +412,10 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
+    "read-position.advance",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -414,6 +434,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "session.import",
     "work.ask",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -476,6 +497,8 @@ pub struct ClientSession {
     /// Accept-time kernel connector generation; never supplied by a request header.
     pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub custom_forms: bool,
+    /// Negotiated `model-drift-attention.v1`: the client reads `model-drift` attention rows.
+    pub model_drift_attention: bool,
     pub conversation_blocks: bool,
     pub conversation_delivery_links: bool,
     pub conversation_message_participants: bool,
@@ -486,6 +509,14 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    /// Which attention rows this session's client can read as they are.
+    pub fn attention_compatibility(&self) -> crate::api::AttentionCompatibility {
+        crate::api::AttentionCompatibility {
+            custom_forms: self.custom_forms,
+            model_drift: self.model_drift_attention,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
@@ -499,6 +530,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: true,
+            model_drift_attention: true,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -542,6 +574,7 @@ impl ClientSession {
                 local_peer: false,
                 peer_process: None,
                 custom_forms,
+                model_drift_attention: false,
                 conversation_blocks: false,
                 conversation_delivery_links: false,
                 conversation_message_participants: false,
@@ -555,9 +588,25 @@ impl ClientSession {
         };
         // Free mode: an agent's local session holds every scope a person's does. Its actions
         // still record the agent as their actor.
-        Ok(Self {
-            actor: person.into(),
-            authority_actor: person.into(),
+        Ok(Self::acting(person))
+    }
+
+    /// A program effect's local session, acting as `run` (docs/st3/program-engine.md §3). Only a
+    /// request its run credential binds to that same run may name it; run authority then decides
+    /// each write.
+    pub fn local_run(run: &str, bound_run: Option<&str>) -> Result<Self, ApiError> {
+        if bound_run != Some(run) {
+            return Err(forbidden(
+                "a trusted Unix client acts as a mission run only when its run credential binds that run",
+            ));
+        }
+        Ok(Self::acting(run))
+    }
+
+    fn acting(actor: &str) -> Self {
+        Self {
+            actor: actor.into(),
+            authority_actor: actor.into(),
             pairing_grant: None,
             pairing_issued_here: false,
             grant_expires_at: None,
@@ -565,14 +614,15 @@ impl ClientSession {
             transport: "unix",
             local_peer: false,
             peer_process: None,
-            custom_forms,
+            custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+        }
     }
 
     pub fn pairing() -> Self {
@@ -587,6 +637,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -637,6 +688,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    // Synced read positions: list, follow and advance the session person's own positions.
+    // Granted only when all three are allowed, so a client never sends a doomed advance.
+    capabilities.push(json!({"id":"read-positions", "version":1, "state":if session.allows("read.projections") && session.allows("read.arrangements") && session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         if *action == "harness.answer" {
             return super::harness_questions::capability(state, session);
@@ -657,6 +711,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"person-answer-option-notes", "version":1, "state":"granted"}));
     // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
     capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -677,6 +732,13 @@ pub fn forbidden(message: impl Into<String>) -> ApiError {
         code: "forbidden".into(),
         message: message.into(),
         details: Box::default(),
+    }
+}
+
+fn credential_rejected(message: &str) -> ApiError {
+    ApiError {
+        details: Box::new(serde_json::Map::from_iter([("reason".into(), json!("credential-rejected"))])),
+        ..forbidden(message)
     }
 }
 
@@ -741,6 +803,10 @@ pub fn authenticate(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|feature|
             feature.trim() == "conversation-delivery-links.v1"));
+    let model_drift_attention = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|feature|
+            feature.trim() == "model-drift-attention.v1"));
     let messages_paging = request
         .headers()
         .get("x-st3-features")
@@ -750,11 +816,13 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
-    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+    if let Some(web) = request.extensions().get::<LocalWebSession>()
+        && !request.headers().contains_key(AUTHORIZATION) {
         let mut session = ClientSession::local(Some(&web.person))?;
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
         session.custom_forms = custom_forms;
+        session.model_drift_attention = model_drift_attention;
         session.grant_expires_at = Some(web.expires_at);
         session.conversation_blocks = conversation_blocks;
         session.messages_paging = messages_paging;
@@ -766,10 +834,15 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
-            let mut session = ClientSession::local(person)?;
+            let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
+            let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
+                Some(run) => ClientSession::local_run(run, bound_run)?,
+                None => ClientSession::local(person)?,
+            };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
@@ -778,6 +851,7 @@ pub fn authenticate(
                 return Err(forbidden("local harnesses and peers cannot inspect owner administration"));
             }
             session.custom_forms = custom_forms;
+            session.model_drift_attention = model_drift_attention;
             session.conversation_blocks = conversation_blocks;
             session.conversation_delivery_links = conversation_delivery_links;
             session.conversation_message_participants = conversation_message_participants;
@@ -786,7 +860,8 @@ pub fn authenticate(
         }
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
-            && request.uri().path().ends_with("/complete");
+            && (request.uri().path().ends_with("/complete")
+                || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)
             .ok_or_else(|| forbidden("the Fabric-loopback client credential is required"));
@@ -801,21 +876,26 @@ pub fn authenticate(
     let digest = credential_digest(credential);
     if let Some(session) = assistant::authenticate(state, &digest, transport)? {
         assistant::authorize_route(&session, request)?;
+        if external_grants::is_service(&session) {
+            external_grants::audit_service_read(state, &session)?;
+        }
         return Ok(session);
     }
     let pairings = state
         .store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| {
-        claim
-            .body
-            .pointer("/fields/credential_hash")
-            .and_then(Value::as_str)
-            == Some(digest.as_str())
-    });
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_trusted(claim, client_now_ms()).map_err(ApiError::internal)?
+        {
+            paired = Some(claim);
+            break;
+        }
+    }
     let Some(paired) = paired else {
-        return Err(forbidden("the client credential is unknown or expired"));
+        return Err(credential_rejected("the client credential is unknown or expired"));
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     // Transfer artifacts contain complete batches/state, not recipient-authorized views.
@@ -827,6 +907,7 @@ pub fn authenticate(
     {
         return Err(super::custom::notices_unavailable());
     }
+    session.model_drift_attention = model_drift_attention;
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
@@ -859,15 +940,23 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
+    paired_client_session_at(state, paired, transport, custom_forms, client_now_ms())
+}
+
+pub fn paired_client_session_at(
+    state: &AppState,
+    paired: &ClaimRecord,
+    transport: &'static str,
+    custom_forms: bool,
+    now_unix_ms: u128,
+) -> Result<ClientSession, ApiError> {
+    let expires_at = state.store.pairing_completion_deadline(paired, now_unix_ms).map_err(ApiError::internal)?
+        .ok_or_else(|| credential_rejected("the client credential requires a new pairing"))?;
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
     // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
-    let revoked = !state.store.claims_for_subject_kind_at(
-        &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.is_empty();
-    let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
-        .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
-    if revoked || expires_at <= client_now_ms() {
-        return Err(forbidden("the client credential was revoked or expired"));
+    let revoked = state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)?;
+    if revoked || expires_at <= now_unix_ms {
+        return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("a paired client has no derived actor"))?;
@@ -894,6 +983,7 @@ pub fn paired_client_session(
         local_peer: false,
         peer_process: None,
         custom_forms,
+        model_drift_attention: false,
         conversation_blocks: false,
         conversation_delivery_links: false,
         conversation_message_participants: false,
@@ -923,18 +1013,28 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
-    // With a grant, the canonical newest completion, so every member checks the same one.
+    // Admission precedes canonical selection; retained records cannot displace a valid grant.
+    let now = client_now_ms();
     let paired = match session.pairing_grant.as_deref() {
-        Some(subject) => state.store
-            .newest_claim_for_subject_kind(subject, "custom.client.pairing-completed")
+        Some(subject) => state.store.newest_admitted_pairing_completion(subject, now)
             .map_err(ApiError::internal)?,
-        None => state.store
-            .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
-            .map_err(ApiError::internal)?
-            .claims.into_iter()
-            .find(|claim| claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())),
+        None => {
+            let claims = state.store.claims_for_kind_at(
+                "custom.client.pairing-completed", None, true, 10_000,
+            ).map_err(ApiError::internal)?.claims;
+            let mut selected = None;
+            for claim in claims {
+                if claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
+                    && state.store.pairing_completion_is_admitted(&claim, now).map_err(ApiError::internal)? {
+                    selected = Some(claim);
+                    break;
+                }
+            }
+            selected
+        }
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
+    current.model_drift_attention = session.model_drift_attention;
     current.conversation_blocks = session.conversation_blocks;
     current.conversation_delivery_links = session.conversation_delivery_links;
     current.conversation_message_participants = session.conversation_message_participants;
@@ -1031,7 +1131,9 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
-                "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
+                "attempt":step.attempt,
+                "assignee":step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                "claimant":step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
                 "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
                 "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),
@@ -1042,8 +1144,9 @@ pub fn mission_list_cards_with(
             })).collect::<Vec<_>>();
             let current=shown.iter().filter(|s| matches!(s["state"].as_str(),Some("ready"|"claimed"|"verifying"|"blocked")))
                 .map(|s| json!({"id":s["id"],"title":s["title"],"assignee":s["assignee"],"claimant":s["claimant"],"state":s["state"],"since":s["since"],"progress_at":s["progress_at"]})).collect::<Vec<_>>();
-            Ok::<Value,anyhow::Error>(json!({
-                "id":run["id"],"generation_id":run["generation_id"],"requester":run["requester"],
+            let mut value = json!({
+                "id":run["id"],"generation_id":run["generation_id"],"revision":run["revision"],"requester":run["requester"],
+                "retried_by":run["retried_by"],
                 "status":run["status"],"phase":run["phase"],"progress":{"done":done,"total":total},
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
@@ -1052,7 +1155,13 @@ pub fn mission_list_cards_with(
                 "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
                 "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
-            }))
+            });
+            for field in ["retry_of", "supersedes", "superseded_by", "supersession_fault"] {
+                if run[field].is_string() {
+                    value[field] = run[field].clone();
+                }
+            }
+            Ok::<Value,anyhow::Error>(value)
         }).collect::<anyhow::Result<Vec<_>>>()?;
         let state=if details.iter().any(|run| run["blocker"]["scope"]==crate::reconcile::FIRST_READINESS_FAULT_SCOPE) {"blocked"} else {state};
         let must_act=["you","agent","blocked","system"].into_iter()
@@ -1060,7 +1169,7 @@ pub fn mission_list_cards_with(
         let generations=newest.iter().map(|r| (r["id"].as_str().unwrap().to_owned(),r["generation_id"].clone()))
             .collect::<serde_json::Map<_,_>>();
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
-        Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
+        let mut value = json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
             "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
@@ -1069,7 +1178,17 @@ pub fn mission_list_cards_with(
             "run_generations":generations,"must_act":must_act,
             "resources":crate::api::client_declared_resources(
                 definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
-            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
+            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}});
+        if let Some(admission) = definition.and_then(|definition| {
+            crate::model::DeclaredAdmission::from_declaration(
+                definition.mission.declared_priority.as_ref(),
+                definition.mission.declared_lane.as_ref(),
+                definition.mission.declared_budgets.as_ref(),
+            )
+        }) {
+            value["declared_admission"] = serde_json::to_value(admission)?;
+        }
+        Ok(value)
     }).collect()
 }
 
@@ -1753,7 +1872,7 @@ pub async fn now(
         move |state, snapshot| {
             let mut items =
                 super::client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             // The default Now view is the person's attention queue. Mission work belongs
             // in Control; only an explicit work filter opts it into this combined view.
             if actor.is_some() || owner_run.is_some() {
@@ -1811,8 +1930,23 @@ pub fn device_resources(
     claims.sort_by_key(|claim| claim.store_index);
     let mut paired = BTreeMap::<String, (&ClaimRecord, Option<&ClaimRecord>)>::new();
     let mut names = BTreeMap::<String, String>::new();
+    let mut unadmitted = BTreeSet::new();
+    let mut withdrawals = BTreeMap::<&str, Vec<&ClaimRecord>>::new();
+    for claim in &claims {
+        if claim.kind == "custom.client.pairing-revoked" {
+            withdrawals.entry(&claim.subject).or_default().push(claim);
+        }
+    }
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        if claim.kind == "custom.client.pairing-begun"
+            && !state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)? {
+            continue;
+        }
+        if claim.kind == "custom.client.pairing-completed"
+            && !state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+            unadmitted.insert(claim.id.clone());
+        }
         if claim.kind == "custom.client.pairing-begun"
             && let Some(name) = fields.get("device_name").and_then(Value::as_str)
         {
@@ -1825,10 +1959,24 @@ pub fn device_resources(
             "custom.client.pairing-completed"
                 if fields.get("person_id").and_then(Value::as_str) == Some(person) =>
             {
-                paired.insert(device_id.to_owned(), (claim, None));
+                let mut withdrawn = None;
+                if unadmitted.contains(&claim.id) {
+                    if paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
+                        continue;
+                    }
+                    for revoked in withdrawals.get(claim.subject.as_str()).into_iter().flatten() {
+                        if state.store.pairing_revocation_is_trusted(revoked, claim).map_err(ApiError::internal)? {
+                            withdrawn = Some(*revoked);
+                        }
+                    }
+                    // Raw shadows cannot replace admitted grants or withdrawn legacy history.
+                    if withdrawn.is_none() { continue; }
+                }
+                paired.insert(device_id.to_owned(), (claim, withdrawn));
             }
             "custom.client.pairing-revoked" => {
-                if let Some(entry) = paired.get_mut(device_id) {
+                if let Some(entry) = paired.get_mut(device_id)
+                    && state.store.pairing_revocation_is_trusted(claim, entry.0).map_err(ApiError::internal)? {
                     entry.1 = Some(claim);
                 }
             }
@@ -1965,6 +2113,7 @@ fn session_messages(
     incarnation: Option<&str>,
     before: Option<u64>,
 ) -> Result<Vec<ClaimRecord>, ApiError> {
+    let (mut messages, started, ended) = crate::otel::conversation_phase("st.conversation.graph_sql_ms", || -> Result<_, ApiError> {
     let (started, ended) = match incarnation {
         Some(incarnation) => state.store.conversation_runtime_span(owner, incarnation)
             .map_err(ApiError::internal)?,
@@ -1972,9 +2121,12 @@ fn session_messages(
     };
     // Every stream item the endpoint has, as the graph's newest sends: a delta read takes those
     // past its cursor's stream position.
-    let mut messages = state.store.conversation_messages_at(
+    let messages = state.store.conversation_messages_at(
         owner, before, 0, Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(0)),
     ).map_err(ApiError::internal)?;
+    crate::otel::conversation_count("st.conversation.graph_rows", messages.len());
+    Ok((messages, started, ended))
+    })?;
     messages.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
     Ok(messages)
 }
@@ -2111,6 +2263,7 @@ fn conversation_page_header(
         return None;
     }
     let _header = crate::profile::span("conversation/header");
+    crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     let derived = crate::conversation_header::derive(
         items,
         window_truncated || crate::conversation_header::window_truncated(items),
@@ -2119,6 +2272,7 @@ fn conversation_page_header(
         derived,
         conversation_register_value(state, session_id).as_ref(),
     )
+    })
 }
 
 /// The live latest-wins values for a conversation, e.g. `working`. Wire the register here when
@@ -2178,6 +2332,7 @@ pub fn native_session_messages(
             incarnation.as_deref(),
             snapshot.store_index.checked_add(1),
         )?;
+        crate::otel::conversation_phase("st.conversation.header_overlay_ms", || -> Result<(), ApiError> {
         for claim in messages {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             let from = fields.get("from").and_then(Value::as_str);
@@ -2194,6 +2349,8 @@ pub fn native_session_messages(
             items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
+            Ok(())
+        })?;
     }
     items.reverse();
     Ok(items)
@@ -2411,6 +2568,31 @@ pub fn native_slice_page_at_generation(
     source: &crate::external_sessions::ExternalSession,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed,
+        #[cfg(any(test, feature = "test-support"))]
+        false,
+    )
+}
+
+/// The pre-split display path, retained only to compare complete page responses in tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn legacy_native_slice_page_for_test(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_slice_page_impl(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+    #[cfg(any(test, feature = "test-support"))] legacy_display: bool,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let legacy_display = false;
     let preparation = crate::profile::span("conversation/native-preparation");
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
@@ -2441,6 +2623,7 @@ pub fn native_slice_page_at_generation(
         }
     }
     let limit = cursor.as_ref().map_or(requested_limit, |cursor| cursor.limit);
+    crate::otel::roster_attribute("st.conversation.requested_limit", limit as i64);
     let expires_at_unix_ms = cursor.as_ref().map_or_else(
         || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
         |cursor| cursor.expires_at_unix_ms,
@@ -2460,8 +2643,12 @@ pub fn native_slice_page_at_generation(
         Vec::new()
     };
     drop(preparation);
+    // Acquire after the first fold lock, then retain the same permit through refills,
+    // the header read and preparation: no second try-acquire decision under load.
+    let mut admission = conversation_blocks::NativeReadAdmission::default();
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, legacy_display,
+        &mut admission,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2477,7 +2664,8 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, legacy_display,
+                &mut admission,
             )?.0)
         } else {
             None
@@ -2485,16 +2673,38 @@ pub fn native_slice_page_at_generation(
         let head = head.as_ref().unwrap_or(&native);
         native_head_fence(head, &source_basis, native.generation)?;
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
-        conversation_page_header(
-            state, session, session_id, &head.items[..count],
+        let header_items = (!legacy_display).then(|| {
+            conversation_blocks::header_items(source, session_id, &head.items[..count])
+        });
+        let mut header = conversation_page_header(
+            state, session, session_id, header_items.as_deref().unwrap_or(&head.items[..count]),
             head.has_more || head.items.len() > count,
-        )
+        );
+        if !legacy_display && let Some(value) = &mut header {
+            conversation_blocks::bound_header(value);
+        }
+        header
     } else {
         None
     };
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
+    if !legacy_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        crate::otel::conversation_phase("st.conversation.display_preparation_ms", || -> Result<(), ApiError> {
+        for item in &mut native.items {
+            conversation_blocks::prepare_one(source, session, session_id, &source_basis, item)?;
+        }
+            crate::otel::conversation_count("st.conversation.native_prepared_items", native.items.len());
+            Ok(())
+        })?;
+    }
+    if conversation_blocks::basis(source)? != source_basis {
+        return Err(client_page_expired("the transcript changed while preparing the page"));
+    }
+    drop(admission);
     let overlay = crate::profile::span("conversation/overlay");
+    let (mut items, mut has_more) = crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
     let messages = messages.into_iter().map(|item| {
@@ -2524,8 +2734,10 @@ pub fn native_slice_page_at_generation(
             messages.next().expect("peeked message entry")
         });
     }
-    let mut has_more = items.len() > limit || native.has_more;
+    let has_more = items.len() > limit || native.has_more;
     items.truncate(limit);
+    (items, has_more)
+    });
     drop(overlay);
     let _page_preparation = crate::profile::span("conversation/page-preparation");
     let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
@@ -2600,9 +2812,10 @@ pub fn canonical_native_slice(
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
     prepare_display: bool,
+    admission: &mut conversation_blocks::NativeReadAdmission,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit, prepare_display,
+        source, session, session_id, order, before, limit, prepare_display, admission,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2622,7 +2835,7 @@ pub fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
-            prepare_display,
+            prepare_display, admission,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
@@ -3276,13 +3489,42 @@ pub fn timeline_value(
     id: &str,
     query: &ClientListQuery,
 ) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, None)
+}
+
+/// Inventory subjects are hints only: resolve on this page sequence's pinned snapshot.
+pub fn timeline_value_for_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: &str,
+) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, Some(owner_subject))
+}
+
+fn timeline_value_with_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: Option<&str>,
+) -> Result<Json<Value>, ApiError> {
+    crate::otel::conversation_scope(|| {
     require_scope(session, "read.projections")?;
     let session_id = client_detail_id("session", id);
+    let managed_owner = || match owner_subject {
+        Some(subject) => super::managed_session_owner_for_timeline_at(
+            &state.store, snapshot.store_index, &session_id, subject,
+        ),
+        None => super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id),
+    }.map_err(ApiError::internal);
     if let Some(cursor) = query.cursor.as_deref() {
         let _span = crate::profile::span("timeline/cached-page");
         if cursor.starts_with(NATIVE_PAGE_CURSOR_PREFIX) {
-            let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-                .map_err(ApiError::internal)?;
+            let managed = managed_owner()?;
             let source = conversation_blocks::source(state, &session_id, managed.as_ref())
                 .map_err(|_| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
             return native_slice_page_at_generation(
@@ -3319,10 +3561,10 @@ pub fn timeline_value(
         }
         return Ok(Json(page_value));
     }
+    let managed = managed_owner()?;
     crate::performance::task("conversation/first-page", || {
-        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-            .map_err(ApiError::internal)?;
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
+    })
     })
 }
 
@@ -4385,7 +4627,7 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
     ) {
         return Some("control.runtimes");
     }
-    if matches!(action, "work.done" | "custom.reply" | "prompt.respond") {
+    if matches!(action, "work.done" | "work.override" | "custom.reply" | "prompt.respond") {
         return Some("control.attention");
     }
     Some(match action.split_once('.')?.0 {
@@ -4408,6 +4650,8 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
         }
         "pairing" => "control.pairing",
         "arrangement" => "control.arrangements",
+        // Read positions are person workspace state, granted with arrangements.
+        "read-position" => "control.arrangements",
         _ => return None,
     })
 }

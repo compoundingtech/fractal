@@ -303,6 +303,7 @@ def prepare_clone():
     git('config', 'user.email', os.environ.get('FRACTAL_INTEGRATOR_GIT_USER_EMAIL',
                                              'live-r3@fractal-integrator.invalid'))
     if git('rev-parse', '--verify', 'MERGE_HEAD', capture=True, check=False).returncode == 0:
+        git('rerere', 'clear')
         git('merge', '--abort')
     git('checkout', '-f', '-B', 'live-r3', 'origin/main')
     git('clean', '-fd')  # keep ignored dependencies/private overlay, never -x
@@ -317,6 +318,38 @@ def prepare_clone():
     # Detached rerere gc held MERGE_RR.lock during the next commit.
     git('config', 'maintenance.autoDetach', 'false')
     git('config', 'gc.autoDetach', 'false')
+    # Keep fetch/commit from triggering full auto-GC repacks.
+    git('config', 'gc.auto', '0')
+    git('config', 'maintenance.auto', 'false')
+
+def maintain_clone(row):
+    """Best-effort daily maintenance, under the tick's existing clone lock."""
+    stamp = L/f'{C.name}-git-maintenance.json'
+    try:
+        now = time.time()
+        if stamp.exists() and now - json.loads(stamp.read_text())['attemptedAt'] < 86400:
+            return
+        # Record attempts, not successes: a broken maintenance command must not
+        # run every five minutes. The tick row preserves its failure.
+        atomic_json(stamp, {'attemptedAt': now})
+        commands = [('prune', '--expire=2.weeks.ago')]
+        full_stamp = L/f'{C.name}-git-full-gc.json'
+        if not full_stamp.exists() or now - json.loads(full_stamp.read_text())['attemptedAt'] >= 30 * 86400:
+            # Collect packed garbage before geometric repacking can refresh its
+            # pack age. This deliberately permits one full repack per month.
+            atomic_json(full_stamp, {'attemptedAt': now})
+            commands.append(('gc', '--cruft', '--prune=2.weeks.ago'))
+        commands.extend((
+            ('repack', '-d', '--geometric=2'),
+            ('-c', 'gc.rerereResolved=60', '-c', 'gc.rerereUnresolved=7', 'rerere', 'gc')))
+        for command in commands:
+            try:
+                git(*command, capture=True)
+            except (OSError, subprocess.SubprocessError) as error:
+                detail = (getattr(error, 'stderr', None) or str(error))[-4000:]
+                row.setdefault('maintenanceErrors', []).append({'command': list(command), 'detail': detail})
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        row.setdefault('maintenanceErrors', []).append({'detail': str(error)})
 
 def retain_main_registry():
     """Legacy PR registries cannot replace main's directory-derived implementation."""
@@ -869,6 +902,7 @@ def tick():
             if pattern not in exclude.read_text():
                 with exclude.open('a') as f: f.write('\n'+pattern+'\n')
         prepare_clone()
+        maintain_clone(row)
         git('fetch','origin','+refs/heads/main:refs/remotes/origin/main',*[f'+refs/pull/{p["number"]}/head:refs/remotes/origin/live-r3-pr-{p["number"]}' for p in ordered])
         row['main']=text('rev-parse','origin/main')
         for number, commit in LOCAL_HEAD_OVERRIDES.items():
@@ -936,6 +970,7 @@ def tick():
                 conflicts=text('diff','--name-only','--diff-filter=U').splitlines()
                 if conflicts:
                     row['stackConflictFiles']=conflicts
+                    git('rerere','clear')
                     git('merge','--abort')
                     raise RuntimeError(f'recorded required-PR resolution conflicts with main: {conflicts}')
                 git('commit','--no-edit')
@@ -947,6 +982,9 @@ def tick():
                 resolved=resolve_additive()
                 conflicts=text('diff','--name-only','--diff-filter=U').splitlines()
                 if conflicts:
+                    # Abandoned conflicts have no reusable resolution. Without
+                    # clear, Git allocates another preimage variant next tick.
+                    git('rerere','clear')
                     git('merge','--abort',check=False)
                     if p['number'] in REQUIRED:
                         row['requiredConflict']={'pr':p['number'],'files':conflicts}

@@ -43,6 +43,9 @@
     "examples/demos",
     "examples/fractal",
     "fixtures",
+    "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/pr-landing.kdl",
+    "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",
     "slo"
    ]
@@ -53,6 +56,7 @@
     "crates/fractal-daemon/fixtures/native-records/codex.jsonl",
     "crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl",
     "crates/fractal-daemon/fixtures/native-records/schema-conformance.jsonl",
+    "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
     "docs/st3/client-v0/schemas/quota-source-v1.schema.json",
@@ -63,7 +67,11 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
-    "scripts/ci-test-paths.rs"
+    "apps/ios/fixtures/observation-minute.json",
+    "claude-channel",
+    "fixtures/objective-native-rows.json",
+    "scripts/ci-test-paths.rs",
+    "slo/dotfiles-merge-latency.kdl"
    ]
   },
   "fractal-api-mailbox": {
@@ -125,6 +133,7 @@
   },
   "fractal-conversation-ui": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "fixtures/clients/conversation-style.json",
     "fixtures/clients/transcripts/claude-skill.json",
     "fixtures/clients/transcripts/claude.expected.json",
@@ -139,7 +148,7 @@
     "fixtures/clients/transcripts/native-omp-run.json",
     "fixtures/clients/transcripts/noise.json",
     "fixtures/clients/transcripts/omp-parity.expected.json",
-    "fixtures/clients/transcripts/omp-parity.json"
+    "fixtures/clients/transcripts/omp-parity.json", "fixtures/clients/transcripts/wakes.expected.json", "fixtures/clients/transcripts/wakes.json"
    ]
   },
   "fractal-daemon": {
@@ -158,6 +167,7 @@
   },
   "fractal-delivery-base": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -166,6 +176,7 @@
     "claude-channel/.claude-plugin/marketplace.json",
     "claude-channel/plugins/st2-channel/.claude-plugin/plugin.json",
     "claude-channel/plugins/st2-channel/.mcp.json",
+    "docs/st3/client-v0/fixtures/response-evidence.json",
     "plugins/claude/.claude-plugin/marketplace.json",
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
@@ -222,6 +233,9 @@
     "wit/github-pr"
    ]
   },
+  "fractal-jobs": {
+   "extra": []
+  },
   "fractal-kernel": {
    "extra": [
     ".config",
@@ -230,7 +244,10 @@
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
-    "crates/fractal-daemon/hooks/pi-channel.ts"
+    "crates/fractal-daemon/hooks/pi-channel.ts",
+    "fixtures/objective-native-rows.json",
+    "slo/fractal-ci.kdl",
+    "slo/objectives.kdl"
    ]
   },
   "fractal-migrate": {
@@ -241,6 +258,7 @@
   },
   "fractal-missions": {
    "extra": [
+    "crates/fractal-attention/src/store/attention.rs",
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
     "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
@@ -286,14 +304,15 @@
   },
   "fractal-runtime": {
    "extra": [
-    "crates/pty-launch-environment.rs"
+    "crates/pty-launch-environment.rs",
+    "fixtures/host-envelope.schema.json"
    ]
   },
   "fractal-schema": {
    "extra": [
-    "crates/fractal-schema/src/notice.rs",
     "docs/st3/schema.md",
     "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
     "examples/fractal/decision-tree.json"
    ]
   },
@@ -344,6 +363,11 @@
     "crates/fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
+    "crates/fractal-missions/src/store/tests/huge_part_digest.rs",
+    "crates/fractal-store/src/store/notice_authority.rs",
+    "crates/fractal-store/src/store/notice_authority_tests.rs",
+    "crates/fractal-store/src/store/transaction_work.rs",
+    "docs/st3/client-v0/fixtures/notice-conformance.json",
     "evals/fractal",
     "examples/fractal/custom-review.json",
     "examples/fractal/decision-tree.json",

@@ -140,7 +140,7 @@ type Stash = {
    */
   lastCostUsd?: number;
   label?: string;
-  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; admitted?: boolean; read?: boolean; acceptedAtUnixMs?: number }>;
   /** Todo observation state is fenced by the channel binding, not the extension instance. */
   todoFingerprint?: string;
   todoBranchKey?: string;
@@ -748,10 +748,11 @@ export default function (pi: ExtensionAPI) {
           state.reconnectAttempt = 0;
           await applyLabel(ctx);
           for (const accepted of state.accepted?.values() ?? []) {
-            send({ type: "delivered", meta: accepted.meta });
+            if (!accepted.admitted && !accepted.read) continue;
+            send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
-          send({ type: "ready", ...sessionBinding });
+          send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
           // The driver requires ready before accepting observations. Replay before other
           // producers; each retained close follows its original open with the same identity.
           if (state.webAnswers) {
@@ -768,9 +769,14 @@ export default function (pi: ExtensionAPI) {
             state.restoringAsk.ready = true;
             retryPendingAsk();
           }
+          if (!state.restoringAsk) {
+            // Hello validated the protocol and ready bound the native session. The handoff
+            // handler can now choose send versus steer using ctx.isIdle(), even if this
+            // provider has worked continuously since launch. Restored asks retain their fence.
+            send({ type: "delivery_ready" });
+          }
           // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-          // Every fresh channel needs the provider's idle proof, including reconnects
-          // during an idle session where no further turn boundary will arrive.
+          // Continue observing actual idle independently of handoff readiness.
           watchSettle(ctx);
           // The fence proves only the first session restored by this cold launch. A later explicit
           // in-process session switch becomes the current binding and must not inherit the old ID.
@@ -797,7 +803,8 @@ export default function (pi: ExtensionAPI) {
         const messageId = frame.meta?.messageId;
         if (typeof messageId === "string" && state.accepted?.has(messageId)) {
           const accepted = state.accepted.get(messageId)!;
-          send({ type: "delivered", meta: accepted.meta });
+          if (!accepted.admitted && !accepted.read) return;
+          send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
           if (accepted.read) send({ type: "read", meta: accepted.meta });
           return;
         }
@@ -929,7 +936,7 @@ export default function (pi: ExtensionAPI) {
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       sendFrame({ type: "session", sessionId: nativeSession,
         ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
-      sendFrame({ type: "ready", sessionId: nativeSession });
+      sendFrame({ type: "ready", inputAcceptanceClock: true, sessionId: nativeSession });
       state.todoSession = nativeSession;
       state.todoFingerprint = undefined;
       state.todoBranchKey = undefined;
@@ -989,24 +996,42 @@ export default function (pi: ExtensionAPI) {
     const usage = message.usage && typeof message.usage === "object"
       ? message.usage as Record<string, unknown>
       : undefined;
-    // Per-response spend: the provider's disjoint token buckets, its model, and the cost the
-    // harness itself computed. Nothing else about the request leaves the harness.
+    // Only observed response metadata and numeric usage leave the harness, never raw requests.
     const cost = usage?.cost && typeof usage.cost === "object"
       ? usage.cost as Record<string, unknown>
       : undefined;
+    const cttl = usage?.cttl && typeof usage.cttl === "object"
+      ? usage.cttl as Record<string, unknown>
+      : undefined;
     return { message: {
       id: boundedTimelineString(message.id, 256),
+      responseId: boundedTimelineString(message.responseId, 256),
       role: boundedTimelineString(message.role, 32),
       content,
       model: boundedTimelineString(message.model, 128),
       provider: boundedTimelineString(message.provider, 64),
+      api: boundedTimelineString(message.api, 128),
+      stopReason: boundedTimelineString(message.stopReason, 64),
+      timestamp: finiteOrNull(message.timestamp),
+      completedAt: finiteOrNull(message.completedAt),
+      duration: finiteOrNull(message.duration),
+      ttft: finiteOrNull(message.ttft),
       usage: usage ? {
         input: finiteOrNull(usage.input ?? usage.inputTokens),
         output: finiteOrNull(usage.output ?? usage.outputTokens),
         cacheRead: finiteOrNull(usage.cacheRead),
         cacheWrite: finiteOrNull(usage.cacheWrite),
         totalTokens: finiteOrNull(usage.totalTokens),
-        cost: cost ? finiteOrNull(cost.total) : null,
+        reasoningTokens: finiteOrNull(usage.reasoningTokens),
+        cttl: cttl ? { ephemeral1h: finiteOrNull(cttl.ephemeral1h) } : undefined,
+        cost: cost ? {
+          input: finiteOrNull(cost.input),
+          output: finiteOrNull(cost.output),
+          cacheRead: finiteOrNull(cost.cacheRead),
+          cacheWrite: finiteOrNull(cost.cacheWrite),
+          total: finiteOrNull(cost.total),
+        } : finiteOrNull(usage.cost),
+        premiumRequests: finiteOrNull(usage.premiumRequests),
       } : undefined,
     } };
   };
@@ -1076,6 +1101,10 @@ export default function (pi: ExtensionAPI) {
     toolCallsInFlight().clear();
   };
 
+  // An idle send's promise owns the entire run. Its matching user message_start is
+  // the earlier, truthful admission receipt; never serialize that run behind itself.
+  let pendingAdmission: { content: string; accept: () => void } | undefined;
+
   // omp injects one queued steer per boundary (its default steering mode is `one-at-a-time`). A
   // second steer released at the same boundary waited through the next model turn and then
   // backgrounded that turn's whole batch (cross-omp-hold-luna-20260927-m), so mail released
@@ -1100,12 +1129,35 @@ export default function (pi: ExtensionAPI) {
       // Not optional-chained: reading a missing idle proof as "idle" would silently turn
       // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
-        await pi.sendUserMessage(content);
+        let accept!: () => void;
+        const started = new Promise<void>((resolve) => { accept = resolve; });
+        const pending = { content, accept };
+        pendingAdmission = pending;
+        try {
+          // Content transformed by OMP cannot match our event; in that case admission
+          // retains the old await-run behavior rather than inventing a receipt.
+          const run = Promise.resolve(pi.sendUserMessage(content)).catch((error: unknown) => {
+            console.error("OMP mailbox run failed:", error);
+            throw error;
+          });
+          await Promise.race([run, started]);
+        } finally {
+          if (pendingAdmission === pending) pendingAdmission = undefined;
+        }
       } else {
         await pi.sendUserMessage(content, { deliverAs: first.deliverAs });
       }
+      const acceptedAtUnixMs = Date.now();
       for (const message of messages) {
-        message.reply({ type: "delivered", meta: message.meta });
+        const messageId = message.meta?.messageId;
+        if (typeof messageId === "string") {
+          const accepted = state.accepted?.get(messageId);
+          if (accepted) {
+            accepted.admitted = true;
+            accepted.acceptedAtUnixMs ??= acceptedAtUnixMs;
+          }
+        }
+        message.reply({ type: "delivered", meta: message.meta, acceptedAtUnixMs });
       }
     } catch (error) {
       for (const message of messages) {
@@ -1480,6 +1532,18 @@ export default function (pi: ExtensionAPI) {
       }
       throw error;
     }
+  });
+
+  onWidened("message_start", async (event) => {
+    if (!event || typeof event !== "object" || !("message" in event)) return;
+    const message = event.message;
+    if (!message || typeof message !== "object" || !("role" in message) ||
+      message.role !== "user" || !("content" in message) || !pendingAdmission) return;
+    const text = typeof message.content === "string" ? message.content :
+      Array.isArray(message.content) ? message.content.flatMap((part: unknown) =>
+        part && typeof part === "object" && "type" in part && part.type === "text" &&
+        "text" in part && typeof part.text === "string" ? [part.text] : []).join("\n") : undefined;
+    if (text === pendingAdmission.content) pendingAdmission.accept();
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this

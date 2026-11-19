@@ -258,23 +258,44 @@ class CiLocal(unittest.TestCase):
 
     def test_a_stage_s_wait_at_the_admission_gate_after_its_slot_is_queue_time_too(self):
         events = Path(self.tmp.name) / 'queue-events'
+        # This test controls log-observation time, not the scheduling of a pipe reader.
+        # Only the private ci-local copy is instrumented; its parser and arithmetic stay intact.
+        script = self.work / 'scripts/ci-local'
+        source = script.read_text()
+        opener = 'queue_times() {\n'
+        dispatch = '    case "$line" in\n'
+        event_clock = '"$(date +%s)" "$2"'
+        self.assertEqual(source.count(opener), 1)
+        self.assertEqual(source.count(dispatch), 1)
+        self.assertEqual(source.count(event_clock), 1)
+        # Unsetting SECONDS removes Bash's special ticking behavior in this pipeline process.
+        source = source.replace(opener, opener + '  unset SECONDS\n  SECONDS=0\n', 1)
+        source = source.replace(dispatch,
+            '    case "$line" in\n'
+            '      "cargo: waiting in order"*) SECONDS=100 ;;\n'
+            '      "cargo: got build slot"*) SECONDS=101 ;;\n'
+            '      "build-admission:"*) SECONDS=101 ;;\n'
+            '      "   Compiling"*) SECONDS=103 ;;\n'
+            '      done) SECONDS=104 ;;\n'
+            '    esac\n' + dispatch, 1)
+        source = source.replace(event_clock, '"$SECONDS" "$2"', 1)
+        script.write_text(source)
         # The cargo shim holds its slot, then waits at the admission gate, which prints no end: the build's own output ends the wait.
-        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\n'
                  'echo "cargo: got build slot 0 and a heavy slot"\n'
-                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\nsleep 2.1\n'
-                 'echo "   Compiling fractal v0.1.0"\nsleep 1.1\necho done\n')
+                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\n'
+                 'echo "   Compiling fractal v0.1.0"\necho done\n')
         done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
         self.assertEqual(done.returncode, 0, done.stderr)
         row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
         waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
         self.assertEqual(waits, '2')
-        self.assertGreaterEqual(int(seconds), 3)
-        self.assertLess(int(seconds), int(re.search(r'(\d+)s +exit', row).group(1)))  # the compile after it ran
+        self.assertEqual(int(seconds), 3)  # 1s slot wait + 2s gate wait; compilation is excluded.
         self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
         lines = [line.split(' ') for line in events.read_text().splitlines()]
         self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
         at = [int(when) for _, when, _ in lines]
-        self.assertGreaterEqual(at[3] - at[2], 2)
+        self.assertEqual(at, [100, 101, 101, 103])
 
     def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'

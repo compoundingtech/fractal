@@ -230,6 +230,7 @@ impl Seat {
             adopt: Default::default(),
             allow_empty: retire,
             confirm_retire: None,
+            policy: None,
             expected_subjects: Default::default(),
         };
         let preview = self.store.owned_set_preview(&input, &options).unwrap();
@@ -400,6 +401,257 @@ impl Seat {
     }
 }
 
+fn enable_idle_reader(seat: &Seat) {
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    seat.store.bind_fleet(fleet).unwrap();
+    seat.store.pin_fleet_anchor(key.public()).unwrap();
+    seat.store.set_member_key(Some(key.clone())).unwrap();
+    seat.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+    seat.store.append_claim(&ClaimInput {
+        subject:"daemon/amber".into(),kind:"daemon.started".into(),actor:None,
+        fields:serde_json::from_value(json!({"status":"running","features":{"idle_residency":1,"owned_sets":1}})).unwrap(),
+        evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    seat.store.replication_snapshot().unwrap();
+}
+
+fn seed_idle_sleep(seat: &Seat) -> String {
+    enable_idle_reader(seat);
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend","cause":"idle","incarnation_id":"original-1","idle_after_ms":60_000
+    }), vec![token], None);
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend","operation_status":"snapshotting","harness":"claude",
+        "native_session_id":"native-one","source_host":"amber"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_snapshot_key(&request.id)));
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend","operation_status":"suspended"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_completed_key(&request.id)));
+    seat.runtime.observation.lock().unwrap().as_mut().unwrap().status = "exited".into();
+    request.id
+}
+
+fn sleep_end_classes(seat: &Seat) -> Vec<String> {
+    seat.store.claims_for_kind_at("residency.sleep-ended",None,false,16).unwrap().claims.iter()
+        .filter(|claim| claim.body["fields"]["seat"] == SUBJECT)
+        .map(|claim| claim.body["fields"]["end_class"].as_str().unwrap().to_owned()).collect()
+}
+
+#[test]
+fn explicit_stop_ends_the_historical_idle_hold_once_after_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    seed_idle_sleep(&seat);
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat.store.mission(&input, crate::model::IntentInput {
+        kdl:source,source_name:None,
+    }).unwrap();
+    seat.store.apply_as(&input,&preview.subject_tokens,"end-idle-stop",Some("person/operator")).unwrap();
+    assert!(crate::suspension::current(&seat.store,SUBJECT).unwrap().is_none());
+    seat.reconcile();
+    seat.reopen();
+    seat.reconcile();
+    assert_eq!(sleep_end_classes(&seat), ["stop"]);
+}
+
+#[test]
+fn retiring_an_owned_idle_hold_records_one_retire_sleep_end() {
+    let mut seat = Seat::new();
+    seed_idle_sleep(&seat);
+    seat.publish(2,"first",None,true);
+    seat.reopen();
+    seat.reconcile();
+    assert_eq!(sleep_end_classes(&seat), ["retire"]);
+}
+
+#[test]
+fn manual_resume_ends_idle_sleep_without_becoming_an_automatic_wake() {
+    let seat = Seat::new_with_owned_publication(false);
+    let operation = seed_idle_sleep(&seat);
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let resume = seat.suspension_claim("runtime.action.requested", json!({"action":"resume"}),
+        vec![token,operation],None);
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"resume","operation_status":"resumed",
+        "native_session_id":"native-one","incarnation_id":"replacement-1"
+    }), vec![resume.id.clone()],Some(crate::suspension::resume_completed_key(&resume.id)));
+    let mut evidence = super::super::idle_residency_evidence::RuntimeEvidence::default();
+    evidence.evaluate_subject(&seat.store,SUBJECT,now_ms()).unwrap();
+    evidence.evaluate_subject(&seat.store,SUBJECT,now_ms()).unwrap();
+    assert_eq!(sleep_end_classes(&seat), ["manual"]);
+}
+
+#[test]
+fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
+    let seat = Seat::new_with_owned_publication(false);
+    enable_idle_reader(&seat);
+    seat.busy(false);
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
+    }), vec![token], None);
+    seat.store.append_claim(&ClaimInput {
+        subject:"message/wake-before-idle-stop".into(), kind:"message.sent".into(),
+        actor:Some("person/operator".into()),
+        fields:serde_json::from_value(json!({
+            "status":"sent","from":"person/operator","to":SUBJECT,"content":"Continue"
+        })).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
+        "amber".into(), Arc::new(Notify::new()));
+    let desired = seat.desired();
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    let observed = seat.runtime.observation.lock().unwrap().clone();
+    reconciler.reconcile_suspension(&desired, desired.member.as_ref().unwrap(),
+        observed.as_ref(), None, &suspension).unwrap();
+    let cancelled = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(cancelled.phase, "failed");
+    assert_eq!(cancelled.code.as_deref(), Some("wake-pending"));
+    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+    assert!(seat.store.wake_demand(SUBJECT).unwrap().oldest.is_some());
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat.store.mission(&input, crate::model::IntentInput {
+        kdl:source,source_name:None,
+    }).unwrap();
+    seat.store.apply_as(&input,&preview.subject_tokens,"stop-after-idle-cancel",Some("person/operator")).unwrap();
+    seat.reconcile();
+    assert!(sleep_end_classes(&seat).is_empty(),
+        "a cancelled attempt followed by an explicit stop never slept");
+}
+
+#[test]
+fn idle_resume_completion_requires_incarnation_channel_readiness() {
+    let seat = Seat::new_with_owned_publication(false);
+    let (suspend, token, member) = seat.finish_suspend();
+    let request = seat.suspension_claim("runtime.action.requested",
+        json!({"action":"resume"}), vec![token, suspend], None);
+    seat.suspension_claim("runtime.action.succeeded",
+        json!({"action":"resume","operation_status":"verifying"}),
+        vec![request.id.clone()], Some(crate::suspension::resume_started_key(&request.id)));
+    let mut suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    suspension.cause = Some("idle".into());
+    let mut observation = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    observation.status = "running".into();
+    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
+        "amber".into(), Arc::new(Notify::new()));
+    let desired = seat.desired();
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    // A ready receipt from another incarnation is not the resumed driver's channel.
+    seat.append("harness.diagnostic", json!({
+        "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"other", "reason":"confirmed"
+    }));
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    seat.append("harness.diagnostic", json!({
+        "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"original-1", "reason":"confirmed"
+    }));
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_some());
+}
+
+#[test]
+fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let transcript = seat.root.path().join("native-one.jsonl");
+    std::fs::write(&transcript, format!("{}\n", json!({
+        "type":"session", "id":"native-one", "cwd":member.workspace
+    }))).unwrap();
+    seat.append("harness.session-file", json!({
+        "harness":"omp", "session_id":"native-one", "incarnation_id":"original-1",
+        "path":transcript
+    }));
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let state = seat.root.path().join("state");
+    // Admission has its own owner/fleet tests. Start this filesystem recovery test at the
+    // irreversible boundary, after a real in-place capture, rather than forge admission.
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(crate::seat_snapshot::capture(&state, SUBJECT, member, &suspension).unwrap(), "in-place");
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend", "operation_status":"snapshotting", "mode":"in-place",
+        "harness":"omp", "native_session_id":"native-one", "source_host":"amber"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_snapshot_key(&request.id)));
+    for expected_phase in ["snapshotting", "suspended"] {
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        let mut reconciler = Reconciler::new(
+            seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+        );
+        reconciler.driver_state_dir = state.join("drivers");
+        let observation = seat.runtime.observation.lock().unwrap().clone();
+        if suspension.phase == "snapshotting"
+            && observation.as_ref().is_none_or(|observation| observation.status != "running")
+        {
+            let bytes = std::fs::read(&transcript).unwrap();
+            std::fs::remove_file(&transcript).unwrap();
+            let error = reconciler.reconcile_suspension(
+                &desired, member, observation.as_ref(), None, &suspension,
+            ).unwrap_err();
+            assert_eq!(crate::seat_snapshot::code(&error), "transcript-missing");
+            let retained = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+            assert!(retained.holds_seat());
+            assert_eq!(retained.phase, "snapshotting");
+            assert!(seat.runtime.starts.lock().unwrap().is_empty());
+            std::fs::write(&transcript, bytes).unwrap();
+        }
+        reconciler.reconcile_suspension(
+            &desired, member, observation.as_ref(), None, &suspension,
+        ).unwrap();
+        drop(reconciler);
+        seat.reopen();
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        assert_eq!(suspension.phase, expected_phase);
+        assert_eq!(suspension.mode(), "in-place");
+        assert_eq!(suspension.native_session_id.as_deref(), Some("native-one"));
+    }
+    assert_eq!(seat.runtime.stops.lock().unwrap().len(), 1);
+    assert!(transcript.is_file());
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert!(crate::seat_snapshot::directory(&state, &suspension.operation_id).join("payload.tar").is_file());
+}
+
+#[test]
+fn manual_git_snapshot_receipt_omits_mode_for_older_members() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    for args in [
+        vec!["init", "-q"],
+        vec!["-c", "core.hooksPath=", "-c", "commit.gpgsign=false",
+            "-c", "user.name=Snapshot fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-qm", "Initial"],
+    ] {
+        assert!(std::process::Command::new("git").args(args)
+            .current_dir(seat.root.path()).status().unwrap().success());
+    }
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let mut reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    // Keep snapshot output outside the workspace it captures.
+    let state = tempfile::tempdir().unwrap();
+    reconciler.driver_state_dir = state.path().join("drivers");
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    let observation = seat.runtime.observation.lock().unwrap().clone();
+    reconciler.reconcile_suspension(&desired, member, observation.as_ref(), None, &suspension).unwrap();
+    let receipt = seat.store.operation_claim(&crate::suspension::suspend_snapshot_key(&request.id)).unwrap().unwrap();
+    assert!(receipt.body["fields"].get("mode").is_none());
+    assert_eq!(crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap().mode(), "git");
+}
+
 #[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
@@ -535,6 +787,7 @@ fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
         adopt: Default::default(),
         allow_empty: false,
         confirm_retire: None,
+        policy: None,
         expected_subjects: Default::default(),
     };
     let preview = seat.store.owned_set_preview(&input, &options).unwrap();
@@ -1032,12 +1285,9 @@ fn rollout_rechecks_pending_replies_and_the_physical_render_fence() {
     assert!(reconciler.rollout_render_guard(&seat.desired()).is_err());
 }
 
-/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
-/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
-#[tokio::test(start_paused = true)]
-async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
-    use futures_util::FutureExt;
-    let seat = Seat::new();
+/// A seat claims its step and asks `person/operator` from it with a one-hour deadline: the
+/// origin step, the ask's step and its stored deadline.
+fn ask_with_deadline(seat: &Seat) -> (String, String, u128) {
     seat.store.set_ask_deadlines(true);
     let run = seat.work();
     let origin = run.steps[0].subject.clone();
@@ -1055,6 +1305,7 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let ask = seat
         .store
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: Some(3_600_000),
             default_answer: None,
             legacy_request: None,
@@ -1075,6 +1326,16 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
             .as_u64()
             .unwrap(),
     );
+    (origin, ask.subject, deadline)
+}
+
+/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
+/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
+    use futures_util::FutureExt;
+    let seat = Seat::new();
+    let (origin, ask, deadline) = ask_with_deadline(&seat);
     let reconciler = Reconciler::new(
         seat.store.clone(),
         seat.runtime.clone(),
@@ -1102,10 +1363,212 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let resolved = reconciler.reconcile_person_asks();
     smallclaims::store::set_thread_clock(None);
     assert!(resolved.unwrap());
-    assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "completed");
     let resumed = seat.store.step_run(&origin).unwrap().unwrap();
     assert_eq!(resumed.status, "ready");
     assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ask_digest_stage_records_and_fires_local_nine_wakes_across_dst() {
+    use crate::store::fleet_admission_tests_shared_seats::{admit, key, node};
+    use futures_util::FutureExt as _;
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let ms = |at: &str| u128::try_from(chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis()).unwrap();
+    for (previous, boundary, hours) in [
+        ("2026-03-28T08:00:00Z", "2026-03-29T07:00:00Z", 23),
+        ("2026-10-24T07:00:00Z", "2026-10-25T08:00:00Z", 25),
+    ] {
+        let armed = ms(previous) + 1;
+        let deadline = ms(boundary);
+        assert_eq!(deadline - ms(previous), hours * 3_600_000);
+        smallclaims::store::set_thread_clock(Some(armed));
+        let identity = key();
+        let store = Arc::new(node("alder", Some(&identity), Some(&identity)));
+        admit(&store, "alder", &identity, "anchor", None);
+        store.project_replication_backlog().unwrap();
+        store.fleet_membership().unwrap();
+        let intent = parse_intent(&format!(
+            "version 2\nnotice-owner {{ member \"alder\"; member-key \"{}\"; always-on }}",
+            identity.public(),
+        ), "alder").unwrap();
+        let subject = crate::notice_owner::SUBJECT;
+        let expected = BTreeMap::from([(subject.to_owned(), Vec::new())]);
+        store.apply_as(&intent, &expected, "digest-owner", Some("person/example")).unwrap();
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(Runtime::default()),
+            "alder".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.set_ask_digest_policy(&crate::config::AsksConfig {
+            digest_timezone: "Europe/Berlin".into(),
+            ..crate::config::AsksConfig::default()
+        }).unwrap();
+        let (pass, due) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests());
+        assert!(!pass.unwrap(), "no resolved asks means no digest");
+        assert_eq!(due, Some(deadline));
+        assert_eq!(reconciler.step_deadlines.lock().unwrap().get("ask-digest"), Some(&deadline));
+        let _ = reconciler.notify.notified().now_or_never();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(u64::try_from(deadline - armed - 1).unwrap())).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_some(), "local 09:00 wakes the digest stage");
+        smallclaims::store::set_thread_clock(Some(deadline));
+        let (_, next) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests().unwrap());
+        assert_eq!(next, Some(deadline + 24 * 3_600_000));
+    }
+}
+
+/// While the asked person holds their deadline clock no wake is armed for the ask; once it
+/// runs again the wake is armed for the stored deadline plus the time held.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_arms_the_ask_deadline_wake_past_the_time_the_clock_was_held() {
+    let seat = Seat::new();
+    let (_, ask, deadline) = ask_with_deadline(&seat);
+    let reconciler = Reconciler::new(
+        seat.store.clone(),
+        seat.runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
+    let clock = |deadline_clock: &str| {
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: "person/operator".into(),
+                kind: "person.deadline-clock-set".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([
+                    ("deadline_clock".into(), json!(deadline_clock)),
+                    ("source".into(), json!("host/amber")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let held = now_ms();
+    smallclaims::store::set_thread_clock(Some(held));
+    clock("hold-all");
+    assert!(!reconciler.reconcile_person_asks().unwrap());
+    assert_eq!(reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"), None, "a held clock arms nothing");
+    let resumed = held + 600_000;
+    smallclaims::store::set_thread_clock(Some(resumed));
+    clock("run");
+    let pass = reconciler.reconcile_person_asks();
+    smallclaims::store::set_thread_clock(None);
+    assert!(!pass.unwrap());
+    assert_eq!(
+        reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"),
+        Some(&(deadline + 600_000))
+    );
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "ready");
+}
+
+#[test]
+fn cancelling_a_native_person_ask_fails_its_waiting_step_and_runs_finally() {
+    native_person_ask_failure_runs_finally(false);
+}
+
+#[test]
+fn removing_an_asking_worker_fails_its_native_wait_and_runs_finally() {
+    native_person_ask_failure_runs_finally(true);
+}
+
+fn native_person_ask_failure_runs_finally(remove_requester: bool) {
+    let seat = Seat::new();
+    apply_source(&seat.store, r#"version 2
+mission "garden/cancel-ask" state="ready" {
+  goal "End withdrawn work through ordinary failure cleanup."
+  step "current" { assigned-to "agent/garden/orchard" }
+  finally { step "cleanup" { agentless } }
+}"#, "native-ask-cancellation");
+    let run = seat.store.create_mission_run(&crate::model::MissionRunRequest {
+        mission: "garden/cancel-ask".into(),
+        revision: None,
+        workspace: seat.root.path().display().to_string(),
+        requester: Some("person/operator".into()),
+        mode: None,
+        inputs: Default::default(),
+        idempotency_key: "cancel-ask-run".into(),
+    }).unwrap();
+    let origin = run.steps.iter().find(|step| step.step == "current").unwrap().subject.clone();
+    seat.store.set_step_state(&origin, "ready", None).unwrap();
+    seat.store.work_action(&origin, "claim", &crate::model::WorkRequest {
+        wait_ms: None,
+        actor: Some(SUBJECT.into()),
+        incarnation: Some("original-1".into()),
+        summary: None,
+        reason: None,
+        evidence: Vec::new(),
+        idempotency_key: "cancel-ask-claim".into(),
+    }).unwrap();
+    let ask = seat.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
+        deadline_ms: None,
+        default_answer: None,
+        legacy_request: None,
+        person: "person/operator".into(),
+        title: "Which bed?".into(),
+        reason: "Choose the next bed".into(),
+        actor: SUBJECT.into(),
+        step: Some(origin.clone()),
+        new_run: None,
+        incarnation: Some("original-1".into()),
+        request: None,
+        idempotency_key: "cancel-ask".into(),
+    }).unwrap();
+    assert_eq!(seat.store.step_run(&origin).unwrap().unwrap().status, "waiting-person");
+    let response = crate::model::PersonStepResponse {
+        delegation: None,
+        subject: ask.subject.clone(),
+        actor: SUBJECT.into(),
+        summary: "The work is no longer needed.".into(),
+        evidence: Vec::new(),
+        episode: None,
+        answer: None,
+        idempotency_key: "cancel-ask-response".into(),
+    };
+    if remove_requester {
+        seat.publish(2, "first", None, true);
+        assert!(seat.store.reconcile_person_asks().unwrap());
+        assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+        let asked = seat.store.latest_claim(&ask.subject, Some("work.person-asked")).unwrap().unwrap();
+        let cancelled = seat.store.latest_claim(&ask.subject, Some("work.person-cancelled")).unwrap().unwrap();
+        assert_eq!(cancelled.body["fields"]["episode"], asked.id);
+    } else {
+        assert_eq!(seat.store.finish_person_step(&response, true).unwrap().status, "cancelled");
+    }
+    let failed = seat.store.step_run(&origin).unwrap().unwrap();
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.blocked_reason.as_deref(), Some(if remove_requester {
+        "ask cancelled by daemon/runtime"
+    } else {
+        "ask cancelled by agent/garden/orchard"
+    }));
+    if !remove_requester {
+        // A response replay does not resume or fail the step again.
+        seat.store.finish_person_step(&response, true).unwrap();
+    }
+    let reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    for _ in 0..6 {
+        reconciler.reconcile_once().unwrap();
+    }
+    let ended = seat.store.mission_run(&run.subject).unwrap().unwrap();
+    assert_eq!(ended.status, "failed");
+    assert_eq!(ended.phase, "terminal");
+    assert_eq!(ended.steps.iter().find(|step| step.step == "current").unwrap().status, "failed");
+    assert_eq!(ended.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
 }
 
 #[test]
@@ -1130,6 +1593,7 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let ask = seat
             .store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

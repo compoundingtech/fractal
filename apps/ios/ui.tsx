@@ -1,5 +1,5 @@
-import { createContext, useContext, useCallback, useRef, type ReactNode, type Ref } from 'react';
-import { quality } from './qualityNative';
+import { createContext, useContext, useCallback, useRef, useSyncExternalStore, type ReactNode, type Ref } from 'react';
+import { quality, localDrafts } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
 import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type StyleProp, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { fonts, inLight, lightTheme, systemColors, theme, type Theme } from './theme';
@@ -56,13 +56,14 @@ export function SchemeScreen({ children }: { children: ReactNode }) {
   return <AppearanceScope.Provider value="scheme"><View style={{ flex: 1, backgroundColor: palette.base }}>{children}</View></AppearanceScope.Provider>;
 }
 
-/** Wrapping, inset grouped row. The label carries meaning without a glyph legend. */
-export function GroupedRow({ title, context, onPress, onLongPress }: { title: string; context: string; onPress: () => void; onLongPress?: () => void }) {
+/** Wrapping, inset grouped row. The label carries meaning without a glyph legend; without `onPress` it only reads. A read-only row is not `disabled`: VoiceOver would call it dimmed. */
+export function GroupedRow({ title, context, onPress, onLongPress, hint = 'Opens alert details' }: { title: string; context: string; onPress?: () => void; onLongPress?: () => void; hint?: string }) {
   const colors = useSystemColors();
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${title}. ${context}`} accessibilityHint="Opens alert details" onPress={onPress} onLongPress={onLongPress}
-    style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
+  const interactive = onPress !== undefined || onLongPress !== undefined;
+  return <Pressable accessibilityRole={onPress ? 'button' : 'text'} accessibilityLabel={`${title}. ${context}`} accessibilityHint={onPress ? hint : undefined} onPress={onPress} onLongPress={onLongPress}
+    style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed && interactive ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
     <View style={{ flex: 1, gap: 6 }}><T bold>{title}</T><T dim>{context}</T></View>
-    <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text>
+    {onPress ? <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text> : null}
   </Pressable>;
 }
 
@@ -105,6 +106,12 @@ export function Legend({ entries }: { entries: ReadonlyArray<{ glyph: string; co
 
 export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: 'dim' | 'warning' | 'fault' }) {
   return <T style={styles.note} color={tone === 'warning' ? theme.waiting : tone === 'fault' ? theme.fault : theme.overlay0}>{children}</T>;
+}
+
+/** Recovery problems stay visible wherever a person is composing or reviewing saved drafts. */
+export function DraftRecoveryNote() {
+  const issue = useSyncExternalStore(localDrafts.subscribe, localDrafts.snapshot);
+  return issue ? <Note tone="warning">{issue}</Note> : null;
 }
 
 export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {

@@ -9,9 +9,10 @@
 //! systemd's default weight of 100 (unless overridden by host policy). The daemon's unit carries
 //! [`LIVE_WEIGHT`] too.
 //!
-//! macOS has no cgroups. There the harness, and each exec task such as a gate's tests, starts
-//! under `taskpolicy -b`, which throttles it and every child it starts, while the daemon and the PTY servers keep
-//! their launchd agent's default QoS.
+//! macOS has no cgroups. There a standing seat's harness starts under `taskpolicy -b`, which
+//! throttles it and every child it starts, while the daemon and the PTY servers keep their launchd
+//! agent's default QoS. Exec tasks and seats a mission run owns start at [`SeatPriority::Normal`]
+//! unless they declare [`PRIORITY_ENV`]; the reconciler picks that default per launch.
 //!
 //! Linux scope weights only divide a resource between cgroups, and need the user manager to
 //! delegate the controller. A harness therefore also starts at [`BACKGROUND_NICE`] and IO class
@@ -186,6 +187,9 @@ pub fn protect_server(runtime_id: &str, pid: u32, work_unit: &str) -> Result<Ser
     if leaf != work_unit {
         return Ok(ServerPlacement::Foreign);
     }
+    // Physical membership proves the original scope joined, even for an older
+    // launcher without the normal PTY completion acknowledgement.
+    crate::isolate::finish_scope_join(work_unit);
     let output =
         crate::pty::output_within(move_command(&unit, pid, slice, runtime_id), MOVE_TIMEOUT)
             .context("ask the systemd user manager for a PTY server scope")?;
@@ -198,6 +202,7 @@ pub fn protect_server(runtime_id: &str, pid: u32, work_unit: &str) -> Result<Ser
     let deadline = Instant::now() + MOVE_TIMEOUT;
     loop {
         if slice_and_leaf(&process_cgroup(pid)?).1 == unit {
+            crate::systemd::invalidate();
             return Ok(ServerPlacement::Moved(unit));
         }
         anyhow::ensure!(

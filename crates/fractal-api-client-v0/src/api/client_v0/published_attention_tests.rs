@@ -72,7 +72,7 @@ async fn attention_windows_serve_the_published_list_to_each_session_and_never_fo
         .unwrap();
         crate::api::present_attention(&state.store, &mut rows, publication.fleet.as_deref())
             .unwrap();
-        client_attention_compatibility(&mut rows, false);
+        client_attention_compatibility(&mut rows, crate::api::AttentionCompatibility { custom_forms: false, model_drift: false });
         rows
     };
     let folds = state.store.attention_list_folds();

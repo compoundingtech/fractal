@@ -1,0 +1,665 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "darwin-advisory"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "mem_available_floor": {
+            "properties": {
+              "coverage": {
+                "const": "not-enforced"
+              }
+            }
+          },
+          "slice_psi": {
+            "properties": {
+              "cpu": {
+                "properties": {
+                  "coverage": {
+                    "const": "not-enforced"
+                  }
+                }
+              },
+              "memory": {
+                "properties": {
+                  "coverage": {
+                    "const": "not-enforced"
+                  }
+                }
+              }
+            }
+          },
+          "slices": {
+            "items": {
+              "properties": {
+                "cpu": {
+                  "properties": {
+                    "max": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    },
+                    "weight": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    }
+                  }
+                },
+                "io": {
+                  "properties": {
+                    "coverage": {
+                      "const": "not-enforced"
+                    }
+                  }
+                },
+                "memory": {
+                  "properties": {
+                    "high": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    },
+                    "max": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    }
+                  }
+                },
+                "swap": {
+                  "properties": {
+                    "max": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    }
+                  }
+                },
+                "tasks": {
+                  "properties": {
+                    "max": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "host": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "mem_available_floor": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "const": "enforced"
+            },
+            "value": {
+              "description": "Binary SIZE parsed by lane::parse_memory; must fit u64 bytes.",
+              "pattern": "^[+]?[0-9]+[KkMmGgTt]?$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "coverage",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "const": "not-enforced"
+            },
+            "reason": {
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "coverage",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "platform": {
+      "enum": [
+        "linux-systemd",
+        "darwin-advisory"
+      ]
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "slice_psi": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "coverage": {
+                  "const": "enforced"
+                },
+                "value": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "percent": {
+                      "maximum": 100,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "target_slice": {
+                      "type": "string"
+                    },
+                    "window": {
+                      "enum": [
+                        "avg10",
+                        "avg60",
+                        "avg300"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "window",
+                    "percent",
+                    "target_slice"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "coverage",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "coverage": {
+                  "const": "not-enforced"
+                },
+                "reason": {
+                  "pattern": "\\S",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "coverage",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "memory": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "coverage": {
+                  "const": "enforced"
+                },
+                "value": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "percent": {
+                      "maximum": 100,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "target_slice": {
+                      "type": "string"
+                    },
+                    "window": {
+                      "enum": [
+                        "avg10",
+                        "avg60",
+                        "avg300"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "window",
+                    "percent",
+                    "target_slice"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "coverage",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "coverage": {
+                  "const": "not-enforced"
+                },
+                "reason": {
+                  "pattern": "\\S",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "coverage",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "memory",
+        "cpu"
+      ],
+      "type": "object"
+    },
+    "slices": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "cpu": {
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "period_micros": {
+                            "maximum": 18446744073709551615,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "quota_micros": {
+                            "maximum": 18446744073709551615,
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "quota_micros",
+                          "period_micros"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "weight": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "maximum": 10000,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "max",
+              "weight"
+            ],
+            "type": "object"
+          },
+          "io": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "coverage": {
+                    "const": "enforced"
+                  },
+                  "value": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "weight": {
+                        "maximum": 10000,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "weight"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "coverage",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "coverage": {
+                    "const": "not-enforced"
+                  },
+                  "reason": {
+                    "pattern": "\\S",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "coverage",
+                  "reason"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "memory": {
+            "additionalProperties": false,
+            "properties": {
+              "high": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "description": "Binary SIZE parsed by lane::parse_memory; must fit u64 bytes.",
+                        "pattern": "^[+]?[0-9]+[KkMmGgTt]?$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "max": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "description": "Binary SIZE parsed by lane::parse_memory; must fit u64 bytes.",
+                        "pattern": "^[+]?[0-9]+[KkMmGgTt]?$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "max",
+              "high"
+            ],
+            "type": "object"
+          },
+          "name": {
+            "pattern": "^[^/\\s]+\\.slice$",
+            "type": "string"
+          },
+          "swap": {
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "description": "Binary SIZE parsed by lane::parse_memory; must fit u64 bytes.",
+                        "pattern": "^[+]?[0-9]+[KkMmGgTt]?$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "max"
+            ],
+            "type": "object"
+          },
+          "tasks": {
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "maximum": 18446744073709551615,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "max"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "memory",
+          "cpu",
+          "io",
+          "swap",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "host",
+    "platform",
+    "mem_available_floor",
+    "slice_psi",
+    "slices"
+  ],
+  "title": "Inactive Fractal host envelope v1",
+  "type": "object"
+}

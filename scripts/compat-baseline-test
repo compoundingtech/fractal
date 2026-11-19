@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Native bundle pin validation, using a real local archive and no network."""
+"""Native bundle pin validation, using local archives and loopback HTTP fixtures."""
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
 import importlib.util
 import io
@@ -9,6 +10,8 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import threading
+import urllib.error
 import unittest
 from unittest.mock import patch
 
@@ -39,11 +42,11 @@ class BundleTests(unittest.TestCase):
         (self.root / ".github").mkdir()
         self.output = self.root / "output"
 
-    def run_loader(self):
+    def run_loader(self, *args):
         (self.root / ".github/fleet-compat-baseline.json").write_text(json.dumps(self.pin))
         with patch.object(module, "REPO", self.root), patch.object(module.platform, "system", return_value="Linux"), \
              patch.object(module.platform, "machine", return_value="x86_64"), \
-             patch.object(sys, "argv", ["compat-baseline", "fleet", str(self.output)]):
+             patch.object(sys, "argv", ["compat-baseline", "fleet", str(self.output), *args]):
             module.main()
 
     def test_checksum_verified_archive_is_reused(self):
@@ -91,10 +94,184 @@ class BundleTests(unittest.TestCase):
                 self.run_loader()
 
     def test_download_timeout_does_not_publish(self):
-        with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")):
-            with self.assertRaisesRegex(TimeoutError, "download timed out"):
+        self.remote_bundle()
+        with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")), \
+             patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "browser: download timed out; API fallback: download timed out"):
                 self.run_loader()
         self.assertEqual([], list(self.output.iterdir()))
+
+    def remote_bundle(self):
+        self.pin["bundles"][self.target]["url"] = (
+            "https://github.com/compoundingtech/fractal/releases/download/v0.3.17/bundle.tar.gz")
+
+    def api_download(self, payload=None, primary=None):
+        self.remote_bundle()
+        primary = primary or urllib.error.HTTPError("browser", 504, "Gateway Timeout", {}, None)
+        if isinstance(primary, urllib.error.HTTPError):
+            self.addCleanup(primary.close)
+        metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+        archive = io.BytesIO(payload if payload is not None else (self.root / "bundle.tar.gz").read_bytes())
+        failures = [primary] * (3 if isinstance(primary, urllib.error.HTTPError)
+                                and primary.code in (502, 503, 504) else 1)
+        with patch.dict(module.os.environ, {"GH_TOKEN": "test-token"}), \
+             patch.object(module.urllib.request, "urlopen", side_effect=[*failures, metadata, archive]) as opener, \
+             patch.object(module.time, "sleep"), patch("sys.stderr", new=io.StringIO()) as stderr:
+            self.run_loader()
+        self.assertIn("API asset served the archive", stderr.getvalue())
+        metadata_request = opener.call_args_list[-2].args[0]
+        asset_request = opener.call_args_list[-1].args[0]
+        self.assertEqual(metadata_request.full_url,
+                         "https://api.github.com/repos/compoundingtech/fractal/releases/tags/v0.3.17")
+        self.assertEqual(asset_request.full_url,
+                         "https://api.github.com/repos/compoundingtech/fractal/releases/assets/123")
+        for request in (metadata_request, asset_request):
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+        self.assertEqual(asset_request.get_header("Accept"), "application/octet-stream")
+
+    def test_primary_504_falls_back_and_verifies_digest(self):
+        self.api_download()
+        self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
+
+    def test_primary_timeout_falls_back(self):
+        self.api_download(primary=TimeoutError("browser timed out"))
+
+    def test_fallback_digest_mismatch_does_not_publish(self):
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            self.api_download(payload=b"corrupt archive")
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_fallback_source_mismatch_does_not_publish(self):
+        self.pin["commit"] = "b" * 40
+        with self.assertRaisesRegex(ValueError, "source/target"):
+            self.api_download()
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_both_5xx_fail_clearly_with_bounded_retries(self):
+        self.remote_bundle()
+        failure = urllib.error.HTTPError("download", 504, "Gateway Timeout", {}, None)
+        self.addCleanup(failure.close)
+        metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+        with patch.object(module.urllib.request, "urlopen",
+                          side_effect=[failure, failure, failure, metadata, failure, failure]) as opener, \
+             patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "browser: HTTP Error 504.*API fallback: HTTP Error 504"):
+                self.run_loader()
+        self.assertEqual(opener.call_count, 6)
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_primary_404_does_not_fall_back(self):
+        failure = urllib.error.HTTPError("browser", 404, "Not Found", {}, None)
+        self.addCleanup(failure.close)
+        with patch.object(module.urllib.request, "urlopen", side_effect=failure) as opener:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.run_loader()
+        self.assertEqual(opener.call_count, 1)
+
+    def test_api_redirect_does_not_forward_token_and_verifies_digest(self):
+        self.remote_bundle()
+        payload = (self.root / "bundle.tar.gz").read_bytes()
+        received = []
+
+        class CDN(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(("cdn", self.headers.get("Authorization")))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_):
+                pass
+
+        def serve(handler):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join)
+            self.addCleanup(server.shutdown)
+            return server.server_port
+
+        cdn_port = serve(CDN)
+
+        class API(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(("api", self.headers.get("Authorization")))
+                if "/tags/" in self.path:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", f"http://localhost:{cdn_port}/signed-bundle")
+                    self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        api_port = serve(API)
+        real_request = module.api_request
+        real_open = module.urllib.request.urlopen
+        failure = urllib.error.HTTPError("browser", 504, "Gateway Timeout", {}, None)
+        self.addCleanup(failure.close)
+
+        def request(url, accept):
+            return real_request(url.replace("https://api.github.com", f"http://127.0.0.1:{api_port}"), accept)
+
+        def open_url(url, **kwargs):
+            if isinstance(url, str) and url.startswith("https://github.com/"):
+                raise failure
+            return real_open(url, **kwargs)
+
+        with patch.dict(module.os.environ, {"GH_TOKEN": "test-token"}), \
+             patch.object(module, "api_request", side_effect=request), \
+             patch.object(module.urllib.request, "urlopen", side_effect=open_url), \
+             patch.object(module.time, "sleep"):
+            self.run_loader()
+        self.assertEqual(received, [("api", "Bearer test-token"), ("api", "Bearer test-token"), ("cdn", None)])
+        self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
+
+    def test_browser_transient_then_success_does_not_use_api(self):
+        for code in (502, 503, 504):
+            with self.subTest(code=code):
+                failure = urllib.error.HTTPError("browser", code, "Transient", {}, None)
+                self.addCleanup(failure.close)
+                archive = io.BytesIO((self.root / "bundle.tar.gz").read_bytes())
+                with patch.object(module.urllib.request, "urlopen", side_effect=[failure, archive]) as opener, \
+                     patch.object(module.time, "sleep") as sleep:
+                    self.run_loader("--save-archive", str(self.root / f"retained-{code}.tar.gz"))
+                self.assertEqual(opener.call_count, 2)
+                sleep.assert_called_once_with(1)
+
+    def test_exhausted_browser_retries_wait_one_then_three_seconds(self):
+        failure = urllib.error.HTTPError("browser", 503, "Unavailable", {}, None)
+        self.addCleanup(failure.close)
+        metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+        archive = io.BytesIO((self.root / "bundle.tar.gz").read_bytes())
+        self.remote_bundle()
+        with patch.object(module.urllib.request, "urlopen",
+                          side_effect=[failure, failure, failure, metadata, archive]), \
+             patch.object(module.time, "sleep") as sleep:
+            self.run_loader()
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(1), unittest.mock.call(3)])
+
+    def test_saved_archive_is_verified_and_reused_without_network(self):
+        saved = self.root / "cache/bundle.tar.gz"
+        self.run_loader("--save-archive", str(saved))
+        self.assertEqual(saved.read_bytes(), (self.root / "bundle.tar.gz").read_bytes())
+        with patch.dict(module.os.environ, {"COMPAT_BASELINE_ARCHIVE": str(saved)}), \
+             patch.object(module.urllib.request, "urlopen", side_effect=AssertionError("network forbidden")):
+            self.run_loader()
+            saved.write_bytes(b"bad cache")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                self.run_loader()
+
+    def test_bad_archive_is_not_saved(self):
+        saved = self.root / "cache/bundle.tar.gz"
+        self.pin["commit"] = "b" * 40
+        with self.assertRaisesRegex(ValueError, "source/target"):
+            self.run_loader("--save-archive", str(saved))
+        self.assertFalse(saved.exists())
 
     def test_checksum_mismatch_does_not_publish(self):
         self.pin["bundles"][self.target]["sha256"] = "0" * 64

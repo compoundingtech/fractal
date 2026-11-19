@@ -4,6 +4,7 @@ Run with: python3 -m unittest discover -s apps/ios/scripts -p 'test_release_deli
 No Apple tools, network access, or device are needed.
 """
 
+import copy
 import fcntl
 import json
 import os
@@ -18,7 +19,9 @@ import textwrap
 import time
 import unittest
 
-from release_delivery import FABRIC_FRAMEWORK, framework_hash, ios_env
+from release_delivery import (DAILY_BUILD_ENV, FABRIC_FRAMEWORK, build_environment,
+                              bundle_id, framework_hash, ios_env, policy_digest, revoked_policy_digests,
+                              validate_update_policy, variant_state)
 
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
@@ -37,6 +40,7 @@ name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 root = Path(os.environ["DELIVERY_FIXTURE_ROOT"])
 control = json.loads((root / "control.json").read_text())
+bundle_id = "com.compoundingtech.fractal" + (".test" if os.environ.get("APP_VARIANT") == "test" else "")
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps({"command": name, "args": args, "cwd": os.getcwd(),
                           "developer_dir": os.environ.get("DEVELOPER_DIR"),
@@ -56,10 +60,18 @@ if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nix":
-    assert args == ["run", "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
+    if args[0] == "build":
+        assert args == ["build", "--max-jobs", "0", "--option", "builders", "",
+                        "--option", "external-builders", "[]", "--no-link",
+                        "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo"], args
+        sys.exit(control.get("toolchain_exit", 0))
+    assert args == ["run", "--max-jobs", "0", "--option", "builders", "",
+                    "--option", "external-builders", "[]",
+                    "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
                     "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
                     "--lock-sync", "off"], args
     if control.get("member_exit"):
+        print("member apply failed", file=sys.stderr)
         sys.exit(control["member_exit"])
     publisher = Path.cwd() / "repos/effect-utils/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs"
     publisher.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +88,7 @@ if name == "node":
     sys.exit(0)
 if name == "fabric-build":
     assert os.environ["FRACTAL_FABRIC"] == os.environ["ST3_FABRIC"] == "1"
+    assert os.environ["FRACTAL_NIX_CACHE_ONLY"] == "1"
     framework = Path.cwd() / "modules/fractal-fabric/ios/build/FractalFabricRust.xcframework"
     if control.get("missing_framework"):
         import shutil
@@ -91,19 +104,19 @@ if name == "pnpm":
             (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
         sys.exit(0)
     if args == ["run", "export:ios"]:
-        assert os.environ["APP_VARIANT"] == "daily"
+        assert os.environ["APP_VARIANT"] in ("daily", "test")
         sys.exit(0)
     assert args[:2] == ["exec", "expo"], args
     if "config" in args:
         print(json.dumps({"name": control.get("expo_name", "Fractal"), "slug": "fractal", "ios": {
-            "bundleIdentifier": "com.compoundingtech.fractal"}}))
+            "bundleIdentifier": bundle_id}}))
     elif "prebuild" in args:
         (Path.cwd() / "ios" / "fractal.xcworkspace").mkdir(parents=True, exist_ok=True)
         (Path.cwd() / "ios" / "Podfile").write_text("# Fixture native project\n")
         native = Path.cwd() / "ios" / "fractal"
         native.mkdir(parents=True, exist_ok=True)
         with (native / "Info.plist").open("wb") as info:
-            plistlib.dump({"CFBundleIdentifier": "com.compoundingtech.fractal",
+            plistlib.dump({"CFBundleIdentifier": bundle_id,
                           "CFBundleExecutable": "fractal", "CFBundleVersion": "0",
                           "StBuildCommit": "unstamped"}, info)
     else:
@@ -171,7 +184,8 @@ if name == "xcrun":
     status = 0
     if "apps" in args:
         installed = root / "device-apps.json"
-        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [])}
+        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [
+            {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}])}
         status = control.get("apps_exit", 0)
     elif "processes" in args:
         result = {"runningProcesses": control.get("processes", [])}
@@ -183,12 +197,18 @@ if name == "xcrun":
             app = Path(next(arg for arg in args if arg.endswith(".app")))
             with (app / "Info.plist").open("rb") as file:
                 bundle = plistlib.load(file)
-            (root / "device-apps.json").write_text(json.dumps([{
+            installed = root / "device-apps.json"
+            existing = json.loads(installed.read_text()) if installed.exists() else [
+                {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}]
+            others = [record for record in existing
+                      if record["bundleIdentifier"] != bundle["CFBundleIdentifier"]]
+            installed.write_text(json.dumps([*others, {
                 "bundleIdentifier": bundle["CFBundleIdentifier"],
                 "bundleVersion": bundle["CFBundleVersion"],
             }]))
     elif "launch" in args:
-        assert "com.compoundingtech.fractal" in args, args
+        assert any(identifier in args for identifier in (
+            "com.compoundingtech.fractal", "com.compoundingtech.fractal.test")), args
         status = control.get("launch_exit", 0)
     else:
         raise AssertionError(args)
@@ -205,6 +225,78 @@ raise AssertionError((name, args))
 
 
 class IosEnvironmentTests(unittest.TestCase):
+    def test_fabric_cache_only_is_opted_in_and_manual_builds_still_realize(self):
+        script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$@\" > \"$NIX_ARGUMENTS\"\n"
+                           "exit 1\n")
+            nix.chmod(0o755)
+            arguments = root / "arguments"
+            for cache_only in ("1", ""):
+                with self.subTest(cache_only=cache_only):
+                    result = subprocess.run(
+                        ["sh", str(script)], capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_ARGUMENTS": str(arguments), "FRACTAL_NIX_CACHE_ONLY": cache_only})
+                    self.assertEqual(result.returncode, 1)
+                    actual = arguments.read_text().splitlines()
+                    if cache_only:
+                        self.assertEqual(actual[:9],
+                                         ["build", "--max-jobs", "0", "--option", "builders", "",
+                                          "--option", "external-builders", "[]"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+                    else:
+                        self.assertEqual(actual[:3], ["build", "--no-link", "--print-out-paths"])
+                        self.assertEqual(len(actual), 4)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_workspace_cache_miss_and_apply_failure_have_distinct_messages(self):
+        script = SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "flake.lock").write_text(json.dumps({
+                "nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$1\" >> \"$NIX_COMMANDS\"\n"
+                           "if [ \"$1\" = build ]; then exit \"$REALIZE_EXIT\"; fi\n"
+                           "echo 'member apply failed' >&2\n"
+                           "exit 42\n")
+            nix.chmod(0o755)
+            commands = root / "commands"
+            for realize_exit in ("7", "0"):
+                with self.subTest(realize_exit=realize_exit):
+                    commands.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [sys.executable, str(script), "apply", "--cache-only"],
+                        cwd=root, capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_COMMANDS": str(commands), "REALIZE_EXIT": realize_exit})
+                    self.assertNotEqual(result.returncode, 0)
+                    if realize_exit != "0":
+                        self.assertEqual(commands.read_text().splitlines(), ["build"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build", result.stderr)
+                    else:
+                        self.assertEqual(commands.read_text().splitlines(), ["build", "run"])
+                        self.assertIn("member apply failed", result.stderr)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_normal_identity_and_state_are_unchanged(self):
+        state = Path("/lane")
+        self.assertEqual(bundle_id("normal"), BUNDLE_ID)
+        self.assertEqual(variant_state(state, "normal"), state)
+        self.assertEqual(build_environment("normal"), DAILY_BUILD_ENV)
+
+    def test_test_identity_state_and_pinned_guard_environment(self):
+        self.assertEqual(bundle_id("test"), BUNDLE_ID + ".test")
+        self.assertEqual(variant_state(Path("/lane"), "test"), Path("/lane/ios-test-variant"))
+        self.assertEqual(build_environment("test"), {**DAILY_BUILD_ENV, "APP_VARIANT": "test"})
+
     def test_fractal_values_win_and_empty_values_mask_legacy(self):
         for suffix in ("REF", "EXPECTED_ORIGIN", "TRUSTED_COMMIT", "DEVICE", "TEAM",
                        "NOTIFY_FROM", "NOTIFY_TO", "MAX_DEFERRAL", "BUILD_BACKOFF", "BUILD_ONLY"):
@@ -228,6 +320,49 @@ class IosEnvironmentTests(unittest.TestCase):
 
 
 class ReleaseDeliveryTests(unittest.TestCase):
+    def test_test_variant_has_separate_artifacts_and_same_fabric_guard(self):
+        self.env.update(FRACTAL_IOS_VARIANT="test",
+                        FRACTAL_IOS_TEST_APP_PROFILE="Fractal Test Development",
+                        FRACTAL_IOS_TEST_RUNNER_PROFILE="Fractal Test Runner Development")
+        self.configure(fabric_stub=True)
+        self.reconcile("--build-only")
+        test_state = self.state / "ios-test-variant"
+        self.assertFalse((self.state / "state.json").exists())
+        data = json.loads((test_state / "state.json").read_text())
+        self.assertIn("failed_build", data)
+        self.assertFalse(list((test_state / "artifacts").glob("*/success.json")))
+        self.assertEqual(len(self.commands("nm")), 1)
+        self.configure(fabric_stub=False)
+        self.reconcile("--build-only")
+        receipts = list((test_state / "artifacts").glob("*/success.json"))
+        self.assertEqual(len(receipts), 1)
+        app = Path(json.loads(receipts[0].read_text())["app"])
+        with (app / "Info.plist").open("rb") as file:
+            self.assertEqual(plistlib.load(file)["CFBundleIdentifier"], BUNDLE_ID + ".test")
+        self.assertTrue(app.is_relative_to(test_state))
+        for command in self.commands("xcodebuild"):
+            self.assertIn("CODE_SIGN_STYLE=Manual", command["args"])
+            self.assertNotIn("-allowProvisioningUpdates", command["args"])
+        self.assertFalse(self.device_commands("install"))
+        normal_record = {"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}
+        (self.root / "device-apps.json").write_text(json.dumps([normal_record]))
+        self.reconcile()
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertIn(BUNDLE_ID + ".test", self.device_commands("launch")[0]["args"])
+        installed = json.loads((self.root / "device-apps.json").read_text())
+        self.assertEqual(len(installed), 2)
+        self.assertEqual([record for record in installed if record["bundleIdentifier"] == BUNDLE_ID],
+                         [normal_record])
+
+    def test_cli_variant_overrides_environment_and_requires_test_profile(self):
+        self.env["FRACTAL_IOS_VARIANT"] = "test"
+        failed = self.invoke("--build-only")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("test-app-profile", failed.stderr)
+        self.reconcile("--variant", "normal", "--build-only")
+        self.assertTrue((self.state / "state.json").exists())
+        self.assertFalse((self.state / "ios-test-variant").exists())
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="release-delivery-tests-")
         self.addCleanup(temporary.cleanup)
@@ -783,6 +918,127 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 1)
 
+    def stale_installed_fixture(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data.update(installed_version="17664", installed=self.initial_commit, installed_key="stale")
+        data["pending"]["build_version"] = "18516"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}])
+
+    def test_reconcile_installed_raises_floor_without_approval_or_deployment(self):
+        self.stale_installed_fixture()
+        self.env.pop("AGENT_ACTION_APPROVAL")
+        before = len(self.commands())
+        self.origin.rename(self.root / "offline-origin.git")
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "18528")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(data["pending"]["build_version"], "18516")
+        self.assertEqual(self.outcomes()[-1], "installed_reconciled")
+        self.assertEqual([entry["command"] for entry in self.commands()[before:]], ["xcrun"])
+        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+        self.assertFalse((self.state / "installed-apps.json").exists())
+
+    def test_reconcile_installed_never_lowers_floor(self):
+        self.stale_installed_fixture()
+        data = self.saved_state()
+        data["installed_version"] = "19000"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.reconcile("--reconcile-installed")
+        self.assertEqual(self.saved_state()["installed_version"], "19000")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_reads_device_and_refuses_stale_pending_build(self):
+        self.stale_installed_fixture()
+        self.reconcile()
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.saved_state()["pending"]["build_version"], "18516")
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+
+    def test_approved_tick_refuses_pending_equal_to_device_build(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18516"}])
+        self.reconcile()
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_reconciled_floor_discards_older_pending_on_next_approved_tick(self):
+        self.stale_installed_fixture()
+        self.reconcile("--reconcile-installed")
+        self.configure(build_exit=65)
+        self.reconcile()
+        self.assertIn("pending_discarded", self.outcomes())
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertFalse(self.saved_state().get("pending"))
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_readback_failures_refuse_install(self):
+        self.stale_installed_fixture()
+        for control in (
+            {"apps_exit": 1},
+            {"apps_exit": 0, "apps": []},
+            {"apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "unparseable"}]},
+        ):
+            with self.subTest(control=control):
+                self.configure(**control)
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "install_deferred")
+                self.assertEqual(self.saved_state()["installed_version"], "17664")
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+
+    def test_reconcile_installed_readback_failure_preserves_floor(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[])
+        result = self.invoke("--reconcile-installed")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.saved_state()["installed_version"], "17664")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def reconciled_failed_launch(self, *, source_changed):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}])
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertFalse(data["pending"]["installed"])
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        if source_changed:
+            self.change_js("after-external-install")
+        installs = len(self.device_commands("install"))
+        launches = len(self.device_commands("launch"))
+        self.configure(launch_exit=0, build_exit=65)
+        self.reconcile()
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(len(self.device_commands("install")), installs)
+        self.assertEqual(len(self.device_commands("launch")), launches)
+        self.configure(build_exit=0)
+        self.reconcile()
+        self.assertGreater(int(self.saved_state()["installed_version"]), 99)
+        self.assertEqual(len(self.device_commands("install")), installs + 1)
+        self.assertEqual(len(self.device_commands("launch")), launches + 1)
+        self.assert_installed(self.git("rev-parse", "HEAD"))
+
+    def test_reconcile_installed_invalidates_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=False)
+
+    def test_reconcile_installed_invalidates_superseded_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=True)
+
     def test_interrupted_install_reads_back_success_without_reinstalling(self):
         self.configure(launch_exit=1)
         self.reconcile()
@@ -794,7 +1050,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.reconcile()
         self.assert_installed(self.initial_commit)
         self.assertEqual(len(self.device_commands("install")), 1)
-        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(len(self.device_commands("apps")), 2)
         self.assertEqual(len(self.device_commands("launch")), 2)
         self.assertFalse((self.state / "installed-apps.json").exists())
 
@@ -816,7 +1072,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(len(self.device_commands("install")), 1)
                 self.assertEqual(self.device_commands("launch"), [])
                 self.assertIn("install_attempt", self.saved_state())
-                self.assertFalse(self.saved_state().get("installed_version"))
+                self.assertEqual(self.saved_state()["installed_version"], "0")
                 self.assertFalse((self.state / "installed-apps.json").exists())
 
     def test_recovered_higher_device_version_forces_new_monotonic_build(self):
@@ -833,8 +1089,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.device_commands("install")), 2)
 
     def test_contradictory_readback_reinstalls_reverted_content(self):
-        for apps, minimum_version in (([], 1), ([{
-                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100)):
+        for apps, minimum_version in (([{
+                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100),):
             with self.subTest(apps=apps):
                 self.reset_delivery()
                 self.reconcile()
@@ -1188,6 +1444,77 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertFalse((output / "success.json").exists())
         self.assertIn("refusing the disabled stub", (output / "build.log").read_text())
 
+    def test_disabled_stub_is_refused_before_pending_or_retained_install(self):
+        for retained in (False, True):
+            with self.subTest(retained=retained):
+                self.reset_delivery()
+                self.reconcile("--build-only")
+                if retained:
+                    data = self.saved_state()
+                    del data["pending"]
+                    data["installed_version"] = "0"
+                    (self.state / "state.json").write_text(json.dumps(data))
+                # Model a snapshot published by an older updater without the build guard.
+                self.configure(fabric_stub=True)
+                self.reconcile()
+                event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["outcome"], "install_refused")
+                self.assertEqual(event["reason"], "fabric_missing")
+                self.assertEqual(event["commit"], self.initial_commit)
+                self.assertNotIn("pending", self.saved_state())
+                self.assertNotIn("install_attempt", self.saved_state())
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+                receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+                self.assertFalse(receipt.exists())
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "build_failed")
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(len(self.commands("xcodebuild")), 2)
+
+    def test_disabled_stub_is_refused_before_install_recovery_readback(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data["install_attempt"] = dict(data["pending"])
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(fabric_stub=True)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
+    def test_disabled_stub_is_refused_before_installed_launch_retry(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.command_log.unlink()
+        self.configure(fabric_stub=True, launch_exit=0)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertNotIn("installed_key", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
+    def test_pending_artifact_with_real_bridge_installs(self):
+        self.reconcile("--build-only")
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        self.assertEqual(len(self.commands("nm")), 2)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertEqual(len(self.device_commands("launch")), 1)
+
     def test_changed_build_inputs_rebuild_unchanged_revision_before_trusting_artifacts(self):
         self.reconcile("--build-only")
         self.assertEqual(len(self.commands("xcodebuild")), 1)
@@ -1493,6 +1820,18 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state().get("pending"), None)
         events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("member apply failed", log.read_text())
+        self.assertNotIn("binary cache", log.read_text())
+
+    def test_workspace_toolchain_cache_miss_never_applies_or_builds(self):
+        self.configure(toolchain_exit=7)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual([entry["args"][0] for entry in self.commands("nix")], ["build"])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("closure is not available in the binary cache", log.read_text())
 
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
@@ -1727,6 +2066,127 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.commands("xcodebuild")), 1)
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertEqual(len(self.device_commands("launch")), 1)
+
+
+class UpdatePolicySchemaTests(unittest.TestCase):
+    """Pure staged format checks: no files, tools, native asks or device access."""
+
+    def setUp(self):
+        self.script_sha = "a" * 64
+        self.policy = {"enabled": True, "policy_revision": 1,
+                       "updater_sha256": self.script_sha, "lock": "/state/policy/delivery.lock",
+                       "deny_file": "/state/policy/revoked-policies", "lanes": []}
+        for name in ("iphone", "ipad"):
+            self.policy["lanes"].append({
+                "id": name, "device": "TEST-" + name.upper(), "state": "/state/" + name,
+                "repo": "/source", "ref": "origin/main", "team": "TESTTEAM",
+                "developer_dir": "/toolchain/Developer", "expected_origin": "https://example.invalid/app",
+                "trusted_commit": "b" * 40, "bundle": BUNDLE_ID,
+                "certificate_sha256": "c" * 64, "profile_uuid": "fixture-profile",
+                "entitlements": {"get-task-allow": True}, "distribution": "development",
+                "effects": ["install", "launch", "recover"], "max_deferral": 2400, "build_backoff": 900})
+
+    def envelope(self, policy=None):
+        policy = self.policy if policy is None else policy
+        return {"version": 1, "policy": policy,
+                "approval": {"decision": "step-run/fixture/ask", "sha256": policy_digest(policy)}}
+
+    def test_valid_normal_policy_does_not_modify_input(self):
+        envelope = self.envelope()
+        before = copy.deepcopy(envelope)
+        self.assertEqual(validate_update_policy(envelope, self.script_sha), self.policy)
+        self.assertEqual(envelope, before)
+
+    def test_canonical_digest_ignores_key_order_and_rejects_non_json_numbers(self):
+        self.assertEqual(policy_digest({"z": 1, "a": "é"}), policy_digest({"a": "é", "z": 1}))
+        self.assertNotEqual(policy_digest({"flag": True}), policy_digest({"flag": 1}))
+        with self.assertRaises(ValueError):
+            policy_digest({"number": float("nan")})
+
+    def test_revived_policy_needs_explicit_new_revision_and_exact_approval(self):
+        old = self.envelope()
+        revoked = revoked_policy_digests(old["approval"]["sha256"] + "\n")
+        again = copy.deepcopy(old)
+        again["approval"]["decision"] = "step-run/another-fixture/ask"
+        self.assertIn(again["approval"]["sha256"], revoked)
+        revised = copy.deepcopy(self.policy)
+        revised["policy_revision"] = 2
+        # Reusing the old decision's digest is not an approval of the revised body.
+        again["policy"] = revised
+        with self.assertRaises(ValueError):
+            validate_update_policy(again, self.script_sha)
+        fresh = self.envelope(revised)
+        fresh["approval"]["decision"] = "step-run/fresh-policy/ask"
+        self.assertNotIn(fresh["approval"]["sha256"], revoked)
+        self.assertEqual(validate_update_policy(fresh, self.script_sha)["policy_revision"], 2)
+
+    def test_missing_default_unknown_and_wrong_approval_refuse(self):
+        valid = self.envelope()
+        for mutate in (
+            lambda value: value.pop("approval"),
+            lambda value: value.update(version=True),
+            lambda value: value.update(version=2),
+            lambda value: value.update(extra="unknown"),
+            lambda value: value["approval"].update(decision=""),
+            lambda value: value["approval"].update(sha256="0" * 64),
+            lambda value: value["approval"].update(default="accept"),
+        ):
+            with self.subTest(mutate=mutate):
+                value = copy.deepcopy(valid)
+                mutate(value)
+                with self.assertRaises(ValueError):
+                    validate_update_policy(value, self.script_sha)
+
+    def test_changed_or_disabled_body_and_unbound_script_refuse(self):
+        for key, invalid in (("enabled", False), ("policy_revision", 0), ("policy_revision", True),
+                             ("lock", "relative"), ("deny_file", "relative"),
+                             ("updater_sha256", "d" * 64)):
+            with self.subTest(key=key, invalid=invalid):
+                value = copy.deepcopy(self.policy)
+                value[key] = invalid
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+        changed = self.envelope()
+        changed["policy"]["lanes"][0]["max_deferral"] = 1200
+        with self.assertRaises(ValueError):
+            validate_update_policy(changed, self.script_sha)
+
+    def test_each_lane_binding_and_permission_shape_refuses_invalid_values(self):
+        mutations = (("bundle", BUNDLE_ID + ".test"), ("distribution", "enterprise"),
+                     ("effects", ["install", "launch"]), ("entitlements", {"get-task-allow": False}),
+                     ("certificate_sha256", "short"), ("profile_uuid", ""), ("team", ""),
+                     ("trusted_commit", "short"), ("state", "relative"), ("repo", "relative"),
+                     ("developer_dir", "relative"), ("state", "/state/ipad/../iphone"), ("max_deferral", -1), ("build_backoff", True))
+        for key, invalid in mutations:
+            with self.subTest(key=key):
+                value = copy.deepcopy(self.policy)
+                value["lanes"][0][key] = invalid
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+
+    def test_two_named_lanes_with_distinct_lexical_bindings_are_required(self):
+        for mutate in (
+            lambda value: value["lanes"].pop(),
+            lambda value: value["lanes"][0].update(id="ipad"),
+            lambda value: value["lanes"][0].update(device="test-ipad"),
+            lambda value: value["lanes"][0].update(state="/state/ipad"),
+            lambda value: value["lanes"][0].update(unknown="field"),
+        ):
+            with self.subTest(mutate=mutate):
+                value = copy.deepcopy(self.policy)
+                mutate(value)
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+
+    def test_deny_contents_are_empty_or_full_lowercase_digests(self):
+        first, second = "a" * 64, "b" * 64
+        self.assertEqual(revoked_policy_digests(""), frozenset())
+        self.assertEqual(revoked_policy_digests(first), frozenset([first]))
+        self.assertEqual(revoked_policy_digests(first + "\n" + second + "\n"), frozenset([first, second]))
+        for invalid in (None, "\n", first + "\n\n", first + "\r\n", first.upper(), "short", "unknown"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    revoked_policy_digests(invalid)
 
 
 if __name__ == "__main__":

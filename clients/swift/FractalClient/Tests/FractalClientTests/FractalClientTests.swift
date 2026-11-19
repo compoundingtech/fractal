@@ -6,6 +6,80 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testSeriesFixturePreservesZeroAndClippedBuckets() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertNil(series.groupBy)
+        XCTAssertEqual(series.from, 1767225600000)
+        XCTAssertEqual(series.to, 1767225725000)
+        XCTAssertEqual(series.bucketSeconds, 60)
+        XCTAssertEqual(series.buckets.map(\.count), [2, 0, 1])
+        XCTAssertEqual(series.buckets.last?.start, 1767225720000)
+        XCTAssertEqual(series.buckets.last?.end, series.to)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
+    }
+
+    func testSeriesGroupedFixturePreservesJSONValues() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series-grouped.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertEqual(series.groupBy, "category")
+        XCTAssertEqual(series.buckets.first?.groups?.count, 6)
+        XCTAssertEqual(series.buckets[1].groups?.count, 0)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
+    }
+
+    func testMissionRunSupersessionLineageAndLegacyOmission() throws {
+        let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)
+        XCTAssertNil(decoded.supersedes)
+        XCTAssertNil(decoded.supersededBy)
+        XCTAssertNil(decoded.supersessionFault)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        for field in ["supersedes", "superseded_by", "supersession_fault"] {
+            XCTAssertNil(encoded[field])
+        }
+        var linked = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        linked["retry_of"] = "mission-run/example/failed"
+        linked["retried_by"] = ["mission-run/example/retry"]
+        linked["supersedes"] = "mission-run/example/previous"
+        linked["superseded_by"] = "mission-run/example/replacement"
+        linked["supersession_fault"] = "revision old -> new: missing [replacement]; extra [value]"
+        let run = try JSONDecoder().decode(MissionRunSummary.self, from: JSONSerialization.data(withJSONObject: linked))
+        XCTAssertEqual(run.retryOf, "mission-run/example/failed")
+        XCTAssertEqual(run.retriedBy, ["mission-run/example/retry"])
+        XCTAssertEqual(run.supersedes, "mission-run/example/previous")
+        XCTAssertEqual(run.supersededBy, "mission-run/example/replacement")
+        XCTAssertEqual(run.supersessionFault, "revision old -> new: missing [replacement]; extra [value]")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(run)) as? NSDictionary, linked as NSDictionary)
+    }
+
+    func testPersonOptionNotesRoundTripAndEmptyOmission() throws {
+        let legacy = Data(#"{"id":"land","text":"Ship it."}"#.utf8)
+        let decoded = try JSONDecoder().decode(PersonAnswerInput.self, from: legacy)
+        XCTAssertTrue(decoded.optionNotes.isEmpty)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: legacy) as? NSDictionary)
+        let notes = [PersonOptionNote(id: "hold", text: "Keep as a fallback.")]
+        let input = PersonAnswerInput(id: "land", text: "Ship it.", optionNotes: notes)
+        let wire = try JSONEncoder().encode(input)
+        XCTAssertEqual(try JSONDecoder().decode(PersonAnswerInput.self, from: wire).optionNotes, notes)
+        let stored = Data(#"{"type":"decision","outcome":"accept","id":"land","text":"Ship it.","option_notes":[{"id":"hold","text":"Keep as a fallback."}]}"#.utf8)
+        let answer = try JSONDecoder().decode(PersonAnswer.self, from: stored)
+        XCTAssertEqual(answer.optionNotes, notes)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(answer)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: stored) as? NSDictionary)
+        let empty = try JSONDecoder().decode(PersonAnswer.self,
+            from: Data(#"{"type":"decision","outcome":"accept","id":"land","option_notes":[]}"#.utf8))
+        let emptyWire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(empty)) as? [String: Any])
+        XCTAssertNil(emptyWire["option_notes"])
+    }
+
     func testDeviceCommandTypedArgumentsAndResourceRoundTrip() throws {
         let request = DeviceCommandRequest(device: "device/phone",
             command: .navigate(.conversation(target: "agent/example/worker", sessionID: "session/example")), ttlMS: 30000)
@@ -249,6 +323,118 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testDirectiveNoteSetFixturesDecodeAndEncodeAClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let set = try JSONDecoder().decode(DirectiveNoteSet.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set.json")))
+        XCTAssertEqual(set.expiresAt, "2026-11-16T09:00:00Z")
+        let result = try JSONDecoder().decode(Envelope<DirectiveNoteSetResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set-result.json")))
+        XCTAssertEqual(result.value.note?.text, set.text)
+        let cleared = try JSONDecoder().decode(DirectiveNoteSetResult.self, from: Data(#"{"note":null}"#.utf8))
+        XCTAssertNil(cleared.note)
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DirectiveNoteSet(text: nil))) as? NSDictionary
+        XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
+    }
+
+    func testAutoResolvedFixtureAndOverrideParameters() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/auto-resolved.json")
+        let rows = try JSONDecoder().decode(Envelope<AutoResolvedAsks>.self, from: Data(contentsOf: fixture))
+        XCTAssertTrue(rows.value.complete)
+        XCTAssertEqual(rows.value.items[0].defaultAnswer?.id, "hold")
+        XCTAssertEqual(rows.value.items[0].actionParameters?["work.override"]?.episode, "claim/example")
+        let input = PersonOverrideParameters(targetID: "step-run/example", episode: "claim/example", answer: PersonOverrideAnswer(id: "ship"))
+        let wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(input)) as? NSDictionary
+        XCTAssertEqual(wire, ["target_id": "step-run/example", "episode": "claim/example", "answer": ["id": "ship"]] as NSDictionary)
+    }
+
+    func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/blair"])
+        XCTAssertEqual(read.value.people[0].statusSource, .override)
+        XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
+        XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        XCTAssertEqual(read.value.people[2].status, .available)
+        XCTAssertEqual(read.value.people[2].statusSource, .unreported)
+        let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
+        XCTAssertEqual(own.value.presence, .present)
+        let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
+        XCTAssertEqual(set.deadlineClock?.value, "run")
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
+        XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "active", lastInputAt: "2026-11-12T09:57:30Z", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, try JSONSerialization.jsonObject(with: Data(contentsOf: fixtures.appendingPathComponent("presence-report.json"))) as? NSDictionary)
+        let locked = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "locked", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(locked, ["state": "locked", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let reported = try JSONDecoder().decode(Envelope<PresenceReportResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("presence-report-result.json")))
+        XCTAssertEqual(reported.value.availability.presence, .present)
+        XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
+    }
+
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
+        let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
+        let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
+        XCTAssertEqual(future.status, .unknown("busy"))
+        XCTAssertEqual(future.statusSource, .unknown("calendar"))
+        XCTAssertEqual(future.presence, .unknown("in-call"))
+        XCTAssertEqual(future.interruptions, .unknown("priority"))
+        XCTAssertEqual(future.deadlineClock, .unknown("hold-weekend"))
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
+        XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
+        XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
+    }
+
+    func testAvailabilityHistoryFixtureDecodesMillisecondsPerAxis() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/availability-history.json")
+        let history = try JSONDecoder().decode(Envelope<AvailabilityHistory>.self, from: Data(contentsOf: fixture)).value
+        XCTAssertEqual(history.person, "person/ada")
+        XCTAssertEqual([history.bucketSeconds, history.buckets.count], [3600, 2])
+        let last = try XCTUnwrap(history.buckets.last)
+        XCTAssertEqual(last.start, "2026-11-12T10:00:00.000Z")
+        XCTAssertEqual([last.coveredMS, last.statusSource.override, last.deadlineClock.holdRoutine, last.interruptions.urgent], [1_800_000, 1_200_000, 1_200_000, 1_800_000])
+        XCTAssertEqual(last.presence?.present, 1_800_000)
+        for bucket in history.buckets {
+            XCTAssertEqual(bucket.status.available + bucket.status.away, bucket.coveredMS)
+            XCTAssertEqual(bucket.deadlineClock.run + bucket.deadlineClock.holdRoutine + bucket.deadlineClock.holdAll, bucket.coveredMS)
+        }
+        let wire = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any]
+        let reencoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(history)) as? NSDictionary
+        XCTAssertEqual(reencoded, wire?["value"] as? NSDictionary)
+    }
+
+    func testAvailabilityHistorySendsItsRangeAndAnOlderDaemonIsUnsupported() async throws {
+        let url = URL(string: "https://history-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        let client = FractalClient(fabricLoopbackURL: url, session: session)
+        do {
+            _ = try await client.availabilityHistory(person: "person/ada", from: "2026-11-12T09:00:00Z", to: "2026-11-12T11:00:00Z", bucketSeconds: 3600)
+            XCTFail("an older daemon has no availability history")
+        } catch let error as ErrorEnvelope {
+            XCTAssertEqual(error.code, .unsupportedCapability)
+        }
+        let request = try XCTUnwrap(capture.requests.first { $0.url?.path == "/v1/client/availability/history" })
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "from", value: "2026-11-12T09:00:00Z"), URLQueryItem(name: "to", value: "2026-11-12T11:00:00Z"),
+            URLQueryItem(name: "bucket_seconds", value: "3600"), URLQueryItem(name: "person", value: "person/ada"),
+        ])
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -490,6 +676,8 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(agent.runtimeIDs, ["runtime/release-agent"])
         XCTAssertEqual(agent.workspace, "/srv/example/release")
         XCTAssertEqual(agent.checkout?.branch, "release")
+        XCTAssertEqual(agent.suspension?.cause, "idle")
+        XCTAssertEqual(agent.suspension?.mode, "git")
         guard case .runtime(let runtime) = try resource("runtime/release-agent") else { return XCTFail("runtime discriminator lost") }
         XCTAssertEqual(runtime.ownerHostID, "host/host-a")
         XCTAssertEqual(runtime.incarnationID, "runtime-9:2026-09-20T11:06:30Z")
@@ -915,16 +1103,18 @@ private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        // An older daemon: no availability history route, so Axum's empty 404.
+        let missing = request.url?.path == "/v1/client/availability/history"
         guard let capture = TraceHTTPRegistry.shared.capture(for: request),
               let url = request.url,
-              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+              let response = HTTPURLResponse(url: url, statusCode: missing ? 404 : 200, httpVersion: nil,
                   headerFields: ["Content-Type": "application/json"]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
         capture.append(request)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: TraceTestFixtures.capabilities)
+        client?.urlProtocol(self, didLoad: missing ? Data() : TraceTestFixtures.capabilities)
         client?.urlProtocolDidFinishLoading(self)
     }
 

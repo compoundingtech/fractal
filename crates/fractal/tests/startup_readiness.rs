@@ -29,10 +29,72 @@ fn command(root: &Path) -> Command {
         .env("XDG_CONFIG_HOME", root.join("home/.config"))
         .env("XDG_STATE_HOME", root.join("home/.local/state"))
         .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env("SYSTEMD_UNIT_PATH", root.join("home/.config/systemd/user"))
         .env("ST3_ENDPOINT", root.join("run/api.sock"))
         .current_dir(root)
         .stdin(Stdio::null());
     command
+}
+
+#[test]
+fn up_starts_the_escalation_capable_wal_recycler() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for directory in ["home/.config/st3", "run", "state"] {
+        std::fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    std::fs::write(root.path().join("home/.config/st3/config.toml"), format!(
+        "node = \"studio\"\nstate_dir = {:?}\nsocket = {:?}\nclient_gateway_socket = {:?}\npty_root = {:?}\n",
+        root.path().join("state"), root.path().join("run/api.sock"),
+        root.path().join("run/client.sock"), root.path().join("pty")
+    )).unwrap();
+    let mut daemon = Daemon(
+        command(root.path())
+            .args(["up", "--web-listen", "off"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = daemon.0.stderr.take().unwrap();
+    let (observed, checkpoint) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let mut startup_log = String::new();
+        let mut published = false;
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if !published {
+                if let Some(report) = line.strip_prefix("fractal: WAL checkpoint ") {
+                    let _ = observed.send(Ok(serde_json::from_str::<Value>(report).unwrap()));
+                    published = true;
+                } else {
+                    startup_log.push_str(&line);
+                    startup_log.push('\n');
+                }
+            }
+        }
+        if !published {
+            let _ = observed.send(Err(startup_log));
+        }
+    });
+    // Await the worker's first completed recycle, not a guessed startup delay. The watchdog
+    // bounds a missing startup call; it is not used to manufacture overlapping WAL activity.
+    let checkpoint = checkpoint.recv_timeout(Duration::from_secs(30))
+        .expect("up did not publish a completed WAL recycle")
+        .expect("daemon exited before a WAL recycle");
+    assert!(daemon.0.try_wait().unwrap().is_none(), "{checkpoint}");
+    // This structured event is published only after the startup worker calls Store::recycle_wal,
+    // the entry point that includes escalation. Its threshold/restart behavior has a separate
+    // deterministic Store-level regression; this test protects the real `up` launch wiring.
+    assert!(matches!(checkpoint["report"]["outcome"].as_str(), Some("empty" | "recycled" | "deferred")), "{checkpoint}");
+    assert!(checkpoint["report"]["frames"].as_i64().is_some_and(|frames| frames >= 0), "{checkpoint}");
+    assert_eq!(checkpoint["retained"]["error_outcomes"], 0, "{checkpoint}");
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    reader.join().unwrap();
 }
 
 #[test]
@@ -270,12 +332,21 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         std::fs::create_dir_all(&directory).unwrap();
         let systemctl = directory.join("systemctl");
         std::fs::write(&systemctl, r#"#!/bin/sh
-if [ "$2" != show ]; then exit 9; fi
-if [ "$3" = st3.service ]; then
-    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
-else
-    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
-fi
+case "$2" in
+list-units)
+    printf '%s\n' '[{"unit":"st3.service","load":"loaded","active":"active","sub":"running"}]'
+    ;;
+show)
+    # Only the actually enumerated unit may reach the property batch.
+    for argument in "$@"; do
+        case "$argument" in
+        *.service) [ "$argument" = st3.service ] || exit 8 ;;
+        esac
+    done
+    printf '%s\n' 'Id=st3.service' 'LoadState=loaded' 'ActiveState=active' 'SubState=running' 'MainPID=0' 'ControlGroup=' ''
+    ;;
+*) exit 9 ;;
+esac
 "#).unwrap();
         std::fs::set_permissions(systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = command(root)

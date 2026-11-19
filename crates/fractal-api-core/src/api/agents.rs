@@ -62,13 +62,18 @@ pub struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
-    /// Restart without first asking the seat for its handoff.
+    /// Restart without first asking the seat for its handoff, except a fresh session still waits
+    /// for a current handoff unless a person explicitly accepts a stale one.
     #[serde(default)]
     now: bool,
-    /// Start a new native session instead of continuing the last one. The seat must have a
-    /// handoff that is ready since its last turn, which its new session is given first.
+    /// Start a new native session instead of continuing the last one, waiting for the seat's
+    /// handoff acknowledgement if its handoff is not ready since its last turn.
     #[serde(default)]
     fresh_session: bool,
+    /// A person explicitly accepts the existing handoff without waiting for acknowledgement.
+    /// Requires a fresh session.
+    #[serde(default)]
+    from_stale_handoff: bool,
     /// Start the seat now even if its lane does not fit the host (docs/st3/seat-lanes.md,
     /// "Admission by fit"). Needs a reason, recorded on the request with its actor.
     #[serde(default)]
@@ -82,6 +87,20 @@ pub async fn restart_agent(
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-restart-actor")?;
+    if request.from_stale_handoff {
+        if !request.fresh_session {
+            return Err(ApiError::bad(FractalError::new(
+                "restart-from-stale-handoff-requires-fresh-session",
+                "from_stale_handoff requires fresh_session",
+            )));
+        }
+        if !actor.starts_with("person/") {
+            return Err(ApiError::bad(FractalError::new(
+                "restart-from-stale-handoff-person-only",
+                "only a person may accept a stale handoff for a fresh session",
+            )));
+        }
+    }
     let ignore_fit_reason = match (request.ignore_fit, request.reason.as_deref().map(str::trim)) {
         (false, _) => None,
         (true, Some(reason)) if !reason.is_empty() => Some(reason.to_owned()),
@@ -192,14 +211,13 @@ pub async fn restart_agent(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    if request.fresh_session
-        && !crate::handoff::ready_since_last_turn(&state.store, &subject).map_err(ApiError::internal)?
-    {
-        return Err(ApiError::bad(FractalError::new(
-            "restart-fresh-session-no-handoff",
-            "a fresh session starts from the seat's handoff: write it with `st agents handoff write`, or mark the current one current with `st agents handoff ready`, then restart again",
-        )));
-    }
+    let restart_now = if request.fresh_session {
+        request.from_stale_handoff
+            || crate::handoff::ready_since_last_turn(&state.store, &subject)
+                .map_err(ApiError::internal)?
+    } else {
+        request.now
+    };
     let defer = actor == subject
         && !request.now
         && current.actual.as_ref().is_some_and(|actual| {
@@ -230,14 +248,15 @@ pub async fn restart_agent(
                 ("incarnation_id".into(), Value::String(incarnation.into())),
             ])
             .into_iter()
-            // A fresh session already required a ready handoff, so asking for one again is only a wait.
-            .chain((request.now || request.fresh_session).then(|| {
+            // A fresh session may skip preparation only with a current handoff or a person's override.
+            .chain(restart_now.then(|| {
                 (
                     "operation".to_owned(),
                     Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
                 )
             }))
             .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
+            .chain(request.from_stale_handoff.then(|| ("from_stale_handoff".to_owned(), Value::Bool(true))))
             .chain(ignore_fit_reason.into_iter().flat_map(|reason| [
                 ("ignore_fit".to_owned(), Value::Bool(true)),
                 ("reason".to_owned(), Value::String(reason)),
@@ -665,6 +684,66 @@ async fn rename_identity_id(
     let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
     signal_changed(&state);
     Ok(Json(receipt))
+}
+
+pub async fn plan_agent_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn plan_mission_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn plan_identity_rename(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: crate::store::identities::RenameRequest,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    person_or_agent_actor(&request.actor, "invalid-rename-actor")?;
+    let store = state.store.clone();
+    let peers = state.configured_peers.clone();
+    blocking_action(move || store.plan_rename_identity(kind, &request, &peers)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofQuery {
+    from: String,
+    to: String,
+    request_digest: Option<String>,
+}
+
+pub async fn agent_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, query).await
+}
+
+pub async fn mission_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, query).await
+}
+
+async fn identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    query: RenameProofQuery,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.rename_proof(kind, &query.from, &query.to, query.request_digest.as_deref())
+    }).await.map(Json)
 }
 
 #[derive(Deserialize)]

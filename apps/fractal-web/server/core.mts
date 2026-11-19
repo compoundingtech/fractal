@@ -1,20 +1,41 @@
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { Cause, Context, Effect, Exit, Fiber, Layer, Schema, Scope, Tracer } from 'effect'
 import { completedResponse, reject } from './boundary.mts'
 import { createContentSecurityPolicy } from './csp.mts'
-import { clientRoute, Gateway } from './gateway.mts'
+import { browserPath, clientRoute, Gateway, type GatewayOptions } from './gateway.mts'
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
+import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
 
+export interface AdmissionIdentity {
+  readonly kind: 'login' | 'tag'
+  readonly value: string
+}
+type Admission = boolean | AdmissionIdentity
+const tagPreviewRoute = (req: IncomingMessage): boolean => {
+  const path = browserPath(req.url ?? '')
+  if (path === undefined || pairingRoute(req.url ?? '') || /^\/v1\/client\/pairings?(?:\/|$)/i.test(path) || !['GET', 'HEAD'].includes(req.method ?? 'GET')) return false
+  // Only this read subscription tunnel is exposed to tagged readers. The daemon enforces
+  // frame authorization using the publisher's read-only credential; we never parse frames.
+  return req.headers.upgrade === undefined || path === '/v1/client/collections/stream'
+}
+const identityLog = (admission: Admission) => typeof admission === 'object'
+  ? Effect.logInfo('Publisher admission').pipe(Effect.annotateLogs({
+    'identity.kind': admission.kind,
+    'identity.value': admission.kind === 'tag' ? admission.value : createHash('sha256').update(admission.value).digest('hex'),
+  }))
+  : Effect.void
 /** The host supplies authentication/CSRF policy; no deployment identity is assumed. */
 export interface MiddlewareOptions {
   readonly server: Server
-  readonly admit: (request: IncomingMessage) => boolean | Promise<boolean>
-  readonly gateway: { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
+  readonly admit: (request: IncomingMessage) => Admission | Promise<Admission>
+  readonly gateway: GatewayOptions
   readonly tracer: Tracer.Tracer
+  readonly pairing?: BrowserPairingOptions
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */
   readonly connectOrigins?: readonly string[]
 }
@@ -69,22 +90,33 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
         }
       })
     }
-    const admitted = async (req: IncomingMessage): Promise<boolean> => {
-      try { return !closed && await options.admit(req) }
+    const admitted = async (req: IncomingMessage): Promise<Admission> => {
+      try {
+        const admission = !closed && await options.admit(req)
+        return typeof admission === 'object' && admission.kind === 'tag' && !tagPreviewRoute(req) ? false : admission
+      }
       catch { return false }
     }
     const handle = async (req: IncomingMessage, res: ServerResponse, next: Effect.Effect<void>): Promise<void> => {
       res.setHeader('content-security-policy', policy(req.headers.host))
       // Admission refusals and auth-hook failures do not enter tracing.
-      if (!await admitted(req)) { reject(res, 403, 'Forbidden\n'); return }
+      const admission = await admitted(req)
+      if (!admission) { reject(res, 403, 'Forbidden\n'); return }
+      const preview = typeof admission === 'object' && admission.kind === 'tag'
       const dispatch = Effect.gen(function* () {
+        yield* identityLog(admission)
         const url = req.url ?? ''
+        const path = browserPath(url)
+        if (path === undefined) { reject(res, 404, 'Not found\n'); return }
+        if (pairingRoute(url)) {
+          return yield* Effect.promise(() => handlePairing(req, res, options.gateway, options.pairing))
+        }
         if (clientRoute(url)) {
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
-          return yield* gateway.http(req, res, parent)
+          return yield* gateway.http(req, res, parent, preview)
         }
         // No privileged local API or application-specific private routes.
-        if (/^\/(?:v1|wf|otlp)(?:\/|\?|$)/.test(url)) { reject(res, 404, 'Not found\n'); return }
+        if (/^\/(?:v1|wf|otlp)(?:\/|$)/.test(path)) { reject(res, 404, 'Not found\n'); return }
         yield* next
       }).pipe(
         Effect.catchDefect(() => Effect.sync(() => {
@@ -101,7 +133,8 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
     }
     const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
       // As dev middleware the host server (Vite HMR) owns every other upgrade; answering it here would close that socket.
-      if (assets === undefined && !clientRoute(req.url ?? '')) return
+      const path = browserPath(req.url ?? '')
+      if (assets === undefined && path !== undefined && !/^\/v1(?:\/|$)/.test(path)) return
       // Node relinquishes HTTP error handling as soon as it emits upgrade.
       // Cover pending admission and rejected shutdown, not only admitted tunnels.
       const onError = () => socket.destroy()
@@ -115,8 +148,9 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
           return
         }
         await run(Effect.gen(function* () {
+          yield* identityLog(allowed)
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
-          const status = yield* gateway.upgrade(req, socket, head, parent)
+          const status = yield* gateway.upgrade(req, socket, head, parent, typeof allowed === 'object' && allowed.kind === 'tag')
           yield* Effect.annotateCurrentSpan('http.response.status_code', status)
         }).pipe(Effect.withSpan('fractal.server.request', requestSpanOptions(req, true))), socket)
       })().catch(() => socket.destroy())

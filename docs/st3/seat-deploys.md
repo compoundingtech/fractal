@@ -126,12 +126,18 @@ the provider. Several Fractal processes carry the seat's messages for the whole 
 
 New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects to `/v1/mailbox`
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
-Every connection starts a new automatic-delivery boundary. Pre-connection mail older than one
-hour stays held in the graph mailbox. Recent mail with no staging or delivery claim is admitted
-once so an in-flight send survives a daemon restart. Previously staged or delivered-but-unread
-mail stays held regardless of age; a missing receipt never authorizes another offer. The one-hour
-window uses the original send time and the same threshold as the unread backlog. SQLite
-fences both subscriptions and receipts to the live runtime
+Every connection starts a new automatic-delivery boundary. Never-offered pre-connection mail
+sent within the preceding seven days is eligible for recovery; older mail stays held in the graph
+mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, in batches of
+at most five. Only one batch is outstanding per connection: the next batch opens when every
+member is delivered or withdrawn. A terminally closed message is withdrawn, not delivered;
+withdrawal creates no delivery receipt. Staging or offering a message does not release a slot;
+one stuck, non-closed member holds the whole next batch. Mail at most one hour old and new live
+mail do not consume that budget. Delivery or withdrawal wakes the stream to admit the next
+batch without a reconnect.
+Both age boundaries use the original send time relative to connection start, including late imports.
+Previously staged or delivered-but-unread mail stays held regardless of age; a missing receipt
+never authorizes another offer. SQLite fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
 after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
 just before the record goes to the messages shard, so a token revoked between them can still
@@ -146,12 +152,44 @@ uncertain handoffs, and successful handoffs retry lost receipt acknowledgements 
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
-never authorizes another offer of old mail. Older polling drivers also recover recent unoffered
-pre-boot mail and retain the current boot's staging attempt until its receipts finish;
-their local archive projection removes old native inbox files without closing the graph messages.
+never authorizes another offer of previously offered mail. Polling drivers use the same seven-day
+recovery window and settlement-gated batches of at most five oldest backlog messages. Their
+connection boundary is the consumer's boot/session floor; the daemon's store keeps one bounded
+outstanding batch per recipient and replaces it when that floor changes. Pagination and filtered
+reads share that batch; a stale boot cannot refill it. Admitted mail remains visible through the
+current boot's staging attempt until its receipts finish; their local
+archive projection removes old native inbox files without closing the graph messages.
 An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.
+
+The registry also accepts a durable graph `message.expired` outcome, written only by
+`daemon/runtime`, with reason `cutoff-never-offered`, `cutoff-uncertain-attempt`, or
+`no-live-recipient`. No automatic expiration is enabled. Non-superseded expiry removes mail
+from open inboxes, unread counts and recovery offers, and settles an outstanding batch member.
+It wakes stream re-evaluation without inventing a delivered/read receipt. Actual delivery or read
+evidence supersedes expiry and restores the normal receipt-based path; delivered-but-unread
+mail remains unread. The expiry claim stays in history. Harness receipts cannot
+write expiry, and the messages shard still replicates only `message.sent`. Outcome readers,
+projections and sender surfaces must be deployed to every pinned host before any expiry writer
+is enabled; older registries retain the new kind as unknown rather than interpreting its outcome.
+Writer activation also requires upgraded TypeScript clients, including fractal-web and generated
+consumers, whose message-state decoder accepts `expired`. This is a prerequisite for the
+expiry-writer rollout, not a negotiated response format.
+The writer must also enforce original-accepting-member authority before activation; replicated
+expiry admission here checks the daemon actor, not that future writer prerequisite.
+
+`GET /v1/messages/delivery/:id` reports active expiry as terminal `state: expired`,
+`phase: expired`, with the durable reason above, before human-hold or delivery-path
+diagnostics. An unavailable remote receipt host cannot replace that outcome with
+`unknown`. Actual delivered/read evidence supersedes expiry and reports normal receipt
+progress; this endpoint does not add expiry history. `fractal conversations status`
+prints the outcome and reason; `fractal conversations ls` shows the raw message status.
+Rust's generated string field can receive the raw `expired` status without regeneration.
+Older TypeScript `ReadSchema.Message.state` decoders use a closed literal union and reject
+`expired`, even in tolerant mode; upgrade those clients before enabling any expiry writer.
+Upgrading the generated union may require consumers to add an exhaustive `expired` arm.
+No harness receipt or automatic expiry writer is changed.
 
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
@@ -260,8 +298,8 @@ Older OMP releases without `getSessionName` still apply the declared label witho
 Claude's status line reads the same graph authority on each render and chains the existing renderer.
 Native `/rename` is temporary: the next authority update restores the declared name.
 
-Live harness evidence is refreshed every twenty seconds, inside the client's ninety-second
-observation freshness horizon. The driver retries its durable observation outbox across daemon
+Live harness evidence is refreshed every five minutes, inside the shared
+`HARNESS_OBSERVATION_FRESHNESS` window (refresh interval plus thirty seconds). The driver retries its durable observation outbox across daemon
 outages; mailbox subscriptions reconnect under the existing incarnation and fence. Once the daemon
 returns, quiet seats recover their current observation without a provider restart or a new turn.
 Heartbeats remain evidence-gated: missing, ended, superseded, or disconnected provider observations
@@ -399,9 +437,9 @@ another recipient, or a channel process's history query does not count. Claude's
 watches inbox files; the outer `driver claude` process supplies the mailbox poll.
 
 
-The Home Manager module installs a real executable at `services.smalltalk.stateDir/bin/st3`
-and provides `st` as a relative symlink there. Activation copies a changed build to a temporary
-file in that directory and atomically renames it over `st3` before Home Manager restarts the
+The Home Manager module installs a real executable at `services.fractal.stateDir/bin/fractal`
+and provides `st` and `st3` as relative symlinks there. Activation copies a changed build to a temporary
+file in that directory and atomically renames it over `fractal` before Home Manager restarts the
 daemon. Identical contents leave the file's inode and modification time unchanged, so a no-op
 activation does not make seats re-exec. Both the daemon and declaration-apply service use this
 stable executable, and the service PATH puts its directory first; `pty` still comes from the

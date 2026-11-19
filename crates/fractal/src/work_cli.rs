@@ -147,10 +147,14 @@ pub(super) async fn run_work(
                 .as_deref()
                 .map(|deadline| fractal_daemon::graph::parse_duration(deadline, true))
                 .transpose()?;
+            let (person, actor) = (args.person.clone(), args.actor.clone());
+            let urgent = fractal_schema::availability::urgent_priority(Some(&args.priority));
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        // `normal` is what an ask has without a priority, so it is not sent.
+                        priority: (args.priority != "normal").then_some(args.priority),
                         deadline_ms,
                         default_answer: args.default_answer,
                         legacy_request: None,
@@ -166,14 +170,48 @@ pub(super) async fn run_work(
                     },
                 )
                 .await?;
-            print_value(&result, json_output)
+            // A separate read as the asker: the ask stands whether or not it answers.
+            let availability = match generated_client(endpoint, Some(&actor)) {
+                Ok(reader) => reader.availability_list(Some(&person)).await.map_err(anyhow::Error::from),
+                Err(error) => Err(error),
+            };
+            let availability = match availability {
+                Ok(read) => read.value.people.into_iter().find(|entry| entry.person == person),
+                Err(error) => {
+                    stderr_message("st", format_args!("could not read {person}'s availability: {error:#}"));
+                    None
+                }
+            };
+            if json_output {
+                let mut value = serde_json::to_value(&result)?;
+                value["urgent"] = urgent.into();
+                if let Some(availability) = &availability {
+                    value["person_availability"] = serde_json::to_value(availability)?;
+                    // Only an ask that named `--deadline` is known to have one to hold.
+                    if deadline_ms.is_some() {
+                        value["deadline_held"] = availability::holds_deadline(availability, urgent).into();
+                    }
+                }
+                return print_value(&value, true);
+            }
+            print_value(&result, false)?;
+            if let Some(availability) = &availability {
+                println!("{}", availability::summary_line(availability));
+            }
+            println!("{}", availability::ask_line(urgent, deadline_ms.is_some(), availability.as_ref()));
+            Ok(())
         }
         WorkCommand::Update(args) => {
             reject_foreign_agent_actor(&args.actor)?;
+            let mut update = serde_json::json!({"version": 1, "type": "update", "about": args.about});
+            if let Some(speech) = args.speech {
+                update["speech"] = speech.into();
+            }
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        priority: None,
                         deadline_ms: None,
                         default_answer: None,
                         legacy_request: None,
@@ -185,9 +223,7 @@ pub(super) async fn run_work(
                         new_run: None,
                         incarnation: None,
                         idempotency_key: args.idempotency_key,
-                        request: Some(
-                            serde_json::json!({"version": 1, "type": "update", "about": args.about}),
-                        ),
+                        request: Some(update),
                     },
                 )
                 .await?;
@@ -214,10 +250,48 @@ pub(super) async fn run_work(
                             format!("person-response:{}", uuid::Uuid::now_v7().simple())
                         }),
                         answer: (args.answer.is_some() || args.text.is_some()).then(|| {
-                            fractal_daemon::person_request::AnswerInput {
-                                id: args.answer,
-                                text: args.text,
-                            }
+                            fractal_daemon::person_request::AnswerInput { id: args.answer, text: args.text, option_notes: Vec::new() }
+                        }),
+                    },
+                )
+                .await?;
+            print_value(&result, json_output)
+        }
+        WorkCommand::Override(args) => {
+            reject_foreign_agent_actor(&args.actor)?;
+            let subject = if args.subject.starts_with("step-run/") {
+                args.subject
+            } else {
+                format!("step-run/{}", args.subject)
+            };
+            let episode = match args.episode {
+                Some(episode) => episode,
+                None => {
+                    let page: ClaimsPage = client
+                        .get(&format!(
+                            "/v1/claims?subject={}&kind=work.person-asked&order=desc&limit=1",
+                            urlencoding::encode(&subject)
+                        ))
+                        .await?;
+                    page.claims.into_iter().next()
+                        .context("this work item has no person ask to override")?.id
+                }
+            };
+            let result: StepRunView = client
+                .post(
+                    "/v1/work/override",
+                    &PersonStepResponse {
+                        delegation: None,
+                        subject,
+                        actor: args.actor,
+                        summary: args.summary.unwrap_or_default(),
+                        evidence: Vec::new(),
+                        idempotency_key: format!("person-override:{episode}:{}", args.answer),
+                        episode: Some(episode),
+                        answer: Some(fractal_daemon::person_request::AnswerInput {
+                            id: Some(args.answer),
+                            text: args.text,
+                            option_notes: Vec::new(),
                         }),
                     },
                 )
@@ -256,6 +330,7 @@ pub(super) async fn run_work(
                     until,
                     status,
                     actor,
+                    None,
                     cursor,
                     limit,
                     json_output,
@@ -345,19 +420,24 @@ pub(super) async fn run_work(
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
-        WorkCommand::Resume(args) => post_work(client, "resume", args, json_output).await,
+        WorkCommand::Resume(mut args) => {
+            let (actor, incarnation) =
+                clock_actor(args.actor.take(), args.incarnation.take(), "a work resume")?;
+            args.actor = Some(actor);
+            args.incarnation = incarnation;
+            post_work(client, "resume", args, json_output).await
+        }
         WorkCommand::Wait(args) => {
-            let actor = args.actor.context("a work wait needs explicit --as")?;
-            reject_foreign_agent_actor(&actor)?;
+            let (actor, incarnation) = clock_actor(args.actor, args.incarnation, "a work wait")?;
+            let incarnation = match incarnation {
+                Some(incarnation) => Some(incarnation),
+                None => current_agent_incarnation(client, &actor).await?,
+            };
             let wait_ms = fractal_daemon::graph::parse_duration(&args.wait_for, true)?;
             let subject = if args.subject.starts_with("step-run/") {
                 args.subject.clone()
             } else {
                 format!("step-run/{}", args.subject)
-            };
-            let incarnation = match args.incarnation {
-                Some(incarnation) => Some(incarnation),
-                None => current_agent_incarnation(client, &actor).await?,
             };
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
             let response: StepRunView = client
@@ -710,9 +790,10 @@ async fn post_work(
     } else {
         if action == "claim" {
             let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
+            let source = crate::source_cli::step_source(client, &response.subject).await;
             print!(
                 "{}",
-                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held)
+                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held, source.as_deref())
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(
@@ -725,6 +806,36 @@ async fn post_work(
         }
         Ok(())
     }
+}
+
+/// Who stops or restarts a step's clock, and the fence it acts under. Inside a step's exec,
+/// which has no agent identity, that is the exec itself (`ST3_SUBJECT`) under the launch its
+/// runtime gave it (`ST3_START_OPERATION`); the daemon accepts it only from that live launch.
+/// An agent's fence stays the caller's to look up.
+fn clock_actor(
+    actor: Option<String>,
+    incarnation: Option<String>,
+    what: &str,
+) -> Result<(String, Option<String>)> {
+    let own_exec = || {
+        fractal_drivers::contracts::env("ST_AGENT")
+            .is_none()
+            .then(|| fractal_drivers::contracts::env("ST3_SUBJECT"))
+            .flatten()
+            .filter(|subject| subject.starts_with("exec/"))
+    };
+    let actor = actor
+        .or_else(own_exec)
+        .with_context(|| format!("{what} needs explicit --as"))?;
+    reject_foreign_agent_actor(&actor)?;
+    let incarnation = match incarnation {
+        None if actor.starts_with("exec/") => Some(
+            fractal_drivers::contracts::env("ST3_START_OPERATION")
+                .context("an exec acts under its launch, and ST3_START_OPERATION is not set; pass --incarnation")?,
+        ),
+        incarnation => incarnation,
+    };
+    Ok((actor, incarnation))
 }
 
 fn render_wait_lease(
@@ -867,5 +978,32 @@ mod wait_lease_tests {
         let requests = requests.lock().unwrap();
         assert!(requests.iter().any(|path| path.starts_with("/v1/client/")));
         assert!(!requests.iter().any(|path| path.starts_with("/v1/work-items/")));
+    }
+}
+
+#[cfg(test)]
+mod ask_priority_tests {
+    use clap::Parser as _;
+
+    fn priority(extra: &[&str]) -> Result<String, clap::Error> {
+        let mut argv = vec![
+            "st", "work", "ask", "--for", "person/avery", "--title", "Ship?", "--reason", "Release",
+            "--as", "agent/example", "--idempotency-key", "ship",
+        ];
+        argv.extend(extra);
+        let cli = super::super::Cli::try_parse_from(argv)?;
+        let super::super::Command::Work { command: super::super::WorkCommand::Ask(args) } = cli.command else {
+            panic!("expected work ask")
+        };
+        Ok(args.priority)
+    }
+
+    #[test]
+    fn work_ask_priority_defaults_to_normal_and_offers_only_the_four_priorities() {
+        assert_eq!(priority(&[]).unwrap(), "normal");
+        for named in ["critical", "high", "normal", "low"] {
+            assert_eq!(priority(&["--priority", named]).unwrap(), named);
+        }
+        assert!(priority(&["--priority", "urgent"]).is_err());
     }
 }

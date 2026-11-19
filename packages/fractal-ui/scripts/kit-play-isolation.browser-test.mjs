@@ -147,6 +147,39 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   assert.ok(baseAudit, 'reset creates an inert origin audit document')
   await worker.reset()
   assert.ok(worker.context.pages().includes(baseAudit), 'an unchanged inert target is reused')
+
+  const staleWriter = await worker.newPage(pageOptions)
+  await staleWriter.goto(base)
+  // A write's acknowledgment in the case renderer does not mean the retained
+  // audit renderer has received its storage event. Observe that renderer before
+  // taking the stale-view fixture; reset detection has not run at this point.
+  const auditClient = await worker.context.newCDPSession(baseAudit)
+  await auditClient.send('DOMStorage.enable')
+  const { promise: storageObserved, resolve: observeStorage } = Promise.withResolvers()
+  auditClient.on('DOMStorage.domStorageItemAdded', ({ storageId, key }) => {
+    if (storageId.securityOrigin === base && storageId.isLocalStorage && key === 'prior-renderer-view') observeStorage()
+  })
+  try {
+    await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
+    await storageObserved
+  } finally {
+    await auditClient.detach()
+  }
+  const readAudit = baseAudit.evaluate.bind(baseAudit)
+  const staleSnapshot = await readAudit(() => ({
+    origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+  }))
+  assert.deepEqual(staleSnapshot.local, ['prior-renderer-view'])
+  // Deliver the previous renderer view for just the first reset read. The
+  // acknowledgment and the subsequent storage read both come from Chromium.
+  let auditReads = 0
+  baseAudit.evaluate = (...args) => ++auditReads === 1 ? Promise.resolve(staleSnapshot) : readAudit(...args)
+  try {
+    await worker.reset()
+    assert.ok(auditReads > 1, 'the accepted reset independently observes the empty storage after acknowledgment')
+  } finally {
+    baseAudit.evaluate = readAudit
+  }
   const previous = await worker.newPage(pageOptions)
   await previous.goto(base)
   await seedState(previous)
