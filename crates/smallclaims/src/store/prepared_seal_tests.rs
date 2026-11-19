@@ -591,7 +591,14 @@ fn a_claim_whose_signing_key_changes_after_preparation_is_signed_with_the_new_ke
             chain: vec!["claim/replacement-grant".into()],
         });
     });
-    assert_eq!(seal(&store), 1);
+    // The changed agent key belongs to the second batch. Keep both batches in one loan
+    // so this assertion measures invalidation, not whether a timed yield preceded it.
+    SEALS_PREPARED_AGAIN.with(|count| count.set(0));
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    while store.seal_local_batch_chunk_with_loan_budget(
+        target, usize::MAX, std::time::Duration::MAX,
+    ).unwrap() {}
+    assert_eq!(SEALS_PREPARED_AGAIN.with(Cell::get), 1);
     let payloads = payloads(&store.readers.get());
     let signature = &payloads["note/by-an-agent"].claim_signatures[&claim.id];
     assert_ne!(signature.key, minted.key.public());
@@ -737,7 +744,16 @@ fn two_key_grants_by_one_actor_with_different_issuers_are_selected_apart() {
         grant("agent/scribe", agent.key.public()),
     );
     SIGNERS_SELECTED.with(|count| count.set(0));
-    assert_eq!(seal(&store), 0);
+    // Selection is deduplicated per loan, so publish once without a timed boundary.
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let prepared = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(store.seal_prepared_tx(
+        &transaction, &prepared, std::time::Instant::now(), std::time::Duration::MAX,
+    ).unwrap(), Some(target));
+    transaction.commit().unwrap();
+    drop(connection);
     // The agent's note, the node's grants (the minted key's and `by_node`, the same input), and
     // `by_agent`.
     assert_eq!(SIGNERS_SELECTED.with(Cell::get), 3);
