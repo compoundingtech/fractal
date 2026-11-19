@@ -146,11 +146,20 @@ fn retention_elapsed_budget_commits_a_prefix_and_resumes_without_losing_pins() {
                 transaction.rollback().unwrap();
             }
         }
-        let transaction = writer.transaction().unwrap();
-        let remainder =
-            idempotency::cleanup_tx(&transaction, now, CLEANUP_CHUNK, |_, _| Ok(false)).unwrap();
-        assert_eq!(remainder.deleted, 2, "rollback kept the first prefix; commit advanced it");
-        transaction.commit().unwrap();
+        let mut deleted = 0;
+        loop {
+            let transaction = writer.transaction().unwrap();
+            let remainder =
+                idempotency::cleanup_tx(&transaction, now, CLEANUP_CHUNK, |_, _| Ok(false)).unwrap();
+            assert!(remainder.examined <= CLEANUP_CHUNK);
+            assert_eq!(remainder.deleted, remainder.examined);
+            deleted += remainder.deleted;
+            transaction.commit().unwrap();
+            if remainder.examined == 0 {
+                break;
+            }
+        }
+        assert_eq!(deleted, 2, "rollback kept the first prefix; committed prefixes advance it");
         drop(writer);
         assert_eq!(store.next_idempotency_expiry().unwrap().is_some(), pinned);
         assert!(store
@@ -387,34 +396,49 @@ fn retention_live_receipts_do_not_starve_expired_keys_and_failure_rolls_back() {
         .execute("UPDATE idempotency SET expires_at_unix_ms=100", [])
         .unwrap();
     transaction.commit().unwrap();
-    {
+    let mut extended = 0;
+    while extended < CLEANUP_CHUNK {
         let transaction = connection.transaction().unwrap();
-        let result = idempotency::cleanup_tx(&transaction, 100, CLEANUP_CHUNK, |_, response| {
+        let remaining = CLEANUP_CHUNK - extended;
+        let result = idempotency::cleanup_tx(&transaction, 100, remaining, |_, response| {
             Ok(response == "live")
         })
         .unwrap();
-        assert_eq!(result.extended, CLEANUP_CHUNK);
+        assert!(result.examined > 0 && result.examined <= remaining);
+        assert_eq!(result.extended, result.examined);
+        assert_eq!(result.deleted, 0);
+        extended += result.extended;
         transaction.commit().unwrap();
     }
+    assert_eq!(extended, 64, "every live response was moved to the tail without deletion");
     {
         let transaction = connection.transaction().unwrap();
         let result =
             idempotency::cleanup_tx(&transaction, 100, CLEANUP_CHUNK, |_, _| Ok(false)).unwrap();
-        assert_eq!(result.deleted, CLEANUP_CHUNK);
+        assert!(result.deleted > 0 && result.deleted <= CLEANUP_CHUNK);
+        assert_eq!(result.deleted, result.examined);
         // Drop without commit models interruption while a cleanup chunk is in flight.
     }
     let count: usize = connection
         .query_row("SELECT COUNT(*) FROM idempotency", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 128);
-    let transaction = connection.transaction().unwrap();
-    assert_eq!(
-        idempotency::cleanup_tx(&transaction, 100, CLEANUP_CHUNK, |_, _| Ok(false))
-            .unwrap()
-            .deleted,
-        CLEANUP_CHUNK
-    );
-    transaction.commit().unwrap();
+    let mut deleted = 0;
+    loop {
+        let transaction = connection.transaction().unwrap();
+        let result =
+            idempotency::cleanup_tx(&transaction, 100, CLEANUP_CHUNK, |_, _| Ok(false)).unwrap();
+        assert!(result.examined <= CLEANUP_CHUNK);
+        assert_eq!(result.deleted, result.examined);
+        deleted += result.deleted;
+        transaction.commit().unwrap();
+        if result.examined == 0 {
+            break;
+        }
+    }
+    assert_eq!(deleted, 64, "rollback discarded its prefix; committed prefixes drain only finished keys");
+    drop(connection);
+    assert!(store.next_idempotency_expiry().unwrap().unwrap() > 100, "live responses remain pinned");
 }
 
 #[test]
