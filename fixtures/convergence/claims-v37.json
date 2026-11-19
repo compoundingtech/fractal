@@ -8413,6 +8413,12 @@
         "immutable": false,
         "reference": false
       },
+      "outcome_known": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "owner": {
         "value_type": "object",
         "required": true,
@@ -8475,6 +8481,7 @@
       "wall_duration_ms": {
         "value_type": "integer",
         "required": true,
+        "nullable": true,
         "immutable": false,
         "reference": false
       }
