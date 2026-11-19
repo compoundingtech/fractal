@@ -73,8 +73,10 @@ fn duplicate_envelope_position_join_invalidates_the_canonical_prefix() {
         let second = append(&tx, "stopped", Some(&first.batch_id));
         tx.execute("UPDATE claims SET accepted_at_unix_ms='100' WHERE id IN (?1,?2)",
             params![first.id, second.id]).unwrap();
-        canonical::record_position_tx(&tx, &first.id, 10).unwrap();
-        canonical::record_position_tx(&tx, &second.id, 20).unwrap();
+        // Local admission already assigned 0 and 1. Seed the pre-duplicate wire
+        // positions directly: the production MIN join cannot raise those values.
+        tx.execute("UPDATE claim_positions SET position=10 WHERE claim_id=?1", [&first.id]).unwrap();
+        tx.execute("UPDATE claim_positions SET position=20 WHERE claim_id=?1", [&second.id]).unwrap();
         tx.commit().unwrap();
         (first, second)
     };
