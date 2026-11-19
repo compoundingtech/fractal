@@ -252,7 +252,9 @@
    ]
   },
   "fractal-mac-custody": {
-   "extra": []
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
   },
   "fractal-migrate": {
    "extra": []
