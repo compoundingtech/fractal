@@ -328,7 +328,13 @@ pub fn record_fenced_lifecycle(
         let connection = graph.readers.get();
         super::check_mailbox_fence(&connection, fence, &graph.graph.origin)?;
     }
-    record_lifecycle(graph, subject, kind, actor, fields)
+    if kind == "message.staged" {
+        let mut fields = fields.clone();
+        fields.insert("native_mail_incarnation".into(), json!(fence.incarnation));
+        record_lifecycle(graph, subject, kind, actor, &fields)
+    } else {
+        record_lifecycle(graph, subject, kind, actor, fields)
+    }
 }
 
 /// Record a lifecycle step a member took for a stream item: staged, delivered, read or closed.

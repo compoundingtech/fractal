@@ -592,23 +592,38 @@ fn retain_live_mail(
     admit: bool,
 ) -> anyhow::Result<()> {
     let mut candidates = Vec::with_capacity(messages.len());
-    let mut available = if recovered.backlog.is_empty() { RECOVERY_BACKLOG_LIMIT } else { 0 };
     for (position, message) in messages.drain(..).enumerate() {
         let Some(sent) = sent_claim(store, &message)? else {
             continue;
         };
+        // A replacement socket has no ephemeral recovery set. Reconstruct its
+        // incarnation's unresolved staged batch BEFORE choosing any new backlog,
+        // even when an unoffered candidate sorts earlier than that batch.
+        if admit && message.status == "staged"
+            && !crate::silent::is_held(&message)
+            && recovery_backlog(sent.accepted_at_unix_ms, since) == Some(true)
+            && offered_since(store, &message, (since, through.unwrap_or(0)))?
+        {
+            recovered.backlog.insert(message.subject.clone());
+            recovered.admitted.insert(message.subject.clone());
+        }
         candidates.push((sent.accepted_at_unix_ms, position, message, false));
     }
+    let mut available = if recovered.backlog.is_empty() { RECOVERY_BACKLOG_LIMIT } else { 0 };
     // Imports have fresh indexes but retain their original send times.
     if admit {
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     }
     for (accepted_at, _, message, keep) in &mut candidates {
-        // `through` is a graph index and a stream item's is past them all, so a stream item
-        // counts as after the connection by its accepted time alone.
-        let after_connection = through.is_none_or(|index| message.created_index > index)
-            && *accepted_at >= since;
-        if after_connection || recovered.admitted.contains(&message.subject) {
+        // `through` is a graph boot index and a stream item's is past them all,
+        // so the stream item's original send time decides whether it is post-boot.
+        let after_connection = message.status == "sent"
+            && through.is_none_or(|index| message.created_index > index)
+            && *accepted_at >= since
+            && never_offered(store, message)?;
+        if after_connection || recovered.admitted.contains(&message.subject)
+            || offered_since(store, message, (since, through.unwrap_or(0)))?
+        {
             *keep = true;
         } else if never_offered(store, message)? {
             let held = crate::silent::is_held(message);
@@ -865,6 +880,7 @@ where
         policy_rechecks.retain(|subject| eligible.contains(subject));
         retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
         order.bound_held(&mut messages, true);
+        store.order_mailbox_messages(&mut messages, &mut order.keys)?;
         Ok((mark, (seat, messages), true))
     });
     // Reading never commits a closure or builds persistent derived state. The background
@@ -1050,11 +1066,33 @@ async fn stream_with_timers_inner<F, S, H>(
     let primary_peer = control.primary_peer;
     let _pushed = ForgetPushed(fence.clone());
     futures_util::pin_mut!(safety, heartbeat);
-    let since = client_now_ms();
-    let through = match state.store.index() {
-        Ok(index) => index,
-        Err(_) => return,
+    // A transport reconnect is not a new harness incarnation. Keep its durable boot
+    // boundary so staged-but-unacknowledged sends remain eligible for replay.
+    let (since, through) = if fence.component == "delivery" {
+        match state.store.native_mail_boot_floor(&fence.subject) {
+            Ok(Some(floor)) => floor,
+            _ => return,
+        }
+    } else {
+        match state.store.index() {
+            Ok(index) => (client_now_ms(), index),
+            Err(_) => return,
+        }
     };
+    let mut connection_log = MailboxConnectionLog {
+        fence: &fence,
+        epoch: Fence::new(&fence.subject, &fence.incarnation, "connection").token,
+        floor: (since, through),
+        cause: "stream-task-ended",
+    };
+    tracing::info!(
+        event = "mailbox.connection.opened",
+        agent = %fence.subject, incarnation = %fence.incarnation,
+        component = %fence.component, binding_epoch = fence.epoch,
+        connection_epoch = %connection_log.epoch,
+        boot_since_unix_ms = since, boot_through_index = through,
+        "mailbox socket opened"
+    );
     // Subscribe before reading to close the replay-to-live race. Watch coalesces writes; every
     // wake reads a durable delta, so lag never depends on an ephemeral event cursor.
     let mut subscription = state.store.subscribe_mailbox(&fence, &state.event_notify);
@@ -1475,7 +1513,20 @@ async fn stream_with_timers_inner<F, S, H>(
                 },
                 Some(Ok(WsMessage::Pong(_))) => {},
                 Some(Ok(WsMessage::Ping(bytes))) => { if socket.send(WsMessage::Pong(bytes)).await.is_err() { return; } },
-                _ => return,
+                Some(Ok(WsMessage::Close(_))) => {
+                    connection_log.cause = "peer-close";
+                    return;
+                },
+                Some(Err(error)) => {
+                    connection_log.cause = "socket-read-error";
+                    tracing::warn!(connection_epoch = %connection_log.epoch, %error, "mailbox socket read failed");
+                    return;
+                },
+                None => {
+                    connection_log.cause = "socket-eof";
+                    return;
+                },
+                _ => {},
             },
             tick = heartbeat.next() => {
                 if tick.is_none() { return; }
@@ -1485,6 +1536,28 @@ async fn stream_with_timers_inner<F, S, H>(
                 if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { return; }
             },
         }
+    }
+}
+
+/// Journal a stable socket identity even when its task is cancelled before a close frame.
+struct MailboxConnectionLog<'a> {
+    fence: &'a Fence,
+    epoch: String,
+    floor: (u128, u64),
+    cause: &'static str,
+}
+
+impl Drop for MailboxConnectionLog<'_> {
+    fn drop(&mut self) {
+        tracing::info!(
+            event = "mailbox.connection.closed",
+            agent = %self.fence.subject, incarnation = %self.fence.incarnation,
+            component = %self.fence.component, binding_epoch = self.fence.epoch,
+            connection_epoch = %self.epoch,
+            boot_since_unix_ms = self.floor.0, boot_through_index = self.floor.1,
+            cause = self.cause,
+            "mailbox socket closed"
+        );
     }
 }
 
@@ -1659,6 +1732,316 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn mailbox_orders_graph_and_high_index_stream_mail_by_send_time() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&store, "ordered");
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "ordered", "delivery")).unwrap();
+        let send_at = |target: &smallclaims::store::Store, id: &str, at: u128| {
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic ordering fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        // Shard admission order differs from send order, and its index namespace is
+        // above every graph index. Neither fact may move an older send behind new mail.
+        send_at(&shard, "0000000000000030", 30);
+        send_at(&shard, "0000000000000010", 10);
+        send_at(&store.graph, "0000000000000020", 20);
+        let mut recovery = MailRecovery::default();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let (mark, initial, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, None, (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        let subjects = |messages: &[MessageView]| messages.iter()
+            .map(|message| message.subject.clone()).collect::<Vec<_>>();
+        let expected = [
+            "message/0000000000000010",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ];
+        assert_eq!(subjects(&initial.1), expected);
+        assert!(initial.1[0].created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(initial.1[0].created_index > initial.1[1].created_index);
+        // The delta reuses cached graph AND shard keys, and inserts a backdated
+        // shard import before later sends rather than at the end of the namespace.
+        send_at(&shard, "0000000000000015", 15);
+        let (_, delta, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, Some((mark, initial)), (0, 0),
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        assert_eq!(subjects(&delta.1), [
+            "message/0000000000000010",
+            "message/0000000000000015",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ]);
+        assert_eq!(order.keys.len(), 4, "every admitted message keeps its canonical key");
+    }
+
+    #[tokio::test]
+    async fn reconnect_reoffers_staged_graph_and_shard_mail_in_send_order() {
+        reconnect_reoffers_staged_graph_and_shard_mail_with(false).await;
+        reconnect_reoffers_staged_graph_and_shard_mail_with(true).await;
+    }
+
+    async fn reconnect_reoffers_staged_graph_and_shard_mail_with(marks: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        if marks {
+            let intent = crate::graph::parse_intent(
+                "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }", "node",
+            ).unwrap();
+            state.store.apply_internal(&intent, "declare-reconnect-worker").unwrap();
+            assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+        }
+        crate::store::mailbox_tests::ready(&state.store, "reconnect");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let fence = state.store.bind_mailbox(
+            &Fence::new("agent/eval.worker", "reconnect", "delivery"),
+        ).unwrap();
+        let floor = state.store.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+        let expected = ["message/0000000000000100", "message/0000000000000200"];
+        for (target, subject, at) in [
+            (&*shard, expected[0], floor.0.saturating_sub(10)),
+            (&state.store.graph, expected[1], floor.0 + 2),
+        ] {
+            let claim = target.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic reconnect fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        }
+        let (mut first, messages) = controlled_stream_with_initial(
+            state.clone(), &fence, &root.path().join("first.sock"), None,
+        ).await;
+        assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected);
+        for subject in expected {
+            if subject == expected[0] {
+                assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                    &state.store, &fence, subject, "message.staged", Some(&fence.subject),
+                    &BTreeMap::from([("status".into(), json!("staged"))]),
+                ).unwrap());
+                continue;
+            }
+            state.store.append_mailbox_receipt(&ClaimInput {
+                subject: subject.into(),
+                kind: "message.staged".into(),
+                actor: Some(fence.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!("staged"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("reconnect-stage:{subject}")),
+            }, &fence).unwrap();
+        }
+        first.socket.close(None).await.unwrap();
+        // No new send, turn end, idle proof or timer tick: opening a replacement
+        // socket under the SAME incarnation and fence must replay both pending IDs.
+        let (mut second, messages) = controlled_stream_with_initial(
+            state.clone(), &fence, &root.path().join("second.sock"), None,
+        ).await;
+        assert_eq!(messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), expected);
+        assert!(messages.iter().all(|message| message.status == "staged"));
+        assert!(messages[0].created_index > messages[1].created_index);
+        assert_eq!(state.store.native_mail_boot_floor(&fence.subject).unwrap(), Some(floor));
+        second.socket.close(None).await.unwrap();
+    }
+
+    #[test]
+    fn native_replay_requires_fenced_staging_provenance() {
+        for storage in ["graph-claims", "graph-marks", "stream"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(&root.path().join("graph.db"), "node").unwrap();
+            if storage == "graph-marks" {
+                let intent = crate::graph::parse_intent(
+                    "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }", "node",
+                ).unwrap();
+                store.apply_internal(&intent, "declare-native-provenance-worker").unwrap();
+                assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+            }
+            crate::store::mailbox_tests::ready(&store, "native-provenance");
+            let floor = store.native_mail_boot_floor("agent/eval.worker").unwrap().unwrap();
+            let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+            let target = if storage == "stream" { &*shard } else { &store.graph };
+            for (ordinal, status) in [(1, "staged"), (2, "delivered")] {
+                let subject = format!("message/{ordinal:016x}");
+                target.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: "message.sent".into(),
+                    actor: Some("person/eval".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                        ("to".into(), json!("agent/eval.worker")), ("content".into(), json!("Synthetic provenance fixture")),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                for step in ["staged", status] {
+                    let kind = format!("message.{step}");
+                    let fields = BTreeMap::from([("status".into(), json!(step))]);
+                    if storage == "stream" {
+                        crate::store::messages_shard::record_lifecycle(
+                            &store, &subject, &kind, Some("agent/eval.worker"), &fields,
+                        ).unwrap();
+                    } else {
+                        store.append_claim(&ClaimInput {
+                            subject: subject.clone(), kind, actor: Some("agent/eval.worker".into()), fields,
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap();
+                    }
+                }
+            }
+            let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "native-provenance", "delivery")).unwrap();
+            let mut messages = store.messages(Some(&fence.subject), false).unwrap();
+            assert_eq!(messages.len(), 2);
+            for message in &messages {
+                assert!(!offered_since(&store, message, floor).unwrap(), "{storage}: timestamp is not custody");
+            }
+            // Even a repeated fenced staging cannot relabel a historical receipt.
+            let staged = &messages.iter().find(|m| m.status == "staged").unwrap().subject;
+            let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+            if storage == "stream" {
+                assert!(!crate::store::messages_shard::record_fenced_lifecycle(
+                    &store, &fence, staged, "message.staged", Some(&fence.subject), &fields,
+                ).unwrap());
+            } else {
+                store.append_mailbox_receipt(&ClaimInput {
+                    subject: staged.clone(), kind: "message.staged".into(), actor: Some(fence.subject.clone()), fields,
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }, &fence).unwrap();
+            }
+            retain_live_mail(&store, &mut messages, floor.0, Some(floor.1), &mut MailRecovery::default(), true).unwrap();
+            assert!(messages.is_empty(), "{storage}: historical staging/delivery entered native recovery");
+            let subject = "message/0000000000000003";
+            target.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "message.sent".into(), actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(fence.subject)), ("content".into(), json!("Synthetic native custody")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+            if storage == "stream" {
+                assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                    &store, &fence, subject, "message.staged", Some(&fence.subject), &fields,
+                ).unwrap());
+            } else {
+                store.append_mailbox_receipt(&ClaimInput {
+                    subject: subject.into(), kind: "message.staged".into(), actor: Some(fence.subject.clone()), fields,
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }, &fence).unwrap();
+            }
+            // Custody survives a daemon store reopen, but never a new incarnation.
+            let reopened = Store::open(&root.path().join("graph.db"), "node").unwrap();
+            let _reopened_shard = crate::store::messages_shard::open(&reopened, root.path()).unwrap();
+            let message = reopened.message(subject).unwrap().unwrap();
+            assert!(offered_since(&reopened, &message, floor).unwrap(), "{storage}: lost durable native custody");
+            crate::store::mailbox_tests::ready(&reopened, "next-native-provenance");
+            let next_floor = reopened.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+            assert!(!offered_since(&reopened, &message, next_floor).unwrap(), "{storage}: crossed incarnation");
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_preserves_the_unsettled_five_message_recovery_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&state.store, "bounded-recovery");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let fence = state.store.bind_mailbox(
+            &Fence::new("agent/eval.worker", "bounded-recovery", "delivery"),
+        ).unwrap();
+        let floor = state.store.native_mail_boot_floor(&fence.subject).unwrap().unwrap();
+        let send_old = |ordinal: u64, at: u128| {
+            let target = if ordinal.is_multiple_of(2) { &*shard } else { &state.store.graph };
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{ordinal:016x}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic bounded recovery fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        let old = floor.0 - 7_200_000;
+        for ordinal in 0..12 {
+            send_old(ordinal, old + u128::from(ordinal));
+        }
+        let expected = (0..RECOVERY_BACKLOG_LIMIT)
+            .map(|ordinal| format!("message/{ordinal:016x}")).collect::<Vec<_>>();
+        for connection in 0..3 {
+            let (mut stream, messages) = controlled_stream_with_initial(
+                state.clone(), &fence, &root.path().join(format!("connection-{connection}.sock")), None,
+            ).await;
+            assert_eq!(messages.iter().map(|m| m.subject.clone()).collect::<Vec<_>>(), expected);
+            if connection == 0 {
+                for message in &messages {
+                    let fields = BTreeMap::from([("status".into(), json!("staged"))]);
+                    if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+                        assert!(crate::store::messages_shard::record_fenced_lifecycle(
+                            &state.store, &fence, &message.subject, "message.staged", Some(&fence.subject), &fields,
+                        ).unwrap());
+                    } else {
+                        state.store.append_mailbox_receipt(&ClaimInput {
+                            subject: message.subject.clone(), kind: "message.staged".into(),
+                            actor: Some(fence.subject.clone()), fields,
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }, &fence).unwrap();
+                    }
+                }
+                // An earlier late import must not take a slot before reconstruction.
+                send_old(12, old - 1);
+            } else {
+                assert!(messages.iter().all(|message| message.status == "staged"));
+            }
+            // No delivered/read/closed receipts: neither replacement may admit
+            // a sixth old message while this incarnation's first batch is unresolved.
+            stream.socket.close(None).await.unwrap();
+        }
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
@@ -2355,10 +2738,21 @@ mod tests {
             .unwrap();
         socket.close(None).await.unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();
-        assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty()),
-            "{transport} replayed pre-reconnect mail"
-        );
+        let Frame::Mailbox { messages } = next(&mut socket).await else {
+            panic!("{transport} did not replay the pending mailbox");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].subject, "message/live-first");
+        assert_eq!(messages[0].status, "staged");
+        read_all(&client, &fence, &messages).await;
+        loop {
+            let Frame::Mailbox { messages } = next(&mut socket).await else {
+                panic!("{transport} did not settle the replay");
+            };
+            if messages.is_empty() { break; }
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].subject, "message/live-first");
+        }
         send("live-second");
         assert!(
             matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.len() == 1 && messages[0].subject == "message/live-second")
@@ -2370,7 +2764,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "staged"
+            "read"
         );
         assert!(
             state
@@ -2428,6 +2822,12 @@ mod tests {
         send_at("cutoff", since - RECOVERY_CUTOFF_MS);
         send_at("staged", since - threshold - 20);
         crate::store::message_marks::record(&store, "message/staged", "message.staged", "agent/eval.worker").unwrap();
+        // This fixture represents an offer from BEFORE this incarnation, not a
+        // pending offer owned by the incarnation whose transport is reconnecting.
+        store.connection.write().execute(
+            "UPDATE local_message_staged SET recorded_at_unix_ms=?1 WHERE message=?2",
+            rusqlite::params![(since - 1) as i64, "message/staged"],
+        ).unwrap();
         // Insert in reverse age order: selection must not follow indexes or names.
         for n in 0..6 {
             send_at(&format!("old-{n}"), since - threshold - n - 1);
@@ -2479,7 +2879,8 @@ mod tests {
             crate::store::message_marks::record(&store, &subject, "message.staged", "agent/eval.worker").unwrap();
         }
         let next_connection = recover(&mut MailRecovery::default());
-        assert!(next_connection.iter().all(|s| !admitted.admitted.contains(s)));
+        assert!(admitted.admitted.iter().all(|s| next_connection.contains(s)),
+            "same-incarnation reconnect must retain its staged recovery batch");
         assert!(!next_connection.iter().any(|s| s == "message/staged" || s == "message/expired"));
     }
 
@@ -3377,7 +3778,7 @@ mod tests {
             assert!(
                 matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages[0].subject == send.subject)
             );
-            // A staged offer stays held after reconnect, even when its original send is recent.
+            // Same-incarnation reconnects replay pending staging, not just never-offered mail.
             client
                 .post::<_, ClaimRecord>(
                     "/v1/mailbox/receipts",
@@ -3393,7 +3794,7 @@ mod tests {
             let mut socket = client.open_mailbox(&fence).await.unwrap();
             next(&mut socket).await;
             assert!(
-                matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty())
+                matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.len() == 1 && messages[0].subject == send.subject && messages[0].status == "staged")
             );
             for lifecycle in ["staged", "delivered", "read"] {
                 let receipt = Receipt {
@@ -3716,6 +4117,14 @@ mod tests {
     async fn controlled_stream_with_peer(
         state: AppState, fence: &Fence, path: &Path, peer: Option<NativeDeliveryPeer>,
     ) -> ControlledStream {
+        let (stream, initial) = controlled_stream_with_initial(state, fence, path, peer).await;
+        assert!(initial.is_empty(), "control requires an initially empty mailbox");
+        stream
+    }
+
+    async fn controlled_stream_with_initial(
+        state: AppState, fence: &Fence, path: &Path, peer: Option<NativeDeliveryPeer>,
+    ) -> (ControlledStream, Vec<MessageView>) {
         let (recheck, receiver) = tokio::sync::mpsc::unbounded_channel();
         let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
         let (heartbeat, heartbeats) = tokio::sync::mpsc::unbounded_channel();
@@ -3789,21 +4198,26 @@ mod tests {
         let client = Client::new(Endpoint::Unix(path.to_owned()));
         let mut socket = client.open_mailbox(fence).await.unwrap();
         // Only a delivery stream carries mail; a title stream starts silent.
-        if fence.component == "delivery" {
+        let initial = if fence.component == "delivery" {
             let mut initial = next(&mut socket).await;
             if matches!(initial, Frame::Seat { .. }) {
                 initial = next(&mut socket).await;
             }
-            assert!(matches!(initial, Frame::Mailbox { messages } if messages.is_empty()));
-        }
-        ControlledStream {
+            match initial {
+                Frame::Mailbox { messages } => messages,
+                other => panic!("expected initial mailbox, got {other:?}"),
+            }
+        } else {
+            Vec::new()
+        };
+        (ControlledStream {
             dirty_gate,
             socket,
             recheck,
             heartbeat,
             reads,
             server,
-        }
+        }, initial)
     }
 
     #[cfg(target_os = "linux")]
