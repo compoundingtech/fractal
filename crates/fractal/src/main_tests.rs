@@ -658,6 +658,97 @@ fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp
     assert_eq!(resumed.pending.input_acceptances, recovered);
 }
 
+#[test]
+fn omp_admission_fallback_is_content_free_fenced_and_once_per_batch_across_reexec() {
+    for reason in ["content-mismatch", "no-message-start", "timeout"] {
+        let mut state = PiChannelResume {
+            incarnation: "runtime-a".into(),
+            ..Default::default()
+        };
+        let mut observer = None;
+        let mut frame = json!({
+            "type": "admission_fallback", "reason": reason, "content": "PRIVATE PROMPT",
+            "meta": {"messageId": "message/first", "identity": "example",
+                "inputIncarnation": "runtime-a", "extra": "PRIVATE METADATA"},
+        });
+        assert!(accept_managed_channel_frame(
+            &mut state, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert_eq!(state.pending.admission_fallbacks.len(), 1);
+        assert_eq!(state.pending.admission_fallbacks["message/first"], reason);
+        let input = omp_channel_admission_fallback_claim(
+            "agent/example", &state.incarnation, "message/first", reason,
+        );
+        assert_eq!(input.subject, "agent/example");
+        assert_eq!(input.fields["incarnation_id"], "runtime-a");
+        assert_eq!(input.fields["message_id"], "message/first");
+        assert_eq!(input.fields["reason"], reason);
+        let saved = serde_json::to_string(&state).unwrap();
+        let claim = serde_json::to_string(&input).unwrap();
+        for serialized in [&saved, &claim] {
+            assert!(!serialized.contains("PRIVATE"));
+            assert!(!serialized.contains("\"content\""));
+        }
+        let mut restored: PiChannelResume = serde_json::from_str(&saved).unwrap();
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        // Publication removes only pending work, not the first-observation deduplication.
+        restored.pending.admission_fallbacks.clear();
+        frame["reason"] = json!("timeout");
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert!(restored.pending.admission_fallbacks.is_empty());
+        assert!(restored.pending.acknowledgements.is_empty());
+        assert!(!restored.first_idle_seen);
+    }
+}
+
+#[test]
+fn omp_admission_fallback_rejects_unknown_reason_and_foreign_or_missing_binding() {
+    let valid = json!({
+        "type": "admission_fallback", "reason": "timeout",
+        "meta": {"messageId": "message/first", "identity": "example",
+            "inputIncarnation": "runtime-a"},
+    });
+    for (path, invalid) in [
+        ("/reason", json!("private-unbounded-reason")),
+        ("/reason", Value::Null),
+        ("/meta/inputIncarnation", json!("runtime-b")),
+        ("/meta/inputIncarnation", Value::Null),
+        ("/meta/identity", json!("another-seat")),
+        ("/meta/identity", Value::Null),
+        ("/meta/messageId", json!("")),
+        ("/meta/messageId", Value::Null),
+    ] {
+        let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+        let mut frame = valid.clone();
+        *frame.pointer_mut(path).unwrap() = invalid;
+        assert!(!accept_managed_channel_frame(
+            &mut state, &mut None, &frame.to_string(), "agent/example",
+        ).unwrap(), "{frame}");
+        assert!(state.pending.admission_fallbacks.is_empty());
+        assert!(state.admission_fallbacks_seen.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn omp_admission_fallback_outage_retains_pending_observation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+    let frame = json!({"type":"admission_fallback","reason":"timeout",
+        "meta":{"messageId":"message/first","identity":"example","inputIncarnation":"runtime-a"}});
+    assert!(accept_managed_channel_frame(
+        &mut state, &mut None, &frame.to_string(), "agent/example",
+    ).unwrap());
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(state.pending.publish(
+        &client, "agent/example", "omp", "runtime-a", "native",
+    ).await.is_err());
+    assert_eq!(state.pending.admission_fallbacks["message/first"], "timeout");
+}
+
 #[tokio::test]
 async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
     let root = tempfile::tempdir().unwrap();

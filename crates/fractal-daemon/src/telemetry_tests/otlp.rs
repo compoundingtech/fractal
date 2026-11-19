@@ -443,6 +443,81 @@ fn hook_metric_labels_are_bounded_and_a_non_application_has_no_counter_or_span()
     );
 }
 
+#[tokio::test]
+async fn omp_admission_fallbacks_export_content_free_logs_and_bounded_delta_counts() {
+    let store = Arc::new(Store::open_memory("node-a").unwrap());
+    for (index, reason) in ["content-mismatch", "no-message-start", "timeout"].iter().enumerate() {
+        let input = ClaimInput {
+            subject: "agent/example".into(),
+            kind: "harness.diagnostic".into(),
+            actor: Some("agent/example".into()),
+            fields: BTreeMap::from([
+                ("code".into(), json!("omp-channel-admission-fallback")),
+                ("driver".into(), json!("omp")),
+                ("incarnation_id".into(), json!("runtime-a")),
+                ("message_id".into(), json!(format!("message/first-{index}"))),
+                ("reason".into(), json!(reason)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("omp-channel-admission-fallback:agent/example:runtime-a:message/first-{index}")),
+        };
+        let first = store.append_claim(&input).unwrap();
+        assert_eq!(first.id, store.append_claim(&input).unwrap().id);
+    }
+    let batch = store.local_observations_after(0, 10).unwrap();
+    assert_eq!(batch.len(), 3, "replayed observations must not increment the counter");
+    let logs = records(&otlp_logs("node-a", &batch));
+    for (index, log) in logs.iter().enumerate() {
+        assert_eq!(log["severityText"], "INFO");
+        let attributes = log["attributes"].as_array().unwrap();
+        for (key, value) in [
+            ("st3.subject", "agent/example"),
+            ("st3.incarnation_id", "runtime-a"),
+            ("st3.code", "omp-channel-admission-fallback"),
+        ] {
+            assert!(attributes.iter().any(|a| a["key"] == key && a["value"]["stringValue"] == value));
+        }
+        assert!(attributes.iter().any(|a| a["key"] == "st3.message_id"
+            && a["value"]["stringValue"] == format!("message/first-{index}")));
+        assert!(!log.to_string().contains("\"content\""));
+    }
+    let metric = otlp_omp_admission_fallback_metrics("node-a", &batch).unwrap();
+    assert_eq!(resource_service_name(&metric), "st-daemon");
+    let counter = &metric["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+    assert_eq!(counter["name"], "omp_channel_admission_fallback_total");
+    assert_eq!(counter["sum"]["aggregationTemporality"], 1);
+    assert_eq!(counter["sum"]["isMonotonic"], true);
+    let points = counter["sum"]["dataPoints"].as_array().unwrap();
+    assert_eq!(points.len(), 3);
+    for (point, reason) in points.iter().zip(["content-mismatch", "no-message-start", "timeout"]) {
+        assert_eq!(point["asInt"], "1");
+        assert_eq!(point["attributes"], json!([
+            {"key":"reason","value":{"stringValue":reason}},
+        ]));
+    }
+    let mut invalid = batch.clone();
+    for observation in &mut invalid {
+        observation.body["fields"]["reason"] = json!("unbounded-private-reason");
+    }
+    assert!(otlp_omp_admission_fallback_metrics("node-a", &invalid).is_none());
+    for observation in &mut invalid {
+        observation.body["fields"]["reason"] = json!("timeout");
+        observation.body["fields"]["driver"] = json!("pi");
+    }
+    assert!(otlp_omp_admission_fallback_metrics("node-a", &invalid).is_none());
+
+    let (collector, endpoint) = start_collector().await;
+    let exporter = OtlpExporter::new(&OtlpConfig {
+        endpoint, headers_file: None, ui_url: None,
+    }, "node-a").unwrap();
+    assert_eq!(exporter.export_once(&store).await.unwrap().exported, 3);
+    assert_eq!(exporter.export_once(&store).await.unwrap().exported, 0);
+    let requests = collector.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "the existing exporter sends logs and one metric batch");
+    assert_eq!(requests[1].1, metric);
+}
+
 /// Every native harness reading reaches the collector as a log record, while the graph keeps
 /// only the readings that change a current value; account limits also go out as a bounded
 /// gauge. Exporting writes nothing to the graph.
