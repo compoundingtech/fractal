@@ -303,6 +303,7 @@ pub mod claim_pages;
 pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
+pub mod database_archive_size;
 pub mod answers_check;
 pub mod local_trim_fault;
 pub mod projection_divergence;
