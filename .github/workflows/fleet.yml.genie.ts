@@ -26,6 +26,7 @@ import {
   genieSetupSteps,
   nixCacheStep,
   linuxRunner,
+  requiredLinuxRunner,
   linuxStageJob as namespaceStageJob,
   evidenceStageJob,
   evidenceEnvironment,
@@ -409,7 +410,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...requiredLinuxRunner, ...linuxStageRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
@@ -528,7 +529,7 @@ fi`,
     'bundled-sqlite-packages': {
       name: 'bundled-sqlite-packages',
       ...afterPickRunner,
-      'runs-on': linuxRunner,
+      'runs-on': requiredLinuxRunner,
       'timeout-minutes': 90,
       steps: [
         ...fullHistoryCheckoutSteps({ 'persist-credentials': false }).slice(0, queue ? 1 : undefined),
