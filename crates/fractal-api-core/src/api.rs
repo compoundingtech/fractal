@@ -10527,6 +10527,17 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
+    if state.fleet_id.is_some() {
+        checks.check("checkpoint", || {
+            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
+                .map_err(ApiError::internal)?;
+            Ok(vec![DoctorCheck {
+                name: "checkpoint".into(),
+                status: if status.pending.is_some() { "warn" } else { "pass" }.into(),
+                message: status.blocking_summary().unwrap_or_else(|| "no checkpoint is pending".into()),
+            }])
+        });
+    }
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
