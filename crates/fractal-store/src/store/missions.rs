@@ -2,6 +2,114 @@ use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
 
+/// Run scratch must not become untracked content in somebody else's checkout.
+/// Resolve existing ancestors first so missing run directories and symlinked roots
+/// receive the same admission check, without creating anything on disk.
+fn validate_run_workspace(workspace: &std::path::Path) -> Result<(), FractalError> {
+    use std::path::Component;
+
+    let unavailable = |error: std::io::Error| FractalError::new(
+        "mission-workspace-unavailable",
+        format!("cannot inspect mission workspace {}: {error}", workspace.display()),
+    );
+    if workspace.components().any(|component| component == Component::ParentDir) {
+        return Err(FractalError::new(
+            "mission-workspace-unavailable",
+            "mission workspace must not contain parent-directory traversal",
+        ));
+    }
+    let absolute = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(&unavailable)?.join(workspace)
+    };
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(path) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is not an absent directory we can safely append.
+                if std::fs::symlink_metadata(ancestor).is_ok() {
+                    return Err(unavailable(error));
+                }
+                missing.push(ancestor.file_name().ok_or_else(|| unavailable(error))?);
+                ancestor = ancestor.parent().expect("a path with a filename has a parent");
+            }
+            Err(error) => return Err(unavailable(error)),
+        }
+    };
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    for directory in resolved.ancestors() {
+        match std::fs::symlink_metadata(directory.join(".git")) {
+            Ok(_) => return Err(FractalError::new(
+                "mission-workspace-in-worktree",
+                format!(
+                    "mission workspace {} is inside Git worktree {}; use a per-seat state directory for run scratch and declare repository checkouts separately",
+                    workspace.display(), directory.display(),
+                ),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unavailable(error)),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::validate_run_workspace;
+
+    #[test]
+    fn run_scratch_outside_checkout_can_be_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("seat/runs/new");
+        validate_run_workspace(&workspace).unwrap();
+        assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn run_scratch_rejects_normal_and_linked_checkout_markers() {
+        let root = tempfile::tempdir().unwrap();
+        for linked in [false, true] {
+            let checkout = root.path().join(if linked { "linked" } else { "checkout" });
+            std::fs::create_dir(&checkout).unwrap();
+            if linked {
+                std::fs::write(checkout.join(".git"), "gitdir: /unused/worktrees/linked\n").unwrap();
+            } else {
+                std::fs::create_dir(checkout.join(".git")).unwrap();
+            }
+            for workspace in [&checkout, &checkout.join("missing/run")] {
+                let error = validate_run_workspace(workspace).unwrap_err();
+                assert_eq!(error.code, "mission-workspace-in-worktree");
+            }
+            assert!(!checkout.join("missing").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_scratch_resolves_symlinked_checkout_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let alias = root.path().join("seat");
+        std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+        let error = validate_run_workspace(&alias.join("missing/run")).unwrap_err();
+        assert_eq!(error.code, "mission-workspace-in-worktree");
+        assert!(!checkout.join("missing").exists());
+    }
+
+    #[test]
+    fn run_scratch_rejects_parent_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let error = validate_run_workspace(&root.path().join("missing/../run")).unwrap_err();
+        assert_eq!(error.code, "mission-workspace-unavailable");
+    }
+}
+
 /// Read pin intent from immutable creation evidence, not the currently published head.
 pub(super) fn mission_run_revision_pinned(
     connection: &Connection,
@@ -601,6 +709,11 @@ impl Store {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
     }
 
+    /// Check scratch admission before a launcher creates a directory or a run.
+    pub fn validate_mission_run_workspace(workspace: &std::path::Path) -> Result<(), FractalError> {
+        validate_run_workspace(workspace)
+    }
+
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
     pub fn create_declared_workspace_mission_run(
         &self,
@@ -809,6 +922,7 @@ impl Store {
             return Ok(view);
         }
         stages.enter("admission");
+        Self::validate_mission_run_workspace(std::path::Path::new(&request.workspace))?;
         owned_sets::guard_mission_start(transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
         // rename must not admit a new run between the read and transaction.

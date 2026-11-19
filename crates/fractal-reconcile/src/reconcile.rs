@@ -13159,6 +13159,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    fn record_workspace_refusal(
+        &self,
+        subject: &str,
+        error: &crate::model::FractalError,
+    ) -> Result<()> {
+        self.record_diagnostic_once(subject, BTreeMap::from([
+            ("severity".into(), Value::String("error".into())),
+            ("status".into(), Value::String("failed".into())),
+            ("code".into(), Value::String(error.code.into())),
+            ("reason".into(), Value::String(error.to_string())),
+        ]))?;
+        Ok(())
+    }
+
     fn evaluate_used_mission(
         &self,
         run: &MissionRunView,
@@ -13260,6 +13274,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             self.note_mission_capacity_holders(&mission)?;
                             return Ok((false, UsedMissionOutcome::Pending));
                         }
+                        if error.code == "mission-workspace-in-worktree" {
+                            self.record_workspace_refusal(&view.subject, &error)?;
+                            return Ok((false, UsedMissionOutcome::Failed(error.to_string())));
+                        }
                         return Err(error.into());
                     }
                 };
@@ -13293,6 +13311,26 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_loop_step(
+        &self,
+        run: &MissionRunView,
+        step: &RuntimeStep<'_>,
+        view: &crate::model::StepRunView,
+        loop_spec: &LoopSpec,
+    ) -> Result<bool> {
+        match self.evaluate_loop_step_inner(run, step, view, loop_spec) {
+            Err(error) if error.downcast_ref::<crate::model::FractalError>()
+                .is_some_and(|error| error.code == "mission-workspace-in-worktree") =>
+            {
+                let refusal = error.downcast_ref::<crate::model::FractalError>()
+                    .expect("the workspace refusal was checked");
+                self.record_workspace_refusal(&view.subject, refusal)?;
+                Ok(self.store.set_step_state(&view.subject, "failed", Some(&refusal.to_string()))?)
+            }
+            result => result,
+        }
+    }
+
+    fn evaluate_loop_step_inner(
         &self,
         run: &MissionRunView,
         step: &RuntimeStep<'_>,
@@ -17834,87 +17872,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )?;
                 continue;
             };
-            if on_standby {
-                // Do not take over a primary's already-reached or mid-run request.
-                if request.origin != self.host { continue; }
-                if self.store.selected_desired_revision(&schedule.subject)?.as_deref() != field("revision") {
-                    self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
-                    continue;
-                }
-                // Whole history: it compares occurrence values from both hosts, which order does not bound.
-                let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-                let other_reached = history.iter().any(|claim| claim.origin != self.host
-                    && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
-                let prior = history.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64())
-                    .filter(|known| *known < occurrence).max();
-                if other_reached || self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some()
-                    || !Self::standby_candidate_current(&spec, occurrence, prior, now_ms() as i64)? {
-                    self.fail_schedule_work(schedule, &request.id, "standby-occurrence-unavailable", "the occurrence is already reached, already run, or outside the current catch-up selection")?;
-                    continue;
-                }
-                let current_revision = self.store.selected_desired_revision(&schedule.subject)?.unwrap_or_default();
-                match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec,
-                    &current_revision, occurrence, self.started_at_unix_ms, now_ms())? {
-                    crate::schedule_standby::Readiness::Ready(_) => {},
-                    crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
-                    crate::schedule_standby::Readiness::Held => continue,
-                }
-                if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
-                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
-                    continue;
-                }
-            }
-            let retry = self
-                .schedule_workspace_retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&schedule.subject)
-                .cloned();
-            if let Some((pending, until)) = retry
-                && pending == request.id
-                && until > now_ms()
-            {
-                self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
-                break;
-            }
             let occurrence_subject =
                 Store::scheduled_mission_run_subject(&schedule.subject, occurrence);
             let suffix = &occurrence_subject.trim_start_matches("mission-run/")[..16];
             let workspace = Path::new(root).join(suffix);
-            if let Err(error) = fs::create_dir_all(&workspace) {
-                if on_standby {
-                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
-                        &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
-                    continue;
-                }
-                let until = now_ms().saturating_add(SCHEDULE_WORKSPACE_RETRY_MS);
-                self.schedule_workspace_retries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(schedule.subject.clone(), (request.id.clone(), until));
-                self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
-                self.record_diagnostic_once(
-                    &schedule.subject,
-                    BTreeMap::from([
-                        ("severity".into(), Value::String("error".into())),
-                        ("status".into(), Value::String("unavailable".into())),
-                        ("code".into(), Value::String("workspace-unavailable".into())),
-                        (
-                            "reason".into(),
-                            Value::String(format!(
-                                "schedule {} workspace {}: {error}",
-                                schedule.subject,
-                                workspace.display()
-                            )),
-                        ),
-                    ]),
-                )?;
-                break;
-            }
-            self.schedule_workspace_retries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&schedule.subject);
             let inputs = serde_json::from_value(fields.get("inputs").cloned().unwrap_or_default())
                 .unwrap_or_default();
             let request_value = MissionRunRequest {
@@ -17931,9 +17892,110 @@ impl<R: RuntimeControl> Reconciler<R> {
             let legacy_subject = self
                 .store
                 .mission_run_subject_for_idempotency_key(&request_value.idempotency_key);
-            let created = if let Some(run) = self.store.mission_run(&legacy_subject)? {
+            let existing = match self.store.mission_run(&occurrence_subject)? {
+                Some(run) => Some(run),
+                None => self.store.mission_run(&legacy_subject)?,
+            };
+            let created = if let Some(run) = existing {
                 Ok(run)
             } else {
+                if on_standby {
+                    // Do not take over a primary's already-reached or mid-run request.
+                    if request.origin != self.host { continue; }
+                    if self.store.selected_desired_revision(&schedule.subject)?.as_deref() != field("revision") {
+                        self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
+                        continue;
+                    }
+                    // Whole history: it compares occurrence values from both hosts, which order does not bound.
+                    let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
+                    let other_reached = history.iter().any(|claim| claim.origin != self.host
+                        && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
+                    let prior = history.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64())
+                        .filter(|known| *known < occurrence).max();
+                    if other_reached
+                        || !Self::standby_candidate_current(&spec, occurrence, prior, now_ms() as i64)? {
+                        self.fail_schedule_work(schedule, &request.id, "standby-occurrence-unavailable", "the occurrence is already reached or outside the current catch-up selection")?;
+                        continue;
+                    }
+                    let current_revision = self.store.selected_desired_revision(&schedule.subject)?.unwrap_or_default();
+                    match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec,
+                        &current_revision, occurrence, self.started_at_unix_ms, now_ms())? {
+                        crate::schedule_standby::Readiness::Ready(_) => {},
+                        crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
+                        crate::schedule_standby::Readiness::Held => continue,
+                    }
+                    if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
+                        self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
+                        continue;
+                    }
+                }
+                let retry = self
+                    .schedule_workspace_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&schedule.subject)
+                    .cloned();
+                if let Some((pending, until)) = retry
+                    && pending == request.id
+                    && until > now_ms()
+                {
+                    self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
+                    break;
+                }
+                let workspace_check = Store::validate_mission_run_workspace(&workspace);
+                if let Err(error) = &workspace_check
+                    && error.code == "mission-workspace-in-worktree"
+                {
+                    self.record_diagnostic_once(
+                        &schedule.subject,
+                        BTreeMap::from([
+                            ("severity".into(), Value::String("error".into())),
+                            ("status".into(), Value::String("unavailable".into())),
+                            ("code".into(), Value::String(error.code.into())),
+                            ("reason".into(), Value::String(error.to_string())),
+                        ]),
+                    )?;
+                    self.fail_schedule_work(
+                        schedule, &request.id, "unsafe-workspace", &error.to_string(),
+                    )?;
+                    continue;
+                }
+                if let Err(error) = workspace_check.map_err(anyhow::Error::from)
+                    .and_then(|()| fs::create_dir_all(&workspace).map_err(anyhow::Error::from))
+                {
+                    if on_standby {
+                        self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
+                            &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
+                        continue;
+                    }
+                    let until = now_ms().saturating_add(SCHEDULE_WORKSPACE_RETRY_MS);
+                    self.schedule_workspace_retries
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(schedule.subject.clone(), (request.id.clone(), until));
+                    self.arm_restart(&format!("schedule-workspace:{}", schedule.subject), until);
+                    self.record_diagnostic_once(
+                        &schedule.subject,
+                        BTreeMap::from([
+                            ("severity".into(), Value::String("error".into())),
+                            ("status".into(), Value::String("unavailable".into())),
+                            ("code".into(), Value::String("workspace-unavailable".into())),
+                            (
+                                "reason".into(),
+                                Value::String(format!(
+                                    "schedule {} workspace {}: {error}",
+                                    schedule.subject,
+                                    workspace.display()
+                                )),
+                            ),
+                        ]),
+                    )?;
+                    break;
+                }
+                self.schedule_workspace_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&schedule.subject);
                 match &schedule.owner_run {
                     Some(owner) => match self.store.mission_run(owner)? {
                         Some(parent) => start(
