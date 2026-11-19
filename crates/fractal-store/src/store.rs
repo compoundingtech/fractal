@@ -6472,7 +6472,7 @@ impl Store {
             smallclaims::touched::note_read(|| (*subject).to_owned());
         }
         let connection = self.readers.get();
-        let mut statement = connection.prepare(Self::HOSTED_SUBJECTS_SQL)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h88521c22b258 owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::HOSTED_SUBJECTS_SQL)?;
         let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
