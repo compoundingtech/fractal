@@ -6,6 +6,8 @@ export * as Fractal from './fractal-effect.ts'
 export {
   AskAnswer,
   AskCancelled,
+  AwaitPrFailed,
+  AwaitPrOutcome,
   ChildFailed,
   ChildRun,
   type InputSchema,

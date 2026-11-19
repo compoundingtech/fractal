@@ -34,6 +34,8 @@ use crate::model::{
 use crate::store::Store;
 use crate::{MissionsStore, PersonWorkStore};
 
+pub(super) mod await_pr;
+
 pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
@@ -141,6 +143,8 @@ pub enum Wait {
     Run { mission: String, input: BTreeMap<String, String> },
     /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
     Ask(Box<PersonAskRequest>),
+    /// A GitHub pull request outcome, pinned to the caller's head.
+    AwaitPr { repo: String, pr: u64, head: String },
     /// Resource operations always visit the host authority, including journal replay.
     Resource { operation: String, payload: Value, cancelled: bool },
 }
@@ -573,6 +577,9 @@ impl ProgramEngine {
     fn cancel_waits(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
         let reason = format!("its program step {step} (attempt {attempt}) no longer waits on it: {reason}");
         for child in self.open_waits(step, attempt)? {
+            if child.starts_with("program-await-pr/") {
+                continue;
+            }
             if child.starts_with("mission-run/") {
                 let child = self.store.mission_run_supersession_successor(&child)?;
                 if !matches!(self.store.mission_run_status(&child)?.as_deref(), None | Some("completed" | "failed" | "cancelled")) {
@@ -664,6 +671,25 @@ impl ProgramEngine {
             }
         }
         Ok(entries)
+    }
+
+    /// Adopt the original registration and its baseline; a host restart is not a new wait.
+    fn register_pr(&self, request: &Request, child: &str, mut value: Value) -> Result<Value> {
+        if let Some(claim) = self.journal_claims(&request.step)?.into_iter().find(|claim| {
+            let fields = &claim.body["fields"];
+            fields["attempt"] == request.attempt && fields["key"] == request.key
+                && fields["child"] == child && fields["value"]["type"] == "await-pr"
+        }) {
+            return Ok(claim.body["fields"]["value"].clone());
+        }
+        value["type"] = Value::from("await-pr");
+        value["step"] = Value::from(request.step.clone());
+        value["attempt"] = Value::from(request.attempt);
+        value["since_unix_ms"] = Value::from(smallclaims::store::now_ms().to_string());
+        value["member"] = Value::from(self.store.origin.clone());
+        let registration = self.write_journal(&request.step, request.attempt, &request.program, &request.key,
+            "started", &json!({"value": value}), Some(child))?;
+        Ok(registration.body["fields"]["value"].clone())
     }
 
     /// Every journal entry of `step`, in store order.
@@ -885,7 +911,7 @@ impl ProgramEngine {
         };
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
-            Some("run" | "ask" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
+            Some("run" | "ask" | "await-pr" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
             Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
@@ -907,6 +933,16 @@ impl ProgramEngine {
             Ok(wait) => wait,
             Err(reason) => return self.fail(step, attempt, &format!("the program made an invalid request for `{key}`: {reason}")),
         };
+        if matches!(wait, Wait::AwaitPr { .. })
+            && let Some(mut exit) = self.journal(step, attempt)?.into_iter().find(|entry| entry["key"] == key)
+        {
+            exit.as_object_mut().expect("journal exit object").remove("key");
+            send_to(&self.lock(), generation, &json!({
+                "t": "resolved", "step": step, "attempt": attempt,
+                "seq": message["seq"], "key": key, "exit": exit,
+            }));
+            return Ok(());
+        }
         if !matches!(wait, Wait::Resource { .. }) {
             self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
         }
@@ -1002,7 +1038,11 @@ impl ProgramEngine {
             fields,
             evidence,
             expected_subject: None,
-            idempotency_key: (status != "started").then(|| format!("program:{step}:{attempt}:{key}:result")),
+            idempotency_key: if status != "started" {
+                Some(format!("program:{step}:{attempt}:{key}:result"))
+            } else if result["value"]["type"] == "await-pr" && child.is_some_and(|child| child.starts_with("program-await-pr/")) {
+                Some(format!("program:{step}:{attempt}:{key}:registration"))
+            } else { None },
         })
     }
 
@@ -1281,6 +1321,17 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
             .map(str::to_owned)
             .ok_or_else(|| format!("`{name}` must be a non-empty string"))
     };
+    if message["t"] == "await-pr" {
+        let repo = text("repo")?;
+        let pr = message["pr"].as_u64().filter(|pr| *pr > 0 && *pr <= 9_007_199_254_740_991)
+            .ok_or_else(|| "`pr` must be a positive safe integer".to_owned())?;
+        let thread = crate::github_watch::ThreadRef::parse(&format!("{repo}#{pr}"))
+            .map_err(|error| error.message)?;
+        if !repo.eq_ignore_ascii_case(&thread.locator()) {
+            return Err("`repo` must be OWNER/NAME".into());
+        }
+        return Ok(Wait::AwaitPr { repo: thread.locator(), pr, head: text("head")? });
+    }
     if matches!(message["t"].as_str(), Some("resource" | "resource-cancel")) {
         let operation = text("operation")?;
         if !matches!(operation.as_str(),

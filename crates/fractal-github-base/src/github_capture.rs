@@ -582,6 +582,7 @@ mod tests {
             fields: std::collections::BTreeSet::new(), cursor: None, previous_facts: None,
             every_ms: Some(0), refresh: true, webhook_covered: false, workflow_runs: None,
             github_capture: ledger,
+            await_prs: Vec::new(),
         }
     }
 

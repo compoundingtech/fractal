@@ -161,6 +161,7 @@ const main = () => {
         case 'journal':
         case 'run':
         case 'ask':
+        case 'await-pr':
         case 'resource':
         case 'resource-cancel':
           // The daemon decides; the worker waits for its answer.
@@ -265,6 +266,7 @@ const worker = async () => {
       record: (entry) => request({ t: 'journal', ...entry }),
       child: (child) => request({ t: 'run', key: child.key, mission: child.mission, input: child.input }),
       ask: (ask) => request({ t: 'ask', ...ask }),
+      awaitPr: (wait) => request({ t: 'await-pr', ...wait }),
       resource: (resource, signal) => {
         const pending = request({ t: 'resource', ...resource })
         const n = seq

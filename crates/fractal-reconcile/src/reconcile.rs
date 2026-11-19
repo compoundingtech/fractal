@@ -1570,9 +1570,9 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
-    /// The fields the latest arm of each observer/revision requests, so an arm that requests
-    /// more polls at once rather than keeping a deadline set by a poll that read less.
-    observer_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Fields and native PR targets captured by each observer/revision's latest arm. New
+    /// interest observes immediately rather than keeping a deadline for an older input set.
+    observer_fields: Arc<Mutex<HashMap<String, (Vec<String>, Vec<u64>)>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// By observer: held from a look reading its cursor until the look publishes the cursor it
     /// kept, so an arm that retired another waits for that look rather than polling from the
@@ -2601,6 +2601,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn reconcile_github_watches(&self, desired: &[DesiredSubject]) -> Result<()> {
+        use crate::watches::ProgramPrWatchesStore as _;
         let now = now_ms();
         let mut next_deadline: Option<u128> = None;
         let mut used_observers = BTreeSet::new();
@@ -2627,6 +2628,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 (!spec.stopped).then_some((subject, spec))
             })
             .collect::<Vec<_>>();
+        for registration in self.store.program_pr_watches()? {
+            let repo = registration["repo"].as_str().context("PR registration has no repository")?;
+            used_observers.insert(crate::github_watch::standing_observer(repo));
+            if registration["member"].as_str() == Some(self.host.as_str()) {
+                ensure(repo.to_owned())?;
+            }
+        }
         for (subject, spec) in &subscriptions {
             if subject.subject.starts_with("subscription/watch/") {
                 continue;
@@ -15574,6 +15582,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+                program::Wait::AwaitPr { repo, pr, head } =>
+                    program::await_pr::settle(&self.store, engine, &request, repo, *pr, head)?,
                 program::Wait::Resource { operation, payload, cancelled } =>
                     self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
@@ -18826,6 +18836,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         spec.fields.sort();
         spec.fields.dedup();
+        let await_prs = if spec.provider == "github.repository" {
+            use crate::watches::ProgramPrWatchesStore as _;
+            let targets = self.store.program_pr_watches()?.into_iter().filter(|registration| {
+                registration["repo"].as_str().is_some_and(|repo| repo.eq_ignore_ascii_case(&spec.locator))
+            }).filter_map(|registration| registration["pr"].as_u64()).collect::<BTreeSet<_>>();
+            if !targets.is_empty() {
+                spec.fields.extend(crate::github_watch::WATCH_FIELDS.into_iter().map(str::to_owned));
+                spec.fields.sort();
+                spec.fields.dedup();
+            }
+            targets.into_iter().collect::<Vec<_>>()
+        } else { Vec::new() };
         // A live subscription is a watch of this ref. Keep explicit faster intervals,
         // and use conditional reads every thirty seconds while anyone watches it.
         let watched_ref = spec.provider == "github.ref" && selected.iter().any(|(_, subscription)|
@@ -18879,8 +18901,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         // adds were never read, as when a watch's subscription reaches the standing observer
         // after its first poll (#4470), so poll now instead of waiting out that cadence.
         let previous_fields = self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
-            .insert(deadline_key.clone(), spec.fields.clone());
-        if previous_fields.is_some_and(|previous| spec.fields.iter().any(|field| !previous.contains(field))) {
+            .insert(deadline_key.clone(), (spec.fields.clone(), await_prs.clone()));
+        if previous_fields.as_ref().is_some_and(|(fields, targets)| {
+            spec.fields.iter().any(|field| !fields.contains(field))
+                || await_prs.iter().any(|target| !targets.contains(target))
+        }) || previous_fields.is_none() && !await_prs.is_empty() {
             next_check = next_check.min(now_ms());
         }
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
@@ -18910,7 +18935,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             &[]
         };
-        let snapshot = smallclaims::hash::canonical_hash(&(&spec, &selected, opener_workspaces))?;
+        let snapshot = smallclaims::hash::canonical_hash(&(&spec, &selected, opener_workspaces, &await_prs))?;
         let snapshot_prefix = format!("{operation_prefix}{snapshot}:");
         // A refresh or revision replacement also retires the scheduled arm.
         let operation = {
@@ -19080,6 +19105,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
                     fields: spec.fields.iter().cloned().collect(),
+                    await_prs: await_prs.clone(),
                     cursor: cursor.clone(),
                     previous_facts: previous_facts.clone(),
                     every_ms: spec.every_ms,
@@ -21295,6 +21321,7 @@ async fn refill_mirror(
         provider: spec.provider.clone(),
         locator: spec.locator.clone(),
         fields: spec.fields.iter().cloned().collect(),
+        await_prs: Vec::new(),
         cursor: None,
         previous_facts: None,
         every_ms: spec.every_ms,

@@ -2,12 +2,14 @@
 //! a failed observation; the store's attention snapshot reads the same classification back.
 use serde_json::Value;
 
-use super::{LocalObserverBudget, ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated};
+use super::{LocalObserverBudget, ProviderForbidden, ProviderRateLimit, ProviderRepositoryNotFound, ProviderUnauthenticated};
 
 /// Why an observer cannot observe, and whether a person has to act.
 pub enum ObserverCondition {
     /// GitHub rejected the token or refused access. Nothing changes until a person acts.
     Access(String),
+    /// The repository is missing or GitHub hides it from this credential.
+    RepositoryNotFound(String),
     /// A rate limit ends at a known reset. It needs a person only when the observer was already
     /// limited and is still limited after the reset that limit named.
     RateLimited { reason: String, outlasted: bool },
@@ -26,6 +28,9 @@ const OBSERVER_UNREACHABLE_ATTENTION_MS: u128 = 3_600_000;
 impl ObserverCondition {
     pub fn of(error: &anyhow::Error, previous: Option<&Value>) -> Self {
         let reason = error.to_string();
+        if error.downcast_ref::<ProviderRepositoryNotFound>().is_some() {
+            return Self::RepositoryNotFound(reason);
+        }
         if error.downcast_ref::<ProviderForbidden>().is_some()
             || error.downcast_ref::<ProviderUnauthenticated>().is_some()
         {
@@ -54,6 +59,7 @@ impl ObserverCondition {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Access(_) => "access-denied",
+            Self::RepositoryNotFound(_) => "github-repository-not-found",
             Self::RateLimited { .. } => "rate-limited",
             Self::LocalBudget(_) => "local-observer-budget",
             Self::Unreachable(_) => "unreachable",
@@ -63,7 +69,7 @@ impl ObserverCondition {
 
     pub fn needs_person(&self, failing_for_ms: u128) -> bool {
         match self {
-            Self::Access(_) | Self::Rejected(_) => true,
+            Self::Access(_) | Self::RepositoryNotFound(_) | Self::Rejected(_) => true,
             Self::RateLimited { outlasted, .. } => *outlasted,
             Self::LocalBudget(_) => false,
             Self::Unreachable(_) => failing_for_ms >= OBSERVER_UNREACHABLE_ATTENTION_MS,
@@ -73,6 +79,7 @@ impl ObserverCondition {
     pub fn title(&self) -> &'static str {
         match self {
             Self::Access(_) => "An observer has no access to GitHub",
+            Self::RepositoryNotFound(_) => "GitHub cannot find or expose a repository",
             Self::RateLimited { .. } => "A GitHub rate limit outlasted its reset",
             Self::LocalBudget(_) => "The local observer budget is reached",
             Self::Unreachable(_) => "An observer has failed for an hour",
@@ -86,6 +93,9 @@ impl ObserverCondition {
         match self {
             Self::Access(reason) => format!(
                 "{subject} cannot observe its resource: {reason}. Give the daemon account's GitHub token access to the repository, with `gh auth login` or `gh auth refresh -h github.com -s repo` as that account. The observer tries again on its own. {closes}"
+            ),
+            Self::RepositoryNotFound(reason) => format!(
+                "{subject} cannot observe its repository: {reason}. Check the repository locator and this daemon account's access. GitHub uses 404 for both missing and inaccessible repositories. {closes}"
             ),
             Self::RateLimited { reason, .. } => format!(
                 "{subject} is still limited after the reset GitHub named: {reason}. Something else spends the GitHub budget that every host shares; `st doctor` on {host} shows how much of it remains, how much that host's observers spent, and each observer's requests. The observer waits for each reset on its own. {closes}"
@@ -115,5 +125,14 @@ mod tests {
             "local observer budget reached, next slot at 123456 (Unix ms)"
         ));
         assert!(!condition.reason("observer/test", "host").contains("GitHub HTTP"));
+    }
+
+    #[test]
+    fn repository_absence_has_a_distinct_code_without_hiding_credential_ambiguity() {
+        let error = anyhow::Error::new(ProviderRepositoryNotFound { locator: "acme/missing".into() });
+        let condition = ObserverCondition::of(&error, None);
+        assert_eq!(condition.code(), "github-repository-not-found");
+        assert!(condition.needs_person(0));
+        assert!(condition.reason("observer/test", "host").contains("inaccessible"));
     }
 }

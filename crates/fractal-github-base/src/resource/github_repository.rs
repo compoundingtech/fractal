@@ -1366,7 +1366,14 @@ async fn observe_poll(
     // A renamed repository answers through a redirect. Its numeric ID proves that the locator
     // still names the repository whose items were observed before.
     let repository_data = github_json(&client, base.clone(), token, cache_for)
-        .await?
+        .await
+        .map_err(|error| {
+            if http_not_found(&error) {
+                error.context(super::ProviderRepositoryNotFound { locator: request.locator.clone() })
+            } else {
+                error
+            }
+        })?
         .value;
     let repository_id = repository_data
         .get("id")
@@ -1408,6 +1415,7 @@ async fn observe_poll(
     let resuming = cursor.resume_next.is_some()
         || (watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty());
     let mut items = BTreeMap::<u64, Item>::new();
+    let mut await_prs_not_found = Vec::new();
     let mut more = false;
     let mut changed_open_pull = false;
     // The open pull requests the REST reads named. GraphQL must know each one before its answer
@@ -1639,6 +1647,38 @@ async fn observe_poll(
         }
     }
 
+    // A newly registered exact-head wait may name a closed PR that never appeared in the
+    // open listing. Bootstrap its identity through the existing observer's authenticated
+    // acquisition path; subsequent observations use the normal tracked-node detail reads.
+    for &number in &request.await_prs {
+        if cursor.identities.values().any(|identity| identity.pull && identity.number == number) {
+            continue;
+        }
+        let pull = match github_json(&client, format!("{base}/pulls/{number}"), token, cache_for).await {
+            Ok(pull) => pull.value,
+            Err(error) if http_not_found(&error) => {
+                await_prs_not_found.push(number);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let id = pull.get("node_id").and_then(Value::as_str)
+            .context("the GitHub pull request response has no node ID")?;
+        anyhow::ensure!(pull.get("number").and_then(Value::as_u64) == Some(number),
+            "the GitHub pull request response names another PR");
+        cursor.identities.insert(id.to_owned(), ItemIdentity { number, pull: true });
+        let mut facts = serde_json::Map::new();
+        for (name, pointer) in [
+            ("number", "/number"), ("node_id", "/node_id"), ("state", "/state"),
+            ("head_sha", "/head/sha"), ("merged", "/merged"),
+            ("merge_commit_sha", "/merge_commit_sha"), ("merged_at", "/merged_at"),
+            ("merged_by", "/merged_by/login"), ("url", "/html_url"), ("title", "/title"),
+        ] {
+            insert(&mut facts, name, pull.pointer(pointer));
+        }
+        merge(&mut items, Item { pull: true, listed: false, facts });
+    }
+
     if fields.contains("pull_requests")
         || (fields.contains("issues") && !cursor.identities.is_empty())
     {
@@ -1802,6 +1842,9 @@ async fn observe_poll(
     if !issues.is_empty() {
         facts.insert("issues".into(), Value::Array(issues));
     }
+    // Unlike incremental pull_requests, this is explicit evidence of a targeted 404.
+    // Always reset it, including when a formerly missing PR becomes readable.
+    facts.insert("await_prs_not_found".into(), json!(await_prs_not_found));
     if fields.contains(super::github_workflows::PERFORMANCE_FAILURES_FIELD) {
         let repository = format!("{}/{}", current_location.0, current_location.1);
         let failures = super::github_workflows::main_performance_failures(
@@ -1855,6 +1898,11 @@ async fn observe_poll(
         cursor: Some(serde_json::to_string(&cursor)?),
         next_check_unix_ms: now_ms().saturating_add(delay),
     })
+}
+
+fn http_not_found(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status)
+        == Some(reqwest::StatusCode::NOT_FOUND)
 }
 
 /// An installation without statuses:read sees an app-only rollup, which is not complete.
@@ -2252,7 +2300,52 @@ mod tests {
             webhook_covered: false,
             workflow_runs: None,
             github_capture: None,
+            await_prs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn exact_pr_registration_reads_a_previously_unseen_merged_pull_request() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "closed", "head": {"sha": "head"},
+            "merged": true, "merge_commit_sha": "merge", "merged_at": "2026-11-19T09:00:00Z"}));
+        let mut input = request(&[], None, None);
+        input.await_prs = vec![42];
+        let observed = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        let pull = item(&observed.facts, "pull_requests", 42);
+        assert_eq!(pull["head_sha"], "head");
+        assert_eq!(pull["merged"], true);
+        assert_eq!(pull["merge_commit_sha"], "merge");
+        assert_eq!(observed.facts["await_prs_not_found"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn exact_pr_absence_is_explicit_and_resets_after_a_successful_lookup() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let mut input = request(&[], None, None);
+        input.await_prs = vec![42];
+        let missing = observe_at(input.clone(), &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(missing.facts["await_prs_not_found"], json!([42]));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "open", "head": {"sha": "head"},
+            "merged": false}));
+        input.previous_facts = Some(missing.facts);
+        let found = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(found.facts["await_prs_not_found"], json!([]));
+        assert_eq!(item(&found.facts, "pull_requests", 42)["head_sha"], "head");
+    }
+
+    #[tokio::test]
+    async fn repository_lookup_404_has_a_typed_observer_condition() {
+        let (_github, base) = FakeGithub::start().await;
+        let error = observe_at(request(&[], None, None), &base, Some(&GithubAuth::test("test")))
+            .await.unwrap_err();
+        assert!(error.downcast_ref::<super::super::ProviderRepositoryNotFound>().is_some());
+        assert_eq!(super::super::ObserverCondition::of(&error, None).code(),
+            "github-repository-not-found");
     }
 
     fn items<'a>(facts: &'a Value, collection: &str) -> Vec<&'a Value> {

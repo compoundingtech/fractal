@@ -3,6 +3,8 @@ import { Data, Effect, Schedule, Schema } from 'effect'
 
 import {
   AskCancelled,
+  AwaitPrFailed,
+  AwaitPrOutcome,
   ChildFailed,
   Fractal,
   type ProgramExit,
@@ -24,6 +26,136 @@ const reportTo: AgentRef = {
 }
 const meta = { url: 'file:///tree/factory/test/mission.ts' }
 const Change = Schema.Struct({ change: Schema.String })
+
+describe('pull request waits', () => {
+  const request = { id: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' }
+  const waiting = Fractal.mission(
+    {
+      meta, id: 'factory/test', goal: 'Wait for merge.', reportTo, input: Change,
+      output: AwaitPrOutcome, error: AwaitPrFailed,
+    },
+    (): Effect.Effect<AwaitPrOutcome, AwaitPrFailed, ProgramServices> => Fractal.awaitPr(request),
+  )
+
+  for (const outcome of [
+    { outcome: 'merged', mergeCommit: 'merge-sha' },
+    { outcome: 'dequeued', reason: 'checks-failed' },
+    { outcome: 'dequeued', reason: 'head-changed' },
+  ] satisfies readonly AwaitPrOutcome[]) {
+    it.effect(`returns ${JSON.stringify(outcome)} live and bypasses the host on replay`, () =>
+      Effect.gen(function* () {
+        const requests: unknown[] = []
+        const exit: ProgramExit = { _tag: 'Success', value: outcome }
+        const host = fakeHost({
+          awaitPr: async (value) => {
+            requests.push(value)
+            return exit
+          },
+        })
+        expect(yield* start(waiting, host)).toEqual(exit)
+        expect(requests).toEqual([
+          { key: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' },
+        ])
+        // Deferred results are already journaled by the daemon, not recorded a second time.
+        expect(host.recorded).toEqual([])
+        expect(host.started).toEqual([])
+        const replay = fakeHost({ journal: [['await-outcome', exit]] })
+        expect(yield* start(waiting, replay)).toEqual(exit)
+        expect(replay.recorded).toEqual([])
+        expect(replay.started).toEqual([])
+      }),
+    )
+  }
+
+  for (const code of ['unknown-repo', 'unknown-pr'] as const) {
+    it.effect(`decodes ${code} as a typed error live and on replay`, () =>
+      Effect.gen(function* () {
+        const error = {
+          _tag: 'AwaitPrFailed', code, repo: request.repo, pr: request.pr, message: code,
+        } as const
+        const exit: ProgramExit = { _tag: 'Failure', error }
+        const caught = Fractal.mission(
+          {
+            meta, id: 'factory/test', goal: 'Handle missing PR.', reportTo,
+            input: Change, output: Schema.String,
+          },
+          () => Fractal.awaitPr(request).pipe(
+            Effect.catchTag('AwaitPrFailed', (failure) => {
+              expect(failure).toBeInstanceOf(AwaitPrFailed)
+              expect(failure.code).toBe(code)
+              expect(failure.repo).toBe(request.repo)
+              expect(failure.pr).toBe(request.pr)
+              return Effect.succeed(failure.message)
+            }),
+          ),
+        )
+        expect(yield* start(waiting, fakeHost({ awaitPr: async () => exit }))).toEqual(exit)
+        expect(yield* start(caught, fakeHost({ awaitPr: async () => exit }))).toEqual({
+          _tag: 'Success', value: code,
+        })
+        expect(yield* start(caught, fakeHost({ journal: [['await-outcome', exit]] }))).toEqual({
+          _tag: 'Success', value: code,
+        })
+      }),
+    )
+  }
+
+  it.effect('uses successive keyed occurrences for repeated waits and replays each outcome', () =>
+    Effect.gen(function* () {
+      const outcomes: readonly AwaitPrOutcome[] = [
+        { outcome: 'dequeued', reason: 'head-changed' },
+        { outcome: 'merged', mergeCommit: 'merge-sha' },
+      ]
+      const repeated = Fractal.mission(
+        {
+          meta, id: 'factory/test', goal: 'Wait for both heads.', reportTo, input: Change,
+          output: Schema.Array(AwaitPrOutcome),
+        },
+        () => Effect.gen(function* () {
+          const first = yield* Fractal.awaitPr(request)
+          const second = yield* Fractal.awaitPr({ ...request, head: 'new-head' })
+          return [first, second]
+        }),
+      )
+      const requests: unknown[] = []
+      const resolutions: [string, ProgramExit][] = []
+      const host = fakeHost({
+        awaitPr: async (value) => {
+          const exit: ProgramExit = { _tag: 'Success', value: outcomes[requests.length]! }
+          requests.push(value)
+          resolutions.push([value.key, exit])
+          return exit
+        },
+      })
+      expect(yield* start(repeated, host)).toEqual({ _tag: 'Success', value: outcomes })
+      expect(requests).toEqual([
+        { key: 'await-outcome', repo: request.repo, pr: request.pr, head: request.head },
+        { key: 'await-outcome#2', repo: request.repo, pr: request.pr, head: 'new-head' },
+      ])
+      expect(yield* start(repeated, fakeHost({ journal: resolutions }))).toEqual({
+        _tag: 'Success', value: outcomes,
+      })
+    }),
+  )
+
+  it.effect('rejects malformed outcomes and unexpected error codes at the schema boundary', () =>
+    Effect.gen(function* () {
+      for (const value of [
+        { outcome: 'merged' },
+        { outcome: 'dequeued' },
+        { outcome: 'pending', reason: 'still-queued' },
+      ]) {
+        const decoded = yield* Effect.result(Schema.decodeUnknownEffect(AwaitPrOutcome)(value))
+        expect(decoded._tag).toBe('Failure')
+      }
+      const decoded = yield* Effect.result(Schema.decodeUnknownEffect(AwaitPrFailed)({
+        _tag: 'AwaitPrFailed', code: 'head-changed', repo: request.repo, pr: request.pr,
+        message: 'Head changes are successful dequeues, not errors.',
+      }))
+      expect(decoded._tag).toBe('Failure')
+    }),
+  )
+})
 
 describe('program replay', () => {
   const effects: string[] = []
