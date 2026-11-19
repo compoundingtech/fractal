@@ -325,7 +325,12 @@ impl Store {
         smallclaims::touched::note_read(|| "kind:runtime.action.requested".to_owned());
         smallclaims::touched::note_read(|| "kind:runtime.action.succeeded".to_owned());
         smallclaims::touched::note_read(|| "kind:runtime.action.failed".to_owned());
-        let before = self.wake_demand(subject)?.frontier;
+        let initial = self.wake_demand(subject)?;
+        if !initial.frontier.caught_up || initial.oldest.is_none() {
+            return Ok(IdleWakeAdmission::default());
+        }
+        let before = initial.frontier;
+        let mut own_pending = initial.oldest;
         let mut active = 0usize;
         let mut candidates = Vec::new();
         let mut queued = Vec::new();
@@ -343,9 +348,14 @@ impl Store {
                 active += 1; continue;
             }
             if state.phase != "suspended" && !(state.action == "resume" && state.phase == "failed") { continue; }
-            let demand = self.wake_demand(&desired.subject)?;
-            if !demand.frontier.caught_up { return Ok(IdleWakeAdmission::default()); }
-            let Some(pending) = demand.oldest else { continue; };
+            let pending = if desired.subject == subject {
+                own_pending.take()
+            } else {
+                let demand = self.wake_demand_untracked(&desired.subject)?;
+                if !demand.frontier.caught_up { return Ok(IdleWakeAdmission::default()); }
+                demand.oldest
+            };
+            let Some(pending) = pending else { continue; };
             let lineage = state.suspend_operation_id.as_deref().unwrap_or(&state.operation_id).to_owned();
             let incarnation = state.incarnation_id.clone().ok_or_else(|| anyhow::anyhow!("idle suspension has no incarnation"))?;
             queued.push((desired.subject.clone(), lineage.clone(), pending.clone(), incarnation));
@@ -602,6 +612,48 @@ mod tests {
             &json!({"evidence":[resume],"fields":{"action":"resume","operation_status":"resumed","incarnation_id":"three"}}),
             &[], None, &crate::suspension::resume_completed_key(&resume))).unwrap().unwrap();
         assert!(store.admit_idle_wake(SEAT, 1, 9_000_000_000_000).unwrap().operation_id.is_some());
+    }
+
+    #[test]
+    fn wake_queue_ranking_does_not_subscribe_to_other_seats_mail() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let orchard = "agent/alder.orchard";
+        let intent = crate::parse_intent(
+            "version 2\nagent \"orchard\" { workspace \".\"; command \"true\"; }", "alder").unwrap();
+        store.apply(&intent, &BTreeMap::from([(orchard.into(), Vec::new())]), "orchard").unwrap();
+        let declaration = store.selected_desired_token(orchard).unwrap().unwrap();
+        let suspend = store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", orchard,
+            "runtime.action.requested", Some(orchard),
+            &json!({"evidence":[declaration],"fields":{"action":"suspend","cause":"idle","incarnation_id":"two"}}),
+            &[], None, "orchard-suspend")).unwrap().unwrap();
+        complete_suspend(&store, orchard, &suspend.id);
+        let garden = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+        complete_suspend(&store, SEAT, &garden);
+        for (message, seat) in [("message/garden", SEAT), ("message/orchard", orchard)] {
+            claim(&store, message, "message.sent", Some("person/avery"),
+                json!({"from":"person/avery","to":seat,"content":"Wake.","status":"sent","tags":[]}));
+        }
+        // Zero capacity forces both items to rank the complete queue without starting a wake.
+        let (_, garden_reads) = smallclaims::touched::record(|| store.admit_idle_wake(SEAT, 0, 9_000_000_000_000).unwrap());
+        let (_, orchard_reads) = smallclaims::touched::record(|| store.admit_idle_wake(orchard, 0, 9_000_000_000_000).unwrap());
+        assert!(garden_reads.contains(&format!("mailbox:{SEAT}")));
+        assert!(garden_reads.contains("message/garden"));
+        assert!(!garden_reads.contains(&format!("mailbox:{orchard}")));
+        assert!(!garden_reads.contains("message/orchard"));
+        assert!(orchard_reads.contains(&format!("mailbox:{orchard}")));
+        assert!(orchard_reads.contains("message/orchard"));
+        assert!(!orchard_reads.contains(&format!("mailbox:{SEAT}")));
+        assert!(!orchard_reads.contains("message/garden"));
+        let incremental = crate::incremental::Incremental::default();
+        incremental.observe(&store).unwrap();
+        incremental.evaluated("member:garden", garden_reads, None);
+        incremental.evaluated("member:orchard", orchard_reads, None);
+        claim(&store, "message/garden-new", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"New garden mail.","status":"sent","tags":[]}));
+        incremental.observe(&store).unwrap();
+        assert!(incremental.needs("member:garden", 0));
+        assert!(!incremental.needs("member:orchard", 0), "garden mail must not invalidate orchard's queue ranking");
     }
 
     #[test]
