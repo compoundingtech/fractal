@@ -381,6 +381,33 @@ contains this reader, and it turns on through its own meta flag, never through
 the version number. Once a store is at 24, roll back only to a published binary
 with this reader, never by decrementing `user_version`.
 
+### Compacted claim signatures writer (version 24)
+
+The release after the version 24 reader compacts settled claims. Judging
+compacts each claim when its verdict settles. Once the signature migration is
+done, a background pass compacts the claims that earlier releases kept whole:
+- it walks `claim_signature_candidates` in claim order from the cursor
+  `meta.claim_signature_compaction`;
+- each writer loan covers at most 512 candidate rows or 10 ms, followed by an
+  equal quiet interval;
+- after it reaches the end, the cursor reads `done`, and each later pass only
+  scans the small remainder of unsettled claims for one a rollback left whole.
+
+The pass deletes a claim's candidate row, the existing trigger removes its
+source and writer count with it, and the pass restores its count at 1.
+
+In the transaction that compacts its first claim, the writer fences the store at
+24 (never lowering a later fence) and sets its own flag,
+`meta.claim_signature_compaction_writer = '1'`. A store that has nothing to
+compact stays at its version. The writer needs the v21 reference writer gated on
+its own flag (#6876). Without that gate, the fence would turn the reference
+conversion on, and that conversion needs every facade's candidate row.
+
+Rollback works to the version 24 reader release, which reads every compacted
+claim and expands one before writing a new candidate. An earlier release
+refuses the store by the fence ("unsupported st schema version 24") instead of
+misreading it.
+
 ### Additive assistant admission index
 
 Store initialization installs `claims_assistant_v1_principal_index` on

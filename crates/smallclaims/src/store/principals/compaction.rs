@@ -62,10 +62,10 @@ fn activate_tx(connection: &Connection) -> Result<()> {
 /// existing trigger takes its source and count with it, and the count comes back at 1.
 pub(super) fn compact_settled_tx(connection: &Connection, claim_id: &str) -> Result<bool> {
     let settled: bool = connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he0591c585070 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ &format!(
             "SELECT EXISTS(SELECT 1 {SETTLED_FROM} WHERE d.claim_id=?1 AND {SETTLED})"
         ))?
-        .query_row([claim_id], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1c1e2c4418af owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))?;
     if !settled || judging::unavailable(connection, claim_id)?.is_some() {
         return Ok(false);
     }
@@ -73,11 +73,11 @@ pub(super) fn compact_settled_tx(connection: &Connection, claim_id: &str) -> Res
         activate_tx(connection)?;
     }
     connection
-        .prepare_cached("DELETE FROM claim_signature_candidates WHERE claim_id=?1")?
-        .execute([claim_id])?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1f988d53ce56 owner=smallclaims::store::principals::compaction TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_candidates WHERE claim_id=?1")?
+        .execute(/* sqlite-large-value: allow-for-now lv-h428772d36dee owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id])?;
     connection
-        .prepare_cached("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,1)")?
-        .execute([claim_id])?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1c7676aeb4df owner=smallclaims::store::principals::compaction TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,1)")?
+        .execute(/* sqlite-large-value: allow-for-now lv-hb028967bb9f6 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id])?;
     Ok(true)
 }
 
@@ -91,8 +91,8 @@ pub(super) fn compact_page_tx(connection: &Connection) -> Result<(usize, usize, 
     let mut cursor = super::super::fleet_meta(connection, COMPACTION_CURSOR)?.unwrap_or_default();
     if cursor == "done" {
         let left: bool = connection
-            .prepare_cached(&format!("SELECT EXISTS(SELECT 1 {SETTLED_FROM} WHERE {SETTLED})"))?
-            .query_row([], |row| row.get(0))?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3a201afcb2b7 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 {SETTLED_FROM} WHERE {SETTLED})"))?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h6c9a3ed04989 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
         if !left {
             return Ok((0, 0, true));
         }
@@ -147,13 +147,13 @@ pub(super) fn expand_tx(connection: &Connection, claim_id: &str) -> Result<bool>
         .prepare_cached(
             "SELECT b.origin FROM claims c JOIN batches b ON b.id=c.batch_id WHERE c.id=?1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h1c1e2c4418af owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h543173a4ce74 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
         .optional()?
         .unwrap_or_else(|| "unknown-legacy".to_owned());
     // The candidate trigger counts the restored row, so drop the compacted count first.
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h92b0e591751c owner=smallclaims::store::principals::compaction TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_counts WHERE claim_id=?1")?
-        .execute(/* sqlite-large-value: allow-for-now lv-h428772d36dee owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h0f3ad4ce13f5 owner=smallclaims::store::principals::compaction TODO=trace-statement-and-value-representation */ [claim_id])?;
     connection
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h35cb2b585420 owner=smallclaims::store::principals::compaction TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_signature_candidates(claim_id,signature,key,nonce) VALUES (?1,?2,?3,?4)",

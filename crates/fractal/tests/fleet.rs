@@ -6749,6 +6749,219 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     kept(&judged, &verdicts(&o), "re-upgrade");
 }
 
+/// Signature compaction (storage version 24) across mixed versions, upgrade and rollback: a
+/// previous-release member and a new one replicate signed claims both ways; the new member keeps
+/// only the facade of each claim it settles; the previous release upgraded in place compacts the
+/// claims it kept whole without changing a verdict or the replicated set. Rolled back, a release
+/// without the version 24 reader refuses the store by its fence, and a release with it reads
+/// every verdict as before.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_verdicts_survive_signature_compaction_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8d2f4b6a-1c3e-4a5b-9d7f-0e2c4a6b8d1f";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n = Node::new(root.path(), "n");
+    o.legacy_config(fleet_id, &secret, &[("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    o.start().await;
+    n.start().await;
+    let rows = |node: &Node, sql: &str| -> i64 {
+        rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+    };
+    let compacted = |node: &Node| {
+        rows(node, "SELECT COUNT(*) FROM claim_signatures s JOIN claim_signature_counts USING(claim_id)
+                     WHERE NOT EXISTS(SELECT 1 FROM claim_signature_candidates d WHERE d.claim_id=s.claim_id)")
+    };
+    // The node's own claims: they read verified on every release, so they settle and compact.
+    let own_whole = |node: &Node| {
+        rows(node, &format!(
+            "SELECT COUNT(*) FROM claim_signature_candidates d JOIN claims c ON c.id=d.claim_id
+              JOIN claim_verdicts v USING(claim_id) WHERE c.origin='{}' AND v.verdict='verified'",
+            node.name,
+        ))
+    };
+    // A peer's claims read held here, since the legacy fleet does not enroll node keys; what
+    // matters is that no verdict changes across upgrade and rollback.
+    let verdicts = |node: &Node| -> BTreeMap<String, String> {
+        let connection = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT s.claim_id, COALESCE(v.verdict, 'none') FROM claim_signatures s
+                      LEFT JOIN claim_verdicts v USING(claim_id)")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let unsettled = |node: &Node| {
+        rows(node, &format!(
+            "SELECT (SELECT COUNT(*) FROM claim_verdict_queue)
+                  + (SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE v.verdict IS NULL)
+                  + (SELECT COUNT(*) FROM claim_signatures s JOIN claims c ON c.id = s.claim_id
+                     LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE c.origin = '{}' AND v.verdict IS NOT 'verified')",
+            node.name,
+        ))
+    };
+    macro_rules! settle {
+        ($node:expr) => {{
+            let node: &Node = $node;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while unsettled(node) != 0 {
+                assert!(Instant::now() < deadline, "{}: verdicts did not settle: {:?}", node.name, verdicts(node));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }};
+    }
+    let kept = |before: &BTreeMap<String, String>, after: &BTreeMap<String, String>, stage: &str| {
+        for (claim, verdict) in before {
+            assert_eq!(after.get(claim), Some(verdict), "{stage}: verdict of {claim} changed");
+        }
+    };
+    let note = |node: &Node, text: &str| {
+        let client = node.client();
+        let text = text.to_owned();
+        async move {
+            let _: Value = client
+                .post("/v1/claims", &ClaimInput {
+                    subject: format!("custom/fleet-test/{text}"),
+                    kind: NOTE.into(),
+                    actor: None,
+                    fields: [("text".to_owned(), Value::String(text))].into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+    };
+    let ids = |claims: Vec<Value>| -> BTreeSet<String> {
+        claims.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect()
+    };
+    let mut expected = BTreeSet::new();
+    for text in ["o-0", "o-1", "o-2"] {
+        note(&o, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for text in ["n-0", "n-1"] {
+        note(&n, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+    }
+    // The new member compacts what it settles; the previous release keeps every claim whole.
+    wait_until("the new member compacts its settled claims", 60, || async { own_whole(&n) == 0 }).await;
+    assert!(compacted(&n) > 0);
+    assert_eq!(rows(&n, "PRAGMA user_version"), 24);
+    assert_eq!(compacted(&o), 0);
+    assert!(own_whole(&o) > 0);
+
+    // Upgrade in place: the paced pass compacts what the release kept; verdicts and the set stay.
+    let judged = verdicts(&o);
+    let before = ids(o.claims().await);
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    wait_until("the upgraded member compacts the claims it kept", 120, || async { own_whole(&o) == 0 }).await;
+    settle!(&o);
+    assert_eq!(rows(&o, "PRAGMA user_version"), 24);
+    kept(&judged, &verdicts(&o), "upgrade");
+    assert!(before.is_subset(&ids(o.claims().await)), "upgrade lost history");
+    for (node, text) in [(&o, "o-upgraded"), (&n, "n-after-upgrade")] {
+        note(node, text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+        settle!(node);
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert_eq!(ids(o.claims().await), ids(n.claims().await), "both members hold the same set");
+
+    // Roll back. A release without the version 24 reader refuses the store by its fence rather
+    // than misread it; one with the reader reads and writes every verdict as before.
+    let judged = verdicts(&o);
+    o.stop();
+    o.binary = old;
+    let mut daemon = DaemonProcess::spawn_isolated(
+        o.command(&["up", "--web-listen", "off"]),
+        fs::File::create(o.root.join("daemon.log")).unwrap(),
+        fs::File::create(o.root.join("daemon.stderr.log")).unwrap(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(150);
+    let refused = loop {
+        if daemon.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if o.client().get::<Value>("/v1/health").await.is_ok() {
+            break false;
+        }
+        assert!(Instant::now() < deadline, "the rolled-back member neither starts nor exits:\n{}", o.logs());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    if refused {
+        let logs = o.logs();
+        assert!(logs.contains("unsupported st schema version 24"), "{logs}");
+        assert!(ids(n.claims().await).is_superset(&before));
+    } else {
+        o.daemon = Some(daemon);
+        settle!(&o);
+        kept(&judged, &verdicts(&o), "rollback");
+        note(&o, "o-rolled-back").await;
+        expected.insert("custom/fleet-test/o-rolled-back".into());
+        for node in [&o, &n] {
+            wait_for_notes(node, &expected, 90, &[&o, &n]).await;
+            settle!(node);
+        }
+    }
+    o.stop();
+
+    // Forward again: the store opens as it was left and compacts anything kept whole meanwhile.
+    let judged = verdicts(&o);
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    wait_until("the re-upgraded member compacts again", 120, || async { own_whole(&o) == 0 }).await;
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "re-upgrade");
+}
+
 /// A page cursor into the messages stream names its position in `stream_after` and leaves out
 /// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
 /// over rather than reading a stream position as a graph index. A subject the graph holds lists
