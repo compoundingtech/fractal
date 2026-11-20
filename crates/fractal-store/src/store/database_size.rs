@@ -91,8 +91,8 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
     Some((i64::try_from(per_day).ok()?, span))
 }
 
-/// The free pages one write gives back to the filesystem: 512 KiB of 4 KiB pages. On a 61 GB
-/// store giving back 1.3 million pages, chunks of 512 held the writer up to 225 ms and chunks of
+/// The free pages one write gives back to the filesystem: 512 KiB of 4 KiB pages. On a copy of a
+/// real member giving back 9% of its file, chunks of 512 held the writer up to 225 ms and chunks of
 /// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
 // The literal in `release_free_pages` spells this chunk.
