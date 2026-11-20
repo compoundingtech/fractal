@@ -280,6 +280,7 @@ pub struct PtyRuntime {
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    launch_operation: Option<crate::LaunchOperation>,
     registry_snapshot: std::sync::Arc<Mutex<registry_snapshot::RegistrySnapshot>>,
 }
 
@@ -304,6 +305,7 @@ impl PtyRuntime {
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
             unlaned_seat: None,
+            launch_operation: None,
             registry_snapshot: std::sync::Arc::default(),
         }
     }
@@ -311,6 +313,11 @@ impl PtyRuntime {
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.
     pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
         self.unlaned_seat = policy;
+        self
+    }
+
+    pub fn with_launch_operation(mut self, operation: Option<crate::LaunchOperation>) -> Self {
+        self.launch_operation = operation;
         self
     }
 
@@ -521,9 +528,9 @@ impl PtyRuntime {
             &mut producer_entered,
         ).map_err(|error| {
             if !producer_entered
-                && let Some(operation) = env.get("ST3_START_OPERATION")
+                && let Some(operation) = &self.launch_operation
             {
-                error.context(crate::StartRejected { operation: Some(operation.clone()) })
+                error.context(crate::StartRejected { operation: Some(operation.0.clone()) })
             } else {
                 error
             }
@@ -580,8 +587,8 @@ impl PtyRuntime {
         // A pending fence is not operation-bound: even after its recovery window,
         // it cannot prove an earlier producer closed. A same-operation row also
         // disproves a claim that this operation never launched.
-        *producer_entered = prior_pending || env.get("ST3_START_OPERATION").is_some_and(|operation| {
-            before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(operation)
+        *producer_entered = prior_pending || self.launch_operation.as_ref().is_some_and(|operation| {
+            before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(&operation.0)
         });
         if prior_pending {
             let previous = std::fs::read_to_string(&fence)
@@ -629,7 +636,7 @@ impl PtyRuntime {
         if before.as_ref().is_some_and(observation_is_live) {
             log_previous_teardown(
                 id, before.as_ref(), None, None,
-                env.get("ST3_START_OPERATION").map(String::as_str),
+                self.launch_operation.as_ref().map(|operation| operation.0.as_str()),
                 cutover.map(|(predecessor, _)| predecessor),
                 PtyTeardownReason::SpawnPrevious, "acquired", "existing_live_incarnation",
                 false, None,
@@ -646,15 +653,14 @@ impl PtyRuntime {
             id,
             before.as_ref(),
             PtyTeardownReason::SpawnPrevious,
-            env.get("ST3_START_OPERATION").map(String::as_str),
+            self.launch_operation.as_ref().map(|operation| operation.0.as_str()),
             cutover.map(|(predecessor, _)| predecessor),
         ) {
             eprintln!(
                 "fractal: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
         }
-        let operation = env.get("ST3_START_OPERATION")
-            .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
+        let operation = self.launch_operation.as_ref().map(|operation| &operation.0);
         let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
         let unit = crate::scope_unit("st3", &scope_identity);
         let lane = crate::lane::prepare(capacity, id)?;
@@ -789,7 +795,7 @@ impl PtyRuntime {
             // A later failed attempt cannot close a producer created by an earlier
             // attempt. Only failure to create the first launcher proves rejection.
             let operation = (!*producer_entered && attempt == 0)
-                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .then(|| self.launch_operation.as_ref().map(|operation| operation.0.as_str()))
                 .flatten();
             if let Some(guard) = guard
                 && let Err(error) = guard()
@@ -1903,7 +1909,8 @@ exit 0
                 "createdAt": "older", "tags": {"st3.start-operation": earlier_operation}
             }));
             write_pid(&registry, "work", std::process::id());
-            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy())
+                .with_launch_operation(Some(crate::LaunchOperation("new-operation".into())));
             if pending {
                 fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
                 fs::write(runtime.spawn_state_path("work", "pending"), "").unwrap();
@@ -1932,6 +1939,7 @@ exit 0
             let binary = fake_pty(root.path(), "entered-prelaunch", behavior);
             let runtime = PtyRuntime::new(root.path().join("registry"))
                 .with_binary(binary.to_string_lossy())
+                .with_launch_operation(Some(crate::LaunchOperation("new-operation".into())))
                 .with_spawn_timeout(Duration::from_millis(30))
                 .with_command_timeout(Duration::from_secs(1));
             let error = runtime.spawn_checked(
@@ -1951,6 +1959,7 @@ exit 0
             let binary = fake_pty(root.path(), "retry-prelaunch", "  echo 'already in use' >&2\n  exit 1");
             let runtime = PtyRuntime::new(root.path().join("registry"))
                 .with_binary(binary.to_string_lossy())
+                .with_launch_operation(Some(crate::LaunchOperation("new-operation".into())))
                 .with_spawn_timeout(Duration::from_millis(30))
                 .with_command_timeout(Duration::from_secs(1));
             if pending {

@@ -52,7 +52,7 @@ final-assessment custom.st3.message-receipt
 PRODUCTS
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-published="$(st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/test-revision" --json \
+published="$(fractal subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/test-revision" --json \
   | jq -r '.status.subjects[0].actual | (.fields // .) | .sha')"
 current="$(git -C "$CATALOG/worker" rev-parse HEAD)"
 test "$published" = "$current"

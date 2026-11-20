@@ -132,7 +132,7 @@ mod managed_declaration_tests {
     }
 }
 
-/// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
+/// `fractal driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
     fractal_client::set_client_name(format!(
         "fractal-driver-hook {}",
@@ -141,7 +141,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
-            "usage: st {} NAME [ARGS]; NAME is one of {}",
+            "usage: fractal {} NAME [ARGS]; NAME is one of {}",
             fractal_daemon::driver_hook::SUBCOMMAND,
             fractal_daemon::driver_hook::HOOKS.join(", ")
         );
@@ -262,7 +262,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         .as_deref()
         .context("the driver has no subject")?;
     if fractal_daemon::skill::HARNESSES.contains(&args.driver.as_str()) {
-        // A seat starts idle: a declaration stored before st dropped the startup prompt still
+        // A seat starts idle: a declaration stored before fractal dropped the startup prompt still
         // carries it, and it would start a turn nobody asked for.
         let mut argv = args.argv;
         fractal_daemon::boot::strip_legacy_prompt(&args.driver, &mut argv);
@@ -272,13 +272,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             let _ = write_driver_log(
                 subject,
                 &format!(
-                    "could not install the st skill for {}: {error:#}",
+                    "could not install the fractal skill for {}: {error:#}",
                     args.driver
                 ),
             );
         }
         // Harness-session state (OpenCode delivery ledgers, Claude resume bindings) stays beneath
-        // st3's driver directory, never st2's; the seat's hooks choose the same root.
+        // fractal's driver directory, never st2's; the seat's hooks choose the same root.
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
@@ -712,7 +712,7 @@ async fn resume_native_driver(
     let _ = write_driver_log(
         subject,
         &format!(
-            "the {driver} driver resumed in {} after its st binary was replaced; the provider kept running",
+            "the {driver} driver resumed in {} after its fractal binary was replaced; the provider kept running",
             fractal_drivers::reexec::installed_binary()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "a replacement binary".into())
@@ -1692,7 +1692,7 @@ async fn run_pi_channel(
         Some(state) => {
             let _ = write_driver_log(
                 subject,
-                &format!("the {driver} channel resumed after its st binary was replaced"),
+                &format!("the {driver} channel resumed after its fractal binary was replaced"),
             );
             state
         }
@@ -2171,7 +2171,7 @@ async fn run_pi_channel(
                     let _ = write_driver_log(
                         subject,
                         &format!(
-                            "the st binary at {} was replaced; the {driver} channel re-executes into it",
+                            "the fractal binary at {} was replaced; the {driver} channel re-executes into it",
                             binary.display()
                         ),
                     );
@@ -2942,7 +2942,7 @@ async fn drive_codex_native_loop(
                     .await?;
                     }
                     // The Codex runtime stamps its timeline with its own incarnation, which
-                    // outlives st's runtime incarnation when a resident Codex is adopted.
+                    // outlives fractal's runtime incarnation when a resident Codex is adopted.
                     let codex_incarnation = fractal_drivers::codex_app_server::current_runtime_incarnation(
                         &state_dir,
                         &identity,

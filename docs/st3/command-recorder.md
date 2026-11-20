@@ -17,7 +17,7 @@ directory then goes in front of them, so an authored `PATH` cannot put another `
 `st3-recorder.json`, that names the host, log, and optional receipts directory. The daemon writes these at startup. It links
 a program only when that program is on the daemon's `PATH` or the login shell's `PATH`, so
 `command -v gh` still fails on a host without `gh`. When the daemon cannot write the directory, it
-prints `st: not recording git and gh calls: ...` and starts anyway.
+prints `fractal: not recording git and gh calls: ...` and starts anyway.
 
 When Fractal starts as `git` or `gh`, it does not start the async runtime or read any configuration.
 It finds the real program, runs it, waits for it, appends one line to the log, and exits the way the

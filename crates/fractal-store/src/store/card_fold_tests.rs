@@ -63,6 +63,7 @@ fn runtime_membership_decodes_only_the_status_it_needs_as_history_grows() {
         .map(str::to_owned);
     let mut written = 0;
     for history in [8, 80] {
+        let new_observations = (history - written) * subjects.len() + 1;
         for sequence in written..history {
             for subject in &subjects {
                 running(&store, subject, &format!("incarnation-{sequence}"));
@@ -77,11 +78,26 @@ fn runtime_membership_decodes_only_the_status_it_needs_as_history_grows() {
             subject.clone(), runtime_view_entry(&connection, subject, index, true).unwrap(),
         )).collect::<HashMap<_, _>>();
 
+        // The first pass is cold; subsequent CardReads instances must resume
+        // the retained reduction, decoding only this pass's new observations.
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
         let mut full = card_fold::CardReads::new(index);
-        store.agent_card_statuses(&connection, &subjects, index, &mut full).unwrap();
+        let statuses = store.agent_card_statuses(&connection, &subjects, index, &mut full).unwrap();
         let full_bodies = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
-        assert!(full_bodies >= history * subjects.len(), "{full_bodies}");
+        assert_eq!(full_bodies, new_observations, "history={history}");
+        for subject in &subjects {
+            let expected = subject_status_at(
+                &connection, subject, Some(index), None, ClaimsReduction::AgentCard,
+            ).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(&statuses[subject]).unwrap(),
+                serde_json::to_value(expected).unwrap(), "{subject} at history={history}");
+        }
+        // Another fresh CardReads at the same cut must decode no actual bodies.
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let mut warm = card_fold::CardReads::new(index);
+        let unchanged = store.agent_card_statuses(&connection, &subjects, index, &mut warm).unwrap();
+        assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 0);
+        assert_eq!(serde_json::to_value(unchanged).unwrap(), serde_json::to_value(statuses).unwrap());
 
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
         let mut reads = card_fold::CardReads::new(index);

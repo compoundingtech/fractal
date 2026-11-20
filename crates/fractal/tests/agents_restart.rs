@@ -66,6 +66,7 @@ impl RuntimeControl for Runtime {
     fn start_guarded(
         &self,
         member: &MemberSpec,
+        _operation: Option<&fractal_runtime::LaunchOperation>,
         guard: &dyn Fn() -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         guard()?;
@@ -358,7 +359,7 @@ impl Drop for Fixture {
         self.server.abort();
     }
 }
-async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
+async fn fractal_cli(socket: &Path, args: &[&str]) -> std::process::Output {
     let socket = socket.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
@@ -807,7 +808,7 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
             .0;
         assert!(original.member.as_ref().unwrap().one_shot);
         let runtime_id = original.member.as_ref().unwrap().runtime_id.clone();
-        assert!(succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
+        assert!(succeeded(&fractal_cli(&socket, &["agents", "ls"]).await).contains(&subject));
         {
             let mut observations = fixture.runtime.observations.lock().unwrap();
             let observation = observations.get_mut(&runtime_id).unwrap();
@@ -835,9 +836,9 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
         assert_eq!(retired.owner_run, original.owner_run);
         assert_eq!(retired.owner_generation, original.owner_generation);
         assert_eq!(retired.owner_step, original.owner_step);
-        assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
-        assert!(succeeded(&st(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
-        succeeded(&st(&socket, &["agents", "show", &subject, "--all"]).await);
+        assert!(!succeeded(&fractal_cli(&socket, &["agents", "ls"]).await).contains(&subject));
+        assert!(succeeded(&fractal_cli(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
+        succeeded(&fractal_cli(&socket, &["agents", "show", &subject, "--all"]).await);
         assert!(
             fixture
                 .store
@@ -869,7 +870,7 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
             original
         );
         succeeded(
-            &st(
+            &fractal_cli(
                 &socket,
                 &["agents", "start", &subject, "--as", "person/avery"],
             )
@@ -889,7 +890,7 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
                 .unwrap()
                 .one_shot
         );
-        assert!(succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
+        assert!(succeeded(&fractal_cli(&socket, &["agents", "ls"]).await).contains(&subject));
     }
 }
 
@@ -992,11 +993,11 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
     );
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
     let socket = fixture.root.path().join("st3.sock");
-    assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
-    assert!(succeeded(&st(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
-    succeeded(&st(&socket, &["agents", "show", &subject, "--all"]).await);
+    assert!(!succeeded(&fractal_cli(&socket, &["agents", "ls"]).await).contains(&subject));
+    assert!(succeeded(&fractal_cli(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
+    succeeded(&fractal_cli(&socket, &["agents", "show", &subject, "--all"]).await);
     let workspace: serde_json::Value = serde_json::from_str(&succeeded(
-        &st(&socket, &["agents", "workspace", &subject, "--json"]).await,
+        &fractal_cli(&socket, &["agents", "workspace", &subject, "--json"]).await,
     ))
     .unwrap();
     assert_eq!(workspace["value"]["agent_id"], subject);
@@ -1086,7 +1087,7 @@ async fn seats_without_one_shot_keep_their_exit_and_restart_behaviour() {
                 1 + usize::from(restarts)
             );
             assert!(
-                succeeded(&st(&fixture.root.path().join("st3.sock"), &["agents", "ls"]).await)
+                succeeded(&fractal_cli(&fixture.root.path().join("st3.sock"), &["agents", "ls"]).await)
                     .contains(&subject)
             );
         }
@@ -1142,7 +1143,7 @@ async fn one_shot_start_after_retirement_continues_the_same_native_session() {
             .is_some()
     );
     succeeded(
-        &st(
+        &fractal_cli(
             &fixture.root.path().join("st3.sock"),
             &["agents", "start", &subject, "--as", "person/avery"],
         )
@@ -1162,7 +1163,7 @@ async fn stopped_mission_seat_stays_stopped(shape: Shape) {
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
     let socket = fixture.root.path().join("st3.sock");
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "stop", &subject, "--as", "person/avery"],
         )
@@ -1221,7 +1222,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     assert_eq!(seats, std::slice::from_ref(&subject));
     // Starting a running mission seat changes nothing and says how to relaunch it.
     let running = succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "start", &subject, "--as", "person/avery"],
         )
@@ -1229,7 +1230,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     );
     assert!(running.contains("fractal agents restart"), "{running}");
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "stop", &subject, "--as", "person/avery"],
         )
@@ -1239,7 +1240,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         fixture.reconciler.reconcile_once().unwrap();
     }
     // A mission seat's declaration cannot be patched from the command line.
-    let patched = st(
+    let patched = fractal_cli(
         &socket,
         &[
             "agents",
@@ -1256,7 +1257,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     assert!(String::from_utf8_lossy(&patched.stderr).contains("mission seat"));
     // Both accepted spellings of the identity name the same seat.
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -1399,7 +1400,7 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
     observe(json!([]));
     let socket = fixture.root.path().join("st3.sock");
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "stop", &subject, "--as", "person/avery"],
         )
@@ -1433,7 +1434,7 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
         "active"
     );
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "start", &subject, "--as", "person/avery"],
         )
@@ -1522,7 +1523,7 @@ async fn a_finished_run_cannot_start_its_seat_again() {
     let (fixture, subject) = Fixture::new(true).await;
     let socket = fixture.root.path().join("st3.sock");
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "stop", &subject, "--as", "person/avery"],
         )
@@ -1538,7 +1539,7 @@ async fn a_finished_run_cannot_start_its_seat_again() {
             None,
         )
         .unwrap();
-    let output = st(
+    let output = fractal_cli(
         &socket,
         &["agents", "start", &subject, "--as", "person/avery"],
     )
@@ -1718,7 +1719,7 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
     let workspace = elsewhere.to_str().unwrap();
     // The preview says what applying the change does to the running seat.
     let kdl = succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -1749,7 +1750,7 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
         preview.predicted_actions
     );
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -1781,7 +1782,7 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
     // A label is not a launch: renaming the seat leaves it running.
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -1827,7 +1828,7 @@ async fn every_restart_continues_the_seats_last_native_session() {
         Some("/claude/projects/-example/session-one.jsonl")
     );
 
-    // `st agents restart` continues it. The fixture's harness never reports itself ready, so
+    // `fractal agents restart` continues it. The fixture's harness never reports itself ready, so
     // this asks the daemon directly rather than waiting for a ready harness as the CLI does.
     fixture.request(&subject, "explicit").await;
     for _ in 0..4 {
@@ -1840,7 +1841,7 @@ async fn every_restart_continues_the_seats_last_native_session() {
     // A declared model change restarts the harness, on its latest session.
     bind_session(&fixture, &subject, "fixture:3", "session-two").await;
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -1868,7 +1869,7 @@ async fn every_restart_continues_the_seats_last_native_session() {
 
     // A stopped seat started again continues too, and a daemon restart keeps it running.
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "stop", &subject, "--as", "person/avery"],
         )
@@ -1878,7 +1879,7 @@ async fn every_restart_continues_the_seats_last_native_session() {
         fixture.reconciler.reconcile_once().unwrap();
     }
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "start", &subject, "--as", "person/avery"],
         )
@@ -1925,7 +1926,7 @@ async fn harness_switch_retires_claude_before_starting_codex_and_can_stop() {
     assert!(!launch(&starts[1]).contains(&"example-model".to_owned()));
     assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
     let socket = fixture.root.path().join("st3.sock");
-    succeeded(&st(
+    succeeded(&fractal_cli(
         &socket, &["agents", "stop", &subject, "--as", "agent/example/operator"],
     ).await);
     for _ in 0..4 {
@@ -1934,7 +1935,7 @@ async fn harness_switch_retires_claude_before_starting_codex_and_can_stop() {
     assert_eq!(fixture.store.latest_actual_value(&subject).unwrap().unwrap()["status"], "stopped");
     assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
-    assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
+    assert!(!succeeded(&fractal_cli(&socket, &["agents", "ls"]).await).contains(&subject));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1949,7 +1950,7 @@ async fn stop_clears_a_failed_explicit_harness_restart() {
     reconcile_ready(&fixture, &fixture.reconciler, &subject);
     assert_eq!(restart_result(&fixture, &request).kind, "runtime.action.failed");
     assert!(fixture.store.member_reconcile_fault(&subject, None).unwrap().is_some());
-    succeeded(&st(
+    succeeded(&fractal_cli(
         &fixture.root.path().join("st3.sock"),
         &["agents", "stop", &subject, "--as", "agent/example/operator"],
     ).await);
@@ -1963,7 +1964,7 @@ async fn stop_clears_a_failed_explicit_harness_restart() {
         daemon.reconcile_once().unwrap();
     }
     assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
-    assert!(!succeeded(&st(
+    assert!(!succeeded(&fractal_cli(
         &fixture.root.path().join("st3.sock"), &["agents", "ls"],
     ).await).contains(&subject));
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
@@ -1988,7 +1989,7 @@ async fn harness_switch_does_not_keep_the_previous_provider_body() {
         if let Some(model) = model {
             args.extend(["--model", model]);
         }
-        let source = succeeded(&st(&socket, &args).await);
+        let source = succeeded(&fractal_cli(&socket, &args).await);
         assert!(source.contains(provider), "{source}");
         let retained = provider == "claude";
         for old in ["example-model", "high", "--old-provider-flag"] {
@@ -2220,7 +2221,7 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
             reason.contains("parked again") && reason.contains("fixture rejected launch"),
             "{reason}"
         );
-        // `st agents show` and clients consume the same agents read, including this fault.
+        // `fractal agents show` and clients consume the same agents read, including this fault.
         let agents: Value = fixture.client().get("/v1/client/agents?fresh=true").await.unwrap();
         let agent = agents["items"]
             .as_array()
@@ -2230,7 +2231,7 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
             .unwrap_or_else(|| panic!("missing {subject} in {agents}"));
         assert_eq!(agent["state"], "failed");
         assert_eq!(agent["fault"], reason);
-        let show = st(
+        let show = fractal_cli(
             &fixture.root.path().join("st3.sock"),
             &["agents", "show", &subject],
         )
@@ -2260,8 +2261,8 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
 }
 
 /// On 2026-10-21 an explicit restart of a parked seat failed with `spawn PTY failed:
-/// launcher-incompatible` and st parked it again. Its card said only `stopped`, and no agent
-/// heard. Now the card says st parked it, why and when, one fault reaches its owner however many
+/// launcher-incompatible` and Fractal parked it again. Its card said only `stopped`, and no agent
+/// heard. Now the card says fractal parked it, why and when, one fault reaches its owner however many
 /// retries fail, and both clear once the seat runs again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_launcher_incompatible_park_raises_one_fault_to_its_owner_until_the_seat_runs_again() {
@@ -2337,7 +2338,7 @@ async fn a_launcher_incompatible_park_raises_one_fault_to_its_owner_until_the_se
         assert_eq!(agent["end_reason"]["kind"], "parked");
         assert_eq!(agent["end_reason"]["actor"], "daemon/runtime");
         assert!(agent["end_reason"]["reason"].as_str().unwrap().contains(launcher), "{agent}");
-        let show = succeeded(&st(&fixture.root.path().join("st3.sock"), &["agents", "show", &subject]).await);
+        let show = succeeded(&fractal_cli(&fixture.root.path().join("st3.sock"), &["agents", "show", &subject]).await);
         assert!(show.contains("WHY          parked by st after it failed to start at "), "{show}");
         assert!(show.contains(launcher), "{show}");
     }
@@ -2972,7 +2973,7 @@ async fn self_restart_defers_the_cli_and_restarts_once_on_the_same_native_sessio
             smallclaims::store::now_ms(),
         );
         let token = fixture.store.selected_desired_token(&subject).unwrap();
-        let output = st(
+        let output = fractal_cli(
             &fixture.root.path().join("st3.sock"),
             &[
                 "agents",
@@ -3157,7 +3158,7 @@ async fn self_restart_now_and_other_actors_interrupt_immediately() {
         smallclaims::store::now_ms(),
     );
     let driver = fixture.drive();
-    let output = st(
+    let output = fractal_cli(
         &fixture.root.path().join("st3.sock"),
         &[
             "agents",
@@ -3454,7 +3455,7 @@ async fn terminal_retirement_stops_running_root_and_mission_seats_without_remate
     for shape in [Shape::TopLevel, Shape::Owned, Shape::Mission, Shape::Step] {
         let (fixture,subject)=Fixture::shaped(shape).await;
         assert_eq!(fixture.runtime.starts.lock().unwrap().len(),1);
-        let output=st(&fixture.root.path().join("st3.sock"),&["agents","retire",&subject,"--as","person/avery","--reason","Work finished","--idempotency-key","runtime-retirement-operation"]).await;
+        let output=fractal_cli(&fixture.root.path().join("st3.sock"),&["agents","retire",&subject,"--as","person/avery","--reason","Work finished","--idempotency-key","runtime-retirement-operation"]).await;
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         fixture.reconciler.reconcile_once().unwrap();
         fixture.reconciler.reconcile_once().unwrap();
@@ -3474,14 +3475,14 @@ async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
     }
     let (fixture, subject) = Fixture::new(false).await;
     let socket = fixture.root.path().join("st3.sock");
-    let none = st(&socket, &["agents", "handoff", "show", &subject]).await;
+    let none = fractal_cli(&socket, &["agents", "handoff", "show", &subject]).await;
     assert!(!none.status.success());
     assert!(String::from_utf8_lossy(&none.stderr).contains("has written no handoff"));
 
     let file = fixture.root.path().join("handoff.md");
     std::fs::write(&file, "PR 12 is open.\n").unwrap();
     let written = succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
         )
@@ -3489,20 +3490,20 @@ async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
     );
     assert!(written.starts_with("doc/agents/example/worker/handoff@"), "{written}");
     assert_eq!(
-        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        succeeded(&fractal_cli(&socket, &["agents", "handoff", "show", &subject]).await),
         "PR 12 is open.\n"
     );
 
     std::fs::write(&file, "PR 12 merged.\n").unwrap();
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
         )
         .await,
     );
     assert_eq!(
-        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        succeeded(&fractal_cli(&socket, &["agents", "handoff", "show", &subject]).await),
         "PR 12 merged.\n"
     );
     let versions = fixture
@@ -3659,7 +3660,7 @@ async fn ready_acknowledges_a_handoff_that_is_already_current() {
     );
     let socket = fixture.root.path().join("st3.sock");
     let said = succeeded(
-        &st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await,
+        &fractal_cli(&socket, &["agents", "handoff", "ready", "--as", &subject]).await,
     );
     assert!(said.contains("is ready to restart"), "{said}");
     pass(&fixture, 4);
@@ -3682,7 +3683,7 @@ async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
     smallclaims::store::set_thread_clock(Some(at));
     fixture.store.set_write_clock_at(at).unwrap();
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "agents",
@@ -3717,7 +3718,7 @@ async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
 async fn work_in_progress(fixture: &Fixture, subject: &str, incarnation: &str) -> String {
     let socket = fixture.root.path().join("st3.sock");
     let opened: Value = serde_json::from_str(&succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &[
                 "--json",
@@ -3750,7 +3751,7 @@ async fn work_in_progress(fixture: &Fixture, subject: &str, incarnation: &str) -
             "file:fixture",
         ],
     ] {
-        succeeded(&st(&socket, &args).await);
+        succeeded(&fractal_cli(&socket, &args).await);
     }
     step
 }
@@ -3802,7 +3803,7 @@ async fn a_seat_moved_to_another_model_mid_step_resumes_from_its_handoff() {
     let step = work_in_progress(&fixture, &subject, "fixture:1").await;
 
     succeeded(
-        &st(
+        &fractal_cli(
             &socket,
             &["agents", "start", &subject, "--model", "another-model", "--as", "person/avery"],
         )
@@ -4237,7 +4238,7 @@ async fn a_person_fresh_restart_without_a_handoff_prepares_even_with_now_and_wai
 
             if acknowledge_existing {
                 let socket = fixture.root.path().join("st3.sock");
-                succeeded(&st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
+                succeeded(&fractal_cli(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
             } else {
                 write_handoff(
                     &fixture, &subject,
@@ -4428,7 +4429,7 @@ async fn the_cli_accepts_now_and_fresh_session_without_a_handoff_and_returns_pen
     bind_session(&fixture, &subject, "fixture:1", "session-one").await;
     mark_ready(&fixture, &subject, "fixture:1");
     let socket = fixture.root.path().join("st3.sock");
-    let output = succeeded(&st(&socket, &[
+    let output = succeeded(&fractal_cli(&socket, &[
         "agents", "restart", &subject, "--as", "person/avery",
         "--fresh-session", "--now", "--timeout", "1s",
     ]).await);
@@ -4455,7 +4456,7 @@ async fn fresh_restart_review_ready_without_a_document_stays_pending() {
     let request = fixture.request_fresh_session(&subject, "missing-document").await.unwrap();
     pass(&fixture, 3);
     let socket = fixture.root.path().join("st3.sock");
-    succeeded(&st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
+    succeeded(&fractal_cli(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
     pass(&fixture, 4);
     assert!(fixture.runtime.stops.lock().unwrap().is_empty());
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
