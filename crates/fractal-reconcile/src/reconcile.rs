@@ -9283,14 +9283,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .source_host
                     .as_deref()
                     .is_some_and(|source| source != self.host);
-                if !moved && suspension.mode() == "git" {
-                    if let Some(operation) = suspension.suspend_operation_id.as_deref()
-                        && let Err(error) = crate::seat_snapshot::validate_git_workspace(
-                            self.driver_state_dir.parent().unwrap(), operation, Path::new(&member.workspace),
-                        )
-                    {
-                        return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
-                    }
+                if !moved && suspension.mode() == "git"
+                    && let Some(operation) = suspension.suspend_operation_id.as_deref()
+                    && let Err(error) = crate::seat_snapshot::validate_git_workspace(
+                        self.driver_state_dir.parent().unwrap(), operation, Path::new(&member.workspace),
+                    )
+                {
+                    return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
                 }
                 if suspension.mode() == "in-place" {
                     if moved {
