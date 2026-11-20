@@ -146,6 +146,9 @@ pub struct Config {
     /// when it differs from the default.
     #[serde(skip_serializing_if = "TrimConfig::is_default")]
     pub trim: TrimConfig,
+    /// How this member keeps its own store. Defaults unless set.
+    #[serde(skip_serializing_if = "StoreConfig::is_default")]
+    pub store: StoreConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -355,6 +358,35 @@ impl Default for CheckpointConfig {
 impl CheckpointConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+}
+
+/// `[store]`: `blob_move_after` is how long after this member first runs a build that keeps blob
+/// bytes in their own file it starts moving them there, as a number followed by `s`, `m`, `h` or
+/// `d` (`3d` unless set). Until then a rollback to the previous release finds every byte where it
+/// looks; the first move takes the store to a storage version that release refuses until
+/// `fractal store restore-blob-bytes` copies them back, so lengthen it to keep that rollback open
+/// longer.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_move_after: Option<String>,
+}
+
+impl StoreConfig {
+    pub const DEFAULT_BLOB_MOVE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// How long after this member first runs the build it starts moving blob bytes.
+    pub fn blob_move_after_ms(&self) -> Result<u64> {
+        self.blob_move_after.as_deref().map_or(
+            Ok(Self::DEFAULT_BLOB_MOVE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.blob_move_after"),
+        )
     }
 }
 
@@ -973,6 +1005,7 @@ impl Default for Config {
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
+            store: StoreConfig::default(),
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
@@ -1304,6 +1337,7 @@ impl Config {
         }
         self.limits.validate()?;
         self.trim.validate()?;
+        self.store.blob_move_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -2434,6 +2468,19 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(!config.checkpoint.enabled);
         assert!(toml::to_string(&config).unwrap().contains("[checkpoint]"));
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
+    }
+
+    #[test]
+    fn blob_bytes_move_three_days_after_upgrading_unless_set() {
+        let config = Config::default();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 3 * 24 * 60 * 60 * 1000);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[store]"));
+        let config: Config = toml::from_str("[store]\nblob_move_after = \"12h\"\n").unwrap();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 12 * 60 * 60 * 1000);
+        assert!(toml::to_string(&config).unwrap().contains("[store]"));
+        let wrong: Config = toml::from_str("[store]\nblob_move_after = \"soon\"\n").unwrap();
+        assert!(wrong.validate().is_err());
     }
 
     #[test]
