@@ -15,6 +15,8 @@ use super::*;
 
 /// The reader fence of compacted claims. It also carries version 23's meaning.
 pub const COMPACTION_STORAGE_VERSION: u32 = 24;
+// A build that fences a store at 24 must open it again.
+const _: () = assert!(crate::store::MAX_SUPPORTED_SCHEMA_VERSION >= COMPACTION_STORAGE_VERSION);
 /// The compaction writer's own switch (`user_version` is a reader fence only).
 pub const COMPACTION_WRITER_FLAG: &str = "claim_signature_compaction_writer";
 /// The last claim the compaction of earlier releases' settled claims has passed, or `done`.
