@@ -36,6 +36,10 @@ applies a peer's retired set to it (the retired set wins there; today the claim 
 only shows the difference). On by default for such members (Factory, 2026-11-20); retired mail
 does not come back on a rollback. Each
 writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
+Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint inside the commit,
+and put both back afterwards, on error too: on a busy host the fsync took most of a hold, and a
+crash before the writer's next ordinary commit loses only steps the next pass redoes. Before each
+hold a reader reads the signature and replica rows the hold will delete, so it finds them cached.
 Mail in the messages shard is not touched.
 
 ## Where writes go
