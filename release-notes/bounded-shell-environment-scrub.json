@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The one-time historical shell-environment scrub never runs a whole-database VACUUM at startup. Building on #6886, incremental stores give back their free list; other stores overwrite old free pages with page-sized zero rows before the shell-table copy, then securely drop the scratch table.",
+  "replay": {
+    "status": "none",
+    "detail": "Claims, replication and projections are untouched."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "shell_resources_v1 and its existing index are rebuilt once as in #6886. A transient shell_environment_free_scrub_v1 table consumes old free pages in at most 128-row transactions. No client schema or codegen changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The shell-table and free-list scrub removes environment bytes from those pages and the WAL. Bytes in unused portions of pages that other tables reused before this version are not reached; an operator-scheduled offline VACUUM gives full database-file and WAL erasure. secure_delete is enabled only for incomplete scrub work and its previous OFF, ON or FAST setting is restored on success or failure; completed stores leave the setting untouched."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The completion marker is the one #6747 writes, so a store that already finished the scrub skips it, and a previous release reads the rebuilt table as before."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "First open costs the shell-table copy plus free-list cleanup, never a whole-store VACUUM, including with auto_vacuum=NONE. Zero-row allocation is checkpointed every 128 pages; B-tree bookkeeping may grow the file slightly. Historical shell bodies and the table copy remain unbounded."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Old free-list pages are scrubbed, not necessarily returned to the filesystem. Bytes in unused portions of pages that other tables reused before secure_delete was enabled remain outside this scrub. Schedule an offline VACUUM for full erasure of those historical bytes and space reclamation; startup never runs it."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The completion marker is written last, after the second checkpoint. A crash or busy checkpoint before then repeats the scrub on the next open, as before."
+  }
+}

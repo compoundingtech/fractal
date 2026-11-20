@@ -4,6 +4,17 @@
 The guardian detaches from seat ancestry but retains pidfds for both its launcher and
 the test runner. It is a Linux subreaper: orphaned descendants become its children,
 so cleanup needs neither a live daemon API nor a scan of unrelated fleet processes.
+
+With --pid-namespace, where unprivileged user and PID namespaces are available, the guardian
+runs as PID 2 of a fresh PID namespace under a minimal PID 1. Detached from the seat, it would otherwise be
+adopted by the nearest subreaper, which on a seat host is the same-uid, non-dumpable
+`systemd --user`: a daemon's caller-ancestry walk then fails reading that manager's
+environment and refuses person commands. Inside the namespace the walk ends at PID 1, as it
+does on a CI runner or over SSH, where PID 1 adopts the orphan. The walk itself stays strict.
+Only a single test body asks for it (`supervise_test`): host-wide tools that coordinate by PID,
+such as the cargo shim's queue, cannot see out of a PID namespace, so a stage or script that may
+run cargo is supervised as before. Without the flag, where namespaces are unavailable, or with
+FRACTAL_TEST_PID_NAMESPACE=off, the guardian runs as before.
 """
 import argparse
 import ctypes
@@ -74,6 +85,112 @@ def read_released(control):
     while chunk := os.read(control, 4096):
         message += chunk
     return frozenset(int.from_bytes(message[i:i + 4], "big") for i in range(0, len(message), 4))
+
+
+CLONE_NEWNS = 0x00020000
+CLONE_NEWUSER = 0x10000000
+CLONE_NEWPID = 0x20000000
+MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_REC, MS_PRIVATE = 0x2, 0x4, 0x8, 0x4000, 0x40000
+
+
+def enter_namespaces():
+    """Move into fresh user, PID and mount namespaces, keeping this uid and gid.
+
+    Only this process's later children join the PID namespace; the first becomes its PID 1.
+    """
+    uid, gid = os.getuid(), os.getgid()
+    os.unshare(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS)
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
+    Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
+
+
+def drop_namespace_capabilities():
+    """Leave the guardian as readable as the test it runs.
+
+    Entering the user namespace granted every capability in it, and the kernel refuses to
+    show /proc environ of a process whose capabilities exceed the reader's, so the walk
+    could not read the guardian. Each credential change also clears dumpable, which only an
+    exec would restore; the guardian forks without exec, so set it back.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    header = (ctypes.c_uint32 * 2)(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3, this thread
+    data = (ctypes.c_uint32 * 6)()  # effective, permitted, inheritable: twice 32 bits, all clear
+    if libc.capset(header, data) != 0:
+        raise OSError(ctypes.get_errno(), "capset")
+    if libc.prctl(4, 1, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
+        raise OSError(ctypes.get_errno(), "PR_SET_DUMPABLE")
+
+
+def mount_namespace_proc():
+    """Give the namespace its own /proc, so PIDs read there are the namespace's PIDs."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise OSError(ctypes.get_errno(), "make mounts private in the test's namespace")
+    if libc.mount(b"proc", b"/proc", b"proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, None) != 0:
+        raise OSError(ctypes.get_errno(), "mount /proc in the test's PID namespace")
+
+
+def pid_namespace_available():
+    """Whether a throwaway child can build the whole namespace, /proc included.
+
+    CI runners and hardened kernels refuse some step (unshare, the id maps, or the mount);
+    any refusal keeps today's path. A child probes, so a refusal leaves nothing behind.
+    """
+    if os.environ.get("FRACTAL_TEST_PID_NAMESPACE") == "off" or not hasattr(os, "unshare"):
+        return False
+    probe = os.fork()
+    if probe == 0:
+        code = 1
+        try:
+            enter_namespaces()
+            init = os.fork()
+            if init == 0:
+                try:
+                    mount_namespace_proc()
+                    os._exit(0 if os.getpid() == 1 else 1)
+                except BaseException:
+                    os._exit(1)
+            code = os.waitstatus_to_exitcode(os.waitpid(init, 0)[1])
+        except BaseException:
+            pass
+        finally:
+            os._exit(code)
+    return os.waitstatus_to_exitcode(os.waitpid(probe, 0)[1]) == 0
+
+
+def namespace_init(run_guardian, result):
+    """PID 1 of the test's namespace: start the guardian as PID 2 and reap until it exits.
+
+    When this exits the kernel kills whatever is left in the namespace, so nothing outlives it.
+    """
+    mount_namespace_proc()
+    guardian_pid = os.fork()
+    if guardian_pid == 0:
+        try:
+            drop_namespace_capabilities()
+            run_guardian()
+        except BaseException as error:
+            print(f"isolated test guardian: {error}", file=sys.stderr)
+        finally:
+            os._exit(0)
+    # Only the guardian reports the result; the launcher reads it once the guardian is gone.
+    os.close(result)
+    while os.waitpid(-1, 0)[0] != guardian_pid:
+        pass
+
+
+def namespace_holders(namespace):
+    """Live processes, seen from here, in the given PID namespace (as /proc/PID/ns/pid reads)."""
+    holders = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if os.readlink(entry / "ns/pid") == namespace:
+                    holders.append(int(entry.name))
+            except OSError:
+                pass
+    return holders
 
 
 def set_child_subreaper():
@@ -161,7 +278,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
     return code
 
 
-def run_supervised(command, owners=None, temporary_roots=(), keep=False):
+def run_supervised(command, owners=None, temporary_roots=(), keep=False, pid_namespace=False):
     owners = owners or [os.getppid()]
     if "ST_AGENT" in os.environ or "ST3_SUBJECT" in os.environ:
         # /proc ancestry reads the process's original environment. Removing an
@@ -174,19 +291,26 @@ def run_supervised(command, owners=None, temporary_roots=(), keep=False):
         root_args = [arg for root in temporary_roots for arg in ("--temporary-root", *map(str, root))]
         return subprocess.call([sys.executable, str(Path(__file__).resolve()),
                                 *owner_args, *root_args, *(["--keep"] if keep else []),
+                                *(["--pid-namespace"] if pid_namespace else []),
                                 "--", *command], env=env)
     # Open both before forking. The launcher waits for the guardian's result;
     # killing either the launcher or its Rust test runner cancels the whole tree.
     watched = [os.pidfd_open(pid) for pid in [*owners, os.getpid()]]
+    namespaced = pid_namespace and pid_namespace_available()
     reader, writer = os.pipe()
     intermediate = os.fork()
     if intermediate == 0:
-        os.close(reader)
-        os.setsid()
-        if os.fork() != 0:
-            os._exit(0)
         try:
-            guardian(command, watched, writer, temporary_roots, keep)
+            os.close(reader)
+            os.setsid()
+            if namespaced:
+                enter_namespaces()
+            if os.fork() != 0:
+                os._exit(0)
+            if namespaced:
+                namespace_init(lambda: guardian(command, watched, writer, temporary_roots, keep), writer)
+            else:
+                guardian(command, watched, writer, temporary_roots, keep)
         except BaseException as error:
             print(f"isolated test guardian: {error}", file=sys.stderr)
         finally:
@@ -231,6 +355,8 @@ if __name__ == "__main__":
     parser.add_argument("--temporary-root", nargs=3, action="append", default=[],
                         metavar=("ENV", "PREFIX", "PARENT"))
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--pid-namespace", action="store_true",
+                        help="run the guardian in a fresh PID namespace where available (a single test body only)")
     parser.add_argument("--scope", action="store_true",
                         help="foreground descendant scope, with a duplex control socket on stdin")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -244,4 +370,4 @@ if __name__ == "__main__":
         watched = [os.pidfd_open(pid) for pid in args.owner or [os.getppid()]]
         code = guardian(command, watched, 0, control=0)
         raise SystemExit(code if code >= 0 else 128 - code)
-    raise SystemExit(run_supervised(command, args.owner, args.temporary_root, args.keep))
+    raise SystemExit(run_supervised(command, args.owner, args.temporary_root, args.keep, args.pid_namespace))

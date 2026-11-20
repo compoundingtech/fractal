@@ -147,6 +147,17 @@ pub trait Runtime: Send + Sync {
         None
     }
 
+    /// Hold an entire replicated batch before any admission mutation while runtime work catches
+    /// up. This is backpressure, not invalid input: the envelope remains pending and later
+    /// backlog passes retry it normally. Called under the writer with current stored state.
+    fn defer_replicated_batch(
+        &self,
+        _connection: &Connection,
+        _batch: &ReplicaBatch,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
     /// is kept (some kinds stay local observations), validates it, appends it through the graph
     /// and projects it. The bool says whether the claim is new rather than an idempotent repeat.
@@ -242,9 +253,9 @@ pub trait Runtime: Send + Sync {
         Ok(())
     }
 
-    /// Rebuild derived state that a trim's deletes deferred, until `budget` is spent, and say
-    /// whether any is left. A trim calls it in paced transactions after each run, so a runtime
-    /// can refold each subject a trim touched once instead of once per deleted claim.
+    /// Rebuild deferred derived state until `budget` is spent, and say whether any is left.
+    /// The writer scheduler resumes this work in paced transactions after startup and local,
+    /// replicated, or trim writes; it never waits synchronously for the queue to become empty.
     fn rebuild_deferred(&self, _transaction: &Transaction<'_>, _budget: std::time::Duration) -> Result<bool> {
         Ok(false)
     }
@@ -262,7 +273,7 @@ pub trait Runtime: Send + Sync {
         delete()
     }
 
-    /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.
+    /// Whether committed writes left anything for `rebuild_deferred`, without mutating state.
     fn deferred_pending(&self, _connection: &Connection) -> Result<bool> {
         Ok(false)
     }

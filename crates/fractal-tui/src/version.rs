@@ -1,5 +1,5 @@
 //! This build's identity, by the shared build-versioning contract: the same stamp and
-//! formatting as st2 and st-drivers (`crates/fractal-drivers/src/version.rs`, compiled here as is),
+//! formatting as Fractal CLI and fractal-drivers (`crates/fractal-drivers/src/version.rs`, compiled here as is),
 //! fed at startup by the binary that links this library (`set_build_stamps`) with the stamps
 //! crates/fractal-build-stamp bakes: the LocalStamp for a plain `cargo build`, the flake's
 //! `CLI_BUILD_STAMP` for a Nix build.

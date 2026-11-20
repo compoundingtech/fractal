@@ -1823,10 +1823,13 @@ storage does not turn the same approval key into a terminal expired-key refusal.
 Seven days covers the phone's retries with backoff and ordinary retries across a daemon
 restart. Exact saved-response replay lasts seven days; durable recognition of the original
 effect continues afterward. Response rows that predate the caller-key association sit below
-a stored legacy watermark and are never expired by this cleanup.
+a stored legacy watermark. They have no recorded completion time, so cleanup treats them as
+already due. Each goes once its effect is durably recognized, and a late retry then gets
+`idempotency-key-expired`. A legacy row whose effect has no durable identity is kept, as any
+such receipt is.
 
-Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
-watermark and examines at most 64 response rows in completion order. It stops at the first young
+Cleanup adds, drops and changes **no indexes**. It starts at the lowest rowid, so legacy rows come first, and
+examines at most 64 response rows in completion order. It stops at the first young
 row; nonmonotonic completion deadlines can delay later expiry. Active-run receipts move to the
 tail with a renewed deadline using UPDATE, preserving their companion rows. A future writer
 that has neither a durable association nor an explicitly safe retry classification fails closed
