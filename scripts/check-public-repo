@@ -86,9 +86,9 @@ def shared_system_directory(match, line):
     """Recognize the exact case-sensitive macOS shared directory, not a home."""
     if not match.group(0).startswith("/Users/") or match.group(1) != "Shared":
         return False
-    tail = re.split(r"""[\s"'`<>]""", line[match.end():], maxsplit=1)[0]
-    # Do not exempt a spelling that can traverse out into a personal home.
-    return ".." not in tail.split("/")
+    # Whitespace and quotes can be part of a quoted or escaped path. Inspect the
+    # whole remaining line rather than trusting either as a path terminator.
+    return re.search(r"""/\.\.(?=/|[\s"'`<>]|$)""", line[match.end():]) is None
 
 
 def findings(path, content):
