@@ -233,3 +233,32 @@ fn a_row_keeps_its_bytes_until_a_checkpoint_has_put_the_copy_on_disk() {
     assert_eq!(row(&store, &hash).0, 0);
     assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
 }
+
+/// Version 26 (compacted signatures) carries 25's meaning: a store fenced at 26 after its blob
+/// bytes moved opens in this build and reads them, and neither a later move nor a restore
+/// touches the higher fence.
+#[test]
+fn a_store_at_26_opens_and_reads_its_moved_blob_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let body = b"bytes kept in the blob file".repeat(40);
+    let hash = document(&store, "doc/example/fenced", &body);
+    let later = start_window(&store) + WINDOW_MS;
+    assert_eq!(move_all(&store, later).0, 1);
+    assert_eq!(user_version(&store), STORAGE_VERSION);
+    // As the compaction writer fences it.
+    store.connection.write().pragma_update(None, "user_version", 26).unwrap();
+    drop(store);
+    let store = Store::open(&path, "node").unwrap();
+    assert_eq!(user_version(&store), 26);
+    assert_eq!(store.get_document("doc/example/fenced", &hash).unwrap().as_deref(), Some(&body[..]));
+    let more = b"a later document".repeat(40);
+    let other = document(&store, "doc/example/later", &more);
+    assert_eq!(move_all(&store, later + DAY_MS).0, 1);
+    assert_eq!(user_version(&store), 26, "a later move never lowers a higher fence");
+    assert_eq!(restore_all(&store, later + DAY_MS), 2);
+    assert_eq!(user_version(&store), 26, "a restore lowers only its own fence, 25");
+    assert_eq!(store.get_document("doc/example/later", &other).unwrap().as_deref(), Some(&more[..]));
+    assert_eq!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION, 26);
+}

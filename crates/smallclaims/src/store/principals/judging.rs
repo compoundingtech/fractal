@@ -184,8 +184,14 @@ pub(super) fn advance(
             (String::new(), None, false)
         }
     };
-    let texts=connection.prepare_cached("SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 AND signature>?2 ORDER BY signature LIMIT ?3")?
+    let mut texts=connection.prepare_cached("SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 AND signature>?2 ORDER BY signature LIMIT ?3")?
         .query_map(params![claim_id,last,budget as i64],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // A compacted claim's facade is its single candidate.
+    if texts.is_empty() && last.is_empty() && budget > 0
+        && let Some(text) = compaction::facade(connection, claim_id)?
+    {
+        texts.push(text);
+    }
     let candidates = texts
         .iter()
         .map(|text| Ok(serde_json::from_str::<ClaimSignature>(text)?))
