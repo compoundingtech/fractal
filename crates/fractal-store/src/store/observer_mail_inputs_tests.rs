@@ -101,12 +101,12 @@ fn mail_inputs_cover_desired_identity_conflicts_health_and_canonical_evidence() 
     let mut receiver = store.subscribe_mail_objective_inputs();
     let mut generation = *receiver.borrow_and_update();
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hb3cc6a25dd8d owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES('agent/test','agent','revision/test',?1,'{}','local')",
+        /* sqlite-large-value: allow-for-now lv-h69d0a125acf7 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES('agent/test','agent','revision/test',?1,'{}','{\"host\":\"local\"}')",
         [&runtime],
     ).unwrap();
     generation = changed(&mut receiver, generation);
     for sql in [
-        /* sqlite-large-value: allow-for-now lv-h8721d79f4cd2 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET member='other' WHERE subject='agent/test'",
+        /* sqlite-large-value: allow-for-now lv-h189f8514bf9c owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET member='{\"host\":\"other\"}' WHERE subject='agent/test'",
         /* sqlite-large-value: allow-for-now lv-h9575cb4f6e83 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_dirty VALUES(1)",
         /* sqlite-large-value: allow-for-now lv-hffbe56fa06b8 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_dirty",
         /* sqlite-large-value: allow-for-now lv-hdf2bdd17d073 owner=fractal_store::store::observer_mail_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('operation-conflict-naming-name:agent/test','1')",
