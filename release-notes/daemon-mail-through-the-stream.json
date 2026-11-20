@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "More of the daemon's own mail goes to the messages stream instead of the claims graph, where the recipient's host advertises it: capacity-retry wakes, prepare-for-restart notices, plain denial answers, mission-cancelled notices, items routed to their owner, GitHub watch wakes, resource-change notices and workflow-failure alerts. The ones sent from inside a graph transaction go through the message outbox, which delivers them right after the commit (measured p50 11 ms, p99 51 ms) in the order they were queued.",
+  "replay": {
+    "status": "changed",
+    "detail": "These messages become stream items on members whose recipient host advertises messages_stream_inbox, so the graph stops growing by them. Elsewhere they stay graph claims exactly as before; the outbox falls back to the graph when there is no shard, when the recipient can't take stream mail, or after three refusals."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change: the outbox table and its drain exist since 4c-2. The drain now reads rows in the order they were queued (rowid)."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Same routing rule and capability gate as 4c-2b. Ask-ended notices, delegated denial answers, handoff notes and person-authored sends stay on the graph for now, and work wakes follow in a later release."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed versions: a sender routes to the stream only when the recipient's host advertises messages_stream_inbox, so an older recipient keeps getting graph claims. An older peer replicates the stream as it already does since 4c-2b."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back keeps working: the previous release drains whatever this one left in the outbox, and reads stream mail as before."
+  }
+}
