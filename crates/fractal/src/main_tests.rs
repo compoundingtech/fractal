@@ -9888,7 +9888,7 @@ mission "source-bound" state="ready" {
 
 #[test]
 fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("src");
     let source = fs::read_to_string(root.join("main.rs")).unwrap();
     let lookup = source.split_once("async fn load_run_publication(").unwrap().1
         .split_once("async fn load_run_source_provenance(").unwrap().0;
