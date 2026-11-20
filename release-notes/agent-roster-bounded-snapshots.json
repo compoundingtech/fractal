@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No persisted projection replay. Overflow rebuilds only the in-memory roster cache from the complete current cut."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No membership, invalidation, retention or checkpoint policy change."},
-  "compatibility": {"status": "none", "detail": "No client or wire change. A refresh that exhausts its deadline retains the previous publication and resumes its saved membership/delta cursors on the next attempt."},
+  "compatibility": {"status": "none", "detail": "No client or wire change. A refresh that exhausts its deadline retains the previous publication and resumes its saved membership/delta cursors on the next attempt. Dirty-card pages also update child-invalidation dependencies, including members discovered behind the membership cursor."},
   "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
   "manual": {"status": "none", "detail": "No manual step."},
   "recovery": {"status": "none", "detail": "Revert the change."}

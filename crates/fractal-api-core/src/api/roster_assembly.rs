@@ -214,6 +214,10 @@ impl Assembly {
             let (rows, expiry) = agent_roster_snapshot(store, |index| fold_page(store, history, index, &names))
                 .inspect_err(|_| self.width = (self.width / 2).max(1))?;
             for name in &names { reconcile.dirty.remove(name); }
+            // Child invalidation matches roots against these cards. Keep additions,
+            // updates and removals in sync before a later tail is classified.
+            reconcile.previous.retain(|row| row["id"].as_str().is_none_or(|id| !names.contains(id)));
+            reconcile.previous.extend(rows.iter().cloned());
             self.apply(&names, rows, expiry);
             return Ok(None);
         }

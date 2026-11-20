@@ -167,3 +167,53 @@ fn expired_delta_classification_narrows_and_advances_cursor() {
         assert_uncached(&store, history);
     }
 }
+
+#[test]
+fn dirty_page_addition_tracks_later_child_changes() {
+    for history in [false, true] {
+        let store = Store::open_memory("test").unwrap();
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        for name in ["agent/bbb", "agent/ccc", "agent/ddd"] { running(&store, name); }
+        let mut state = Assembly::new(store.fractal.presented_agents.generation());
+        state.width = 2;
+        state.step(&store, history).unwrap();
+        assert_eq!(state.cursor.as_deref(), Some("agent/ccc"));
+        // This declared member is behind the completed keyset page, so only
+        // reconciliation can add its card to the assembled rows.
+        let source = "version 2\nagent \"aaa\" { host \"node\"; exec \"child\" { id \"child\"; command \"true\"; } }\n";
+        let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+        let planned = store.mission(&intent, crate::model::IntentInput {
+            kdl: source.to_owned(), source_name: None,
+        }).unwrap();
+        store.apply(&intent, &planned.subject_tokens, "late-member").unwrap();
+        while state.scanning { state.step(&store, history).unwrap(); }
+        assert!(!state.rows.contains_key("agent/aaa"));
+        // More dirty agents than fit in a card page force a nonterminal fold.
+        for name in ["agent/bbb", "agent/ccc", "agent/ddd"] { running(&store, name); }
+        state.step(&store, history).unwrap();
+        assert!(!state.reconcile.as_ref().unwrap().previous.iter().any(|row| row["id"] == "agent/aaa"));
+        let mut folded = false;
+        for _ in 0..64 {
+            let dirty = state.reconcile.as_ref().unwrap().dirty.len();
+            assert!(state.step(&store, history).unwrap().is_none(), "must not publish before the child change");
+            if state.rows.contains_key("agent/aaa") {
+                assert!(dirty > state.width, "aaa must be added by a nonterminal dirty-card page");
+                folded = true;
+                break;
+            }
+        }
+        assert!(folded);
+        assert_ne!(state.rows["agent/aaa"]["state"], "running");
+        append(&store, "exec/aaa/child", "runtime.observed", None,
+            json!({"status":"running", "runtime_id":"child", "host":"node", "incarnation_id":"one"}));
+        let mut completed = false;
+        for _ in 0..64 {
+            if state.step(&store, history).unwrap().is_some() { completed = true; break; }
+        }
+        assert!(completed);
+        assert_eq!(state.rows["agent/aaa"]["state"], "running", "the tail must refold the newly assembled parent");
+        store.extension::<Assemblies>().0.lock().unwrap()[usize::from(history)] = Some(state);
+        refresh_agent_roster(&store, history).unwrap();
+        assert_uncached(&store, history);
+    }
+}
