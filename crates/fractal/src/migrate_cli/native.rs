@@ -363,8 +363,7 @@ mod tests {
             }
             Ok::<_, anyhow::Error>(())
         });
-        let config = checkpoint_config(false, false)?;
-        let mut native = Native::new(Endpoint::Unix(socket), "example".into(), &config);
+        let mut native = Native::new(Endpoint::Unix(socket), "example".into());
         native.idle().await?;
         native.idle().await?;
         assert!(native.idle().await.unwrap_err().to_string().contains("pending records"));
