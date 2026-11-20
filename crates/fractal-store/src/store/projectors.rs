@@ -64,10 +64,16 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
     Hook { name: "objective-times", run: objective_series::open },
+    Hook { name: "escalation-clocks", run: escalation::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
 pub const APPEND: &[AppendProjector] = &[
+    AppendProjector {
+        name: "escalation-clocks",
+        takes: Takes::Every,
+        project: |transaction, _| escalation::flush(transaction),
+    },
     AppendProjector {
         name: "objective-times",
         takes: Takes::Every,
@@ -190,6 +196,7 @@ pub const REPLICATED: &[AppendProjector] = &[
 /// Catches each domain up with the claims a projection pass admitted.
 pub const FLUSH: &[Hook] = &[
     Hook { name: "objective-times", run: objective_series::flush },
+    Hook { name: "escalation-clocks", run: escalation::flush },
     Hook { name: "custom", run: custom::flush },
     Hook { name: "identities", run: identities::flush },
     Hook { name: "resources", run: resources::flush },
@@ -223,6 +230,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "wake-lookup", run: wake_lookup::rebuild },
+    Hook { name: "escalation-clocks", run: escalation::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -241,6 +249,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
+    ReplayStage { phase: "full-replay/escalation-clocks", run: escalation::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];

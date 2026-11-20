@@ -1,0 +1,23 @@
+version 2
+mission "example/escalation" state="ready" report-to="agent/example/reporter" {
+    escalation {
+        policy "silence" state="running" clock="since-progress" {
+            stage "30m" notify="agent/example/reporter"
+            stage "1d" ask="person/reviewer"
+        }
+    }
+    goal "Escalation parity."
+    step "work" {
+        escalation {
+            policy "residency" state="ready" clock="since-entered" {
+                stage "30m" notify="agent/example/reporter"
+                stage "1d" ask="person/reviewer"
+            }
+        }
+        agentless
+    }
+    step "muted" {
+        escalation disabled=#true
+        agentless
+    }
+}
