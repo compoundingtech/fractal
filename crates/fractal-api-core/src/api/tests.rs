@@ -11023,18 +11023,23 @@ async fn roster_resilience_refresher_fault_reads_degrade_only_at_the_wall_backst
         refresh_agent_roster(store, history).unwrap();
         let (_, paused, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
         assert!(card(&paused, "agent/new-paused")["fault"].is_null(), "a pause is not a fault deadline");
-        // A page read stalled past the backstop still ends and degrades as documented.
+        // A page read stalled past the backstop still ends, and the refresh still publishes.
         roster_resilience_runtime(store, "agent/known-clear", "new");
         roster_resilience_runtime(store, "agent/new-stalled", "new");
         Store::stall_next_card_fault_read_for_test(
             crate::store::mailbox_lease::CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
+        let started = std::time::Instant::now();
         refresh_agent_roster(store, history).expect("a stalled fault read must still publish");
+        assert!(started.elapsed() >= crate::store::mailbox_lease::CARD_FAULT_PINNED_WALL_BACKSTOP,
+            "the stall must reach the backstop");
         let cut = store.index().unwrap();
         let (published, stalled, _) = store.published_agent_roster(cut, history).unwrap();
         assert_eq!(published, cut);
         assert_eq!(card(&stalled, "agent/known-clear")["runtime_ids"], json!(["runtime/new"]));
         assert!(card(&stalled, "agent/known-clear")["fault"].is_null());
-        assert_eq!(card(&stalled, "agent/new-stalled")["fault"], "fault status unknown");
+        // The stalled read ends at the backstop and the assembly resumes it within the snapshot's
+        // own deadline (#6881), so the published card is exact rather than degraded.
+        assert!(card(&stalled, "agent/new-stalled")["fault"].is_null());
         refresh_agent_roster(store, history).unwrap();
         let (_, retried, _) = store.published_agent_roster(cut, history).unwrap();
         assert!(card(&retried, "agent/new-stalled")["fault"].is_null());
