@@ -7405,7 +7405,9 @@ impl Store {
             self.readers.get().query_row(
                 "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
                  WHERE batches.rowid<=?1 AND NOT EXISTS (
-                     SELECT 1 FROM envelope_rows WHERE envelope_rows.batch_id=batches.id)
+                     SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM released_envelopes WHERE released_envelopes.batch_id=batches.id)
                    AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
                      AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
                 [cursor], |row| row.get(0),
@@ -7710,7 +7712,9 @@ impl Store {
             unsealed: connection
                 .prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND NOT EXISTS(
-                         SELECT 1 FROM envelope_rows WHERE envelope_rows.batch_id=batches.id))",
+                         SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+                       AND NOT EXISTS(
+                         SELECT 1 FROM released_envelopes WHERE released_envelopes.batch_id=batches.id))",
                 )?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h3192b5133fb0 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [self.seeded_batch_rowid.load(Ordering::Acquire)], |row| {
                     row.get(0)

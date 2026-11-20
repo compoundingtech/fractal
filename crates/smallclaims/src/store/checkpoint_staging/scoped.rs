@@ -17,10 +17,75 @@
 //!   (`local_trim_citations`), caught up first, counting a citer only if it is present and
 //!   sealed at the cut, as a full capture would stage it.
 //!
-//! Every envelope here is read from `envelope_rows`, by the rowid it had: one this member
-//! released (`envelope_release`) is staged as the stored one was, so its claims are still cut.
+//! Every envelope here is read from `replica_envelopes` and `released_envelopes` alike, by the
+//! rowid it had: one this member released (`envelope_release`) is staged as the stored one was,
+//! so its claims are still cut. Each table is read in its own branch and each record count by
+//! its own seeks (`envelope_record_count_sql`): SQLite runs a view compound in full for a
+//! correlated term.
 use super::*;
 use crate::store::checkpoint::sealed_envelope_records_sql;
+use crate::store::record_bytes::{envelope_has_late_record_sql, envelope_record_count_sql};
+use std::sync::LazyLock;
+
+/// The envelopes up to the seal row that hold a record of claim `?1`, each with its accepted
+/// time and record count: the stored ones, then those this member released.
+static HELD: LazyLock<String> = LazyLock::new(|| {
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                    envelopes.accepted_at_unix_ms, {}
+             FROM replica_record_rows records JOIN {table} envelopes
+               ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+                 AND envelopes.envelope_hash=records.envelope_hash
+             WHERE records.claim_id=?1 AND envelopes.{rowid} <= ?2",
+            envelope_record_count_sql("envelopes")
+        )
+    };
+    format!("{} UNION ALL {}", branch("replica_envelopes", "rowid"), branch("released_envelopes", "original_rowid"))
+});
+
+/// Writer `?1`'s newest envelope up to the seal row `?2` and before the cut `?3`, with its record
+/// count, that holds no claim dated at or after the cut, stored or released.
+static NEWEST_SEALED: LazyLock<String> = LazyLock::new(|| {
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "SELECT * FROM (SELECT sequence, envelope_hash, accepted_at_unix_ms, {}
+             FROM {table} envelopes
+             WHERE writer=?1 AND {rowid} <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3 AND NOT {}
+             ORDER BY sequence DESC LIMIT 1)",
+            envelope_record_count_sql("envelopes"),
+            envelope_has_late_record_sql("envelopes", "?3")
+        )
+    };
+    format!(
+        "{} UNION ALL {} ORDER BY 1 DESC LIMIT 1",
+        branch("replica_envelopes", "rowid"),
+        branch("released_envelopes", "original_rowid")
+    )
+});
+
+/// Whether claim `?1` is present with a record that is not repaired, in an envelope up to the
+/// seal row `?2` and before the cut `?3` that holds no claim dated at or after the cut.
+static SEALED_CITER: LazyLock<String> = LazyLock::new(|| {
+    let branch = |table: &str, rowid: &str| {
+        format!(
+            "EXISTS(
+               SELECT 1 FROM replica_record_rows records JOIN {table} envelopes
+                 ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+                   AND envelopes.envelope_hash=records.envelope_hash
+               WHERE records.claim_id=?1 AND records.state<>'repaired'
+                 AND envelopes.{rowid} <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
+                 AND NOT {})",
+            envelope_has_late_record_sql("envelopes", "?3")
+        )
+    };
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id WHERE citer.id=?1)
+             AND ({} OR {})",
+        branch("replica_envelopes", "rowid"),
+        branch("released_envelopes", "original_rowid")
+    )
+});
 
 /// An envelope holding a record of a staged claim: its key, accepted time and record count.
 type ClaimEnvelope = (EnvelopeKey, u128, i64);
@@ -51,17 +116,7 @@ impl StagedSet {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut held = connection.prepare_cached(
-                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                        envelopes.accepted_at_unix_ms,
-                        (SELECT COUNT(*) FROM replica_record_rows counted
-                         WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
-                           AND counted.envelope_hash=envelopes.envelope_hash)
-                 FROM replica_record_rows records JOIN envelope_rows envelopes
-                   ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
-                     AND envelopes.envelope_hash=records.envelope_hash
-                 WHERE records.claim_id=?1 AND envelopes.row_id <= ?2",
-            )?;
+            let mut held = connection.prepare_cached(&HELD)?;
             let mut partners = connection.prepare_cached(
                 "SELECT partner.id FROM claims AS claim JOIN claims AS partner
                    ON json_extract(partner.body, '$._operation.id')=json_extract(claim.body, '$._operation.id')
@@ -224,21 +279,7 @@ impl StagedSet {
             let connection = store.readers.get();
             // Newest first; a late envelope (one holding a claim dated at or after the cut) is
             // not before the cut, as in a full capture.
-            let mut sealed = connection.prepare_cached(
-                "SELECT sequence, envelope_hash, accepted_at_unix_ms,
-                        (SELECT COUNT(*) FROM replica_record_rows counted
-                         WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
-                           AND counted.envelope_hash=envelopes.envelope_hash)
-                 FROM envelope_rows envelopes
-                 WHERE writer=?1 AND row_id <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3
-                   AND NOT EXISTS(
-                     SELECT 1 FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
-                     JOIN batches ON batches.id=claims.batch_id
-                     WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
-                       AND records.envelope_hash=envelopes.envelope_hash AND records.state<>'repaired'
-                       AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?3)
-                 ORDER BY sequence DESC LIMIT 1",
-            )?;
+            let mut sealed = connection.prepare_cached(&NEWEST_SEALED)?;
             let mut tombstoned = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h512fd1a2bdd1 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT sequence, envelope_hash, CAST(accepted_at_unix_ms AS TEXT), 0 FROM checkpoint_envelopes
                  WHERE writer=?1 AND ?2 IS NOT NULL AND {RECORDED_TOMBSTONE_FILTER}
@@ -295,22 +336,7 @@ impl StagedSet {
             let connection = store.readers.get();
             // Sealed as a full capture stages it: present, with a record, not repaired, in an
             // envelope before the cut and the seal row that holds no claim dated at or after it.
-            let mut sealed = connection.prepare_cached(
-                "SELECT EXISTS(
-                   SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id
-                   JOIN replica_record_rows records ON records.claim_id=citer.id
-                   JOIN envelope_rows envelopes
-                     ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
-                       AND envelopes.envelope_hash=records.envelope_hash
-                   WHERE citer.id=?1 AND records.state<>'repaired'
-                     AND envelopes.row_id <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
-                     AND NOT EXISTS(
-                       SELECT 1 FROM replica_record_rows other CROSS JOIN claims late ON late.id=other.claim_id
-                       JOIN batches ON batches.id=late.batch_id
-                       WHERE other.writer=records.writer AND other.sequence=records.sequence
-                         AND other.envelope_hash=records.envelope_hash AND other.state<>'repaired'
-                         AND CAST(late.accepted_at_unix_ms AS INTEGER) >= ?3))",
-            )?;
+            let mut sealed = connection.prepare_cached(&SEALED_CITER)?;
             let mut cited = Vec::new();
             for candidate in &candidates {
                 for citer in Store::local_trim_citers(&connection, candidate)? {
@@ -339,6 +365,17 @@ mod tests {
     use super::*;
     use crate::store::runtime::Plain;
     use std::sync::Arc;
+
+    /// Each statement the scoped capture runs per claim or writer seeks every table, released
+    /// envelopes included: a correlated term on a view compound would scan it once per run.
+    #[test]
+    fn the_scoped_capture_seeks_stored_and_released_envelopes() {
+        let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        for sql in [&*HELD, &*NEWEST_SEALED, &*SEALED_CITER] {
+            crate::store::envelope_release::assert_plan_seeks(&connection, sql);
+        }
+    }
 
     /// A local cut's file holds the marks `protect_all_but` set. Left behind, as after an error,
     /// a full capture of the same cut must start its own file, not resume those marks.

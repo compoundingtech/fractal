@@ -72,8 +72,8 @@ pub fn operation_is_trusted(
         if row.get::<_, String>(1)? != expected { continue; }
         let quarantined: bool = connection.query_row(
             // The claim's batch names its envelopes, whether or not its valid record is stored
-            // (`record_bytes`) or its envelope was released (`envelope_release`).
-            "SELECT EXISTS(SELECT 1 FROM claims JOIN envelope_rows AS envelopes ON envelopes.batch_id=claims.batch_id
+            // (`record_bytes`). A quarantined envelope is never released (`envelope_release`).
+            "SELECT EXISTS(SELECT 1 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
                  JOIN replica_restore_quarantine AS quarantine ON quarantine.writer=envelopes.writer
                      AND quarantine.sequence=envelopes.sequence AND quarantine.envelope_hash=envelopes.envelope_hash
                  WHERE claims.id=?1)",

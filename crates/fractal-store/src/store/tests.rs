@@ -13610,3 +13610,58 @@ fn shared_step_timing_history_reuses_revision_but_refolds_snapshot() {
     assert!(!Arc::ptr_eq(&changed, &transactional));
     assert_eq!(*changed, *transactional);
 }
+
+#[test]
+fn releasing_an_envelope_fires_no_trigger_that_rebuilds_or_moves_the_inventory() {
+    // `envelope_release` deletes an envelope's signatures, hold, valid records and row, and
+    // keeps its identity in `released_envelopes` first. Its claims and their positions stay, and
+    // the inventory lists the identity from there, so a trigger that fired on those deletions
+    // would queue rebuilds of unchanged state or move digests the release leaves alone.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare(
+            "SELECT tbl_name, name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name IN
+                 ('replica_envelopes','replica_envelope_signatures','replica_envelope_holds','replica_records',
+                  'released_envelopes')",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let mut blind = Vec::new();
+    let mut fired = 0;
+    for (table, name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let head = sql.split(" BEGIN").next().unwrap_or_default();
+        let deletes = head.contains(&format!(" DELETE ON {table}"));
+        if table != "released_envelopes" && !deletes {
+            continue;
+        }
+        fired += 1;
+        let spared = match table.as_str() {
+            // The inventory lists the identity from `released_envelopes` instead.
+            "replica_envelopes" if head.contains("FROM released_envelopes") => true,
+            // Only the newest envelope row moves the tail, and a release never takes it.
+            "replica_envelopes" => head.contains("OLD.rowid > COALESCE((SELECT MAX(rowid) FROM replica_envelopes), 0)"),
+            // A released envelope's record is valid.
+            "replica_records" => head.contains("OLD.state<>'valid'"),
+            _ => false,
+        };
+        // Membership changes only with a `fleet.*` envelope, which is never released.
+        let fleet = head.contains("'fleet.member-admitted'");
+        // The checkpoint capture guard fences a capture in progress; the saved inventory's count
+        // is taken in by the release's own snapshot patch; the position trigger fires only for a
+        // claim without a stored position, which a release requires. None changes a projection
+        // or a digest.
+        let exempt = name.contains("checkpoint_capture")
+            || name == "replica_envelopes_saved_inventory_DELETE"
+            || name == "claim_positions_record_delete_v1";
+        if !spared && !fleet && !exempt {
+            blind.push(name);
+        }
+    }
+    assert!(fired > 0);
+    assert!(blind.is_empty(), "triggers a release fires: {blind:?}");
+}

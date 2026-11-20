@@ -1016,11 +1016,14 @@ fn frontier_is_obsolete(store: &Store, registry: &Registry, receipt: &Receipt, c
     let sequence = |id: &str| -> Result<u64> {
         store.readers.get().query_row(
             // Every valid record as readers see it, also of a claim whose record is gone or
-            // whose envelope this member released (`replica_record_rows`, `envelope_rows`).
+            // whose envelope this member released (`replica_record_rows`).
             "SELECT MAX(r.sequence) FROM replica_record_rows r
-             JOIN envelope_rows e USING(writer,sequence,envelope_hash)
              WHERE r.claim_id=?1 AND r.writer=?2 AND r.state='valid'
-                 AND e.receipt_state='validated'",
+                 AND (EXISTS(SELECT 1 FROM replica_envelopes e WHERE e.writer=r.writer
+                         AND e.sequence=r.sequence AND e.envelope_hash=r.envelope_hash
+                         AND e.receipt_state='validated')
+                      OR EXISTS(SELECT 1 FROM released_envelopes e WHERE e.writer=r.writer
+                         AND e.sequence=r.sequence AND e.envelope_hash=r.envelope_hash))",
             rusqlite::params![id, host], |row| row.get(0)).map_err(Into::into)
     };
     Ok(sequence(claim_id)? <= sequence(&previous.claim_id)?)
