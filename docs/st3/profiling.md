@@ -570,10 +570,13 @@ shows; a column with no reading is a dot, which means the daemon was down or not
 measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
 serves the same columns. A node with a collector keeps the longer history there.
 
-`fractal doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
-over their target in the last five minutes. A p99 target is missed in a window when more than 1%
-of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
-not `warn`, so `fractal doctor --strict` does not fail on a target.
+`fractal doctor` prints a `slo/ID` line for every native objective and account budget from the
+same projection as `fractal slo`, including declared objectives. It retains native status,
+current reading, target and window rather than judging the request telemetry again.
+Native green, red, and yellow or quiet tones map to diagnostic pass, fail, and warn,
+respectively; unknown and unmeasured rows never become successful checks. Strict diagnostics
+therefore reflect native SLO failures and warnings. The ten routes with the highest recent
+p99 remain separate `request-latency/ROUTE` telemetry lines, not independent SLO verdicts.
 
 For a deployed latency receipt, retain the process/source identity and before/after count delta.
 A low-volume tail can include requests from before the measurement window, and a restart resets

@@ -180,7 +180,7 @@ struct Content {
 extension Content {
   var glanceSlo: SloSnapshot {
     SloSnapshot(asOf: now - 120, rows: [
-      slo("factory/work-throughput", about: "Merged PR throughput", target: "≥ 100/day", current: "—", status: "no-data"),
+      slo("factory/merged-prs", about: "Merged PR throughput", target: "≥ 100/day", current: "—", status: "no-data"),
       slo("merge-latency/p95", about: "Merge latency", target: "≤ 4h", current: "—", status: "no-data"),
       slo("ci-critical-path/p95", about: "CI critical path", target: "≤ 20m", current: "—", status: "no-data"),
       slo("flakes", about: "Flaky runs", target: "≤ 3/h", current: "—", status: "no-data"),
