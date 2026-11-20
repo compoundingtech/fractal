@@ -878,14 +878,6 @@ impl Runtime for MessagesRuntime {
         unreachable!("the messages shard is never checkpointed")
     }
 
-    fn clear_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn replay_checkpoint_projections(&self, _transaction: &Transaction<'_>) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         _connection: &Connection,

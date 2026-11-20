@@ -106,9 +106,7 @@ fn main() {
     store.trim_locally(true).unwrap();
     let context = smallclaims::store::checkpoint_agreement::CheckpointContext {
         now_unix_ms: cut + 2 * smallclaims::store::checkpoint::DAY_MS + 1,
-        configured_peers: Vec::new(),
         scratch: scratch.join("trim"),
-        reviewer: "person/operator".into(),
     };
     let started = Instant::now();
     let mut steps = 0;

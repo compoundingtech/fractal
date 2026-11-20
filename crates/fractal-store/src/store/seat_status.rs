@@ -268,16 +268,6 @@ pub fn history_at(
     now: u128,
     index: u64,
 ) -> Result<Value> {
-    history_at_inner(connection, subject, now, index, None)
-}
-
-pub fn history_at_with_sources(connection: &Connection, subject: &str, now: u128, index: u64) -> Result<(Value, Vec<smallclaims::store::checkpoint::CheckpointItemSource>)> {
-    let mut sources = Vec::new();
-    let history = history_at_inner(connection, subject, now, index, Some(&mut sources))?;
-    Ok((history, sources))
-}
-
-fn history_at_inner(connection: &Connection, subject: &str, now: u128, index: u64, mut sources: Option<&mut Vec<smallclaims::store::checkpoint::CheckpointItemSource>>) -> Result<Value> {
     let cutoff = now.saturating_sub(WINDOW_MS);
     // Seek each kind by acceptance time. Read a single older baseline per prompt channel, rather
     // than decoding a seat's lifetime observations on every history request.
@@ -383,11 +373,6 @@ fn history_at_inner(connection: &Connection, subject: &str, now: u128, index: u6
     let start = eligible.len().saturating_sub(MAX_TRANSITIONS);
     let items = eligible[start..].iter().map(|entry| {
         let claim = claims[entry.0];
-        if let Some(sources) = sources.as_mut() {
-            sources.push(smallclaims::store::checkpoint::CheckpointItemSource {
-                claim: claim.id.clone(), order: keyed[entry.0].0.clone(),
-            });
-        }
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         json!({
             "seat": subject, "runtime_incarnation": fields["incarnation_id"],
