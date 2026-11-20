@@ -145,21 +145,27 @@ fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
             .readers
             .get()
             .prepare_cached(
-                "SELECT subject, claim, queued_at_unix_ms, attempts FROM local_message_outbox
+                "SELECT subject, claim, queued_at_unix_ms, attempts, last_error FROM local_message_outbox
                  WHERE (queued_at_unix_ms, subject) > (?1, ?2) AND (NOT ?4 OR attempts=0)
                  ORDER BY queued_at_unix_ms, subject LIMIT ?3",
             )?
             .query_map(params![after.0, after.1, BATCH, fresh_only], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some((subject, _, queued_at, _)) = rows.last() else {
+        let Some((subject, _, queued_at, _, _)) = rows.last() else {
             return Ok(drained);
         };
         after = (*queued_at, subject.clone());
         let full = rows.len() as i64 == BATCH;
-        for (subject, claim, _, attempts) in rows {
-            if drain_one(graph, shard.as_deref(), &subject, &claim, attempts)? {
+        for (subject, claim, _, attempts, last_error) in rows {
+            if drain_one(graph, shard.as_deref(), &subject, &claim, attempts, last_error.as_deref())? {
                 drained += 1;
             }
         }
@@ -170,7 +176,14 @@ fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
 }
 
 /// Drain one row; true when it left the outbox.
-fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &str, attempts: i64) -> Result<bool> {
+fn drain_one(
+    graph: &Store,
+    shard: Option<&GraphStore>,
+    subject: &str,
+    claim: &str,
+    attempts: i64,
+    last_error: Option<&str>,
+) -> Result<bool> {
     let graph_holds = || -> Result<bool> {
         Ok(graph.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')",
@@ -202,6 +215,11 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
     };
     match appended {
         Ok(()) => {
+            // Refused too often: a fallback, counted under the shard's last refusal.
+            if shard.is_some() && routed && attempts >= ATTEMPTS {
+                let (code, message) = last_error.unwrap_or_default().split_once(": ").unwrap_or(("", ""));
+                super::message_routing::record_fallback(graph, "outbox", subject, code, message);
+            }
             mirrored_remove(graph, subject)?;
             Ok(true)
         }

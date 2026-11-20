@@ -17,7 +17,6 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
@@ -281,6 +280,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "checkpoint_capture_epoch",
         "checkpoints",
         "checkpoint_capture_epoch",
+        // A blob is bound by the claims that name its hash, and where its bytes live (the row or
+        // the blob file) is local, so it left the projection digest at projection version 2.
+        "blobs",
     ];
     let mut classified = SHARED_TABLES
         .iter()
@@ -378,8 +380,7 @@ pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                 .iter()
                 .filter(|name| !local_columns.contains(&name.as_str()))
                 .map(|name| {
-                    if (*table == "blobs" && name == "bytes")
-                        || (*table == "documents" && name == "binding_key")
+                    if (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
                         || (*table == "person_directive_notes" && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers" | "ordered_membership_heads")
