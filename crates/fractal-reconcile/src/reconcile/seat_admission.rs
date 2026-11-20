@@ -16,6 +16,7 @@ pub struct Controller {
     /// What admission by fit reads of this host; none where lanes are off.
     pub lanes: Option<LaneHost>,
     pub finite_policy: fractal_runtime::host::FinitePolicy,
+    pub pressure: Mutex<Option<fractal_runtime::resource_pressure::Observer>>,
 }
 
 /// The room a host gives lanes, and how to read unreclaimable host memory outside lanes
@@ -66,6 +67,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             config, status, dirty, checked: Mutex::new(None), outside_observation: Mutex::new(None),
             _watcher: watcher, lanes: self.seat_admission.lanes,
             finite_policy: self.seat_admission.finite_policy,
+            pressure: Mutex::new(None),
         };
         self
     }
@@ -76,6 +78,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
+        // Both logical finite admission and enforced lanes consult the Linux PSI brake.
+        // Keep sampling while supported finite custody can need admission or recovery,
+        // but never turn an otherwise idle host into a five-second full-pass poller.
+        if cfg!(target_os = "linux") && self.store.has_live_finite_resource_memberships(&self.host)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "reading finite pressure observation demand");
+                true
+            })
+        {
+            if let Err(error) = admission.pressure_decision() {
+                tracing::error!(%error, "invalid native admission PSI policy");
+            }
+            self.incremental.touch("host-lane-pressure");
+            self.arm_deadline_at("resource-pressure", u128::from(now.saturating_add(5)) * 1000,
+                crate::reconcile_telemetry::WakeCause::Other);
+        }
         if let Some(host) = admission.lanes {
             let observation = (host.outside)();
             let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
@@ -127,6 +145,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         let deadline = expiry.filter(|expiry| *expiry > now).map_or(next, |expiry| expiry.min(next));
         self.arm_deadline_at("seat-admission", u128::from(deadline) * 1000,
             crate::reconcile_telemetry::WakeCause::Other);
+    }
+}
+
+impl Controller {
+    pub fn pressure_decision(&self) -> Result<fractal_runtime::resource_pressure::Decision> {
+        let mut pressure = self.pressure.lock().unwrap_or_else(PoisonError::into_inner);
+        if pressure.is_none() {
+            *pressure = Some(fractal_runtime::resource_pressure::Observer::new(self.finite_policy.psi_brake.clone())?);
+        }
+        pressure.as_mut().context("pressure observer initialization failed")?.observe(&self.finite_policy.psi_brake)
     }
 }
 

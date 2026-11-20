@@ -132,21 +132,25 @@ obligations from canonical signed inputs.
 The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
 reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
 
-- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+- `lv-hb88f17cedac9` declares the local completion table; its only key is the
   checked integer `complete=1`. The conservative catalog still makes no size proof.
-- `lv-h9abbf1dff207` rewrites historical `shell_resources_v1.body` JSON to remove
-  environments while preserving all other command/result fields. Those bodies
-  remain unbounded inline values; changing their representation requires the
-  owning producer's chunk/reference work, not changing this security scrub.
-- `lv-h017f6a53ca41` is the literal `VACUUM` reclamation sink. It binds no value,
-  but its physical cleanup cost covers the database. Trace that cost into the
-  bounded representation and reclamation work before removing the exception.
+- `lv-h3fe95fd4aec7` copies historical `shell_resources_v1.body` JSON without
+  environments, preserving all other command/result fields. Those bodies and
+  keys remain unbounded inline values; the table copy is still one transaction.
+  Changing that representation remains the owning producer's chunk/reference work.
+- `lv-h4929ecffa855` declares a transient free-list overwrite table;
+  `lv-hac7744f65d12` inserts zero blobs of `page_size - 100` bytes, with at most
+  128 rows per transaction/checkpoint. `lv-ha3413afc70ae` tracks that binding;
+  `lv-h7eba39ebc70f` drops the table under secure_delete. These temporary values
+  are bounded by SQLite page size; the conservative inventory retains exceptions.
+  This consumes old free pages before the table copy can reuse them. B-tree
+  bookkeeping can grow the file slightly; no startup VACUUM remains.
 - `lv-haceef5fded64` inserts the fixed completion key only after physical erasure.
   Keep its cleanup/transaction costs in the same producer's representation review.
 
-These registrations do not change the scrub or claim that its UPDATE or VACUUM
-has bounded work. A bounded body representation and keyed reclamation would be
-the structural improvement; this registration preserves current behavior.
+Building on [#6886](https://github.com/compoundingtech/fractal/pull/6886), cleanup
+work covers this table and the free list, not the entire live database. The
+unbounded shell-body representation and table-copy transaction remain debt.
 
 ### GitHub capture rebuildable projection
 
