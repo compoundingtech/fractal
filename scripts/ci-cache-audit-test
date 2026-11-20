@@ -85,12 +85,20 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
             assert 'git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main' in block
             assert 'git merge-base --is-ancestor "$PUBLISH_SHA" origin/main' in block
             assert '[[ "$(git rev-parse HEAD)" == "$PUBLISH_SHA" ]]' in block
-            proof = next((line for line in block.splitlines() if 'path-info' in line and 'fractal-native-closure.json' in line), '')
-            assert all(part in proof for part in (
-                'nix ', 'path-info', '--store "https://$CACHE_NAME.cachix.org"',
-                '--recursive', '--json', '"$output"',
-            )), 'publication needs a remote full-closure proof'
-            assert '--option netrc-file "$cache_netrc"' in proof, 'the private-cache proof must authenticate'
+            private_query = 'nix --option netrc-file "$cache_netrc" path-info --store "https://$CACHE_NAME.cachix.org"'
+            output_proof = private_query + ' "$output" > /dev/null'
+            upstream_proof = 'if nix path-info --store https://cache.nixos.org "$path" > /dev/null 2>&1; then continue; fi'
+            closure_proof = private_query + ' "$path" > /dev/null'
+            assert output_proof in block, 'the exact output must exist in the authenticated private cache'
+            assert 'nix path-info --recursive "$output" > "$RUNNER_TEMP/fractal-native-closure.paths"' in block
+            assert 'mapfile -t closure < "$RUNNER_TEMP/fractal-native-closure.paths"' in block
+            assert 'nix path-info --json "${closure[@]}" > "$RUNNER_TEMP/fractal-native-closure.json"' in block
+            assert 'for path in "${closure[@]}"; do' in block
+            assert '[[ "$path" == "$output" ]] && continue' in block
+            assert output_proof in block and upstream_proof in block and closure_proof in block
+            assert block.index(output_proof) < block.index(upstream_proof) < block.index(closure_proof)
+            assert closure_proof + '\n          done' in block, 'a path absent from both caches must fail the step'
+            assert private_query + ' --recursive' not in block, 'upstream paths need not be duplicated in the private cache'
             assert 'name: fractal-native-publication' in block and 'fractal-native-closure.json' in block
         elif workflow.name == 'nix.yml':
             assert 'scripts/ci-nix-release build' in block and 'scripts/ci-nix-release verify-cache' in block
