@@ -157,13 +157,13 @@ pub fn project_native_turn(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<
     let revision = text("revision")?;
     let at = claim.accepted_at_unix_ms.to_string();
     tx.execute(
-        "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,parent_step_run,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hf7749efab5f3 owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,parent_step_run,workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
          VALUES(?1,'native-turn',?2,?3,?4,?5,?6,?7,?8,'{}',?9,'running','normal',?10,?10)",
         params![run, revision, generation, text("root_revision")?, root, text("parent_step_run")?,
             text("workspace")?, text("requester")?, text("mode")?, at],
     ).map_err(internal)?;
     tx.execute(
-        "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h8195589e83ca owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
          VALUES(?1,?2,?3,'running',?4,'native agent turn',?5,?5)",
         params![generation, run, revision, claim.actor, at],
     ).map_err(internal)?;
@@ -175,7 +175,7 @@ pub fn project_native_turn(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<
     let constraints = serde_json::to_string(&constraints).map_err(internal)?;
     let goals = serde_json::to_string(&vec![turn.instructions]).map_err(internal)?;
     tx.execute(
-        "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
+        /* sqlite-large-value: allow-for-now lv-h6a7773d60dcd owner=fractal_store::store::adhoc_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
          VALUES(?1,?2,?3,'turn',?4,'ready',1,?5,'[]',0,'Native agent turn',?6,?7,?7,?8)",
         params![format!("step-run/{generation}/turn"), run, generation, revision, turn.agent, goals, at, constraints],
     ).map_err(internal)?;

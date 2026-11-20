@@ -343,7 +343,7 @@ fn capture_releases_readers_between_pages_and_lifecycle_messages() {
         // A real write after each read ensures RESTART must pass the active
         // reader, rather than succeeding vacuously on an empty WAL.
         let connection = store.connection.write();
-        connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('mail_checkpoint_test',?1)",
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h5024471c81ae owner=fractal_api_core::mail_delivery_objectives_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('mail_checkpoint_test',?1)",
             [checkpoints.to_string()]).unwrap();
         let (busy, frames, checkpointed): (i64, i64, i64) = connection.query_row(
             "PRAGMA wal_checkpoint(RESTART)", [],
