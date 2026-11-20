@@ -340,8 +340,8 @@
         "Store::cache_idempotency_response (no production caller)"
       ]
     },
-    "legacy_receipts": "rows-at-or-below-meta.idempotency_legacy_rowid-are-not-removed-by-this-cleanup",
+    "legacy_receipts": "rows-at-or-below-meta.idempotency_legacy_rowid-are-due-and-pass-the-same-durable-or-replay-safe-check",
     "indexes": "no-added-dropped-or-changed-indexes",
-    "cleanup": "rowid-after-legacy-watermark; at-most-64; stop-at-first-young-row; rotate-active-pins-with-update"
+    "cleanup": "rowid-order-legacy-first; at-most-64; stop-at-first-young-row; rotate-active-pins-with-update"
   }
 }

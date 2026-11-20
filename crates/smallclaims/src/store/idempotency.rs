@@ -23,7 +23,7 @@ pub struct Cleanup {
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     // Capture once, before any new request. Existing rows have no recoverable caller
-    // association and remain until the separately scheduled deployment+30d follow-up.
+    // association; cleanup treats them as due (see `cleanup_tx`).
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h4d25c7671914 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value)
          SELECT 'idempotency_legacy_rowid',CAST(COALESCE(MAX(rowid),0) AS TEXT) FROM idempotency",
@@ -63,9 +63,10 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
 
 pub fn next_expiry(connection: &Connection) -> Result<Option<i64>> {
     Ok(connection.query_row(
-        "SELECT expires_at_unix_ms FROM idempotency
-         WHERE rowid > (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
-         ORDER BY rowid LIMIT 1", [], |row| row.get(0),
+        // Receipts stored before expiry was recorded (2026-10-07) are due: see `cleanup_tx`.
+        "SELECT CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
+                THEN 0 ELSE expires_at_unix_ms END
+         FROM idempotency ORDER BY rowid LIMIT 1", [], |row| row.get(0),
     ).optional()?)
 }
 
@@ -160,9 +161,15 @@ pub fn cleanup_tx(
     mut in_use: impl FnMut(&Transaction<'_>, &str) -> Result<bool>,
 ) -> Result<Cleanup> {
     let started = std::time::Instant::now();
+    // Receipts stored before expiry was recorded (2026-10-07) were kept for a separately
+    // scheduled deployment+30d follow-up; this is it. They have no recorded expiry, so they are
+    // due now and go through the same checks as any expired receipt: one whose effect has no
+    // durable operation identity is still kept.
     let candidates = transaction.prepare_cached(
-        "SELECT rowid,operation_id,response,expires_at_unix_ms,replay_safe FROM idempotency
-         WHERE rowid > (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
+        "SELECT rowid,operation_id,response,
+                CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
+                THEN 0 ELSE expires_at_unix_ms END,
+                replay_safe FROM idempotency
          ORDER BY rowid LIMIT ?1",
     )?.query_map([limit.min(CLEANUP_CHUNK) as i64], |row|
         Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,bool>(4)?))
