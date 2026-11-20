@@ -322,3 +322,75 @@ fn wake_lookup_full_replay_restores_missing_derived_candidates() {
     assert!(wake_lookup::status(&store.readers.get()).unwrap().2);
     assert_eq!(assert_history(&store.readers.get(), true), expected);
 }
+
+fn stream(connection: &Connection, subject: &str, tags: Value, index: i64) {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h927754a7f151 owner=fractal_store::store::wake_lookup_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index) VALUES(?1,10,?2,?3)",
+        params![subject, json!({"from": "daemon/runtime", "to": "agent/worker", "tags": tags}).to_string(), index],
+    ).unwrap();
+}
+
+fn stream_candidates(connection: &Connection) -> Vec<(String, String, String)> {
+    connection.prepare(
+        "SELECT recipient,tag,claim_id FROM local_work_wake_tags WHERE claim_id LIKE 'message/%' ORDER BY claim_id",
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap()
+}
+
+#[test]
+fn wake_lookup_keeps_stream_wakes_from_the_mirror_install_and_rebuild() {
+    let store = Store::open_memory("fixture").unwrap();
+    {
+        let connection = store.connection.write();
+        // Mirrored before this build's triggers existed: their first install takes it.
+        remove_lookup(&connection);
+        stream(&connection, "message/early", json!(["st3-work:step-run/r/s@2@3@x"]), 1);
+    }
+    install_lookup(&store);
+    {
+        let connection = store.connection.write();
+        stream(&connection, "message/late", json!(["fractal-work:step-run/r/s@02@3@y"]), 2);
+        stream(&connection, "message/chat", json!(["github-watch"]), 3);
+        // A subject the graph also holds is the graph's alone.
+        insert(&connection, "both", "message.sent", &body("agent/worker", json!(["st3-work:step-run/r/s@2@3@z"])).to_string());
+        stream(&connection, "message/both", json!(["st3-work:step-run/r/s@2@3@z"]), 4);
+    }
+    let expected = vec![
+        ("agent/worker".to_owned(), "step-run/r/s@2@3@x".to_owned(), "message/early".to_owned()),
+        ("agent/worker".to_owned(), "step-run/r/s@2@3@y".to_owned(), "message/late".to_owned()),
+    ];
+    assert_eq!(stream_candidates(&store.readers.get()), expected);
+
+    // The step's history reads them from the mirror, with this member's lifecycle for each.
+    let history = |connection: &Connection| {
+        rows(connection, STREAM_WORK_WAKE_HISTORY, true, "step-run/r/s")
+            .into_iter()
+            .map(|(_, sent, subject, consumed, delivered, staged)| (sent, subject, consumed, delivered, staged))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(history(&store.readers.get()), vec![
+        ("10".to_owned(), "message/early".to_owned(), false, false, false),
+        ("10".to_owned(), "message/late".to_owned(), false, false, false),
+    ]);
+    store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hb74591dd0886 owner=fractal_store::store::wake_lookup_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_stream_lifecycle(subject,kind) VALUES('message/early','message.delivered');
+         INSERT INTO local_stream_lifecycle(subject,kind) VALUES('message/early','message.read');
+         INSERT INTO local_stream_lifecycle(subject,kind) VALUES('message/late','message.staged');",
+    ).unwrap();
+    assert_eq!(history(&store.readers.get()), vec![
+        ("10".to_owned(), "message/early".to_owned(), true, true, false),
+        ("10".to_owned(), "message/late".to_owned(), false, false, true),
+    ]);
+
+    // A rebuild refills them with the graph's.
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hdc1bc253277b owner=fractal_store::store::wake_lookup_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_wake_tags", []).unwrap();
+        wake_lookup::rebuild(&transaction).unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(stream_candidates(&store.readers.get()), expected);
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h4fb82dae4853 owner=fractal_store::store::wake_lookup_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_stream_sent WHERE subject='message/late'", []).unwrap();
+    assert_eq!(stream_candidates(&store.readers.get()), expected[..1]);
+}

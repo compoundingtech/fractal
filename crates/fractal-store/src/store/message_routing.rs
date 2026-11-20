@@ -12,8 +12,9 @@
 //! an image), a delivery probe's, a recipient without a host (a person, an undeclared or retired
 //! seat), or a host that does not advertise the inbox.
 //!
-//! Work wakes, replies that settle a parent, and senders whose evidence or predecessors cite
-//! other claims stay on the graph until 4c-3; they call the graph append, not [`send_message`].
+//! A work wake goes to the stream only for a seat on this member ([`send_work_wake`]). Replies
+//! that settle a parent, and senders whose evidence or predecessors cite other claims, stay on
+//! the graph; they call the graph append, not [`send_message`].
 
 use super::*;
 
@@ -92,6 +93,22 @@ pub fn send_message(store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, b
 /// [`send_message`], answering the claim it wrote or replayed, as [`Store::append_claim`] does.
 pub fn send(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
     send_message(store, input).map(|(claim, _)| claim)
+}
+
+/// Send a work wake: to the stream, as [`send`] would, only when its recipient's host is this
+/// member, whose own reconciler and step views read wakes from both stores. A wake for a seat
+/// placed on another member stays a graph claim, since that member's build may read wakes from
+/// the graph alone.
+pub fn send_work_wake(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+    let to = input.fields.get("to").and_then(Value::as_str).unwrap_or_default();
+    if recipient_host(store, to).map_err(internal)?.as_deref() == Some(store.graph.origin.as_str()) {
+        let sent = send(store, input)?;
+        // The step views and the wake deadline read the mirror, so it takes the wake at once, as
+        // the outbox's drain does. Should this fail, the daemon's mirror loop catches it up.
+        let _ = super::stream_mirror::mirror(store);
+        return Ok(sent);
+    }
+    store.append_claim(input)
 }
 
 /// Queue a daemon's message from inside a graph transaction whose route it can't read before
