@@ -1230,6 +1230,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/", "/v1/messages/?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
@@ -1370,6 +1371,15 @@ const PROBES: &[Probe] = &[
     post("POST /v1/messages", "/v1/messages", |fixture, attempt| {
         json!({
             "idempotency_key": format!("cost-message-{attempt}"),
+            "from": fixture.subjects.seats[0],
+            "to": fixture.subjects.seats[1],
+            "title": "An invented status note",
+            "content": "The invented build finished; the invented review can start.",
+        })
+    }),
+    post("POST /v1/messages/", "/v1/messages/", |fixture, attempt| {
+        json!({
+            "idempotency_key": format!("cost-message-slash-{attempt}"),
             "from": fixture.subjects.seats[0],
             "to": fixture.subjects.seats[1],
             "title": "An invented status note",
