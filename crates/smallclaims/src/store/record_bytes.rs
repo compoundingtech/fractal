@@ -9,8 +9,10 @@
 //! later replaces, or that is marked invalid with its envelope, keeps the empty `raw`: no reader
 //! takes a record's bytes for those either.
 //!
-//! The row stays: its state, claim, position and repair link are what readers and triggers use,
-//! and an older build that runs this store after a rollback finds every row it expects. Only
+//! The row stays for now: its state, claim, position and repair link are what older builds read,
+//! and an older build that runs this store after a rollback finds every row it expects. Readers
+//! in this build no longer need it (`replica_record_rows`, `admitted_claim_sql`), so a later
+//! release can delete valid records once older builds are fenced out. Only
 //! the triggers on `replica_records` that fire on any UPDATE notice the change, so they list the
 //! columns they read (`RECORD_COLUMNS_BUT_RAW`) and an emptied `raw` wakes none of them.
 use super::*;
@@ -158,4 +160,22 @@ mod tests {
             .unwrap();
         assert_eq!(plan, ["SEARCH replica_records USING INTEGER PRIMARY KEY (rowid>?)"]);
     }
+}
+
+/// Whether the claim `alias` has a record in a state other than valid: a record a repair
+/// replaced, or one marked invalid with its envelope. Such a claim is not an accepted copy.
+pub fn claim_record_not_valid_sql(alias: &str) -> String {
+    format!("EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid')")
+}
+
+/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names its
+/// envelope, and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
+/// what `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked, whether or not
+/// the claim's valid record is stored.
+pub fn admitted_claim_sql(alias: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
+          AND NOT {})",
+        claim_record_not_valid_sql(alias)
+    )
 }
