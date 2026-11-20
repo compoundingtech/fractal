@@ -31,7 +31,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h47095dd529d7 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -134,6 +134,13 @@ CREATE INDEX IF NOT EXISTS claim_candidate_verdict_links_claim_index ON claim_ve
 CREATE TABLE IF NOT EXISTS claim_verdict_queue (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+-- A settled small fold keeps no judging row. A claim queued for judgment again must still read
+-- as pending until judged, as a dirty row made it before: give it a dirty placeholder row. As a
+-- trigger, a release that predates pruning also marks pruned claims when it requeues them.
+CREATE TRIGGER IF NOT EXISTS claim_verdict_queue_marks_pruned AFTER INSERT ON claim_verdict_queue BEGIN
+    INSERT OR IGNORE INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty)
+    VALUES (NEW.claim_id,0,'','','',0,1);
+END;
 CREATE TABLE IF NOT EXISTS claim_verdict_fresh (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -1224,6 +1231,15 @@ impl ClaimSigner {
     }
 }
 
+/// One page of [`Store::prune_settled_signature_judgments`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct JudgingPrune {
+    pub examined: usize,
+    pub deleted: usize,
+    /// Every row that predates this release has been looked at; later pages do nothing.
+    pub finished: bool,
+}
+
 /// What a verdict recheck found.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerdictMismatch {
@@ -1634,6 +1650,21 @@ impl Store {
         })
     }
 
+    /// Drop one page of the settled judging rows that earlier releases kept after a verdict was
+    /// published (see `judging::discard_settled_tx`), in one short background writer loan.
+    /// Waits until the candidate model serves: during bootstrap the rows are still being built.
+    pub fn prune_settled_signature_judgments(&self) -> Result<JudgingPrune> {
+        if !self.signature_migration()?.done() {
+            return Ok(JudgingPrune { examined: 0, deleted: 0, finished: false });
+        }
+        let mut connection = self.connection.write_background();
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (examined, deleted, finished) = judging::prune_settled_page_tx(&transaction)?;
+        transaction.commit()?;
+        Ok(JudgingPrune { examined, deleted, finished })
+    }
+
     /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
     /// verdicts are still being queued. Three probes of small tables on a reader.
     pub fn verdicts_pending(&self) -> Result<bool> {
@@ -1838,6 +1869,10 @@ impl Store {
                     .execute(/* sqlite-large-value: allow-for-now lv-h29105e98503c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A signature can arrive for a claim a checkpoint has since dropped.
                 let Some(row) = claim_row(&transaction, claim_id)? else {
+                    // Nothing judges it again: drop the placeholder its queueing made.
+                    transaction
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7fff7fbe77a9 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging WHERE claim_id=?1 AND candidate_count=0 AND complete=0 AND dirty=1")?
+                        .execute(/* sqlite-large-value: allow-for-now lv-h84587f2a5297 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id])?;
                     continue;
                 };
                 let (result, used) = judging::advance(
@@ -1858,6 +1893,8 @@ impl Store {
                     // A changed delegation or revocation changes what relied on it.
                     queue_affected_by_row_tx(&transaction, &row)?;
                 }
+                // Its verdict is published: a settled small fold keeps no resume state.
+                judging::discard_settled_tx(&transaction, claim_id)?;
                 judged += 1;
             }
             if track_bootstrap && candidates_judged != 0 {
