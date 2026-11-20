@@ -200,6 +200,15 @@ impl Store {
     /// those older than a month whose claim never came. One bounded page; returns how many it
     /// settled.
     pub fn promote_claim_member_signatures(&self) -> Result<usize> {
+        // Nothing waits on an idle member: look before taking the writer.
+        let waiting: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM claim_member_signature_pending)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !waiting {
+            return Ok(0);
+        }
         let now = i64::try_from(now_ms())?;
         let keep = i64::try_from(PENDING_KEEP_MS)?;
         let membership = fleet_membership_tx(&self.readers.get())?;

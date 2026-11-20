@@ -136,3 +136,74 @@ fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
         "only alder's own signature is kept for alder's claim"
     );
 }
+
+/// A signature that verifies for `writer` and `sequence` over `claim`, by a fresh key.
+fn fresh_signature(writer: &str, sequence: u64, claim: &str) -> ClaimMemberSignature {
+    let key = MemberKey::generate().unwrap().0;
+    ClaimMemberSignature {
+        claim_id: claim.into(),
+        writer: writer.into(),
+        sequence,
+        member_key: key.public().to_owned(),
+        signature: key.sign(&claim_signature_message(FLEET, writer, sequence, claim)),
+    }
+}
+
+fn waiting(store: &Store) -> usize {
+    store
+        .connection
+        .write()
+        .query_row("SELECT COUNT(*) FROM claim_member_signature_pending", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn only_a_key_membership_admits_counts_and_waiting_signatures_never_hide_later_ones() {
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let alder = node("alder", Some(&key), &key);
+    alder.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
+    note(&alder, 0);
+    while !alder.sign_own_claims().unwrap().done {}
+    let genuine = some_signature(&alder);
+
+    // cedar is a writer membership never keyed. Its claim is held here, signed with a fresh key
+    // for its own writer and sequence: only the window can refuse it.
+    let birch = node("birch", None, &key);
+    let cedar = node("cedar", None, &key);
+    note(&cedar, 1);
+    cedar.replication_snapshot().unwrap();
+    sync(&cedar, &birch);
+    let (cedar_claim, cedar_sequence): (String, u64) = birch
+        .connection
+        .write()
+        .query_row(
+            "SELECT claims.id, batches.replica_sequence FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.origin='cedar' AND claims.kind='example.note'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(birch.receive_claim_member_signatures(&[fresh_signature("cedar", cedar_sequence, &cedar_claim)]).unwrap(), 0);
+    birch.promote_claim_member_signatures().unwrap();
+    assert!(birch.claim_member_signatures_for(&[cedar_claim]).unwrap().is_empty(), "an unkeyed writer's signature is not kept");
+
+    // A made-up writer's signatures for claims that never arrive wait, more than a page of them,
+    // all sorting before alder's claim. They never hide alder's genuine signature, which waits
+    // until alder's claim arrives and is then kept.
+    let invented: Vec<ClaimMemberSignature> = (0..600)
+        .map(|n| fresh_signature("dogwood", 1, &format!("{:064x}", n)))
+        .collect();
+    assert!(invented.iter().all(|signature| signature.claim_id < genuine.claim_id));
+    birch.receive_claim_member_signatures(&invented).unwrap();
+    assert_eq!(birch.receive_claim_member_signatures(std::slice::from_ref(&genuine)).unwrap(), 0);
+    assert_eq!(waiting(&birch), 601);
+    sync(&alder, &birch);
+    for _ in 0..4 {
+        birch.promote_claim_member_signatures().unwrap();
+    }
+    assert_eq!(birch.claim_member_signatures_for(&[genuine.claim_id.clone()]).unwrap(), vec![genuine]);
+    assert_eq!(waiting(&birch), 600, "the invented ones still wait for claims that never come");
+    for signature in &invented {
+        assert!(birch.claim_member_signatures_for(&[signature.claim_id.clone()]).unwrap().is_empty());
+    }
+}
