@@ -134,32 +134,71 @@ pub fn drain_fresh(graph: &Store) -> Result<usize> {
     drain_rows(graph, true)
 }
 
+/// Drain the mail queued since the last drain when it goes out of scope: a store method that
+/// queues messages from inside its transaction holds one, so what it queued leaves as soon as
+/// the method returns, after the commit, without waiting for the daemon's drain task. A failure
+/// is logged; the daemon's task retries.
+pub struct DrainOnReturn<'a>(pub &'a Store);
+
+impl Drop for DrainOnReturn<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = drain_fresh(self.0) {
+            tracing::warn!(error = %format!("{error:#}"), "message outbox drain after a send failed");
+        }
+    }
+}
+
+/// The most recent delivery delays kept in memory, in ms: a measurement reads them through
+/// [`recent_delays_ms`].
+const RECENT_DELAYS: usize = 4096;
+
+static RECENT: std::sync::Mutex<std::collections::VecDeque<u64>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// How long each of the most recent delivered messages waited in the outbox, in ms, oldest first.
+pub fn recent_delays_ms() -> Vec<u64> {
+    RECENT.lock().unwrap_or_else(PoisonError::into_inner).iter().copied().collect()
+}
+
+fn record_delay(graph: &Store, subject: &str, queued_at: i64) {
+    let waited = u64::try_from(now_ms() as i64 - queued_at).unwrap_or(0);
+    let to = if super::messages_shard::holds(graph, subject).unwrap_or(false) { "stream" } else { "graph" };
+    fractal_telemetry::otel::record_message_outbox_delay(to, std::time::Duration::from_millis(waited));
+    let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+    if recent.len() == RECENT_DELAYS {
+        recent.pop_front();
+    }
+    recent.push_back(waited);
+}
+
 fn drain_rows(graph: &Store, fresh_only: bool) -> Result<usize> {
     let drainer = graph.extension::<Drainer>();
     let _running = drainer.0.lock().unwrap_or_else(PoisonError::into_inner);
     let shard = super::messages_shard::shard(graph);
     let mut drained = 0;
-    let mut after = (i64::MIN, String::new());
+    // In the order the messages were queued: a transaction that queued two sends them in order,
+    // however many share its millisecond.
+    let mut after = i64::MIN;
     loop {
         let rows = graph
             .readers
             .get()
             .prepare_cached(
-                "SELECT subject, claim, queued_at_unix_ms, attempts FROM local_message_outbox
-                 WHERE (queued_at_unix_ms, subject) > (?1, ?2) AND (NOT ?4 OR attempts=0)
-                 ORDER BY queued_at_unix_ms, subject LIMIT ?3",
+                "SELECT rowid, subject, claim, queued_at_unix_ms, attempts FROM local_message_outbox
+                 WHERE rowid > ?1 AND (NOT ?3 OR attempts=0)
+                 ORDER BY rowid LIMIT ?2",
             )?
-            .query_map(params![after.0, after.1, BATCH, fresh_only], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+            .query_map(params![after, BATCH, fresh_only], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let Some((subject, _, queued_at, _)) = rows.last() else {
+        let Some((last, ..)) = rows.last() else {
             return Ok(drained);
         };
-        after = (*queued_at, subject.clone());
+        after = *last;
         let full = rows.len() as i64 == BATCH;
-        for (subject, claim, _, attempts) in rows {
+        for (_, subject, claim, queued_at, attempts) in rows {
             if drain_one(graph, shard.as_deref(), &subject, &claim, attempts)? {
+                record_delay(graph, &subject, queued_at);
                 drained += 1;
             }
         }

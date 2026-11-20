@@ -462,7 +462,6 @@ pub fn github_posted_by_tx(
 fn batch_entries_tx(
     transaction: &rusqlite::Transaction<'_>,
     origin: &str,
-    batch_id: &str,
     subscription_subject: &str,
     subscription: &crate::model::SubscriptionSpec,
     mission: &str,
@@ -516,7 +515,6 @@ fn batch_entries_tx(
                 message_subjects.extend(route_item_to_owner_tx(
                     transaction,
                     origin,
-                    batch_id,
                     subscription_subject,
                     item_subject,
                     &owner,
@@ -594,7 +592,6 @@ fn batch_entries_tx(
                 message_subjects.extend(route_item_to_owner_tx(
                     transaction,
                     origin,
-                    batch_id,
                     subscription_subject,
                     item_subject,
                     &owner,
@@ -733,6 +730,47 @@ fn renew_nested_ancestor_leases_tx(
             ],
         )
         .map_err(internal)?;
+    Ok(())
+}
+
+/// Send a message an observation causes, from inside its transaction. Its route can't be read
+/// there, so it goes through the outbox and the daemon's drain routes it after the commit. The
+/// one exception is the observation's receipt, which rides on the observation's first graph
+/// claim: a message that would be that claim stays on the graph and carries it, as before.
+#[allow(clippy::too_many_arguments)]
+fn send_observation_message_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    fields: Value,
+    evidence: Vec<String>,
+    batches: &mut ObservationBatches,
+    receipt_key: &mut Option<&str>,
+) -> Result<(), FractalError> {
+    if receipt_key.is_some() {
+        append_first_receipt_claim_tx(
+            transaction,
+            origin,
+            subject,
+            "message.sent",
+            None,
+            &json!({"fields": fields, "evidence": evidence}),
+            &[],
+            Some(&batches.for_kind(transaction, origin, "message.sent")?),
+            receipt_key,
+        )
+        .map_err(claim_append_error)?;
+        return Ok(());
+    }
+    fractal_store::store::message_routing::queue_tx(transaction, &ClaimInput {
+        subject: subject.to_owned(),
+        kind: "message.sent".into(),
+        actor: None,
+        fields: serde_json::from_value(fields).map_err(internal)?,
+        evidence,
+        expected_subject: None,
+        idempotency_key: None,
+    })?;
     Ok(())
 }
 
@@ -1331,7 +1369,6 @@ fn item_owner_tx(connection: &Connection, facts: &Value) -> Result<Option<(Strin
 fn route_item_to_owner_tx(
     transaction: &rusqlite::Transaction<'_>,
     origin: &str,
-    batch_id: &str,
     subscription: &str,
     resource: &str,
     owner: &str,
@@ -1345,24 +1382,24 @@ fn route_item_to_owner_tx(
         return Ok(None);
     }
     let subject = format!("message/route-{}", &delivery_key[..20]);
-    append_claim_tx(
-        transaction,
-        origin,
-        &subject,
-        "message.sent",
-        None,
-        &json!({"fields": {
+    // Through the outbox: its route can't be read inside this batch.
+    fractal_store::store::message_routing::queue_tx(transaction, &ClaimInput {
+        subject: subject.clone(),
+        kind: "message.sent".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
             "from": format!("daemon/{origin}"),
             "to": owner,
             "title": title,
             "content": format!("{detail}\n\nst sent this to you because {why}; no review or person request was made."),
             "status": "sent",
             "tags": ["resource-route", subscription, resource],
-        }, "evidence": evidence}),
-        &[],
-        Some(batch_id),
-    )
-    .map_err(claim_append_error)?;
+        }))
+        .map_err(internal)?,
+        evidence: evidence.to_vec(),
+        expected_subject: None,
+        idempotency_key: None,
+    })?;
     Ok(Some(subject))
 }
 
@@ -1472,15 +1509,9 @@ fn routed_to_owner_tx(
     transaction: &rusqlite::Transaction<'_>,
     delivery_key: &str,
 ) -> Result<bool, FractalError> {
-    Ok(transaction
-        .query_row(
-            "SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
-            [format!("message/route-{}", &delivery_key[..20])],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(internal)?
-        .is_some())
+    // Sent through the graph, the stream or the outbox, as message_sent_tx sees all three.
+    fractal_store::store::message_sent::message_sent_tx(transaction, &format!("message/route-{}", &delivery_key[..20]))
+        .map_err(|error| internal(format!("{error:#}")))
 }
 
 /// Each step's effective state, and with `summaries` its latest progress and completion
@@ -7446,6 +7477,8 @@ impl MissionsStore for Store {
             )>,
             mirrored: Option<&crate::model::MirroredPrior>,
         ) -> Result<Option<(ResourceObservationOutcome, bool)>, FractalError> {
+        // The mail an observation causes is queued in its transaction and leaves on return.
+        let _drain = fractal_store::store::message_outbox::DrainOnReturn(self);
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -7953,25 +7986,23 @@ impl MissionsStore for Store {
                                 && !fractal_store::store::message_sent::message_sent_tx(transaction, &wake.subject)
                                     .map_err(internal)?
                             {
-                                append_first_receipt_claim_tx(
+                                let fields = json!({
+                                    "from": format!("daemon/{}", self.origin),
+                                    "to": subscription.to,
+                                    "title": wake.title,
+                                    "content": wake.content,
+                                    "status": "sent",
+                                    "tags": wake.tags,
+                                });
+                                send_observation_message_tx(
                                     transaction,
                                     &self.origin,
                                     &wake.subject,
-                                    "message.sent",
-                                    None,
-                                    &json!({"fields": {
-                                        "from": format!("daemon/{}", self.origin),
-                                        "to": subscription.to,
-                                        "title": wake.title,
-                                        "content": wake.content,
-                                        "status": "sent",
-                                        "tags": wake.tags,
-                                    }, "evidence": [item_claim]}),
-                                    &[],
-                                    Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
+                                    fields,
+                                    vec![item_claim.clone()],
+                                    &mut batches,
                                     &mut receipt_key,
-                                )
-                                .map_err(claim_append_error)?;
+                                )?;
                                 message_subjects.push(wake.subject.clone());
                             }
                             if ended {
@@ -8032,7 +8063,6 @@ impl MissionsStore for Store {
                             let entries = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 &subscription.to,
@@ -8109,7 +8139,6 @@ impl MissionsStore for Store {
                             let unowned = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 mission,
@@ -8285,7 +8314,6 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -8371,25 +8399,22 @@ impl MissionsStore for Store {
                                     .map(|(_, _, claim, _)| claim.clone()),
                             )
                             .collect::<Vec<_>>();
-                        append_first_receipt_claim_tx(
+                        send_observation_message_tx(
                             transaction,
                             &self.origin,
                             &message_subject,
-                            "message.sent",
-                            None,
-                            &json!({"fields": {
+                            json!({
                                 "from": format!("daemon/{}", self.origin),
                                 "to": subscription.to,
                                 "title": format!("Resource changed: {resource}"),
                                 "content": content,
                                 "status": "sent",
                                 "tags": ["resource-change", subscription_subject],
-                            }, "evidence": evidence}),
-                            &[],
-                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
+                            }),
+                            evidence,
+                            &mut batches,
                             &mut receipt_key,
-                        )
-                        .map_err(claim_append_error)?;
+                        )?;
                         message_subjects.push(message_subject);
                     }
                 }

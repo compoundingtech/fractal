@@ -248,3 +248,53 @@ fn an_offline_export_refuses_a_copy_with_queued_mail_and_names_it() {
     drop(graph);
     crate::backup::create_from_database(&database, root.path(), &archive).unwrap();
 }
+
+#[test]
+fn mail_a_method_queues_in_its_transaction_leaves_in_order_when_it_returns() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let (first, second) = (sent("message/outbox-order-b", "agent/birch"), sent("message/outbox-order-a", "agent/birch"));
+    {
+        let _drain = message_outbox::DrainOnReturn(&graph);
+        let mut connection = graph.connection.write();
+        let transaction = connection.transaction().unwrap();
+        assert!(message_routing::queue_tx(&transaction, &first).unwrap());
+        assert!(message_routing::queue_tx(&transaction, &second).unwrap());
+        // The same subject again sends nothing more.
+        assert!(!message_routing::queue_tx(&transaction, &first).unwrap());
+        transaction.commit().unwrap();
+        drop(connection);
+    }
+    assert!(rows(&graph).is_empty(), "the guard drained what the transaction queued");
+    let shard = messages_shard::shard(&graph).unwrap();
+    let order: Vec<String> = [&first, &second]
+        .iter()
+        .map(|message| (shard.claims_for(&message.subject, Some("message.sent")).unwrap()[0].store_index, message.subject.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
+        .collect();
+    assert_eq!(order, [first.subject.clone(), second.subject.clone()], "in the order they were queued, not by subject");
+}
+
+/// How long a message waits in the outbox when its sender drains on return, as observations and
+/// reconcile passes do: the figure the PR reports. It fails if p99 reaches a second, past which
+/// the drainer would have to be woken on enqueue instead.
+#[test]
+fn queued_mail_waits_well_under_a_second() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let before = message_outbox::recent_delays_ms().len();
+    for n in 0..200 {
+        let _drain = message_outbox::DrainOnReturn(&graph);
+        let mut connection = graph.connection.write();
+        let transaction = connection.transaction().unwrap();
+        message_routing::queue_tx(&transaction, &sent(&format!("message/outbox-delay-{n:03}"), "agent/birch")).unwrap();
+        transaction.commit().unwrap();
+    }
+    let mut delays: Vec<u64> = message_outbox::recent_delays_ms().into_iter().skip(before).collect();
+    assert!(delays.len() >= 200, "{}", delays.len());
+    delays.sort_unstable();
+    let at = |p: f64| delays[((delays.len() - 1) as f64 * p) as usize];
+    println!("outbox delay over {} messages: p50 {} ms, p99 {} ms, max {} ms", delays.len(), at(0.5), at(0.99), delays[delays.len() - 1]);
+    assert!(at(0.99) < 1000);
+}

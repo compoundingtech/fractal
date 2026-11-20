@@ -3333,6 +3333,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _entered = telemetry.span.enter();
         let result = self.recording_writes(|| self.reconcile_pass());
         if result.is_err() { telemetry.error(); }
+        // Mail the pass queued from inside its transactions leaves now, as the daemon's drain would
+        // after the commit: no wait for that task, and a pass alone delivers what it caused.
+        if let Err(error) = crate::store::message_outbox::drain_fresh(&self.store) {
+            tracing::warn!(error = %format!("{error:#}"), "message outbox drain after a reconcile pass failed");
+        }
         result
     }
 
@@ -4827,7 +4832,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let work_context = step
                 .map(|step| format!(" Continue the claimed work `{step}`."))
                 .unwrap_or_default();
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: message_subject,
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -5169,7 +5174,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(key.clone()),
             })?;
             let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: format!("message/{message_id}"),
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),

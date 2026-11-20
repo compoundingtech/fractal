@@ -94,6 +94,20 @@ pub fn send(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalErr
     send_message(store, input).map(|(claim, _)| claim)
 }
 
+/// Queue a daemon's message from inside a graph transaction whose route it can't read before
+/// the transaction began: the outbox holds it, and the daemon's drain routes it after the commit,
+/// to the stream or, as before, the graph (`message_outbox::drain`). True when it queued, false
+/// when a message under that subject is already sent or queued, so a retried transaction sends it
+/// once.
+pub fn queue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
+    if super::message_sent::message_sent_tx(transaction, &input.subject)
+        .map_err(|error| FractalError::new("internal", format!("{error:#}")))?
+    {
+        return Ok(false);
+    }
+    message_outbox::enqueue_tx(transaction, input)
+}
+
 /// [`send_message`] for a sender inside a graph transaction, which cannot write to the shard: a
 /// message `route` (its [`legacy_reason`], read before the transaction) sends to the stream is
 /// queued in the outbox, which the daemon drains to the shard after the commit; any other is
