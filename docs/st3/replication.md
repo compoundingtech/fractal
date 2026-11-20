@@ -592,6 +592,9 @@ Publication advances a persisted admission-wake generation in the same commit. A
 commit observer schedules admission, repair and projection after the writer returns;
 held envelopes therefore resume even in a quiet fleet with no new receive or resend.
 The local worker also checks at startup, covering an interruption between publication and wake.
+If catch-up throttles projection after re-admission, the worker schedules a continuation at
+the throttle deadline even without new traffic. It releases the store while waiting and
+notifies readers only after projection succeeds; the catch-up throttle remains in force.
 Query-only readers
 use the canonical snapshot fold until publication; writer-context reads report
 `resource-preparation-not-caught-up` rather than doing that unbounded fallback.
