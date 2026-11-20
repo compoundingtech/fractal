@@ -1665,6 +1665,32 @@
       "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
     },
     {
+      "command": "st resources cancel",
+      "description": "Cancel an exact execution or owner-scoped request and optionally await retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::cancel_selects_exact_execution_identity",
+        "crates/fractal-api-core/src/api/resources.rs::absent_request_cancel_returns_confirmed_owner_scoped_tombstone"
+      ],
+      "verification": "real Clap execution/request selectors and authenticated durable cancellation tombstones"
+    },
+    {
+      "command": "st resources member-scope",
+      "description": "Inspect the authenticated execution's exact enforced member cgroup",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::member_scope_requires_exact_execution_selector",
+        "crates/fractal-api-core/src/api/resources.rs::nested_member_scope_keeps_current_generation_separate_from_verified_root"
+      ],
+      "verification": "real Clap exact-execution selector and nested generation/root custody checks"
+    },
+    {
+      "command": "st resources in-member",
+      "description": "Inspect local kernel member placement without granting execution authority",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::offline_membership_requires_explicit_owner_uid"
+      ],
+      "verification": "real Clap parsing requires an explicit owner UID for offline inspection"
+    },
+    {
       "command": "st resources hold",
       "description": "Place a native execution-host admission hold without reserving capacity",
       "tests": [
