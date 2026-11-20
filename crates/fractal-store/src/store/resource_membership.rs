@@ -988,6 +988,14 @@ mod tests {
         assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
         let after = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
         assert_eq!(after, before);
+        let coverage = store.claims_by_kinds_after(&[super::resource_admission_objectives::COVERAGE_KIND], None, 0, 10).unwrap();
+        assert_eq!(coverage.claims.last().unwrap().body["fields"]["complete"], false);
+        assert!(!store.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
+            .load(std::sync::atomic::Ordering::Acquire));
+        let mut supported = request.clone();
+        supported.id = "supported-after-recovery".into();
+        supported.name = "supported-lane".into();
+        assert!(matches!(store.request_resource_membership(&supported, test_fit(), 3).unwrap(), Admission::Admitted(_)));
     }
 
     #[test]
