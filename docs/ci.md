@@ -2,20 +2,20 @@
 
 ## GitHub Actions on Namespace
 
-Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
-exact commit that lands on `main`; its successful checks stay attached to that SHA.
-`Main upkeep` verifies the four required queue checks. If the queue took an evidence skip,
-or its metadata cannot prove hosted execution, upkeep runs the merge-group proof jobs for
-that exact landed source. Otherwise it retains the hosted queue proof without repeating it.
+Workspace CI runs on pull requests, merge groups, pushes to `main` and manual dispatch.
+Every main push runs the canonical hosted graph, including all four Rust test partitions.
+`Main upkeep` waits up to two hours for the exact landed SHA's latest Workspace CI push
+attempt to pass `linux-test-build`, `linux-clippy` and `linux-fleet-compat`. It never
+borrows PR or merge-group results and does not launch a second copy of the proof graph.
 Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
 lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI and both
 public-content guards. Public checks retain each main push in its own run group;
-only pull-request events cancel in-progress runs. Main upkeep retains
-each landed source for any required post-merge proof. Manual dispatch
-(Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
-The four required queue checks and complete test partitions are retained.
+only pull-request events cancel in-progress runs. Main upkeep retains each landed source
+for required hosted-check reporting. Manual dispatch (Performance runs only by dispatch),
+main pushes and merge-group runs retain independent `github.run_id` groups.
+Advisory outcomes, including `linux-gate`, TypeScript and web, remain visible in Workspace CI.
 
 When a trusted note covers a pull request or merge group's web check,
 `fractal-web-execution` skips at job level and allocates no runner. The always-emitted
@@ -47,11 +47,11 @@ its result is hosted execution proof only, not a replacement for a merge gate.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
-disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
-declared inputs, runs beside `genie-freshness` and is not a required context of its own: the `linux-gate` job, which every head reports,
-needs it and fails when it failed or was cancelled; a head from before it existed has no run of it and is not blocked),
-and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
+disabled in GitHub Actions; it does not currently run on PRs or main pushes. The direct-merge
+fast lane requires `linux-test-build`, `linux-clippy` and `linux-fleet-compat`. The full
+`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` checks still run as
+advisory hosted proof. Merge-group support remains available (see [Merge queue](#merge-queue)).
+The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
 
@@ -226,7 +226,7 @@ devShell PTY advances.
 
 The workflow verifies that its configured partition inventories are disjoint and
 cover the complete selected suite. The generated `fleet.yml` declares the
-partitions and which shards apply to PRs and merge groups. `linux-gate` requires
+partitions: two on PRs, four on merge groups and main pushes. `linux-gate` requires
 every applicable shard or its explicitly accepted exact-source evidence skip;
 a failed, cancelled or unexpectedly skipped shard fails its aggregate. Logs retain
 passing test durations and the partition inventories.
@@ -281,9 +281,9 @@ executables, Clippy artifacts, the integration binary, the Genie shell, or the i
 archive and VM driver. The published fleet baseline is downloaded rather than compiled.
 Warmers reuse the setup checkout before probing and do not check out again afterward:
 the shared `withCompatArchives` download must survive until the historical baseline is read.
-These cache jobs do not repeat workspace tests or the isolation VM; the separately selected
-post-merge proof jobs provide hosted execution when queue evidence requires it. The
-TypeScript dependency cache is also kept on main without repeating its tests.
+These cache jobs do not repeat workspace tests or the isolation VM; Workspace CI provides
+hosted execution on every main push. The TypeScript dependency cache is also kept on main
+without repeating its tests in upkeep.
 Merge-group and PR caches have their own ref scope; they cannot replace these main-scope saves,
 which all PRs and Namespace overflow runs can restore. Manual Workspace CI dispatch on main
 remains available for a full run. Release and deployment workflows keep their own push triggers.

@@ -6545,7 +6545,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     loop {
         let names = agent_roster_snapshot(store, |index| {
             let connection = store.readers.get();
-            let names = connection.prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+            let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc92b1baa7e5f owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ &crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
                 .query_map(rusqlite::params![index, lower, "agent0", AGENT_ROSTER_WARM_CHUNK],
                     |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?;

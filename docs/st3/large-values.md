@@ -98,6 +98,39 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Roster paging and read-budget probe inventory repair
+
+The `fractal_api_core::api` maintainer owns `lv-hc92b1baa7e5f`; the
+`fractal_api_core::api::roster_assembly` maintainer owns `lv-h168a03df0009` and
+`lv-h540d1ea0b50f`; the `fractal_seats::store::seats` maintainer owns
+`lv-h25806c4c9d67`. These prepare the shared `AGENT_ROSTER_SUBJECT_PAGE_SQL`,
+which appends a bound `LIMIT ?4` to `RANGE_SUBJECTS`. The recursive range query
+seeks the claims subject index at the snapshot frontier and returns subject
+strings for warm, initial assembly, membership rebuild, and bounded publication
+pages. The row limit bounds page cardinality, not subject/key bytes. Existing
+inline subjects remain transitional debt: trace these dynamic SQL callers to
+the subject representation, then establish bounded physical subject/index units
+or references without changing membership or snapshot semantics.
+
+The surviving unpaged `RANGE_SUBJECTS` calls in `fractal_seats::store::seats`
+use their current source identities `lv-hb0a36171e464` and `lv-h19fe7faeaaf7`;
+the removed earlier call's `lv-hc5cb621b4eae` marker must not remain attached.
+
+The `fractal_store::store` maintainer owns `lv-hc80bf6e28816`, the subject-cache
+overflow probe. It binds integer frontiers and a row limit, reads only the
+store-index B-tree, and returns one integer count before any claim bodies are
+folded. Its unresolved bind sink is registered separately from the SQL template;
+the next representation review must preserve this bounded probe and connect the
+bind sink to that template, not infer that arbitrary claim values are bounded.
+
+The `fractal_api_core::api::tests::roster_fresh` maintainer owns
+`lv-ha365a159e859`. This test-only recursive query produces integers through
+100000 and one integer sum, with no external value input or writes. It
+deliberately exercises reader cancellation after clock expiry. Its conservative
+unresolved-query registration records this exact test flow, not permission for
+new production sinks; trace it to its fixed integer-only statement when refining
+the lexical catalog.
+
 ### Native fleet roll receipt source
 
 The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
