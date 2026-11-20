@@ -347,11 +347,11 @@ reader-first release. Default v20 stores retain N-1 rollback compatibility.
 Once a later release activates v21, roll back only to a published binary with
 this v21 reader, never by decrementing `user_version`.
 
-### Reader-first compacted claim signatures (version 24)
+### Reader-first compacted claim signatures (version 26)
 
-This release reads **version 24** stores and still writes version 20 claim
+This release reads **version 26** stores and still writes version 20 claim
 signatures. No writer compacts yet, so nothing changes on a store this release
-opens. In version 24, a settled claim drops its `claim_signature_candidates` row,
+opens. In version 26, a settled claim drops its `claim_signature_candidates` row,
 and with it, through the existing trigger, its `claim_signature_sources` row. It
 keeps everything else:
 - its `claim_signatures` facade, as inline text;
@@ -375,10 +375,12 @@ A settled claim here has one candidate; a fold that is complete, clean, notified
 and not held; a nonce use, so its signature verified on the claim; no queued or
 fresh entry; and no requeue cursor still ahead of it.
 
-`user_version` 24 is a reader fence only, and it also carries version 23's
-meaning. The compaction writer ships in a later release whose N-1 published binary
+`user_version` 26 is a reader fence only, and it also carries version 25's
+meaning (blob bytes in the blob file), which this release reads. Versions 23 and
+24 are skipped and never used: builds from #6894 on open them unchecked.
+The compaction writer ships in a later release whose N-1 published binary
 contains this reader, and it turns on through its own meta flag, never through
-the version number. Once a store is at 24, roll back only to a published binary
+the version number. Once a store is at 26, roll back only to a published binary
 with this reader, never by decrementing `user_version`.
 
 ### Additive assistant admission index

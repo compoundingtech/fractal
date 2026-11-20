@@ -1,4 +1,4 @@
-//! Check the version 24 readers on a compacted copy of a real member's database: every key grant
+//! Check the version 26 readers on a compacted copy of a real member's database: every key grant
 //! and revocation, plus a sample of other signed claims, is judged afresh through the compacted
 //! facade, and each verdict and served signature must equal what the member had before.
 //! Usage: signature_compaction_check --copy COPY ORIGIN [SAMPLE]. It writes, so it refuses to

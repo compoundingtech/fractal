@@ -1,4 +1,4 @@
-//! Storage version 24 readers: a compacted claim keeps its facade, count, verdict, nonce use and
+//! Storage version 26 readers: a compacted claim keeps its facade, count, verdict, nonce use and
 //! dependency links, without candidate or source rows. Readers take the facade as its single
 //! candidate, so verdicts, serving, revocation, delegation and requeue read as before, and a new
 //! candidate expands it first. The writer ships later; these tests compact as it will.
@@ -82,7 +82,7 @@ fn attach(store: &Store, claim: &ClaimRecord, signature: &ClaimSignature) {
     store_claim_signature_tx(&connection, &claim.id, signature).unwrap();
 }
 
-/// Compact as the version 24 writer will: a settled claim with one candidate whose signature
+/// Compact as the version 26 writer will: a settled claim with one candidate whose signature
 /// verified on it (it holds a nonce use), not held, queued, fresh or pending, keeps its count
 /// and loses its candidate and source rows.
 fn compact(store: &Store) -> i64 {
@@ -301,16 +301,16 @@ fn a_new_candidate_expands_a_compacted_claim_first() {
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
 }
 
-/// A store the writer fenced at 24, rolled back to this reader release: the fence must not turn
+/// A store the writer fenced at 26, rolled back to this reader release: the fence must not turn
 /// on the version 21 reference writer, whose conversion needs every facade's candidate row.
 #[test]
-fn a_store_fenced_at_24_keeps_the_reference_writer_off() {
+fn a_store_fenced_at_26_keeps_the_reference_writer_off() {
     let (_directory, store, _anchor) = studio();
     note(&store, None, "a node note");
     seal(&store);
     drain(&store);
     assert!(compact(&store) > 0);
-    store.connection.write().pragma_update(None, "user_version", 24).unwrap();
+    store.connection.write().pragma_update(None, "user_version", 26).unwrap();
     let before = verdicts(&store);
 
     let later = note(&store, Some("person/ada"), "written after the rollback");

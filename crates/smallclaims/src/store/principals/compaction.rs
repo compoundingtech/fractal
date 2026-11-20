@@ -1,4 +1,4 @@
-//! Reader side of storage version 24: a compacted claim keeps its facade as its only candidate.
+//! Reader side of storage version 26: a compacted claim keeps its facade as its only candidate.
 //!
 //! A settled claim with one candidate keeps its `claim_signatures` facade (inline text), its
 //! `claim_signature_counts` row (candidates = 1), its verdict, nonce use and dependency links,
@@ -91,7 +91,7 @@ mod tests {
         };
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
-        // Compacted as the version 24 writer leaves it: the count at 1, no candidate or source
+        // Compacted as the version 26 writer leaves it: the count at 1, no candidate or source
         // (the candidate's delete trigger takes the source with it).
         tx.execute("DELETE FROM claim_signature_candidates WHERE claim_id=?1", [&claim.id]).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM claim_signature_sources WHERE claim_id=?1", [&claim.id], |row| row.get::<_, i64>(0)).unwrap(), 0);
