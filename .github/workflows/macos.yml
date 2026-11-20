@@ -377,7 +377,10 @@ jobs:
     needs: [compat-archives-aarch64-apple-darwin]
   compat-archives-aarch64-apple-darwin:
     name: Prepare verified compatibility archives (aarch64-apple-darwin)
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 15
     permissions:
       contents: read
