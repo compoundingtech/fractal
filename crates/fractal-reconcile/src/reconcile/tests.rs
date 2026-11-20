@@ -1142,6 +1142,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         resource_ignore_terminate: Mutex<bool>,
         resource_ignore_kill: Mutex<bool>,
+        resource_retirement_pending: Mutex<usize>,
+        resource_retirement_calls: AtomicUsize,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
@@ -1682,6 +1684,7 @@ mission "shell-owner" state="ready" {{
         store.update_shell_resource(&execution).unwrap();
         reconciler.reconcile_shell_resources().unwrap();
         assert_eq!(*runtime.kills.lock().unwrap(), vec!["outcome".to_owned()]);
+        make_shell_retirement_due(&store);
         reconciler.reconcile_shell_resources().unwrap();
         assert_one_shell_outcome(&store, "cancelled");
         reconciler.reconcile_mission_run_cleanup(&run).unwrap();
@@ -1700,6 +1703,78 @@ mission "shell-owner" state="ready" {{
         assert_run_cancellation_stops_owned_shell(true);
     }
 
+
+    fn make_shell_retirement_due(store: &Store) {
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.retirement_retry_at_unix_ms = Some(0);
+        store.update_shell_resource(&execution).unwrap();
+    }
+
+    #[test]
+    fn shell_pending_retirement_rearms_each_unfinished_attempt() {
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        *runtime.resource_retirement_pending.lock().unwrap() = 2;
+        reconciler.reconcile_shell_resources().unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        assert_eq!(first.state, "finishing");
+        assert_eq!(first.retirement_retry_delay_ms, 1_000);
+        assert!(first.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(store.shell_resource("outcome").unwrap().revision, first.revision);
+
+        drop(reconciler);
+        drop(store);
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
+        assert_eq!(store.shell_resource("outcome").unwrap().retirement_retry_at_unix_ms, first.retirement_retry_at_unix_ms);
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+
+        // The pending result has no native event. Its persisted deadline alone
+        // causes another attempt, which must in turn persist a new deadline.
+        make_shell_retirement_due(&store);
+        reconciler.reconcile_shell_resources().unwrap();
+        let second = store.shell_resource("outcome").unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(second.retirement_retry_delay_ms, 2_000);
+        assert!(second.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+        make_shell_retirement_due(&store);
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(runtime.resource_retirement_calls.load(Ordering::Relaxed), 3);
+        assert_one_shell_outcome(&store, "completed");
+    }
+
+    #[test]
+    fn shell_stuck_generation_is_killed_once_and_rechecked_with_capped_backoff() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        *runtime.resource_ignore_terminate.lock().unwrap() = true;
+        *runtime.resource_ignore_kill.lock().unwrap() = true;
+        store.cancel_shell_resource("outcome").unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let mut execution = store.shell_resource("outcome").unwrap();
+        execution.cancellation_started_at = Some(execution.cancellation_started_at.unwrap() - 5_000);
+        store.update_shell_resource(&execution).unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        assert_eq!(first.cancellation_kill_generation.as_deref(), Some("outcome-generation"));
+        assert_eq!(first.retirement_retry_delay_ms, 1_000);
+        let mut first = first;
+        first.retirement_retry_at_unix_ms = Some(u64::try_from(now_ms()).unwrap() + 300_000);
+        store.update_shell_resource(&first).unwrap();
+        let first = store.shell_resource("outcome").unwrap();
+        for _ in 0..100 { reconciler.reconcile_shell_resources().unwrap(); }
+        assert_eq!(store.shell_resource("outcome").unwrap().revision, first.revision);
+        assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+        for expected in [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000, 300_000] {
+            make_shell_retirement_due(&store);
+            reconciler.reconcile_shell_resources().unwrap();
+            let execution = store.shell_resource("outcome").unwrap();
+            assert_eq!(execution.retirement_retry_delay_ms, expected);
+            assert!(execution.retirement_retry_at_unix_ms.unwrap() > u64::try_from(now_ms()).unwrap());
+            assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+        }
+    }
 
     #[test]
     fn shell_cleanup_deadline_retains_custody_for_stuck_process_or_missing_observation() {
@@ -1739,6 +1814,7 @@ mission "shell-owner" state="ready" {{
                 runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
                 exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
             });
+            make_shell_retirement_due(&store);
             reconciler.reconcile_shell_resources().unwrap();
             assert_one_shell_outcome(&store, "cancelled");
         }
@@ -1960,6 +2036,9 @@ mission "cancel-driver" state="ready" {
             Ok(0)
         }
         fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+            self.resource_retirement_calls.fetch_add(1, Ordering::Relaxed);
+            let mut pending = self.resource_retirement_pending.lock().unwrap();
+            if *pending > 0 { *pending -= 1; return Ok(false); }
             Ok(true)
         }
         fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {

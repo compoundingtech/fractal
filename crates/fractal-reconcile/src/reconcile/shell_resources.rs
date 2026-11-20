@@ -16,6 +16,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.store.cancel_shell_resource(&execution.command.id)?;
                 execution.cancel = true;
             }
+            let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+            if let Some(deadline) = execution.retirement_retry_at_unix_ms.filter(|deadline| *deadline > now) {
+                // Re-arm even on unrelated wakes or after restart: a worker's pending
+                // result is not guaranteed to produce another native event.
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
+                continue;
+            }
             if let Err(error) = self.drive_shell_resource(&mut execution) {
                 let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
                     .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
@@ -44,6 +51,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
                 execution.command.environment.clear();
+            } else if execution.cancellation_kill_generation.is_some()
+                || matches!(execution.state.as_str(), "finishing" | "finishing-refused" | "retiring" | "failing")
+            {
+                execution.retirement_retry_delay_ms = execution.retirement_retry_delay_ms.saturating_mul(2).clamp(1_000, 300_000);
+                let deadline = u64::try_from(now_ms()).unwrap_or(u64::MAX).saturating_add(execution.retirement_retry_delay_ms);
+                execution.retirement_retry_at_unix_ms = Some(deadline);
+                self.arm_restart(&format!("shell-retirement:{}", execution.command.id), u128::from(deadline));
             }
             if self.store.update_shell_resource(&execution)? {
                 self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
@@ -420,9 +434,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let began = *execution.cancellation_started_at.get_or_insert(elapsed);
                 let remaining = 5_000_u64.saturating_sub(elapsed.saturating_sub(began));
                 if remaining == 0 {
+                    if execution.cancellation_kill_generation.as_deref() == Some(generation.generation_id.as_str()) {
+                        return Ok(());
+                    }
                     // Preserve observations while the cgroup still exists, even if the helper
                     // is stuck or never installed its SIGTERM handler.
                     execution.result = Some(self.shell_payload_observation(execution, &generation.generation_id, now)?);
+                    // Persist the generation-bound kill intent before the OS side effect.
+                    // Rechecks retain custody but must never repeatedly signal this generation.
+                    execution.cancellation_kill_generation = Some(generation.generation_id.clone());
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
                     // Signal only: a stuck task must not block the writer/reconcile loop.
                     // The exit watch and subsequent sweeps confirm retirement separately.

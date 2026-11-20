@@ -59,6 +59,12 @@ pub struct Execution {
     pub cancel: bool,
     #[serde(default)]
     pub cancellation_started_at: Option<u64>,
+    #[serde(default)]
+    pub cancellation_kill_generation: Option<String>,
+    #[serde(default)]
+    pub retirement_retry_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub retirement_retry_delay_ms: u64,
     pub timed_out: bool,
     pub head_start: Option<String>,
     pub clean_start: Option<bool>,
@@ -324,6 +330,7 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
+            cancellation_kill_generation: None, retirement_retry_at_unix_ms: None, retirement_retry_delay_ms: 0,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
             learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();

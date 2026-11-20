@@ -617,6 +617,9 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
+    fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support exact resource execution cancellation")
+    }
     /// Request SIGKILL without waiting for exit or releasing execution custody.
     fn kill_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
         anyhow::bail!("runtime does not support generation-fenced payload killing")
@@ -1111,6 +1114,13 @@ impl RuntimeControl for NativeRuntime {
         let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(Default::default()); };
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
         crate::store::resource_profile_learner::cgroup::read(group)
+    }
+    fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
+        let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
+        self.exec.retire_if(id, &generation.generation_id)?;
+        store.end_resource_execution(record.grant.as_ref().context("resource generation missing")?, id, u64::try_from(now_ms()).unwrap_or(u64::MAX))
     }
     fn kill_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
         self.exec.signal_if(id, Some(generation), libc::SIGKILL)
