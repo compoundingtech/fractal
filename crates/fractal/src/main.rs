@@ -22332,7 +22332,7 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
         }
     }
     let mut deleted = 0;
-    loop {
+    while smallclaims::store::record_bytes::VALID_RECORD_DELETION {
         let page_store = store.clone();
         let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_records", || page_store.release_valid_records(delete_after_ms))).await;
         match result {

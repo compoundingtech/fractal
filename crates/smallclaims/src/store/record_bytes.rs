@@ -236,6 +236,11 @@ pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[
 /// claim; from it, a build that reads only up to version 22 refuses the store.
 pub const VALID_RECORDS_GONE_VERSION: u32 = 23;
 
+/// Whether the daemon deletes valid records. Off until the signature-reference writer turns on by
+/// its own flag rather than at storage version 21 and above (#6765): committing version 23 would
+/// otherwise switch that writer on too.
+pub const VALID_RECORD_DELETION: bool = false;
+
 /// Whether this store still stores a record for each valid claim.
 pub fn valid_records_kept(connection: &Connection) -> Result<bool> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
