@@ -168,7 +168,7 @@ impl Store {
     pub fn source_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, FractalError> {
         self.readers
             .get()
-            .query_row("SELECT bytes FROM blobs WHERE hash=?1", [hash], |row| row.get(0))
+            .query_row(concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM blobs AS b WHERE b.hash=?1"), [hash], |row| row.get(0))
             .optional()
             .map_err(internal)
     }

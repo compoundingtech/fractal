@@ -9,7 +9,7 @@ pub struct EscalationEpisode {
 
 // One row per clock-bearing receipt, ordered by the shared canonical key. Inserting an
 // out-of-order status changes only its own transition bit and the next status's bit.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6232d25a79e0 owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfeeb5c6bf008 owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_escalation_clocks_v1 (
  store_index INTEGER PRIMARY KEY, subject TEXT NOT NULL, ordering BLOB NOT NULL,
  claim_id TEXT NOT NULL, state TEXT, at TEXT NOT NULL, pause_until TEXT,
@@ -57,7 +57,7 @@ pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
         let subjects = tx.prepare_cached("SELECT DISTINCT subject FROM claims WHERE kind='mission-run.created'")?
             .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         for subject in subjects { register_run(tx, &subject)?; }
-        tx.execute("INSERT INTO meta(key,value) VALUES('local_escalation_registration_v1','ready')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc79245b566e4 owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_escalation_registration_v1','ready')", [])?;
     }
     Ok(())
 }
@@ -102,12 +102,12 @@ fn register_run(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let Some(id) = subject.strip_prefix("mission-run/") else { return Ok(()); };
     // The creation receipt, not the writer of a later transition, owns the run.
     let origin: Option<String> = tx.query_row(
-        &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created'
+        /* sqlite-large-value: allow-for-now lv-h1bb6598fab35 owner=fractal_store::store::escalation TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created'
          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
         [subject], |row| row.get(0)).optional()?;
     if let Some(origin) = origin {
-        tx.execute("INSERT INTO local_escalation_runs_v1(run_id,origin) VALUES(?1,?2)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h799cf224d6de owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_escalation_runs_v1(run_id,origin) VALUES(?1,?2)
             ON CONFLICT(run_id) DO UPDATE SET origin=excluded.origin", params![id, origin])?;
     }
     Ok(())
@@ -115,8 +115,10 @@ fn register_run(tx: &Transaction<'_>, subject: &str) -> Result<()> {
 
 pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
     loop {
+        // A proof copy renumbers claims through negative SQLite rowids. Its triggers
+        // queue those temporary slots too; drain them even after the claims moved on.
         let indexes = tx.prepare_cached("SELECT store_index FROM local_escalation_pending_v1 ORDER BY store_index LIMIT 256")?
-            .query_map([], |row| row.get::<_, u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            .query_map([], |row| row.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if indexes.is_empty() { return Ok(()); }
         for index in indexes {
             let old: Option<(String, Vec<u8>)> = tx.query_row("SELECT subject,ordering FROM local_escalation_clocks_v1 WHERE store_index=?1",
@@ -313,6 +315,32 @@ mod tests {
         tx.execute("UPDATE claim_positions SET position=0 WHERE claim_id='claim-1'", []).unwrap();
         flush(&tx).unwrap();
         assert_eq!(entry(&tx), "claim-2");
+    }
+
+    #[test]
+    fn checkpoint_renumbering_drains_temporary_negative_slots_before_replay() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        insert(&tx, 51, 10, "ready", false);
+        insert(&tx, 149, 20, "working", false);
+        // Checkpoint proofs first move every claim to a disjoint negative slot,
+        // then assign its positive canonical index before replaying projections.
+        tx.execute_batch("UPDATE claims SET store_index=CASE store_index WHEN 51 THEN -1 ELSE -2 END;
+            UPDATE claims SET store_index=-store_index;").unwrap();
+        let negative: u64 = tx.query_row(
+            "SELECT COUNT(*) FROM local_escalation_pending_v1 WHERE store_index<0",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(negative, 2, "exercise the real update triggers, not planted queue rows");
+        rebuild(&tx).unwrap();
+        assert_eq!(entry(&tx), "claim-149");
+        let indexes = tx.prepare("SELECT store_index FROM local_escalation_clocks_v1 ORDER BY store_index").unwrap()
+            .query_map([], |row| row.get::<_, u64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(indexes, vec![1, 2]);
+        let pending: u64 = tx.query_row("SELECT COUNT(*) FROM local_escalation_pending_v1",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(pending, 0, "temporary and final slots are both fully drained");
     }
 }
 

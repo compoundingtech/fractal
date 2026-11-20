@@ -53,6 +53,8 @@ export const ChildRun = Schema.Struct({
   status: Schema.Literal('completed'),
   products: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   executions: Schema.optionalKey(Schema.Array(StepExecution)),
+  /** The completed native program's actual output, not a declared resource product. */
+  result: Schema.optionalKey(Schema.Unknown),
 })
 export type ChildRun = typeof ChildRun.Type
 
@@ -63,6 +65,74 @@ export class ChildFailed extends Schema.TaggedError<ChildFailed>()('ChildFailed'
   reason: Schema.String,
   executions: Schema.optionalKey(Schema.Array(StepExecution)),
 }) {}
+
+/** The native seat's verified finite work episode, including actual claim receipts. */
+export const WorkerReport = Schema.Struct({
+  run: Schema.String,
+  step: Schema.String,
+  summary: Schema.String,
+  evidence: Schema.Array(Schema.String),
+  products: Schema.Record(Schema.String, Schema.Unknown),
+  executions: Schema.optionalKey(Schema.Array(StepExecution)),
+})
+export type WorkerReport = typeof WorkerReport.Type
+
+export const TurnProduct = Schema.Struct({
+  path: Schema.String,
+  kind: Schema.String,
+  fields: Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Boolean, Schema.Finite])),
+})
+export type TurnProduct = typeof TurnProduct.Type
+
+export interface TurnOptions {
+  readonly id: string
+  /** Full agent subject; this does not impersonate the parent program's actor. */
+  readonly agent: string
+  readonly instructions: string
+  /** Inert context text, never shell arguments or environment. */
+  readonly context: string
+  readonly products?: readonly TurnProduct[]
+  readonly freshContext?: boolean
+}
+
+/** A real, parent-linked finite assigned work episode owned by the native engine. */
+export const turn = (options: TurnOptions): Effect.Effect<WorkerReport, ResourceError | ChildFailed, ProgramServices> =>
+  keyed(options.id, (key, program) => {
+    const { id: _, ...payload } = options
+    program.requests.set(key, () => program.host.resource({ key, operation: 'agent.turn', payload }))
+    return DurableDeferred.await(
+      DurableDeferred.make(key, { success: WorkerReport, error: Schema.Union([ResourceError, ChildFailed]) }),
+    ).pipe(Effect.ensuring(Effect.sync(() => program.requests.delete(key))))
+  })
+
+/** Collision-free standard child input protocol: original graph inputs stay inside `inputs`. */
+export const SeatTurnContext = Schema.Struct({
+  inputs: Schema.Record(Schema.String, Schema.String),
+  products: Schema.Array(TurnProduct),
+  freshContext: Schema.optionalKey(Schema.Boolean),
+})
+
+/** Publish this module normally as mission.ts; the default id requires fractal/seat-turn/mission.ts. */
+export const seatTurn = (options: Meta & {
+  readonly id?: string
+  readonly reportTo: MissionIntent['reportTo']
+}) => mission({
+  ...options,
+  id: options.id ?? 'fractal/seat-turn',
+  goal: 'Complete one assigned agent turn and return its verified report.',
+  input: Schema.Struct({ agent: Schema.String, instructions: Schema.String, context: Schema.String }),
+  output: WorkerReport,
+}, ({ agent, instructions, context }) => Effect.gen(function* () {
+  const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(SeatTurnContext))(context).pipe(
+    Effect.mapError((error): ResourceError => ({
+      _tag: 'ResourceError', code: 'resource-operation-refused', message: `Invalid seat-turn context: ${error.message}`,
+    })),
+  )
+  return yield* turn({
+    id: 'turn', agent, instructions, context: JSON.stringify(decoded.inputs), products: decoded.products,
+    ...(decoded.freshContext === undefined ? {} : { freshContext: decoded.freshContext }),
+  })
+}))
 
 /** A person's answer to an ask; `resolved_by` is the person or `deadline`. */
 export const AskAnswer = Schema.Struct({
@@ -215,6 +285,8 @@ export class Worker extends Context.Service<
     readonly mission: string
     readonly input?: Readonly<Record<string, string>>
     readonly product?: string | readonly string[]
+    /** Decode the native program output as WorkerReport, rather than declared child resources. */
+    readonly report?: boolean
   }
 >()('fractal/Worker') {
   /** Runs the worker turns it is provided to as child runs of `mission`. */
@@ -302,28 +374,33 @@ export function step(
     )
   return Effect.flatMap(Effect.service(Worker), (worker) =>
     Effect.flatMap(child(options.id, worker.mission, worker.input ?? {}), (done) => {
-      const decode = () => {
-        if (success === undefined) return Effect.void
-        // The daemon keys products by full subject: `resource/<child run>/<path>`.
-        const read = (path: string) => {
-          const subject = `resource/${done.run}/${path}`
-          const value = done.products?.[subject]
-          if (value === undefined) throw new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`)
-          return value
+      const decodeReport = worker.report === true
+        ? Effect.orDie(Schema.decodeUnknownEffect(WorkerReport)(done.result))
+        : Effect.succeed(undefined)
+      return Effect.flatMap(decodeReport, (report) => {
+        const decode = () => {
+          if (success === undefined) return Effect.void
+          const read = (path: string) => {
+            const subject = `resource/${done.run}/${path}`
+            const value = report === undefined ? done.products?.[subject] : report.products[path]
+            if (value === undefined) throw new Error(`worker turn ${options.id}: ${report?.run ?? done.run} has no product ${report === undefined ? subject : path}`)
+            return value
+          }
+          const value = worker.product === undefined
+            ? undefined
+            : typeof worker.product === 'string'
+              ? read(worker.product)
+              : Object.fromEntries(worker.product.map((path) => [path, read(path)]))
+          return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
         }
-        const value = worker.product === undefined
-          ? undefined
-          : typeof worker.product === 'string'
-            ? read(worker.product)
-            : Object.fromEntries(worker.product.map((path) => [path, read(path)]))
-        return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
-      }
-      return options.execution === true
-        ? Effect.map(decode(), (value) => ({
-          value,
-          ...(done.executions === undefined ? {} : { executions: done.executions }),
-        }))
-        : decode()
+        const executions = report === undefined ? done.executions : report.executions
+        return options.execution === true
+          ? Effect.map(decode(), (value) => ({
+            value,
+            ...(executions === undefined ? {} : { executions }),
+          }))
+          : decode()
+      })
     }),
   )
 }

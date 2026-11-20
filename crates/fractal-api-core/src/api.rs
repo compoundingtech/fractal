@@ -672,6 +672,39 @@ async fn test_retire_closed_mail(
     Ok(Json(json!({"threads": threads, "claims": claims})))
 }
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestBlobMove {
+    now_ms: u64,
+    move_after_ms: u64,
+}
+
+/// Test support: move blob bytes into the blob file as the daemon's hourly pass would at
+/// `now_ms`, so a test need not wait three days or an hour.
+#[cfg(feature = "test-support")]
+async fn test_move_blob_bytes(
+    State(state): State<AppState>,
+    Json(request): Json<TestBlobMove>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (rows, bytes, waiting) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, u64, bool)> {
+        let (mut rows, mut bytes) = (0, 0);
+        loop {
+            let step = store.move_blob_bytes_step(request.now_ms, request.move_after_ms, std::time::Duration::from_millis(40))?;
+            rows += step.rows;
+            bytes += step.bytes;
+            if !step.more {
+                return Ok((rows, bytes, step.waiting));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"rows": rows, "bytes": bytes, "waiting": waiting})))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -1161,7 +1194,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark))
-        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail));
+        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail))
+        .route("/v1/internal/test/blob-move", post(test_move_blob_bytes));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -8648,7 +8682,7 @@ async fn health(
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
         "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"resource_recovery_observations":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;

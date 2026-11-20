@@ -883,7 +883,7 @@ fn subscription_condition_matches(condition: &SubscriptionConditionSpec, facts: 
     }
 }
 
-fn set_mission_run_state_tx(
+pub(super) fn set_mission_run_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     run: &str,
@@ -1252,7 +1252,7 @@ fn run_generation_rows_tx(
     Ok(view)
 }
 
-fn step_generation_is_current(
+pub(super) fn step_generation_is_current(
     connection: &Connection,
     step: &StepRunView,
 ) -> rusqlite::Result<bool> {
@@ -6465,6 +6465,10 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject.clone(), current),
                 };
+                adhoc_work::admit_native_turn_work(transaction, &current)?;
+                if handoff.is_some() && current.run.starts_with("mission-run/native-turn/") {
+                    return Err(FractalError::new("native-turn-assignment", "a native turn's literal assignee cannot be handed off"));
+                }
                 if handoff.is_some() {
                     enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
                 }
