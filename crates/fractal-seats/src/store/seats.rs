@@ -19,6 +19,13 @@ mod harness_ready_tests;
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 
+/// Bound dependency classification as well as card folding. Overflow invalidates the
+/// diff source: chunked assembly rebuilds selected cards at the new cut instead.
+pub const AGENT_ROSTER_DELTA_ROWS: usize = 4096;
+
+pub static AGENT_ROSTER_SUBJECT_PAGE_SQL: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{RANGE_SUBJECTS} LIMIT ?4"));
+
 fn record_roster_counts(changed: usize, covered: usize, refolded: usize) {
     crate::otel::roster_attribute("st.roster.changed", changed as i64);
     crate::otel::roster_attribute("st.roster.covered", covered as i64);
@@ -447,15 +454,22 @@ impl SeatsStore for Store {
         ) -> Result<AgentResourcesChange> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
-            "SELECT subject, kind, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
+            "SELECT subject, kind, actor FROM claims WHERE store_index>?1 AND store_index<=?2
+             ORDER BY store_index LIMIT ?3",
         )?;
-        let mut delta = AgentResourcesDelta::default();
-        let mut owners = BTreeSet::new();
-        for row in statement.query_map(params![after, through], |row| {
+        let rows = statement.query_map(params![after, through, AGENT_ROSTER_DELTA_ROWS + 1], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?))
-        })? {
-            let (subject, kind, actor) = row?;
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.len() > AGENT_ROSTER_DELTA_ROWS {
+            return Ok(AgentResourcesChange::Invalidated {
+                reason: "delta_overflow", detail: "claim delta exceeds row budget".to_owned(),
+            });
+        }
+        let mut delta = AgentResourcesDelta::default();
+        let mut owners = BTreeSet::new();
+        for (subject, kind, actor) in rows {
+            smallclaims::read_budget::check()?;
             // Memberless agent cards reduce their currently declared exec/pty children.
             // Match the previous root too: a removed child's declaration has no live tag.
             if subject.starts_with("exec/") || subject.starts_with("pty/") {
@@ -729,9 +743,12 @@ impl SeatsStore for Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0a36171e464 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
-            .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+        let names = connection.prepare_cached(&AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+            .query_map(params![index, "agent/", "agent0", bound + 1], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if names.len() > bound {
+            return Ok(Some("membership requires assembly".to_owned()));
+        }
         let names = if history { names } else {
             self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };
@@ -1210,6 +1227,8 @@ impl SeatsStore for Store {
             }
         }
         })?;
+        // An expired background fold must not replace a complete cache publication.
+        smallclaims::read_budget::check()?;
         let mut cache = resources.lock().expect("agent resources cache poisoned");
         // All endpoint callers hold admission. Direct internal readers may still race; never
         // replace a complete published projection with a partial one.
