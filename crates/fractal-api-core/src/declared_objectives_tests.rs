@@ -1287,3 +1287,26 @@ objective "example/rolls" {
     assert_eq!(check(&store, &unknown).unwrap().recovered, 0);
     assert!(store.operational_failure("slo-objective/node/example/rolls").unwrap().is_none());
 }
+
+#[test]
+fn github_author_cohort_is_retained_in_the_objective_declaration_revision() {
+    let source = r#"version 2
+objective "delivery/selected" {
+  about "Selected native GitHub throughput"
+  indicator "github-merged-count" {
+    source "github-source/example"
+    roster "github-scope/example"
+    timezone "UTC"
+    cut "now"
+    measurement "only"
+  }
+}"#;
+    let store = store_with(source);
+    let all = store.declared_objectives().unwrap().remove(0);
+    apply(&store, &source.replace("measurement \"only\"", "measurement \"only\"\n    author-login \"example-bot\""));
+    let selected = store.declared_objectives().unwrap().remove(0);
+    assert_eq!(all.subject, selected.subject);
+    assert_ne!(all.revision, selected.revision);
+    let Indicator::GithubMergedCount(config) = selected.objective.unwrap().indicator else { panic!() };
+    assert_eq!(config.author_logins, ["example-bot"]);
+}

@@ -67,6 +67,8 @@ export interface GithubMeasurement {
   readonly timezone: string
   readonly cut: 'now' | 'watermark'
   readonly measurement: 'only' | 'targeted'
+  /** Omit for all authors; otherwise a nonempty, case-insensitive GitHub login cohort. */
+  readonly authorLogins?: readonly string[]
 }
 
 /** Numeric events: one denominator event per subject and timestamp; strictly above is bad. */
@@ -471,13 +473,21 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
   switch (kind) {
     case 'github-merged-count':
     case 'github-ready-to-merged': {
-      allow(['source', 'roster', 'timezone', 'cut', 'measurement'])
+      allow(['source', 'roster', 'timezone', 'cut', 'measurement', 'authorLogins'])
       const { source, roster, timezone, cut, measurement } = value
       if (typeof source !== 'string' || source.trim() === '' || typeof roster !== 'string' || roster.trim() === '' ||
           typeof timezone !== 'string' || timezone.trim() === '') return fail('GitHub source, roster and timezone must be nonempty')
       if (cut !== 'now' && cut !== 'watermark') return fail('GitHub cut must be now or watermark')
       if (measurement !== 'only' && measurement !== 'targeted') return fail('GitHub measurement must be only or targeted')
-      return freeze({ kind, source, roster, timezone, cut, measurement })
+      let authorLogins: readonly string[] | undefined
+      if (value.authorLogins !== undefined) {
+        if (!Array.isArray(value.authorLogins) || value.authorLogins.length === 0 ||
+            value.authorLogins.some((login: unknown) => typeof login !== 'string' || !/^[A-Za-z0-9\[\]-]+$/.test(login))) {
+          return fail('GitHub authorLogins must be a nonempty list of ASCII logins')
+        }
+        authorLogins = freeze([...new Set((value.authorLogins as string[]).map((login) => login.toLowerCase()))].sort())
+      }
+      return freeze({ kind, source, roster, timezone, cut, measurement, ...(authorLogins === undefined ? {} : { authorLogins }) })
     }
     case 'latency': {
       allow(['paths'])
@@ -801,6 +811,7 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
         node({ name: 'timezone', args: [indicator.timezone] }),
         node({ name: 'cut', args: [indicator.cut] }),
         node({ name: 'measurement', args: [indicator.measurement] }),
+        ...(indicator.authorLogins ?? []).map((login) => node({ name: 'author-login', args: [login] })),
       ]
     case 'latency':
       return indicator.paths.map((path) => node({ name: 'path', args: [path] }))
