@@ -6,6 +6,7 @@ use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, k
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use smallclaims::store::checkpoint_agreement::CheckpointContext;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
@@ -380,6 +381,129 @@ fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
     assert_eq!(snapshot.authority_digest, digest, "every identity is still listed");
     let (full, _) = smallclaims::store::full_compact_replication_inventory(&birch.readers.get()).unwrap();
     assert_eq!((&snapshot.inventory.digest, &snapshot.inventory.payloadless), (&full.digest, &full.payloadless));
+}
+
+/// Two members that trim locally, alder and birch, holding the same 20 observations of one
+/// observer. alder has trimmed its cut; birch has not, and learns alder's retired IDs by walking
+/// its claim ranges. birch's own step runs at a time whose due cut drops nothing, so only the
+/// peer's retirements can delete.
+fn retiring_pair(scratch: &std::path::Path) -> (Store, Store, CheckpointContext) {
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    while sync_into(&alder, &birch) != 0 {}
+    while sync_into(&birch, &alder) != 0 {}
+    assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
+    assert_eq!(claims_of(&alder, "observer.observed"), 1);
+    birch.set_retirement_wins(true);
+    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    (alder, birch, quiet)
+}
+
+fn learn_retirements(birch: &Store, alder: &Store) {
+    smallclaims::sync::walk_claim_ranges_in_process(birch, alder, TEST_FLEET, 64).unwrap();
+}
+
+fn retired_ids(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT lower(hex(id)) FROM retired_claim_ids")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A peer's retirement deletes the observation this member holds, through its own trim's path,
+/// and the two converge: the same claims, retired IDs and projection digests.
+#[test]
+fn a_peers_retirement_deletes_a_held_observation() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    assert_eq!(claims_of(&birch, "observer.observed"), 20);
+    learn_retirements(&birch, &alder);
+    assert!(kinds(&step(&birch, &quiet)).contains(&"trimmed"));
+    assert_eq!(claims_of(&birch, "observer.observed"), 1, "the peer's retirements deleted 19");
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    let (a, b) = (alder.replication_snapshot().unwrap(), birch.replication_snapshot().unwrap());
+    assert_eq!(b.projection_digests, a.projection_digests, "claim_sources and operations included");
+    assert_eq!(b.graph_digest, a.graph_digest);
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_kept, 0);
+}
+
+/// No member deletes a person's claim, or a kind its own trim keeps, on a peer's word: such a
+/// retirement is recorded, the claim kept, and the keeping counted.
+#[test]
+fn a_peers_retirement_never_deletes_a_persons_claim_or_a_kind_trim_keeps() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    let person = {
+        let mut connection = alder.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_tx(
+            &transaction, &alder.origin, "observer/watch-0", "observer.observed", Some("person/example"),
+            &json!({"fields": {"status": "ok"}}), &[], None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        claim.id
+    };
+    let kept_kind: String = alder
+        .readers
+        .get()
+        .query_row("SELECT id FROM claims WHERE kind<>'observer.observed' ORDER BY store_index LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let exchange = alder.export_replication_exchange(TEST_FLEET, &birch.replication_inventory().unwrap()).unwrap();
+    birch.receive_replication_exchange(&alder.origin, TEST_FLEET, &exchange).unwrap();
+    birch.validate_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
+    // alder retires both, as a member with another rule might.
+    for id in [&person, &kept_kind] {
+        alder.connection.write().execute(&format!(
+            /* sqlite-large-value: allow-for-now lv-h6ba62f2cb117 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})", smallclaims::store::retired::identity_sql("?1")
+        ), [id]).unwrap();
+    }
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    let held = |id: &str| -> bool {
+        birch.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get(0)).unwrap()
+    };
+    assert!(held(&person), "a person's claim stays");
+    assert!(held(&kept_kind), "a kind local trim keeps stays");
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_kept, 2);
+    assert_eq!(claims_of(&birch, "observer.observed"), 2, "the observations alder's cut dropped are gone");
+}
+
+/// A guard refusal keeps the claims a peer retired and stops the trim, as a local cut's does,
+/// and the stop alerts as `local-trim-stopped`.
+#[test]
+fn a_guard_refusal_keeps_what_a_peer_retired() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, quiet) = retiring_pair(scratch.path());
+    learn_retirements(&birch, &alder);
+    birch.set_trim_fault(Some(smallclaims::store::TrimFault::ChangeGraph));
+    let actions = step(&birch, &quiet);
+    assert!(kinds(&actions).contains(&"graph-changed"), "{:?}", kinds(&actions));
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "nothing is deleted");
+    birch.record_local_trim_stops(&actions).unwrap();
+    let stopped: i64 = birch
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='operational.failure'
+               AND json_extract(body,'$.fields.condition')='local-trim-stopped'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stopped, 1);
+    // A halted member deletes nothing more until a person resumes it.
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20);
 }
 
 /// A local cut that deletes in many chunks leaves the roster's generation alone until its run

@@ -496,6 +496,17 @@ impl Store {
         &self,
         remote: &ClaimRangeSummary,
     ) -> Result<Option<ClaimRangeComparison>> {
+        self.compare_claim_ranges_from("", remote)
+    }
+
+    /// [`Self::compare_claim_ranges`] with the summary of `peer`, an authenticated peer whose
+    /// exchange this member admits: the retired IDs it teaches are noted as its
+    /// (`retirement_wins`).
+    pub fn compare_claim_ranges_from(
+        &self,
+        peer: &str,
+        remote: &ClaimRangeSummary,
+    ) -> Result<Option<ClaimRangeComparison>> {
         if remote.version != CLAIM_RANGE_VERSION {
             return Ok(None);
         }
@@ -515,14 +526,16 @@ impl Store {
             (comparison, retired)
         };
         if let Some(retired) = retired {
-            self.retire_learned_claims(&retired.missing)?;
+            self.retire_learned_claims(peer, &retired.missing)?;
             comparison.retired = Some(Box::new(retired));
         }
         Ok(Some(comparison))
     }
 
-    /// Record claim IDs a peer retired as retired here too, while this member trims locally.
-    fn retire_learned_claims(&self, ids: &[String]) -> Result<()> {
+    /// Record claim IDs a peer retired as retired here too, while this member trims locally. One
+    /// this member holds waits for its own trim's path to delete it, or is kept
+    /// (`retirement_wins`).
+    fn retire_learned_claims(&self, peer: &str, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -536,6 +549,8 @@ impl Store {
             for id in ids {
                 insert.execute(/* sqlite-large-value: allow-for-now lv-hf13d52544a0d owner=smallclaims::store::claim_ranges TODO=trace-statement-and-value-representation */ [id])?;
             }
+            drop(insert);
+            super::retirement_wins::note_learned_retirements_tx(&transaction, peer, ids)?;
         }
         transaction.commit()?;
         Ok(())

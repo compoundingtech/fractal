@@ -88,6 +88,7 @@ pub mod record_bytes;
 pub mod member_signatures;
 pub mod envelope_release;
 pub mod signed_claims;
+pub mod retirement_wins;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -964,6 +965,8 @@ pub struct Store {
     /// What signed-claim exchanges found (`signed_claims`): released envelopes each older peer
     /// lacks, and signed envelopes refused.
     pub(crate) signed_claims: Mutex<signed_claims::Tally>,
+    /// Whether a peer's retired claim IDs delete held copies (`retirement_wins`).
+    pub(crate) retirement_wins: AtomicBool,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1218,7 +1221,8 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h26efdf8fd946 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::RECORD_ROWS_VIEW).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb7a7f8b7d8a5 owner=smallclaims::store TODO=trace-statement-and-value-representation */ retirement_wins::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
@@ -1397,6 +1401,7 @@ impl Store {
             trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
             wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
             signed_claims: Mutex::new(signed_claims::Tally::default()),
+            retirement_wins: AtomicBool::new(retirement_wins::RETIREMENT_WINS),
             runtime,
         })
     }
@@ -8393,7 +8398,7 @@ impl Store {
         // Claims are compared only with a peer that speaks the same claim-range protocol, and
         // only while both range indexes cover every retained claim.
         let claim_ranges = match input.claim_ranges.as_ref() {
-            Some(remote) => self.compare_claim_ranges(remote).map_err(internal)?,
+            Some(remote) => self.compare_claim_ranges_from(relay, remote).map_err(internal)?,
             None => None,
         };
         let now = now_ms();
@@ -10778,7 +10783,9 @@ impl Store {
             peers.push(status);
         }
         let (unservable_released, refused_signed_envelopes) = self.signed_claim_tally()?;
+        let peer_retired_kept = self.peer_retired_claims_kept()?;
         Ok(ReplicationStatus {
+            peer_retired_kept,
             unservable_released,
             refused_signed_envelopes,
             configured,

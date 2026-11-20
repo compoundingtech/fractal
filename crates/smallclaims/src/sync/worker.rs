@@ -4257,3 +4257,49 @@ mod transport_error_tests;
 #[cfg(test)]
 #[path = "unsigned_refusal_tests.rs"]
 mod unsigned_refusal_tests;
+
+/// Walk `peer`'s differing claim ranges from `node` as the worker does after a summary exchange,
+/// with both stores in this process: an exchange of summaries, then up to `round_trips` bounded
+/// queries, each answered by `peer` and received, admitted and projected by `node`. Retired IDs
+/// the walk finds are recorded as `node` records them from a peer. Returns whether any claim was
+/// stored.
+#[cfg(any(test, feature = "test-support"))]
+pub fn walk_claim_ranges_in_process(
+    node: &crate::store::Store,
+    peer: &crate::store::Store,
+    fleet_id: &str,
+    round_trips: usize,
+) -> Result<bool> {
+    let exchange = |inventory: &crate::replication::ReplicationInventory| -> Result<crate::replication::ReplicationReceipt> {
+        let answer = peer.export_replication_exchange(fleet_id, inventory)?;
+        let receipt = node
+            .receive_replication_exchange(peer.origin(), fleet_id, &answer)
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+        node.validate_replication_backlog()?;
+        node.project_replication_backlog()?;
+        Ok(receipt)
+    };
+    node.fold_claim_ranges_paced(|_| {})?;
+    peer.fold_claim_ranges_paced(|_| {})?;
+    let summary = node.export_replication_summary(fleet_id)?;
+    let first = exchange(&summary.inventory)?;
+    let mut fetched = first.received != 0;
+    let Some(comparison) = first.claim_ranges else { return Ok(fetched) };
+    let mut walk = if comparison.same { ClaimWalk::finished(&comparison.pair) } else { ClaimWalk::new(&comparison.pair) };
+    walk.follow_retired(&comparison);
+    for _ in 0..round_trips {
+        let Some(query) = walk.next_query() else { break };
+        let mut ask = summary.inventory.clone();
+        ask.claim_range_query = Some(query.clone());
+        let receipt = exchange(&ask)?;
+        fetched |= receipt.received != 0;
+        match &receipt.claim_ranges {
+            None => {
+                walk.retry(query);
+                break;
+            }
+            Some(comparison) => walk.absorb(query, comparison),
+        }
+    }
+    Ok(fetched)
+}

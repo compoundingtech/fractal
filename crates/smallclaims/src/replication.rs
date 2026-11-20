@@ -445,6 +445,10 @@ pub struct ReplicationStatus {
     /// that did not verify.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub refused_signed_envelopes: u64,
+    /// Held claims a peer retired that this node keeps: a person's, or of a kind its own trim
+    /// keeps (`store::retirement_wins`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub peer_retired_kept: u64,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.

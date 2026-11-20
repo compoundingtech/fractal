@@ -739,6 +739,24 @@ impl World {
     }
 
 
+    /// `to` walks `from`'s differing claim ranges, as the worker does after an exchange.
+    fn walk(&mut self, from: usize, to: usize) -> bool {
+        let result = smallclaims::sync::walk_claim_ranges_in_process(
+            &self.nodes[to].store, &self.nodes[from].store, FLEET, 64,
+        );
+        match result {
+            Ok(fetched) => {
+                self.check_index(to);
+                fetched
+            }
+            Err(error) => {
+                let message = format!("{} could not walk {}: {error:#}", self.nodes[to].name, self.nodes[from].name);
+                self.fail(message);
+                false
+            }
+        }
+    }
+
     fn check_actions(&mut self, index: usize, actions: &[CheckpointAction]) {
         for action in actions {
             match action {
@@ -1734,6 +1752,17 @@ impl World {
                     }
                 }
             }
+            // The claim-range walk the worker runs after a summary exchange, which carries each
+            // peer's retired claim IDs to the trimming nodes that lack them.
+            for from in 0..count {
+                for to in 0..count {
+                    if from != to && !self.nodes[from].old_build && !self.nodes[to].old_build {
+                        let before = retired_claims(&self.nodes[to].store);
+                        moved |= self.walk(from, to);
+                        moved |= retired_claims(&self.nodes[to].store) != before;
+                    }
+                }
+            }
             for index in 0..count {
                 if self.nodes[index].old_build {
                     continue;
@@ -1774,7 +1803,7 @@ impl World {
         // Every claim some node retired.
         let retired_anywhere = retired.iter().flatten().cloned().collect::<BTreeSet<_>>();
         // The first trimming node's retained claims, which every other trimming node must hold.
-        let mut reference: Option<(String, BTreeSet<String>)> = None;
+        let mut reference: Option<(String, BTreeSet<String>, BTreeSet<String>)> = None;
         for (node, retired) in self.nodes.iter().zip(&retired) {
             let name = &node.name;
             let store = &node.store;
@@ -1788,14 +1817,14 @@ impl World {
             }
             let held = claims(store);
             // 3 and 4. A node lacks only claims of a kind local trim drops, never a person's,
-            // and only claims it retired.
+            // and only claims it retired. A node may lack one some node retired before it ever
+            // received it: an old build, which learns no retired ID, or a trimming node that
+            // learned the ID from a peer's claim ranges. Neither holds the dropped claim's facts
+            // (its tombstone), so the tables that keep them (`claim_sources`, `operations`, and
+            // so the graph digest) are not compared for it.
             //
-            // TODO(#6878, T-wins deletion, set-sync S2d): a node may still lack a claim that another
-            // node retired before this one ever received it: the trimming holders list its
-            // envelope without a payload, and this node does not yet learn the retired ID. Then
-            // it should retire the claim too; until it does, such a claim is allowed here, and
-            // the tables that keep a dropped claim's facts (`claim_sources`, `operations`, and
-            // so the graph digest) are not compared for this node.
+            // TODO(#6878, retired facts): the retired-ID walk carries IDs only; carrying a
+            // retired claim's tombstone facts, authenticated, would let these compare too.
             let mut learned_late = 0;
             for (id, claim) in &oracle_claims {
                 let droppable = LOCAL_TRIM_KINDS.contains(&claim.kind.as_str())
@@ -1815,11 +1844,17 @@ impl World {
                             claim.kind, claim.subject
                         ));
                     }
-                    None if retired.contains(id) && !node.old_build => {}
-                    None if retired_anywhere.contains(id) => learned_late += 1,
+                    // A node that learned the retired ID without ever holding the claim has no
+                    // tombstone of it, and so not the facts the oracle keeps of it.
+                    None if retired.contains(id) && !node.old_build => {
+                        if !tombstoned(store, id) {
+                            learned_late += 1;
+                        }
+                    }
+                    None if retired_anywhere.contains(id) && node.old_build => learned_late += 1,
                     None => {
                         failures.push(format!(
-                            "{name}: lacks {id} ({} on {}), which no node retired",
+                            "{name}: lacks {id} ({} on {}), which it did not retire",
                             claim.kind, claim.subject
                         ));
                     }
@@ -1870,26 +1905,25 @@ impl World {
             if node.old_build {
                 continue;
             }
-            // 1. Trimming nodes retain the same claims, but for those some node retired.
-            //
-            // TODO(#6878, T-wins deletion, set-sync S2d): every trimming node should retain exactly
-            // the same claims and hold the same retired claim IDs. Each trims its own cuts and
-            // retired IDs do not yet travel with an exchange, so today only the claims no node
-            // retired must match.
-            let retained = held
-                .keys()
-                .filter(|id| !retired_anywhere.contains(*id))
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            // 1. Trimming nodes retain exactly the same claims and hold the same retired claim
+            // IDs: retired IDs travel in the claim-range walk, and a peer's retirement deletes a
+            // held copy (`retirement_wins`).
+            let retained = held.keys().cloned().collect::<BTreeSet<_>>();
             match &reference {
-                None => reference = Some((name.clone(), retained)),
-                Some((first, first_retained)) => {
+                None => reference = Some((name.clone(), retained, retired.clone())),
+                Some((first, first_retained, first_retired)) => {
                     if &retained != first_retained {
                         failures.push(format!(
-                            "{name}: retains {} claims no node retired that {first} lacks, and \
-                             lacks {} that {first} retains",
+                            "{name}: retains {} claims that {first} lacks, and lacks {} that {first} retains",
                             retained.difference(first_retained).count(),
                             first_retained.difference(&retained).count()
+                        ));
+                    }
+                    if retired != first_retired {
+                        failures.push(format!(
+                            "{name}: retired {} claim IDs that {first} did not, and not {} that {first} did",
+                            retired.difference(first_retired).count(),
+                            first_retired.difference(retired).count()
                         ));
                     }
                 }
@@ -1916,6 +1950,8 @@ fn trim_unless_old(store: &Store, old_build: bool) {
     if !old_build {
         store.import_retired_identities_paced(|_| {}).unwrap();
         store.trim_locally(true).unwrap();
+        // What a peer retired deletes the copy this node holds (`retirement_wins`).
+        store.set_retirement_wins(true);
     }
 }
 
@@ -1928,6 +1964,15 @@ fn reader_answers(store: &Store, subjects: &BTreeSet<String>, now: u128) -> BTre
         .into_iter()
         .map(|(subject, answer)| (subject, smallclaims::hash::canonical_json_text(&answer).unwrap()))
         .collect()
+}
+
+/// Whether `store` holds a tombstone of claim `id`: it held the claim and a trim dropped it.
+fn tombstoned(store: &Store, id: &str) -> bool {
+    store
+        .readers
+        .get()
+        .query_row("SELECT EXISTS(SELECT 1 FROM checkpoint_claims WHERE id=?1)", [id], |row| row.get(0))
+        .unwrap()
 }
 
 /// The claim IDs a node retired, as their text.

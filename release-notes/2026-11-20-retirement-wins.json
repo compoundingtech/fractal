@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A retirement wins (#6878): a claim ID a peer that trims locally retired deletes the copy this member holds, through this member's own guarded trim path, so members that trim converge on the same retained claims and retired IDs. Only claims of a kind local trim drops (LOCAL_TRIM_KINDS) that no person wrote are deleted on a peer's word; any other is kept and counted. The deletion ships switched off (RETIREMENT_WINS)",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. A deletion runs as a local cut's does: the claims' tombstones are recorded under a cut of their own (checkpoint/retired-by-peers/TIME, cut time 0, so this member's own daily cut is never moved by it), then deleted in paced chunks under the day's cap, each checking the projection digests. A held claim that is still the newest of its subject and kind here waits until the newer one arrives."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "New table peer_retired_claims (claim ID, the peer that taught its retirement, pending or kept, when). No storage version change. Nothing is deleted while the switch is off; learned retirements of held claims are still noted."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A retired ID learned in the claim-range walk from an authenticated peer whose exchange this member admits, of a held claim of a kind in LOCAL_TRIM_KINDS whose actor is not a person, is deleted and stays in this member's retired set. A person's claim or a claim of another kind is kept, counted as peer_retired_kept in the replication status, and never deleted on a peer's word. A chunk that would change the graph stops the trim, keeps the claim and raises local-trim-stopped, and trimming waits until resumed, as for a local cut."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire or API change: retired IDs already travel in the claim-range walk's retired namespace. An older peer sends and keeps retired IDs as before; a member that learns a retired ID it never held still lacks that claim's tombstone facts, as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work beyond creating the table."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback to the previous release is supported: it ignores peer_retired_claims, and while the switch is off nothing was deleted on a peer's word. Once a later release switches it on, a rolled-back member keeps the retired IDs and tombstones it recorded, which the previous release already reads."
+  }
+}
