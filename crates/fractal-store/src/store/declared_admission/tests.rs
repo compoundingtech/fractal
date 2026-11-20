@@ -84,19 +84,45 @@ fn recovery_observations_require_every_signed_fleet_reader() {
     }
     started(&peer, json!({"resource_recovery_observations":1}));
     sync(&peer, &store);
-    assert!(matches!(store.request_resource_membership(&request, fit.clone(), 2).unwrap(),
-        Admission::Admitted(_)));
+    assert!(matches!(store.request_resource_membership(&request,
+        Fit { held_bytes: 1024, ..fit.clone() }, 2).unwrap(), Admission::Queued { .. }));
     let mut refused = request.clone();
     refused.id = "refused-recovery".into();
     refused.name = refused.id.clone();
     assert!(matches!(store.request_resource_membership(&refused,
-        Fit { recovery_capable: false, ..fit }, 3).unwrap(), Admission::Refused { .. }));
+        Fit { recovery_capable: false, ..fit.clone() }, 3).unwrap(), Admission::Refused { .. }));
     started(&peer, json!({"resource_recovery_observations":0}));
     sync(&peer, &store);
-    // Recovery must defer existing observations too, rather than aborting startup.
-    store.start_resource_authority("alder", "next-epoch").unwrap();
-    assert!(!store.fractal.extensions.get::<crate::store::resource_admission_objectives::Coverage>().0
-        .load(std::sync::atomic::Ordering::Acquire));
+    let coverage = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 100)
+        .unwrap().claims.last().unwrap().body["fields"]["complete"].clone();
+    assert_eq!(coverage(), true);
+    // No authority restart: withdrawal commits custody but withholds its terminal fact.
+    store.withdraw_resource_membership(&request.id, &request.owner, 4).unwrap();
+    assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().state, "retired");
+    assert_eq!(coverage(), false);
+    assert!(store.fractal.extensions.get::<crate::store::resource_admission_objectives::Coverage>().0
+        .load(std::sync::atomic::Ordering::Acquire), "authority acquisition proof is still live");
+    let observations = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::KIND], None, 0, 100).unwrap().claims;
+    assert_eq!(observations().iter().rfind(|claim| claim.body["fields"]["id"] == request.id)
+        .unwrap().body["fields"]["state"], "queued");
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert_eq!(coverage(), false, "advertisement alone cannot repair stale evidence");
+    // The next live write replays all pending facts, including the retired row,
+    // before emitting a complete cut. No new authority epoch is needed.
+    let mut next = request.clone();
+    next.id = "next-recovery".into();
+    next.name = next.id.clone();
+    store.request_resource_membership(&next, fit, 5).unwrap();
+    let events = observations();
+    let retired = events.iter().rfind(|claim| claim.body["fields"]["id"] == request.id).unwrap();
+    assert_eq!(retired.body["fields"]["state"], "retired");
+    assert_eq!(coverage(), true);
+    let cut = store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 100).unwrap();
+    assert!(retired.store_index < cut.claims.last().unwrap().store_index);
 }
 
 #[test]

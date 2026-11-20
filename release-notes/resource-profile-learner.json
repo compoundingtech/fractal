@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Samples are recorded only in the terminal receipt transaction after confirmed whole-tree retirement; rejected or truncated retirements are not admitted. Recovery admission requires signed resource_recovery_observations=1 advertisements from every active fleet incarnation, the host profile's recoveryCapable gate, and a measured filesystem free-space observation. Recovery observation publication during authority initialization uses the same fleet gate and defers with incomplete coverage when a reader is not ready."
+    "detail": "Samples are recorded only in the terminal receipt transaction after confirmed whole-tree retirement; rejected or truncated retirements are not admitted. Recovery admission requires signed resource_recovery_observations=1 advertisements from every active fleet incarnation, the host profile's recoveryCapable gate, and a measured filesystem free-space observation. Authority initialization and live observation writes use the same fleet gate. Withheld live evidence atomically marks durable coverage incomplete; SLO certification requires both that complete cut and a live authority. A positive advertisement alone cannot restore completeness: the next successful live membership write replays every pending observation, including retired rows, before publishing a complete cut."
   },
   "compatibility": {
     "status": "changed",

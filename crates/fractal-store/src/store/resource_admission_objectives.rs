@@ -22,7 +22,29 @@ pub(super) fn validate_publication(connection: &Connection, host: &str, class: &
 #[derive(Default)]
 pub struct Coverage(pub std::sync::atomic::AtomicBool);
 
+/// Withheld live evidence revokes durable completeness in the same custody transaction.
+/// Only a full replay may restore it; the process-local bit proves authority acquisition.
 pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
+    let complete = publish(tx, member)?;
+    let subject = format!("resource-admission/{}", member.request.host);
+    if let Some(coverage) = latest_claim_of_kind_tx(tx, &subject, COVERAGE_KIND)? {
+        let fields = &coverage.body["fields"];
+        if !complete && fields["complete"] != false {
+            let mut fields = fields.clone();
+            fields["complete"] = json!(false);
+            append_claim_tx(tx, &member.request.host, &subject, COVERAGE_KIND, None,
+                &json!({"fields":fields,"evidence":[]}), &[], None)?;
+        } else if complete && fields["complete"] == false {
+            // Capability restoration alone is not evidence restoration. Replay even
+            // retired rows before certifying the current authority's complete cut.
+            return recover(tx, &member.request.host, fields["epoch"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("admission coverage epoch missing"))?);
+        }
+    }
+    Ok(complete)
+}
+
+fn publish(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
     if let Err(error) = member.request.class.ensure_supported() {
         tracing::warn!(membership = %member.request.id, %error, "skipping unsupported-class admission observation; authoritative custody retained");
         return Ok(false);
@@ -60,7 +82,7 @@ pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<b
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     let mut complete = true;
-    for body in members { complete &= observe(tx, &serde_json::from_str(&body)?)?; }
+    for body in members { complete &= publish(tx, &serde_json::from_str(&body)?)?; }
     append_claim_tx(tx, host, &format!("resource-admission/{host}"), COVERAGE_KIND, None,
         &json!({"fields": {"host": host, "epoch": epoch, "complete": complete}, "evidence": []}), &[], None)?;
     Ok(complete)
