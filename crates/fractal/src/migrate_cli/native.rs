@@ -283,14 +283,16 @@ impl Manager for Native {
 
     async fn idle(&mut self) -> Result<()> {
         let replication: fractal_daemon::model::ReplicationStatus = self.client.get("/v1/replication/status").await.context("cannot establish sync quiescence")?;
-        ensure!(replication.pending_records == 0, "replication has pending records; wait until sync is idle");
+        ensure!(replication.pending_records == 0, "replication has pending records; wait until local admission completes");
         if let Some(first) = replication.first_sync {
             ensure!(first.state == "verified", "first sync is not complete");
         }
-        for peer in replication.peers {
-            ensure!(peer.worker.as_ref().is_some_and(|worker| matches!(worker.phase.as_str(), "idle" | "backoff")),
-                "sync with {} is active or unobserved; retry after the worker reports idle/backoff", peer.peer);
-        }
+        // Peer phases are observations, not a write fence: healthy anti-entropy can
+        // stay in exchange indefinitely and idle can immediately start another round.
+        // Each received page commits atomically and retries deduplicate envelopes.
+        // stop_legacy stops the replication auxiliary before the daemon; swap then
+        // fences state/store ownership before moving the complete durable store,
+        // including any page admitted after this status read.
         Ok(())
     }
 
@@ -320,6 +322,55 @@ mod tests {
         let path = directory.path().join("invalid.toml");
         fs::write(&path, "[checkpoint]\nenabled = 'not a boolean'\n")?;
         assert!(load_daemon_config(Some(&path)).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replication_gate_accepts_active_or_unobserved_peers_but_requires_local_readiness() -> Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let mut ready = serde_json::to_value(fractal_daemon::model::ReplicationStatus::default())?;
+        ready["peers"] = serde_json::json!([
+            {"peer": "birch", "status": "up", "worker": {"phase": "exchange", "last_attempt_at_unix_ms": 1}},
+            {"peer": "cedar", "status": "up", "worker": {"phase": "exchange", "last_attempt_at_unix_ms": 1}}
+        ]);
+        let mut unobserved = ready.clone();
+        unobserved["peers"][0]["worker"] = Value::Null;
+        let mut pending = ready.clone();
+        pending["pending_records"] = 1.into();
+        let mut syncing = ready.clone();
+        let mut first = serde_json::to_value(smallclaims::replication::ReplicationFirstSync::default())?;
+        first["state"] = "syncing".into();
+        syncing["first_sync"] = first.clone();
+        first["state"] = "verified".into();
+        let mut verified = ready.clone();
+        verified["first_sync"] = first;
+        let server = tokio::spawn(async move {
+            for status in [ready, unobserved, pending, syncing, verified] {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).await?;
+                ensure!(request[..count].starts_with(b"GET /v1/replication/status "), "unexpected API probe");
+                let body = serde_json::to_vec(&serde_json::json!({"api_version": "st3.v1", "value": status}))?;
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                ).as_bytes()).await?;
+                stream.write_all(&body).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let config = checkpoint_config(false, false)?;
+        let mut native = Native::new(Endpoint::Unix(socket), "example".into(), &config);
+        native.idle().await?;
+        native.idle().await?;
+        assert!(native.idle().await.unwrap_err().to_string().contains("pending records"));
+        assert!(native.idle().await.unwrap_err().to_string().contains("first sync is not complete"));
+        native.idle().await?;
+        server.await??;
         Ok(())
     }
 

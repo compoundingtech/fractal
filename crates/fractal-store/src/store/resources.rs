@@ -494,7 +494,7 @@ fn prefix_successor(prefix: &str) -> Option<String> {
 }
 
 /// The same canonical newest-claim cursor reader used by the public store and answers check.
-pub(super) fn claimed_observer_cursor_at(connection: &Connection, observer: &str) -> Result<Option<String>> {
+pub fn claimed_observer_cursor_at(connection: &Connection, observer: &str) -> Result<Option<String>> {
     // Keys are bounded; claim body/cursor JSON remains unproven, as in the production newest-claim reader.
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h00e80ee09700 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &smallclaims::store::latest_claim_of_kind_query())?
         .query_row(/* sqlite-large-value: allow-for-now lv-hf4694658e03c owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ params![observer, "observer.observed"], smallclaims::store::claim_from_row).optional()?;

@@ -978,6 +978,15 @@ impl Registry {
         fields: &BTreeMap<String, Value>,
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
+        if subject == "resource/fleet/roll-completion"
+            || subject.starts_with("resource/fleet/roll-completion/") {
+            let receipt = fields.get("facts").and_then(|facts| facts.get("kind")).and_then(Value::as_str);
+            if kind != "resource.observed" || actor.is_none()
+                || !matches!(receipt, Some("roll-declared" | "host-target-resolved" | "source-enabled")) {
+                return Err(error("claim-write-forbidden",
+                    "fleet roll observations require the own-daemon collector; declarations require bound authority"));
+            }
+        }
         if kind.starts_with("custom.client.assistant.")
             || subject.starts_with("custom/client/assistant-v1-")
             || kind.starts_with("custom.client.pairing")
