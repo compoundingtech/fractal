@@ -3710,9 +3710,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(repository) = repository
                 && !activation_leases.contains_key(&lease_owner)
             {
-                let lease = fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
-                    crate::environment::command("mr")?, &lease_owner, &repository,
-                );
+                let lease = crate::checkout::activation_lease(&lease_owner, &repository);
                 match lease {
                     Ok(lease) => { activation_leases.insert(lease_owner, lease); }
                     Err(error) => {
@@ -3799,10 +3797,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let Some(repository) = crate::repositories::workspace_repository(workspace) else {
                     return true;
                 };
-                let lease = crate::environment::command("mr").and_then(|command|
-                    fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
-                        command, &owner, &repository,
-                    ));
+                let lease = crate::checkout::activation_lease(&owner, &repository);
                 match lease {
                     Ok(lease) => {
                         activation_leases.insert(owner, lease);

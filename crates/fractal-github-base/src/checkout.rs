@@ -12,6 +12,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
 
+/// One command boundary for checkout and reconciliation activation.
+pub fn activation_lease(
+    workspace: &Path,
+    repository: &Path,
+) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
+    let command = crate::environment::command("mr")?;
+    #[cfg(any(test, feature = "test-support"))]
+    let command = test_support::lease_command(command, repository);
+    fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+        command, workspace, repository,
+    )
+}
+
 /// A fetch runs inside the reconciler, so a stalled remote must not hold it for long.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -91,11 +104,7 @@ impl Checkout {
         &self,
         workspace: &Path,
     ) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
-        fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
-            crate::environment::command("mr")?,
-            workspace,
-            &self.repository,
-        )
+        activation_lease(workspace, &self.repository)
     }
 
     /// The caller retains the lease through initialization and workspace publication.
@@ -246,6 +255,22 @@ impl Checkout {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::path::{Path, PathBuf};
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::sync::{LazyLock, Mutex};
+
+    static STORES: LazyLock<Mutex<BTreeMap<PathBuf, PathBuf>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    /// Command-local fixture injection: never mutate the parallel test runner's environment.
+    pub(super) fn lease_command(mut command: Command, repository: &Path) -> Command {
+        if let Ok(repository) = std::fs::canonicalize(repository)
+            && let Some(store) = STORES.lock().unwrap().get(&repository)
+        {
+            command.env("MEGAREPO_STORE", store);
+        }
+        command
+    }
 
     pub fn git(directory: &Path, arguments: &[&str]) {
         let status = crate::test_support::git()
@@ -302,6 +327,10 @@ pub mod test_support {
             &seed,
             &["push", "--quiet", &origin.to_string_lossy(), "main"],
         );
+        let store = std::fs::canonicalize(root).unwrap();
+        let mut stores = STORES.lock().unwrap();
+        stores.insert(std::fs::canonicalize(&bare).unwrap(), store.clone());
+        stores.insert(std::fs::canonicalize(&clone).unwrap(), store);
         clone
     }
 }
@@ -341,6 +370,27 @@ pub fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
 mod tests {
     use super::test_support::{git, repository};
     use super::*;
+
+    #[test]
+    fn checkout_fixture_leases_use_only_their_own_store() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = repository(root.path());
+        let store = std::fs::canonicalize(root.path()).unwrap();
+        let host_store = root.path().join("host-store-must-not-be-used");
+        let bare = root.path().join(".bare");
+        for source in [&repository, &bare] {
+            let mut command = std::process::Command::new("mr");
+            command.env("MEGAREPO_STORE", &host_store);
+            let command = test_support::lease_command(command, source);
+            assert!(command.get_envs().any(|(name, value)|
+                name == "MEGAREPO_STORE" && value == Some(store.as_os_str())));
+            let _lease = fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+                command, &root.path().join("prospective"), source,
+            ).unwrap();
+            assert!(root.path().join(".state/deletion-leases").is_dir());
+            assert!(!host_store.exists());
+        }
+    }
     #[test]
     fn a_workspace_subdirectory_uses_the_worktree_root_as_lease_owner() {
         let root = tempfile::tempdir().unwrap();
