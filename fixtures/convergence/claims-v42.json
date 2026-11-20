@@ -12406,9 +12406,27 @@
         "immutable": false,
         "reference": false
       },
+      "gaps": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "period_readings": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "readings": {
         "value_type": "array",
         "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source_frontier": {
+        "value_type": "object",
+        "required": false,
         "immutable": false,
         "reference": false
       }
