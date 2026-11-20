@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v40.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v41.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -95,13 +95,12 @@ fn keyed_only(kind: &str) -> bool {
 }
 
 #[test]
-fn the_corpus_includes_every_registry_kind() {
-    for kind in fractal_schema::registry().claims.keys() {
-        assert!(
-            corpus().contains_key(kind),
-            "add {kind} to a versioned corpus"
-        );
-    }
+fn the_current_corpus_matches_the_registry() {
+    assert_eq!(
+        include_str!("../../../fixtures/convergence/claims-v41.json"),
+        serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
+        "regenerate the active corpus with the owning fractal-schema claim_corpus example"
+    );
 }
 
 #[test]
@@ -2466,7 +2465,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v39 adds durable phone minutes, shifting the seeded schedule.
+/// Corpus v41 adds bounded usage source frontiers and reset-period evidence atop frozen v40.
 /// Prior corpus characterizations are recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
@@ -2480,7 +2479,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v39 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v41 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2489,7 +2488,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v39 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v41 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2497,7 +2496,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v39 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v41 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2710,7 +2709,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v40.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v41.json"
         }))
         .unwrap(),
     )

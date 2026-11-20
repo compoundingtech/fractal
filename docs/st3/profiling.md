@@ -417,36 +417,90 @@ its provenance.
 Older members retain this non-authority unknown kind for replay after upgrade without changing
 terminal/runtime routing.
 
-Credit objectives read durable `usage.limits.observed` evidence from the currently configured
-omp-usage producers. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
-seven days, counted by expiry; each durable credit represents one window-equivalent.
-`CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
-`redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
-otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
-not host or friendly account reference. Terminal states are absorbing across writers and hosts:
-`redeemed` wins over `forfeited`, and `forfeited` wins over `available` or `unknown`, regardless
-of measurement time. Within a state class (`available` and `unknown` share one), the newest
-provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
-consistently across members. An incrementally maintained local projection retains the winning
-reading per provider/account/credit identity **and writer**, including excluded writers.
-The durable usage kind has no numeric retention bound. Store open does not scan retained usage
-history or wait for credit backfill: historical initialization resumes asynchronously from a
-persisted cursor in bounded batches, releasing the writer lock between batches. A missing
-inventory with no configured writers skips initialization; later configured access starts the
-same bounded catch-up, never a synchronous history fold.
-SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
-then apply the same state-class/time/claim-ID ordering across writers.
-Until catch-up completes, both CAM rows are unknown (`no-data`, null remaining percentage),
-even when partial evidence looks successful. Their `current` and `explain` text explicitly say
-`catching-up` with the processed store index and target index; progress counts the claim-store
-cut, not decoded credit readings. Clients display that text without parsing it.
-Read work depends on retained identities and writers, not the
-number of durable observations. An empty writer configuration returns unknown credit rows without
-credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,
-unreported/unsupported coverage or a future measurement
-is `no-data`; stale readings are `stale`, never success. The same freshness policy as account
-readings applies. These rows describe only observed credits and are observational: they do not
-stop seats, enforce quotas or redeem credits.
+Native spend objectives consume durable `usage.limits.observed` source deltas, not a
+second dashboard calculation. Their IDs use the lowercase `spend` native family so
+the ordinary native owner binding can route exhausted/burning episodes:
+
+- `spend/cam-r01/PROVIDER`: confirmed forfeited credits by expiry in trailing 30d;
+  each durable credit is one window-equivalent. Its rolling count must be ≤5 for 95% of
+  covered time, using the same native paired-burn policy as the combined loss gauge.
+- `spend/cam-r02/PROVIDER`: at least 95% timely documented dispositions among credits
+  **entering** the 24h expiry horizon during trailing 30d. `planned`, `redeemed` or
+  `declined` requires a timestamp and nonempty evidence reference by expiry, inclusive.
+  An earlier valid decision survives later revisions; a late decision cannot repair the
+  historical result. Not-yet-due undecided credits remain pending, not failures or recovery.
+  Full cohort evaluation requires 31d source coverage. Failure accounting is anchored at
+  expiry, and successful accounting at the later of entry and decision, so short burns
+  can see a newly overdue failure. Pending credits do not suppress established misses.
+- `spend/forfeited/PROVIDER_PLAN`: rolling 30d lost window-equivalents must be ≤5 for
+  95% of covered time, combining confirmed credits and governing natural-period closures.
+  Period evidence provides a loss **upper bound** from the last monotone pre-reset sample,
+  not an exact terminal quantity. Nonreported periods contribute `[0,1]`; early resets are
+  excluded. Each time interval is good when upper≤5, bad when lower>5, otherwise unknown.
+  A conservative lower bad-time bound may prove exhaustion/burn; recovery requires the
+  upper bad-time bound to fit the allowance. Historical bad intervals survive later count
+  recovery. Full loss-gauge recovery can require 60d forward evidence (30d rolling state
+  integrated over 30d), not a backdated enrollment declaration. Missing authoritative plan
+  metadata is unknown scope, never silently replaced by a provider aggregate.
+- `spend/coverage/ACCOUNT`: supported quota readings no older than one hour for 95% of
+  expected covered time. A drained account is still fresh evidence, not a coverage failure.
+  Every observed window must have a fresh reported numeric reading: a drained window
+  does not mask a stale, unreported or missing reading in another window.
+
+All measured rows use the native 30d budget classifier and paired burns
+14.4x (1h+5m), 6x (6h+30m), not horizon-fraction dashboard math or raw-count status aliases.
+`spend/pool-ready/PROVIDER` is explicitly **not measured** until a runtime producer
+certifies eligible routes, including authentication, capability, reserve/pin policy and
+scoped applicability. Gross quota capacity cannot prove approved work can be served.
+`spend/quota-blocked` likewise requires terminal attempt-chain harm after eligible fallback;
+raw 429s are not user-visible harm. `spend/billed-overage` requires real billed money and an
+approved cap; percentages are not money. These dependencies are not successful empty budgets.
+
+Every configured writer is an expected producer. Use separate host-scoped writer identities
+and configure the entire expected writer set on every mirror; observing one host does not
+prove an unobserved host is empty. Each optional `source_frontier` binds the authenticated
+original host, journal incarnation, fixed account/provider-plan roster, sequence and **actual
+accepted predecessor claim ID**. Publication persists that ID before sealing the next request.
+At most 128 quota/credit/period/gap facts travel in one delta. Incomplete chunks do not
+advance coverage; missing predecessors, forks, changed rosters, mismatched original hosts
+or clocks beyond native acceptance remain unknown. Native sequence-zero acceptance clamps
+the earliest source enrollment; a producer declaration alone cannot invent earlier coverage.
+A new journal or continuity gap starts a new incarnation and a genuinely new coverage start.
+Unsupported/unresolved registry accounts use explicit `gaps` with source observation clocks,
+not invented account hashes or successful empty provider populations.
+
+The native mirror reads at most 64 indexed usage claims per evaluation, replaying durable
+claims after restart without blocking store open. Its cursor is fenced by database identity,
+source epoch and configured writer set. Rows stay unknown while replay or dependency closure
+is pending. All producers evaluate at the **minimum** certified source-through frontier with
+the maximum coverage start; newer facts wait for that common cut. A read never renews a source
+heartbeat. Empty configuration executes no source SQL. Quiet reads reuse derived rows until
+an actual source or freshness boundary, without rescanning retained evidence. Quota history
+keeps one pre-horizon boundary; loss/decision history retains the 60d gauge lookback.
+
+Native source metadata distinguishes `source.scope_complete` (the child population
+has been replayed) from `source.coverage_known` (the evidence is usable and fresh).
+The native-binding boundary retains its previously judged and persisted owned
+children as no-data while source scope is incomplete, including renamed families
+and subtree bindings after restart or source-epoch/configuration reset. Identity
+comes from the declaration's mapped children, not a raw `spend/` episode prefix.
+Missing scope cannot end an owner episode as recovered. History is pruned relative
+to the common certified cut, never wall-clock time or a faster producer's frontier.
+No pruning occurs before every expected writer has a positive frontier.
+
+The source fence is always installed in local `meta`, independent of optional IVM
+view adapters. A per-database nonce and mutation epoch survive reopen. Ordinary
+append-only observations preserve incremental progress; source rewrites, deletions
+and insertion at an already observed position invalidate it. Database replacement
+gets a new nonce, and every newly opened Store starts with an empty derived mirror.
+
+Credit identity remains provider/account digest/credit ID, not host or friendly account ref.
+Across writers, redeemed precedes forfeited, which precedes available/unknown; within one
+state class, full-precision provider time then claim ID wins. Historical timely dispositions
+are retained independently of that selected state. Observations without a frontier remain
+durable/readable but cannot certify source completeness. These objectives do not stop seats,
+enforce quotas or redeem credits. Commissioning is configuration preparation only, not live
+activation.
 
 CI's objectives are not in this file. `fractal/merge-latency`, `fractal/ci-critical-path` and
 `fractal/flakes` are declared objectives in `slo/fractal-ci.kdl`, over the `github.workflow-run`

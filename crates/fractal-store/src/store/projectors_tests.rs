@@ -32,7 +32,8 @@ fn open_installs_each_domain_in_order() {
             "read-positions",
             "attention-controls",
             "limits",
-            "usage-credits",
+            "credit-projection-retirement",
+            "usage-source-fence",
             "run-eta",
             "gate-runners",
             "wake-lookup",
@@ -53,7 +54,7 @@ fn append_projects_each_claim_kind_in_order() {
         ("person.directive-note-set", &["custom", "resource-preparation", "directive-notes", "ordered-membership-flush"]),
         ("message.sent", &["custom", "resource-preparation", "agent-messages", "wake-demand", "ordered-membership-flush"]),
         ("harness.limits", &["custom", "resource-preparation", "limits", "ordered-membership-flush"]),
-        ("usage.limits.observed", &["custom", "resource-preparation", "limits", "usage-credits", "ordered-membership-flush"]),
+        ("usage.limits.observed", &["custom", "resource-preparation", "limits", "ordered-membership-flush"]),
         ("arrangement.edited", &["custom", "resource-preparation", "arrangements", "ordered-membership-flush"]),
         ("read-position.advanced", &["custom", "resource-preparation", "read-positions", "ordered-membership-flush"]),
         ("person.attention-seen", &["custom", "resource-preparation", "attention-controls", "ordered-membership-flush"]),
@@ -81,7 +82,6 @@ fn append_projects_each_claim_kind_in_order() {
             "agent-messages",
             "wake-demand",
             "limits",
-            "usage-credits",
             "arrangements",
             "read-positions",
             "attention-controls",
@@ -92,8 +92,8 @@ fn append_projects_each_claim_kind_in_order() {
 }
 
 #[test]
-fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_memberships_only() {
-    assert_eq!(taking(projectors::REPLICATED, "usage.limits.observed"), ["usage-credits"]);
+fn replicated_claims_project_arrangements_read_positions_and_ordered_memberships_only() {
+    assert!(taking(projectors::REPLICATED, "usage.limits.observed").is_empty());
     assert_eq!(taking(projectors::REPLICATED, "arrangement.edited"), ["arrangement-project"]);
     assert_eq!(taking(projectors::REPLICATED, "read-position.advanced"), ["read-position-project"]);
     for kind in ["person.attention-seen", "person.attention-snoozed"] {
@@ -112,7 +112,7 @@ fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_mem
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["objective-times", "custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "wake-demand", "limits", "usage-credits", "arrangements", "run-eta", "ordered-membership"]
+        ["objective-times", "custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "wake-demand", "limits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
@@ -120,7 +120,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -135,7 +135,6 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/arrangements",
             "full-replay/read-positions",
             "full-replay/attention-controls",
-            "full-replay/usage-credits",
             "full-replay/run-eta",
             "full-replay/wake-lookup",
             "full-replay/ordered-membership",
@@ -184,4 +183,79 @@ fn a_projection_pass_stages_each_flush_hook_by_name() {
     for stage in names(projectors::FLUSH).into_iter().chain(["lease-renewals", "commit"]) {
         assert!(stages.contains(&stage), "{stage} in {stages:?}");
     }
+}
+
+#[test]
+fn reopening_retires_disposable_credit_tables_and_trigger_without_changing_claims() {
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("retired-credit-projection.db");
+    let store=super::Store::open(&path,"node").unwrap();
+    store.connection.batched(|transaction| -> anyhow::Result<()> {
+        // Historical projection fixture, not new authoritative state.
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h1e32e6d704d1 owner=fractal_store::store::projectors_tests TODO=chunk-or-reference-variable-columns */
+            "CREATE TABLE local_usage_credit_heads (
+                provider TEXT NOT NULL,account TEXT NOT NULL,credit_id TEXT NOT NULL,actor TEXT NOT NULL,
+                measured_seconds INTEGER NOT NULL,measured_nanos INTEGER NOT NULL,claim_id TEXT NOT NULL,credit TEXT NOT NULL,
+                PRIMARY KEY(provider,account,credit_id,actor)) WITHOUT ROWID;
+             CREATE TABLE local_usage_credit_pending (claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
+             CREATE TABLE local_usage_credit_progress (id INTEGER PRIMARY KEY CHECK(id=1),through_index INTEGER NOT NULL,target_index INTEGER NOT NULL);
+             CREATE TRIGGER usage_credit_claim_insert AFTER INSERT ON claims WHEN NEW.kind='usage.limits.observed' BEGIN
+                INSERT OR IGNORE INTO local_usage_credit_pending VALUES(NEW.id);
+             END;"
+        )?;
+        Ok(())
+    }).unwrap().unwrap();
+    let actor="agent/sample/usage-producer";
+    store.set_usage_limits_writers(vec![actor.into()]).unwrap();
+    let claim=store.append_claim(&crate::model::ClaimInput{
+        subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
+        fields:std::collections::BTreeMap::from([("readings".into(),serde_json::json!([])),("credit_readings".into(),serde_json::json!([]))]),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let digest=store.replication_inventory().unwrap().digest;
+    drop(store);
+    let store=super::Store::open(&path,"node").unwrap();
+    assert_eq!(store.replication_inventory().unwrap().digest,digest);
+    assert_eq!(store.latest_claim(actor,Some("usage.limits.observed")).unwrap().unwrap().id,claim.id);
+    let remaining:u64=store.readers.get().query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('local_usage_credit_heads','local_usage_credit_pending','local_usage_credit_progress','usage_credit_claim_insert')",
+        [],|row|row.get(0),
+    ).unwrap();
+    assert_eq!(remaining,0);
+}
+
+#[test]
+fn native_usage_source_fence_is_independent_of_optional_views_and_survives_reopen() {
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("source-fence.db");
+    let store=super::Store::open(&path,"node").unwrap();
+    let identity = |store: &super::Store| store.readers.get().query_row(
+        "SELECT identity.value,CAST(epoch.value AS INTEGER)
+         FROM meta identity JOIN meta epoch ON epoch.key='local_usage_source_v1_epoch'
+         WHERE identity.key='local_usage_source_v1_identity'",
+        [], |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)),
+    ).unwrap();
+    let initial=identity(&store);
+    assert_eq!(initial.1,0);
+    let actor="agent/sample/usage-producer";
+    store.set_usage_limits_writers(vec![actor.into()]).unwrap();
+    let claim=store.append_claim(&crate::model::ClaimInput{
+        subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
+        fields:std::collections::BTreeMap::from([
+            ("readings".into(),serde_json::json!([])),
+            ("credit_readings".into(),serde_json::json!([])),
+        ]),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert_eq!(identity(&store),initial,"ordinary appends preserve incremental cursors");
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h3abbf8ee686b owner=fractal_store::store::projectors_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms WHERE id=?1",[&claim.id]).unwrap();
+    assert_eq!(identity(&store),(initial.0.clone(),1));
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-ha50a715460a4 owner=fractal_store::store::projectors_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1",[&claim.id]).unwrap();
+    assert_eq!(identity(&store),(initial.0.clone(),2));
+    drop(store);
+    let reopened=super::Store::open(&path,"node").unwrap();
+    assert_eq!(identity(&reopened),(initial.0.clone(),2));
+    let replacement=super::Store::open_memory("node").unwrap();
+    assert_ne!(identity(&replacement).0,initial.0);
 }
