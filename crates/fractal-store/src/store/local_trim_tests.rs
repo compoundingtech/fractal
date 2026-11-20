@@ -310,7 +310,7 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
     let before = answers(&store, context.now_unix_ms);
     let digest = store.replication_snapshot().unwrap().authority_digest.clone();
     while !store.release_envelopes(0).unwrap().done {}
-    let count = |sql: &str| -> i64 { store.readers.get().query_row(sql, [], |row| row.get(0)).unwrap() };
+    let count = |sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-h12ee733e233d owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
     let released_observations = count(
         "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'",
     );

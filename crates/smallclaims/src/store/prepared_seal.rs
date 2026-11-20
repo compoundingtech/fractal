@@ -71,7 +71,7 @@ pub(crate) fn unsealed_batches(
     } else {
         "origin, replica_sequence, id"
     };
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h1b7cc8d148aa owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h40d1bd6ea3d2 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms,
                 batches.rowid
          FROM batches

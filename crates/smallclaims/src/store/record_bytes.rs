@@ -221,7 +221,7 @@ pub fn envelope_has_late_record_sql(alias: &str, cut: &str) -> String {
 }
 
 /// The table repairs wait in for a record that is gone (`await_repaired_record_tx`).
-pub const VIEW_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8195fc71bd92 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-variable-columns */ "
+pub const VIEW_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h76ab6030e905 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) WITHOUT ROWID;
 ";
 
@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) W
 /// a claim, or how many records an envelope holds, reads this view instead. It holds no data of
 /// its own. The two envelope tables are joined each in its own branch: a term on the view then
 /// reaches every table's index, which a nested view compound would not.
-pub const RECORD_ROWS_VIEW: &str = "
+pub const RECORD_ROWS_VIEW: &str = /* sqlite-large-value: allow-for-now lv-hcb990d31fe61 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-exact-wire-values */ "
 CREATE VIEW IF NOT EXISTS replica_record_rows(writer, sequence, envelope_hash, position, state, claim_id) AS
     SELECT writer, sequence, envelope_hash, position, state, claim_id FROM replica_records
     UNION ALL

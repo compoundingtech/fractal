@@ -116,7 +116,7 @@ impl StagedSet {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut held = connection.prepare_cached(&HELD)?;
+            let mut held = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hee1ce849b473 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &HELD)?;
             let mut partners = connection.prepare_cached(
                 "SELECT partner.id FROM claims AS claim JOIN claims AS partner
                    ON json_extract(partner.body, '$._operation.id')=json_extract(claim.body, '$._operation.id')
@@ -279,7 +279,7 @@ impl StagedSet {
             let connection = store.readers.get();
             // Newest first; a late envelope (one holding a claim dated at or after the cut) is
             // not before the cut, as in a full capture.
-            let mut sealed = connection.prepare_cached(&NEWEST_SEALED)?;
+            let mut sealed = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h24c4e7c6aac9 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &NEWEST_SEALED)?;
             let mut tombstoned = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h512fd1a2bdd1 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT sequence, envelope_hash, CAST(accepted_at_unix_ms AS TEXT), 0 FROM checkpoint_envelopes
                  WHERE writer=?1 AND ?2 IS NOT NULL AND {RECORDED_TOMBSTONE_FILTER}
@@ -336,7 +336,7 @@ impl StagedSet {
             let connection = store.readers.get();
             // Sealed as a full capture stages it: present, with a record, not repaired, in an
             // envelope before the cut and the seal row that holds no claim dated at or after it.
-            let mut sealed = connection.prepare_cached(&SEALED_CITER)?;
+            let mut sealed = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdf4c70d20086 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &SEALED_CITER)?;
             let mut cited = Vec::new();
             for candidate in &candidates {
                 for citer in Store::local_trim_citers(&connection, candidate)? {

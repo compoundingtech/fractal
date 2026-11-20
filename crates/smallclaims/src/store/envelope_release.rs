@@ -29,7 +29,7 @@ pub const ENVELOPE_RELEASE: bool = false;
 /// `original_rowid` is the envelope's `replica_envelopes` rowid, so a capture bounded by a seal row
 /// (`row_id <= ?`) sees a released envelope exactly where it saw the stored one. A released
 /// envelope was validated and admitted (`receipt_state` 'validated').
-pub const SCHEMA: &str = "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4f885dc5dbb7 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS released_envelopes (
     writer TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -186,7 +186,7 @@ fn release_page(tx: &Transaction<'_>, origin: &str, authority: &Authority, min_a
     let newest = max_envelope_rowid(tx)?;
     let oldest_accepted = now_ms().saturating_sub(u128::from(min_age_ms));
     let page = tx
-        .prepare_cached(PAGE_SQL)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb977b8b2d181 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ PAGE_SQL)?
         .query_map(params![after, PAGE], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -222,7 +222,7 @@ fn release_page(tx: &Transaction<'_>, origin: &str, authority: &Authority, min_a
     }
     if report.scanned > 0 {
         tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            /* sqlite-large-value: allow-for-now lv-h71e733dedc2b owner=smallclaims::store::envelope_release TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![CURSOR, after.to_string()],
         )?;
     }
@@ -239,8 +239,8 @@ fn releasable(tx: &Connection, origin: &str, authority: &Authority, envelope: &R
         return Ok(false);
     }
     let eligible: bool = tx
-        .prepare_cached(ELIGIBLE_SQL)?
-        .query_row(params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| row.get(0))?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c3e7cfc9c6d owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ ELIGIBLE_SQL)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-haf548599f1ef owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| row.get(0))?;
     if !eligible {
         return Ok(false);
     }
@@ -249,7 +249,7 @@ fn releasable(tx: &Connection, origin: &str, authority: &Authority, envelope: &R
         crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(false),
     };
     let claims = tx
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6d430f1b6cf owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_batch_index
              WHERE claims.batch_id=?1 ORDER BY claims.store_index"
         ))?
@@ -297,23 +297,23 @@ fn kept_kind(origin: &str, claim: &ClaimRecord) -> bool {
 fn release_tx(tx: &Connection, rowid: i64, envelope: &ReplicaEnvelopeId) -> Result<bool> {
     let kept = tx
         .prepare_cached(
-            "INSERT OR IGNORE INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
+            /* sqlite-large-value: allow-for-now lv-hf6c7e0f4d53c owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
                  accepted_at_unix_ms, batch_id, original_rowid, released_at_unix_ms)
              SELECT writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, batch_id, rowid, ?2
              FROM replica_envelopes WHERE rowid=?1",
         )?
-        .execute(params![rowid, i64::try_from(now_ms())?])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h5ae5cf1b36cc owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![rowid, i64::try_from(now_ms())?])?;
     if kept == 0 {
         return Ok(false);
     }
     for table in ["replica_envelope_signatures", "replica_envelope_holds", "replica_records"] {
         tx.prepare_cached(&format!(
-            "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+            /* sqlite-large-value: allow-for-now lv-h5e86b51b796f owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
         ))?
-        .execute(params![envelope.writer, envelope.sequence, envelope.hash])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-hb7a4188d5c54 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash])?;
     }
-    tx.prepare_cached("DELETE FROM replica_envelopes WHERE rowid=?1")?
-        .execute([rowid])?;
+    tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h51ac46e59165 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes WHERE rowid=?1")?
+        .execute(/* sqlite-large-value: allow-for-now lv-hf1e1d4fedb7a owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ [rowid])?;
     Ok(true)
 }
 
@@ -324,7 +324,7 @@ pub fn envelope_released(connection: &Connection, writer: &str, sequence: u64, e
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM released_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
         )?
-        .query_row(params![writer, sequence, envelope_hash], |row| row.get(0))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-hbd866c8c542b owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![writer, sequence, envelope_hash], |row| row.get(0))?)
 }
 
 /// The writer signatures of claim `claim_id` whose admission came from an envelope this member
@@ -349,7 +349,7 @@ pub fn released_claim_signers(
         )
     });
     Ok(connection
-        .prepare_cached(&QUERY)?
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc79e38407965 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ &QUERY)?
         .query_map(params![claim_id, writer], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }

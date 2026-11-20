@@ -396,7 +396,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         if let Some(batch) = batch {
             delete_statement("batches", || -> Result<()> {
                 transaction
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1ffbd7f1dfc6 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
                  AND NOT EXISTS (SELECT 1 FROM envelope_rows WHERE batch_id=?1)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
@@ -600,7 +600,7 @@ impl Store {
             let connection = self.readers.get();
             let page = connection
                 .prepare_cached(
-                    &format!("SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                    /* sqlite-large-value: allow-for-now lv-haab6388ed742 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
                             envelopes.accepted_at_unix_ms, {}
                      FROM replica_envelopes envelopes
                      WHERE envelopes.rowid > ?1 AND envelopes.rowid <= ?2",

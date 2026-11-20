@@ -1206,12 +1206,12 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(envelope_release::SCHEMA)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2f68e87ca1bc owner=smallclaims::store TODO=trace-statement-and-value-representation */ envelope_release::SCHEMA)?;
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA)?;
             // The view reads `envelope_rows` from this build on, so a released claim keeps its
             // record. An older build keeps this definition: it creates the view only if missing.
             record_bytes::replace_if_changed(connection, "VIEW", "replica_record_rows", record_bytes::RECORD_ROWS_VIEW)?;
-            connection.execute_batch(record_bytes::RECORD_ROWS_VIEW).map_err(Into::into)
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h26efdf8fd946 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::RECORD_ROWS_VIEW).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)

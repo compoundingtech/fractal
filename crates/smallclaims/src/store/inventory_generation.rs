@@ -40,7 +40,7 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
     // and the inventory lists it from there, so it does not count either; its second version
     // counted it. An older build recreates that one beside this; it releases nothing.
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hd0fb382d248c owner=smallclaims::store::inventory_generation TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS replica_envelopes_inventory_DELETE;
+        /* sqlite-large-value: allow-for-now lv-h518ea715aab3 owner=smallclaims::store::inventory_generation TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS replica_envelopes_inventory_DELETE;
          DROP TRIGGER IF EXISTS replica_envelopes_inventory_DELETE_v2;
          DROP TRIGGER IF EXISTS retired_envelopes_inventory_INSERT;",
     )?;
