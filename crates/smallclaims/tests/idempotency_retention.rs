@@ -596,9 +596,9 @@ fn drain_replay_safe(store: &Store, now: i64, window: i64) -> usize {
     let mut deleted = 0;
     loop {
         let cleaned = store.cleanup_replay_safe_idempotency(now, window).unwrap();
-        assert!(cleaned.examined <= CLEANUP_CHUNK);
+        assert!(cleaned.examined + cleaned.passed <= CLEANUP_CHUNK);
         deleted += cleaned.deleted;
-        if cleaned.examined == 0 {
+        if cleaned.examined + cleaned.passed == 0 {
             return deleted;
         }
     }
@@ -671,4 +671,20 @@ fn a_pinned_replay_safe_receipt_stays_for_the_ordinary_pass_and_chunks_stay_boun
     assert_eq!(keys(&store)[..3], ["renewal-0", "renewal-1", "renewal-2"], "nothing moved to the tail");
     // The ordinary pass still governs the pinned ones at the full retention.
     assert_eq!(store.next_idempotency_expiry().unwrap(), Some(now - HOUR - 1 + RETENTION_MS));
+}
+
+#[test]
+fn a_chunk_of_only_published_receipts_moves_the_pass_on() {
+    let store = memory();
+    for index in 0..100 {
+        receipt(&store, &format!("published-{index}"), false);
+    }
+    receipt(&store, "renewal", true);
+    completed_at(&store, expiry(&store) - RETENTION_MS);
+    let now = expiry(&store) - RETENTION_MS + HOUR + 1;
+    commit_clock_anchor(&store, now);
+    let first = store.cleanup_replay_safe_idempotency(now, HOUR).unwrap();
+    assert_eq!((first.examined, first.passed), (0, CLEANUP_CHUNK), "nothing examined, but the cursor moved");
+    assert_eq!(drain_replay_safe(&store, now, HOUR), 1);
+    assert_eq!(keys(&store).len(), 100);
 }

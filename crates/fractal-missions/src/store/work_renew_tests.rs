@@ -1277,7 +1277,7 @@ fn a_renewal_retried_after_its_receipt_expired_renews_again() {
     loop {
         let cleaned = store.cleanup_replay_safe_idempotency(now, hour).unwrap();
         deleted += cleaned.deleted;
-        if cleaned.examined == 0 { break; }
+        if cleaned.examined + cleaned.passed == 0 { break; }
     }
     assert!(deleted >= 1);
     let gone: bool = store.connection.write().query_row(

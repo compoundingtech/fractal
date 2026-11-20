@@ -25,6 +25,8 @@ pub struct Cleanup {
     pub examined: usize,
     pub deleted: usize,
     pub extended: usize,
+    /// Rows the replay-safe pass moved its cursor over without examining: published receipts.
+    pub passed: usize,
 }
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
@@ -285,6 +287,8 @@ pub fn cleanup_replay_safe_tx(
             if !pinned(transaction, &response)? {
                 result.deleted += transaction.execute(/* sqlite-large-value: allow-for-now lv-h6ed1042f2ae7 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1", [key])?;
             }
+        } else {
+            result.passed += 1;
         }
         cursor = rowid;
     }

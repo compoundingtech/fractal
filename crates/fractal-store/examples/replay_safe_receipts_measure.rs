@@ -79,18 +79,19 @@ fn main() {
     let mut holds = Holds::default();
     let now = smallclaims::store::now_ms() as i64;
     let started = Instant::now();
-    let (mut examined, mut deleted) = (0, 0);
+    let (mut examined, mut deleted, mut passed) = (0, 0, 0);
     loop {
         let cleaned = holds.time(|| store.cleanup_replay_safe_idempotency(now, window).unwrap());
         examined += cleaned.examined;
         deleted += cleaned.deleted;
-        if cleaned.examined == 0 {
+        passed += cleaned.passed;
+        if cleaned.examined + cleaned.passed == 0 {
             break;
         }
         // The daemon rests 20 ms between chunks.
         std::thread::sleep(Duration::from_millis(20));
     }
-    println!("replay_safe_examined={examined} replay_safe_deleted={deleted} kept_by_runtime={} pass_s={:.1}",
+    println!("replay_safe_examined={examined} replay_safe_deleted={deleted} published_passed={passed} kept_by_runtime={} pass_s={:.1}",
         examined - deleted, started.elapsed().as_secs_f64());
     holds.report("replay_safe_pass");
     receipts(&store, "after");
