@@ -1790,7 +1790,7 @@ impl World {
             // 3 and 4. A node lacks only claims of a kind local trim drops, never a person's,
             // and only claims it retired.
             //
-            // TODO(T-wins deletion, set-sync S2d): a node may still lack a claim that another
+            // TODO(#6878, T-wins deletion, set-sync S2d): a node may still lack a claim that another
             // node retired before this one ever received it: the trimming holders list its
             // envelope without a payload, and this node does not yet learn the retired ID. Then
             // it should retire the claim too; until it does, such a claim is allowed here, and
@@ -1872,7 +1872,7 @@ impl World {
             }
             // 1. Trimming nodes retain the same claims, but for those some node retired.
             //
-            // TODO(T-wins deletion, set-sync S2d): every trimming node should retain exactly
+            // TODO(#6878, T-wins deletion, set-sync S2d): every trimming node should retain exactly
             // the same claims and hold the same retired claim IDs. Each trims its own cuts and
             // retired IDs do not yet travel with an exchange, so today only the claims no node
             // retired must match.

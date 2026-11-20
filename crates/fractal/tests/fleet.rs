@@ -2954,7 +2954,7 @@ fn supervise_leave_with_diagnostics() -> bool {
         let root = tempfile::tempdir().unwrap();
         let output = Command::new("python3")
             .arg(scripts.join("fractal_test_process.py"))
-            .args(["--owner", &std::process::id().to_string(), "--", "python3"])
+            .args(["--owner", &std::process::id().to_string(), "--pid-namespace", "--", "python3"])
             .arg(scripts.join("fractal_fleet_leave_diagnostics.py"))
             .args(["--seconds", "600", "--root"])
             .arg(root.path())
@@ -3768,7 +3768,6 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    o.wait_listening().await;
     wait_until("the upgraded member empties its valid records' bytes", 60, || async {
         valid_record_bytes(&o).1 == 0
     })
@@ -3786,7 +3785,6 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
     o.stop();
     o.binary = old;
     o.start().await;
-    o.wait_listening().await;
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
     assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
     for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
@@ -3812,7 +3810,6 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    o.wait_listening().await;
     wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
         valid_record_bytes(&o).1 == 0
     })

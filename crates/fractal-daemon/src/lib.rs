@@ -77,6 +77,13 @@ pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 pub use fractal_api_mailbox::readiness_slo;
+pub use fractal_api_mailbox::roll_completion;
+pub use fractal_api_mailbox::roll_completion_watch;
+
+#[test]
+fn rollout_watcher_is_exposed_through_daemon_facade() {
+    let _: fn(&std::sync::Arc<crate::store::Store>) = crate::roll_completion_watch::start;
+}
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
