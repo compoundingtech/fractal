@@ -10,8 +10,9 @@ that exact landed source. Otherwise it retains the hosted queue proof without re
 Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
 lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
-disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
-public-content guard. Public checks keep only the latest main push. Main upkeep retains
+disabled. PR updates cancel obsolete runs for that PR in Workspace CI and both
+public-content guards. Public checks retain each main push in its own run group;
+only pull-request events cancel in-progress runs. Main upkeep retains
 each landed source for any required post-merge proof. Manual dispatch
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The four required queue checks and complete test partitions are retained.
