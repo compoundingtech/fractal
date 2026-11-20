@@ -13,6 +13,7 @@ use fractal_attention::store::owned_sets_tests_shared::{bundle, direct, share, s
 use fractal_attention::store::tests_shared::*;
 use fractal_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 mod empty_authority_guard;
+mod native_roots;
 
 fn options(store: &Store, sequence: u64) -> Options {
     let current = store
@@ -2015,4 +2016,35 @@ fn a_claimed_namespace_still_admits_run_owned_declarations() {
     assert_eq!(member.code, "set-managed-subject");
     assert_eq!(store.index().unwrap(), index);
     assert!(store.latest_claim("agent/garden/helper", Some(owned_sets::DEBT_KIND)).unwrap().is_none());
+}
+
+/// Only a lease renewal's receipt is shortened: an owned-set apply's response and its request
+/// digest are replay-safe too, and stay for the 7-day cleanup however old they are.
+#[test]
+fn owned_set_apply_receipts_outlast_the_replay_safe_window() {
+    let store = Store::open_memory("amber").unwrap();
+    apply(&store, &bundle("initial", true), 10);
+    let receipts = || -> Vec<(String, bool, String)> {
+        let writer = store.connection.write();
+        let mut statement = writer.prepare("SELECT operation_id, replay_safe, response FROM idempotency ORDER BY rowid").unwrap();
+        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let before = receipts();
+    // The request digest and the apply response, both replay-safe.
+    assert!(before.iter().any(|(_, safe, response)| *safe && !response.starts_with('{')), "{before:?}");
+    assert!(before.iter().any(|(_, safe, response)| *safe && response.starts_with("{\"changed\"")), "{before:?}");
+    let hour = smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS;
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h68f5c82ac4bd owner=fractal_evidence::store::owned_sets_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=expires_at_unix_ms-?1", [2 * hour]).unwrap();
+    let now = smallclaims::store::now_ms() as i64;
+    let mut examined = 0;
+    loop {
+        let cleaned = store.cleanup_replay_safe_idempotency(now, hour).unwrap();
+        assert_eq!(cleaned.deleted, 0);
+        examined += cleaned.examined;
+        if cleaned.examined + cleaned.passed == 0 { break; }
+    }
+    assert!(examined >= 2, "the pass saw them and kept them");
+    let kept: Vec<_> = receipts().into_iter().map(|(key, _, _)| key).collect();
+    assert_eq!(kept, before.into_iter().map(|(key, _, _)| key).collect::<Vec<_>>(), "kept for the 7-day cleanup");
 }

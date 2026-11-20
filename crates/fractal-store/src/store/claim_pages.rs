@@ -236,18 +236,19 @@ mod tests {
             .join("; ")
     }
 
-    /// A kind with a prefix walks `claims_kind_index` past the cursor rather than the subject
-    /// range: the page comes out in store-index order and stops at its limit, and a reader that
-    /// keeps its cursor touches only newer claims of that kind. A prefix alone seeks its range.
+    /// A kind with a prefix walks `claims_kind_index` between the cursor and upper bound rather
+    /// than the subject range: the page comes out in store-index order and stops at its limit,
+    /// and a reader that keeps its cursor touches only newer claims of that kind.
+    /// A prefix alone seeks its range.
     #[test]
     fn each_claim_page_filter_seeks_its_index() {
         let store = Store::open_memory("node").unwrap();
         for descending in [false, true] {
             for (subject, kind, expected) in [
-                (ClaimsSubject::Any, true, "USING INDEX claims_kind_index (kind=? AND store_index>?)"),
-                (ClaimsSubject::Range, true, "USING INDEX claims_kind_index (kind=? AND store_index>?)"),
+                (ClaimsSubject::Any, true, "USING INDEX claims_kind_index (kind=? AND store_index>? AND store_index<?)"),
+                (ClaimsSubject::Range, true, "USING INDEX claims_kind_index (kind=? AND store_index>? AND store_index<?)"),
                 (ClaimsSubject::Range, false, "USING INDEX claims_subject_index (subject>? AND subject<?)"),
-                (ClaimsSubject::Exact, true, "USING INDEX claims_subject_kind_index (subject=? AND kind=? AND store_index>?)"),
+                (ClaimsSubject::Exact, true, "USING INDEX claims_subject_kind_index (subject=? AND kind=? AND store_index>? AND store_index<?)"),
             ] {
                 let plan = plan(&store, &claims_page_query(subject, kind, descending, false));
                 assert!(plan.contains(expected), "{subject:?} kind={kind}: {plan}");

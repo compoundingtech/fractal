@@ -14,7 +14,7 @@
 //! peer ignores the field.
 use super::*;
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a55fb29678a owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h88bdbfc1cdaf owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_member_signatures (
     id INTEGER PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -29,14 +29,38 @@ CREATE TABLE IF NOT EXISTS claim_member_signature_pending (
     member_key TEXT NOT NULL,
     signature TEXT NOT NULL,
     received_at_unix_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(claim_id, member_key)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_member_signature_pending_peer ON claim_member_signature_pending(peer);
 ";
 
 const SIGN_CURSOR: &str = "claim_member_signature_cursor";
 const SIGN_PAGE: usize = 512;
 const PROMOTE_PAGE: usize = 512;
 const PENDING_CURSOR: &str = "claim_member_signature_pending_cursor";
+/// The most signatures one peer may have waiting here, and the most in all. A member writes a
+/// few thousand claims a day, so a real backlog stays far below these; past them a signature is
+/// refused and counted (`REFUSED`), never by evicting one that waits.
+pub const PENDING_PER_PEER: usize = 50_000;
+pub const PENDING_TOTAL: usize = 200_000;
+static CAPS: std::sync::RwLock<(usize, usize)> = std::sync::RwLock::new((PENDING_PER_PEER, PENDING_TOTAL));
+
+/// Set the per-peer and total caps on waiting signatures for this process, in place of
+/// [`PENDING_PER_PEER`] and [`PENDING_TOTAL`]; for tests that reach a cap without writing
+/// hundreds of thousands of rows.
+pub fn limit_waiting_claim_signatures(per_peer: usize, total: usize) {
+    *CAPS.write().unwrap_or_else(PoisonError::into_inner) = (per_peer, total);
+}
+/// How many waiting signatures this member refused for the caps, ever.
+const REFUSED: &str = "claim_member_signatures_refused";
+/// The same count, as telemetry.
+static REFUSED_COUNTER: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> = std::sync::LazyLock::new(|| {
+    opentelemetry::global::meter("st3")
+        .u64_counter("st.replication.claim_signatures.refused")
+        .with_description("Waiting claim signatures refused for the per-peer or total cap")
+        .build()
+});
 /// A signature for a claim that never arrives is dropped after this long.
 const PENDING_KEEP_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 
@@ -130,7 +154,7 @@ impl Store {
     /// is that writer's at that sequence. One for a claim not held here yet waits until it is.
     /// Returns how many it kept; one that does not verify, or names another writer's claim, is
     /// dropped.
-    pub fn receive_claim_member_signatures(&self, signatures: &[ClaimMemberSignature]) -> Result<usize> {
+    pub fn receive_claim_member_signatures(&self, peer: &str, signatures: &[ClaimMemberSignature]) -> Result<usize> {
         if signatures.is_empty() {
             return Ok(0);
         }
@@ -139,6 +163,13 @@ impl Store {
             let Some(fleet_id) = self.signing_fleet_id(&connection)? else { return Ok(0) };
             (fleet_id, fleet_membership_tx(&connection)?)
         };
+        // A signature waits only under a key this member's membership has known: the anchor or
+        // any incarnation's. A made-up key is dropped, not parked.
+        let known: std::collections::BTreeSet<&str> = membership
+            .anchor()
+            .into_iter()
+            .chain(membership.incarnations().map(|incarnation| incarnation.member_key.as_str()))
+            .collect();
         // A signature counts only for a key membership admits for its writer at that sequence.
         // Membership may not know the writer's key yet: the claim that keys it can travel in the
         // same exchange as the signatures. Such a signature waits, and is judged again once the
@@ -165,11 +196,20 @@ impl Store {
             return Ok(0);
         }
         let now = i64::try_from(now_ms())?;
+        let (per_peer_cap, total_cap) = *CAPS.read().unwrap_or_else(PoisonError::into_inner);
+        let mut refused = 0;
         // Every signature of one exchange is decided in one write: an exchange carries the
         // signatures of the envelopes it sends, at most its envelope limit's claims.
-        self.connection
+        let kept = self.connection
             .batched(|tx| -> Result<usize> {
                 let mut kept = 0;
+                let mut from_peer: usize = tx.query_row(
+                    "SELECT COUNT(*) FROM claim_member_signature_pending WHERE peer=?1",
+                    [peer],
+                    |row| row.get(0),
+                )?;
+                let mut total: usize =
+                    tx.query_row("SELECT COUNT(*) FROM claim_member_signature_pending", [], |row| row.get(0))?;
                 for (signature, admitted) in verified {
                     match claim_writer_tx(tx, &signature.claim_id)? {
                         Some((writer, sequence)) if admitted => {
@@ -179,20 +219,50 @@ impl Store {
                         }
                         // Another writer's claim, and nothing can admit it later.
                         Some(_) if !admitted => {}
+                        _ if !known.contains(signature.member_key.as_str()) => {}
+                        _ if from_peer >= per_peer_cap || total >= total_cap => refused += 1,
                         _ => {
+                            from_peer += 1;
+                            total += 1;
                             tx.execute(
-                                /* sqlite-large-value: allow-for-now lv-h39694ad7823a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signature_pending(
-                                     claim_id, writer, sequence, member_key, signature, received_at_unix_ms)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                /* sqlite-large-value: allow-for-now lv-h9f2bdd0b1cc1 owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signature_pending(
+                                     claim_id, writer, sequence, member_key, signature, received_at_unix_ms, peer)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                                 params![signature.claim_id, signature.writer, signature.sequence,
-                                    signature.member_key, signature.signature, now],
+                                    signature.member_key, signature.signature, now, peer],
                             )?;
                         }
                     }
                 }
+                if refused > 0 {
+                    tx.execute(
+                        /* sqlite-large-value: allow-for-now lv-hf52799426bd6 owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)
+                         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+CAST(excluded.value AS INTEGER) AS TEXT)",
+                        params![REFUSED, refused.to_string()],
+                    )?;
+                }
                 Ok(kept)
             })
-            .map_err(anyhow::Error::msg)?
+            .map_err(anyhow::Error::msg)??;
+        if refused > 0 {
+            REFUSED_COUNTER.add(refused as u64, &[]);
+            eprintln!(
+                "st3: refused {refused} waiting claim signatures from {peer}: past {per_peer_cap} from one peer or {total_cap} in all"
+            );
+        }
+        Ok(kept)
+    }
+
+    /// How many waiting signatures this member has refused for the caps.
+    pub fn claim_member_signatures_refused(&self) -> Result<u64> {
+        Ok(self
+            .readers
+            .get()
+            .query_row("SELECT value FROM meta WHERE key=?1", [REFUSED], |row| row.get::<_, String>(0))
+            .optional()?
+            .map(|value| value.parse::<u64>())
+            .transpose()?
+            .unwrap_or(0))
     }
 
     /// Keep the waiting signatures whose claims have arrived and whose batch names the signing

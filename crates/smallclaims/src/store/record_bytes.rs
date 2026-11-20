@@ -225,6 +225,57 @@ pub const VIEW_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h76ab6030e
 CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) WITHOUT ROWID;
 ";
 
+/// Assert that `sql` seeks every table it reads: no step scans a table or builds an automatic
+/// index. A view compound or a subquery read as it is produced (`SCAN records`) is not a table.
+#[cfg(test)]
+pub(crate) fn assert_plan_seeks(connection: &Connection, sql: &str) {
+    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let count = statement.parameter_count();
+    let plan = statement
+        .query_map(rusqlite::params_from_iter(vec![rusqlite::types::Null; count]), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let produced = |step: &str| {
+        step == "SCAN CONSTANT ROW"
+            || step == "SCAN records"
+            || step == "SCAN replica_record_rows"
+            || step.starts_with("SCAN (subquery-")
+    };
+    let scans: Vec<&String> = plan
+        .iter()
+        .filter(|step| (step.starts_with("SCAN ") && !produced(step)) || step.contains("AUTOMATIC"))
+        .collect();
+    assert!(scans.is_empty(), "{scans:?} in {plan:#?} for {sql}");
+}
+
+#[cfg(test)]
+mod view_plan_tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// Without statistics the planner assumes large tables, as on a real store.
+    #[test]
+    fn envelope_record_counts_and_late_checks_seek_and_scan_nothing() {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        for sql in [
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE rowid>?1 AND rowid<=?2",
+                envelope_record_count_sql("envelopes")
+            ),
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE writer=?1",
+                envelope_has_late_record_sql("envelopes", "?2")
+            ),
+            "SELECT COUNT(*) FROM replica_record_rows WHERE claim_id=?1".into(),
+            crate::store::checkpoint::sealed_envelope_records_sql(),
+        ] {
+            assert_plan_seeks(&connection, &sql);
+        }
+    }
+}
+
 /// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
 /// valid, a repaired one, or a valid one a store has not yet deleted), and for each valid claim
 /// whose record is gone the row it had: its envelope, found by the claim's batch among the
@@ -299,11 +350,12 @@ pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[
 /// The storage version from which a store keeps no valid record at all: it commits with the
 /// first deletion of one (`release_valid_records`). Below it, admission and sealing still store
 /// a valid record (without bytes), so a member rolled back before then finds a record for every
-/// claim; from it, a build that reads only up to version 22 refuses the store.
-pub const VALID_RECORDS_GONE_VERSION: u32 = 23;
+/// claim; from it, a build that reads only up to version 26 refuses the store. (23 and 24 are retired, 25 and
+/// 26 belong to the blob file and signature compaction.)
+pub const VALID_RECORDS_GONE_VERSION: u32 = 27;
 
 /// Whether the daemon deletes valid records. Off until the signature-reference writer turns on by
-/// its own flag rather than at storage version 21 and above (#6765): committing version 23 would
+/// its own flag rather than at storage version 21 and above (#6765): committing version 27 would
 /// otherwise switch that writer on too.
 pub const VALID_RECORD_DELETION: bool = false;
 

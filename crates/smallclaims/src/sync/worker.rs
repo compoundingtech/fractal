@@ -475,14 +475,14 @@ impl FleetContext {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
+    /// Record that a member refused this node for good, so it stops dialing and `fractal doctor`
     /// can say what happened.
     async fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
         if self.removed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
         eprintln!(
-            "st3: {reported_by} refused this node ({}): {}; it stops syncing",
+            "fractal: {reported_by} refused this node ({}): {}; it stops syncing",
             removed.code, removed.message
         );
         // The settings lock is a blocking flock, and endpoint publication holds it across a
@@ -516,7 +516,7 @@ impl FleetContext {
         .await
         .unwrap_or_else(|error| Err(anyhow::anyhow!("the refusal writer stopped: {error}")));
         if let Err(error) = persisted {
-            eprintln!("st3: cannot persist fleet refusal: {error:#}");
+            eprintln!("fractal: cannot persist fleet refusal: {error:#}");
         }
     }
 
@@ -1757,7 +1757,7 @@ async fn dial_peer<B: Backend>(
     // set changes. A refused preferred route is never held: see the refusal below.
     let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
-        // A removed node stops dialing; `st3 doctor` says what to do next.
+        // A removed node stops dialing; `fractal doctor` says what to do next.
         if fleet.is_removed() {
             tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
             continue;

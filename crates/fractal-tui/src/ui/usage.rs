@@ -12,7 +12,7 @@ use super::text;
 use super::theme;
 use super::view::{Load, World};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use fractal_client::{UsageLimit, UsageRow};
 use std::collections::BTreeMap;
 

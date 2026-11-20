@@ -200,19 +200,19 @@ impl Store {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
-                eprintln!("st3: the saved replication inventory {} cannot be opened, so the first snapshot reads the store: {error}", source.display());
+                eprintln!("fractal: the saved replication inventory {} cannot be opened, so the first snapshot reads the store: {error}", source.display());
                 return Ok(None);
             }
         };
         if let Err(error) = std::fs::remove_file(&source) {
             // Read it only when it cannot outlive this process's changes.
-            eprintln!("st3: the saved replication inventory {} cannot be removed, so the first snapshot reads the store: {error}", source.display());
+            eprintln!("fractal: the saved replication inventory {} cannot be removed, so the first snapshot reads the store: {error}", source.display());
             return Ok(None);
         }
         let (header, inventory, buckets) = match read(file) {
             Ok(read) => read,
             Err(error) => {
-                eprintln!("st3: the saved replication inventory {} is unreadable, so the first snapshot reads the store: {error:#}", source.display());
+                eprintln!("fractal: the saved replication inventory {} is unreadable, so the first snapshot reads the store: {error:#}", source.display());
                 return Ok(None);
             }
         };

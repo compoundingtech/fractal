@@ -17,7 +17,6 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
@@ -101,6 +100,12 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_mailbox_argv_bindings",
         "local_mailbox_leases",
         "local_native_delivery_receipts_v2",
+        // Member-local terminal ladder scheduling; native delivery claims own deduplication.
+        "local_escalation_runs_v1",
+        // Rebuildable indexed escalation clocks and transaction-local change capture.
+        "local_escalation_clocks_v1",
+        "local_escalation_pending_v1",
+        "local_escalation_pending_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -201,6 +206,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
+        "local_resource_preparation_stale",
         "local_resource_preparation_rebuild",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
@@ -230,7 +236,13 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        // Host-local deferred publication queue; never part of the shared projection digest.
+        "resource_admission_pending_v1",
+        // Host-local retirement-qualified learner samples and permanent replay dedupe.
+        "resource_profile_samples_v1",
         "shell_resources_v1",
+        // Owner-scoped cancellation tombstones govern only this host's runtime requests.
+        "shell_resource_request_cancellations_v1",
         // Host-local physical-erasure completion, not replicated or rebuildable from claims.
         "shell_environment_scrub_v1",
         // Settled teardown receipts belong only to this host's runtime cleanup.
@@ -274,6 +286,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "checkpoint_capture_epoch",
         "checkpoints",
         "checkpoint_capture_epoch",
+        // A blob is bound by the claims that name its hash, and where its bytes live (the row or
+        // the blob file) is local, so it left the projection digest at projection version 2.
+        "blobs",
     ];
     let mut classified = SHARED_TABLES
         .iter()
@@ -371,8 +386,7 @@ pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                 .iter()
                 .filter(|name| !local_columns.contains(&name.as_str()))
                 .map(|name| {
-                    if (*table == "blobs" && name == "bytes")
-                        || (*table == "documents" && name == "binding_key")
+                    if (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
                         || (*table == "person_directive_notes" && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers" | "ordered_membership_heads")

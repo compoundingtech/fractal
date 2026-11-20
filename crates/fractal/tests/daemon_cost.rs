@@ -146,8 +146,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Sessions read every harness observation (11.5x full-scan steps).
-    ("GET /v1/sessions", 17.5),
 ];
 
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
@@ -216,6 +214,18 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/internal/resources/{id}/cancel",
         "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/by-request/{request_id}",
+        "requires an owner-scoped host-local submission identity, absent from generated claim-history cost stores; api::resources::tests::request_lookup_submit_retry_conflict_and_terminal_lookup_share_authenticated_scope covers authenticated lookup and terminal replay; local request-row and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/by-request/{request_id}/cancel",
+        "writes an owner-scoped host-local cancellation tombstone even before submission, outside generated claim-history cost stores; api::resources::tests::absent_request_cancel_returns_confirmed_owner_scoped_tombstone covers nonlaunch confirmation and owner isolation; retained tombstone growth is not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}/member-scope",
+        "requires a live enforced native member cgroup and authenticated execution, absent from generated cost stores; api::resources::tests::nested_member_scope_keeps_current_generation_separate_from_verified_root covers generation/root separation; live kernel placement and host-local membership growth are not measured here",
     ),
     (
         "GET /v1/internal/fleet/leave-state",
@@ -1265,6 +1275,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.to_string())
     }),
     get("GET /v1/doctor", "/v1/doctor"),
+    get("GET /v1/storage/status", "/v1/storage/status"),
     get("GET /v1/repair", "/v1/repair"),
     get("GET /v1/replication/status", "/v1/replication/status"),
     get("GET /v1/replication/records", "/v1/replication/records"),
@@ -1500,7 +1511,9 @@ const PROBES: &[Probe] = &[
     // Native physical authority is absent from generated stores. Exercise the real fenced
     // persistence path, including a fresh incarnation and non-replayed frontier each time.
     direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
-        let agent = &fixture.subjects.seats[0];
+        // Reserve the third seat for frontier incarnations; seat zero remains the
+        // running driver used by subsequent harness-event and native-question probes.
+        let agent = &fixture.subjects.seats[2];
         let incarnation = format!("cost-mail-frontier-{attempt}");
         for (kind, fields) in [
             ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),

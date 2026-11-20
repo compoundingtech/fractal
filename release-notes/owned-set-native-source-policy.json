@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Owned-set source policies accept and enforce native objective and GitHub configuration namespaces",
+  "replay": {"status": "none", "detail": "Existing policy receipts replay unchanged; upgraded readers enforce native namespace ownership using the same source-policy matcher."},
+  "schema": {"status": "none", "detail": "No persistent schema migration."},
+  "rules": {"status": "changed", "detail": "Namespace and unmanaged-allow globs accept objective/, github-source/ and github-scope/. Namespace ownership refuses unmanaged native declarations, and explicit allow globs exempt them. Unsupported families remain rejected."},
+  "compatibility": {"status": "changed", "detail": "Policies naming native families require every admitted member to advertise features.owned_set_native_policy=1, even when the set has no native members. Native membership support alone did not establish native policy support."},
+  "downtime": {"status": "none", "detail": "Existing legacy-family policies continue to work during upgrade."},
+  "manual": {"status": "changed", "detail": "Upgrade all admitted readers before enabling native namespace policies. The daemon and health response advertise owned_set_native_policy=1."},
+  "recovery": {"status": "none", "detail": "Before the upgrade completes, native policy publication is blocked without changing the prior selected policy."}
+}

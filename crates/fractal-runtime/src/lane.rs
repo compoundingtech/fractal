@@ -40,12 +40,51 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
-#[serde(rename_all = "camelCase")]
-pub enum RequestClass { Landing, Check, #[default] Agent }
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub enum RequestClass { Recovery, Landing, Check, #[default] Agent, Unknown(String) }
 
 impl RequestClass {
     pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Recovery => "recovery",
+            Self::Landing => "landing", Self::Check => "check", Self::Agent => "agent",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// Future classes remain readable and round-trip losslessly, but grant no execution authority.
+    pub fn ensure_supported(&self) -> Result<()> {
+        anyhow::ensure!(!matches!(self, Self::Unknown(_)), "unsupported resource class {}; upgrade the execution host", self.as_str());
+        Ok(())
+    }
+}
+
+impl serde::Serialize for RequestClass {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RequestClass {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct ClassVisitor;
+        impl serde::de::Visitor<'_> for ClassVisitor {
+            type Value = RequestClass;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a resource class string")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+                Ok(match value {
+                    "recovery" => RequestClass::Recovery,
+                    "landing" => RequestClass::Landing, "check" => RequestClass::Check,
+                    "agent" => RequestClass::Agent, value => RequestClass::Unknown(value.to_owned()),
+                })
+            }
+        }
+        deserializer.deserialize_str(ClassVisitor)
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
@@ -326,30 +365,163 @@ impl Lane {
     }
 }
 
-/// Finite roots share the named policy's slice, not a seat's environment-selected slice.
-/// Admission owns the aggregate capacity; this backend only installs and verifies its envelope.
-pub(crate) fn prepare_finite(name: &str, capacity: Option<Capacity>) -> Result<Lane> {
-    anyhow::ensure!(!name.is_empty(), "finite lane name is empty");
-    if let Some(capacity) = capacity {
-        anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
-    }
-    let slice = seat_slice(&format!("finite:{name}"));
-    let output = crate::systemd::output(crate::isolate::systemctl()
-        .args(["--user", "set-property", "--runtime", &slice])
-        .args(capacity.map_or_else(
-            || vec!["CPUAccounting=yes".to_owned(), "MemoryAccounting=yes".to_owned(), "TasksAccounting=yes".to_owned()],
-            |capacity| capacity.slice_properties(),
-        ))
-        .stdin(std::process::Stdio::null()))
-        .with_context(|| format!("cap finite lane {slice}"))?;
-    anyhow::ensure!(output.status.success(), "cap finite lane {slice}: {}", String::from_utf8_lossy(&output.stderr));
-    crate::systemd::invalidate();
-    Ok(Lane { slice })
+fn child_slice(parent: &str, suffix: impl std::fmt::Display) -> String {
+    format!("{}-{suffix}.slice", parent.trim_end_matches(".slice"))
 }
 
-/// Read kernel controls and the blocked leader's actual placement before releasing its payload.
-pub(crate) fn verify_finite(lane: &Lane, capacity: Option<Capacity>, unit: &str, pid: u32) -> Result<()> {
-    let cgroup = slice_cgroup(&lane.slice).context("finite lane cgroup is unavailable")?;
+fn generation_slice(parent: &str, unit: &str) -> String {
+    child_slice(parent, digest(unit))
+}
+
+/// Offline evidence of canonical member placement, not an authentication or admission grant.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberContainment {
+    /// Stable aggregate slice identity. The original lane name is not recoverable after sanitizing.
+    pub lane_slice: String,
+    pub binding_hash: String,
+}
+
+/// Inspect this process without contacting the daemon or reconstructing membership authority.
+pub fn in_member(owner_uid: u32) -> Result<Option<MemberContainment>> {
+    anyhow::ensure!(cfg!(target_os = "linux"), "member containment inspection requires Linux");
+    let placement = std::fs::read_to_string("/proc/self/cgroup")
+        .context("read current process cgroup placement")?;
+    let path = placement.lines().find_map(|line| line.strip_prefix("0::"))
+        .context("current process has no unified cgroup placement")?;
+    Ok(parse_member_cgroup(owner_uid, path))
+}
+
+fn lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_member_cgroup(owner_uid: u32, path: &str) -> Option<MemberContainment> {
+    let root = format!(
+        "/user.slice/user-{owner_uid}.slice/user@{owner_uid}.service/app.slice/{LANES_SLICE}/"
+    );
+    let mut components = path.strip_prefix(&root)?.split('/');
+    let parent = components.next()?;
+    let parent_body = parent.strip_prefix("app-lanes-finite:")?.strip_suffix(".slice")?;
+    let (label, parent_hash) = parent_body.rsplit_once('_')?;
+    if label.is_empty() || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'.'))
+        || !lowercase_hex(parent_hash, 12)
+    {
+        return None;
+    }
+    let member = components.next()?;
+    let binding = member.strip_suffix(".slice")?
+        .strip_prefix(parent.strip_suffix(".slice")?)?.strip_prefix('-')?;
+    if !lowercase_hex(binding, 64) || child_slice(parent, binding) != member {
+        return None;
+    }
+    let generation = components.next()?;
+    let scope = components.next()?;
+    crate::isolate::scope_identity("st3", scope)?;
+    if generation_slice(member, scope) != generation {
+        return None;
+    }
+    // Descendant cgroups are contained too; reject noncanonical path spellings.
+    if components.any(|component| component.is_empty() || matches!(component, "." | "..")) {
+        return None;
+    }
+    Some(MemberContainment { lane_slice: parent.into(), binding_hash: binding.into() })
+}
+
+/// Bound roots share a membership envelope, with an execution child per persisted scope.
+fn finite_slices(
+    name: &str,
+    binding: Option<&crate::process::ResourceExecutionBinding>,
+    unit: &str,
+) -> (String, Option<String>, String) {
+    let parent = seat_slice(&format!("finite:{name}"));
+    let member = binding.map(|binding| {
+        use sha2::Digest as _;
+        let mut hash = sha2::Sha256::new();
+        for value in [&binding.membership_id, &binding.generation, &binding.authority_epoch] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        child_slice(&parent, format_args!("{:x}", hash.finalize()))
+    });
+    let base = member.as_ref().unwrap_or(&parent);
+    let child = generation_slice(base, unit);
+    (parent, member, child)
+}
+
+fn finite_properties(capacity: Option<Capacity>, memory_high_bytes: Option<u64>, weights: Option<crate::resource_class::Weights>) -> Result<Vec<String>> {
+    let mut properties = match capacity {
+        Some(capacity) => {
+            anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
+            capacity.slice_properties()
+        }
+        None => Vec::new(),
+    };
+    if let Some(high) = memory_high_bytes {
+        anyhow::ensure!(high > 0 && capacity.is_some_and(|capacity| high <= capacity.memory),
+            "finite lane memory high requires a nonzero bound no larger than memory max");
+    }
+    properties.extend([
+        "CPUAccounting=yes".to_owned(),
+        "MemoryAccounting=yes".to_owned(),
+        "TasksAccounting=yes".to_owned(),
+        "IOAccounting=yes".to_owned(),
+        memory_high_bytes.map_or_else(|| "MemoryHigh=infinity".to_owned(), |high| format!("MemoryHigh={high}")),
+    ]);
+    // Class weights order contention between concurrent member executions; the aggregate
+    // parent slice stays unweighted so lanes compete by occupancy, not by class.
+    if let Some(weights) = weights {
+        properties.extend([
+            format!("CPUWeight={}", weights.cpu),
+            format!("IOWeight={}", weights.io),
+        ]);
+    }
+    Ok(properties)
+}
+
+/// Admission owns the aggregate capacity; bound roots share their frozen membership envelope.
+pub(crate) fn prepare_finite(
+    policy: &crate::process::FiniteLane,
+    binding: Option<&crate::process::ResourceExecutionBinding>,
+    unit: &str,
+) -> Result<Lane> {
+    anyhow::ensure!(!policy.name.is_empty(), "finite lane name is empty");
+    let member_capacity = policy.member_capacity.or(policy.capacity);
+    if let (Some(parent), Some(member)) = (policy.capacity, member_capacity) {
+        anyhow::ensure!(member.cores <= parent.cores && member.memory <= parent.memory,
+            "finite member exceeds its aggregate lane");
+    }
+    let (parent, member, child) = finite_slices(&policy.name, binding, unit);
+    // Validate every envelope before mutating any unit.
+    let parent_properties = finite_properties(policy.capacity, None, None)?;
+    let member_weights = Some(crate::resource_class::weights(&policy.class)?);
+    let member_properties = member.as_ref().map(|member| {
+        finite_properties(member_capacity, policy.memory_high_bytes, member_weights).map(|properties| (member, properties))
+    }).transpose()?;
+    let child_properties = finite_properties(member_capacity, policy.memory_high_bytes, member_weights)?;
+    let units = std::iter::once((&parent, parent_properties))
+        .chain(member_properties)
+        .chain(std::iter::once((&child, child_properties)));
+    for (slice, properties) in units {
+        let output = crate::systemd::output(crate::isolate::systemctl()
+            .args(["--user", "set-property", "--runtime", slice])
+            .args(properties)
+            .stdin(std::process::Stdio::null()))
+            .with_context(|| format!("cap finite lane {slice}"))?;
+        anyhow::ensure!(output.status.success(), "cap finite lane {slice}: {}", String::from_utf8_lossy(&output.stderr));
+        crate::systemd::invalidate();
+    }
+    Ok(Lane { slice: child })
+}
+
+fn verify_finite_controls(cgroup: &std::path::Path, capacity: Option<Capacity>, memory_high_bytes: Option<u64>) -> Result<()> {
+    // io.stat may legitimately be empty before the first I/O, but must be readable.
+    std::fs::read_to_string(cgroup.join("io.stat")).context("finite lane IO accounting is unavailable")?;
+    let high = std::fs::read_to_string(cgroup.join("memory.high"))?;
+    anyhow::ensure!(match memory_high_bytes {
+        Some(expected) => high.trim().parse::<u64>()? == expected,
+        None => high.trim() == "max",
+    }, "finite lane memory high readback differs");
     if let Some(capacity) = capacity {
         let cpu = std::fs::read_to_string(cgroup.join("cpu.max"))?;
         let memory = std::fs::read_to_string(cgroup.join("memory.max"))?;
@@ -370,20 +542,45 @@ pub(crate) fn verify_finite(lane: &Lane, capacity: Option<Capacity>, unit: &str,
         anyhow::ensure!(swap.trim().parse::<u64>()? == capacity.memory / 4, "finite lane swap readback differs");
         anyhow::ensure!(tasks.trim().parse::<u32>()? == TASKS_MAX, "finite lane task readback differs");
     }
+    // Missing controllers fail closed: finite launches cannot inherit an apparent no-op cap.
+    let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers"))?;
+    for required in if capacity.is_some() { &["cpu", "memory", "pids", "io"][..] } else { &["memory", "io"][..] } {
+        anyhow::ensure!(controllers.split_whitespace().any(|value| value == *required),
+            "finite lane lacks required controller {required}");
+    }
+    Ok(())
+}
+
+/// Read all envelopes and the blocked leader's exact placement before payload release.
+pub(crate) fn verify_finite(
+    lane: &Lane,
+    policy: &crate::process::FiniteLane,
+    binding: Option<&crate::process::ResourceExecutionBinding>,
+    unit: &str,
+    pid: u32,
+) -> Result<()> {
+    let (parent, member, child) = finite_slices(&policy.name, binding, unit);
+    anyhow::ensure!(lane.slice == child, "finite generation slice identity differs");
+    let parent = slice_cgroup(&parent).context("finite lane cgroup is unavailable")?;
+    verify_finite_controls(&parent, policy.capacity, None)?;
+    let member_capacity = policy.member_capacity.or(policy.capacity);
+    let base = if let Some(member) = member {
+        let path = parent.join(member);
+        verify_finite_controls(&path, member_capacity, policy.memory_high_bytes)?;
+        path
+    } else {
+        parent
+    };
+    let cgroup = base.join(child);
+    verify_finite_controls(&cgroup, member_capacity, policy.memory_high_bytes)?;
     let placement = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
     let expected = cgroup.join(unit);
     let actual = placement.lines().find_map(|line| line.strip_prefix("0::"))
         .context("finite execution has no unified cgroup placement")?;
     anyhow::ensure!(
         std::path::Path::new("/sys/fs/cgroup").join(actual.trim_start_matches('/')) == expected,
-        "finite execution did not join its admitted lane"
+        "finite execution did not join its admitted generation lane"
     );
-    // Missing controllers fail closed: finite launches cannot inherit an apparent no-op cap.
-    let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers"))?;
-    for required in if capacity.is_some() { &["cpu", "memory", "pids"][..] } else { &[][..] } {
-        anyhow::ensure!(controllers.split_whitespace().any(|value| value == *required),
-            "finite lane lacks required controller {required}");
-    }
     Ok(())
 }
 
@@ -669,6 +866,179 @@ pub fn sccache_socket(runtime: &str, slice: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn future_resource_classes_round_trip_without_granting_authority() {
+        for name in ["future-class", "another-future-class"] {
+            let encoded = serde_json::to_string(name).unwrap();
+            let class: RequestClass = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(class, RequestClass::Unknown(name.into()));
+            assert_eq!(serde_json::to_string(&class).unwrap(), encoded);
+            assert!(class.ensure_supported().unwrap_err().to_string().contains(name));
+        }
+        for class in [RequestClass::Recovery, RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
+            let decoded: RequestClass = serde_json::from_str(&serde_json::to_string(&class).unwrap()).unwrap();
+            assert_eq!(decoded, class);
+            decoded.ensure_supported().unwrap();
+        }
+    }
+
+    #[test]
+    fn offline_member_grammar_accepts_exact_members_and_descendants_only() {
+        let binding = crate::process::ResourceExecutionBinding {
+            membership_id: "member".into(), generation: "generation".into(), authority_epoch: "epoch".into(),
+        };
+        let unit = "st3-check-123-1.scope";
+        let (parent, member, generation) = finite_slices("check lane", Some(&binding), unit);
+        let member = member.unwrap();
+        let root = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice";
+        let path = format!("{root}/{parent}/{member}/{generation}/{unit}");
+        let proof = parse_member_cgroup(1000, &path).unwrap();
+        assert_eq!(proof.lane_slice, parent);
+        assert_eq!(proof.binding_hash.len(), 64);
+        assert_eq!(parse_member_cgroup(1000, &format!("{path}/worker.scope/subgroup")), Some(proof));
+        assert!(parse_member_cgroup(1001, &path).is_none());
+        for outside in [
+            format!("{root}/{parent}"),
+            format!("{root}/{parent}/{member}"),
+            format!("{root}/{parent}/{member}/{generation}"),
+            path.replace(unit, "st3-sibling-123-2.scope"),
+            path.replace(&parent, &seat_slice("ordinary-seat")),
+            path.replace("app-lanes.slice/", "app-lanes-lookalike.slice/"),
+            path.replace("user@1000.service", "user@1001.service"),
+            path.replace("user-1000.slice", "user-1001.slice"),
+            path.replace(&member, &member.to_ascii_uppercase()),
+            path.replace(&generation, &generation_slice(&member, "st3-other-123-3.scope")),
+            path.replace(unit, "st3-check-0123-1.scope"),
+            format!("{path}/../sibling"),
+            format!("{path}/"),
+            format!("{path}//worker"),
+        ] {
+            assert!(parse_member_cgroup(1000, &outside).is_none(), "{outside}");
+        }
+        let (unbound_parent, _, unbound_generation) = finite_slices("check lane", None, unit);
+        assert!(parse_member_cgroup(1000, &format!(
+            "{root}/{unbound_parent}/{unbound_generation}/{unit}"
+        )).is_none());
+    }
+
+    #[test]
+    fn offline_member_grammar_refuses_namespace_root_and_relative_paths() {
+        for path in [
+            "/",
+            ".",
+            "",
+            "user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice",
+            "/app.slice/app-lanes.slice",
+        ] {
+            assert!(parse_member_cgroup(1000, path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn offline_member_grammar_refuses_wrong_hash_lengths_and_inserted_components() {
+        let binding = crate::process::ResourceExecutionBinding {
+            membership_id: "member".into(), generation: "generation".into(), authority_epoch: "epoch".into(),
+        };
+        let unit = "st3-check-123-1.scope";
+        let (parent, member, generation) = finite_slices("checks", Some(&binding), unit);
+        let member = member.unwrap();
+        let root = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice";
+        let path = format!("{root}/{parent}/{member}/{generation}/{unit}");
+        let proof = parse_member_cgroup(1000, &path).unwrap();
+        for length in [0, 12, 63, 65] {
+            let wrong = path.replace(&proof.binding_hash, &"a".repeat(length));
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+            let wrong_generation = child_slice(&member, "a".repeat(length));
+            let wrong = path.replace(&generation, &wrong_generation);
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+        let parent_hash = parent.strip_suffix(".slice").unwrap().rsplit_once('_').unwrap().1;
+        for length in [0, 11, 13, 64] {
+            let wrong = path.replace(parent_hash, &"a".repeat(length));
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+        for wrong in [
+            format!("{root}/extra.slice/{parent}/{member}/{generation}/{unit}"),
+            format!("{root}/{parent}/extra.slice/{member}/{generation}/{unit}"),
+            format!("{root}/{parent}/{member}/extra.slice/{generation}/{unit}"),
+            format!("{root}/{parent}/{member}/{generation}/extra.scope/{unit}"),
+            format!("{root}/{parent}/{member}/{generation}/{unit}").trim_start_matches('/').to_owned(),
+        ] {
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+    }
+
+
+    #[test]
+    fn finite_generation_slices_share_only_the_aggregate_parent() {
+        let (parent, member, first) = finite_slices("checks", None, "st3-check-123-1.scope");
+        let (other_parent, _, second) = finite_slices("checks", None, "st3-check-123-2.scope");
+        assert!(member.is_none());
+        assert_eq!(parent, other_parent);
+        assert_ne!(first, second);
+        assert!(first.starts_with(&format!("{}-", parent.trim_end_matches(".slice"))));
+        assert_eq!(first.matches('-').count(), 3);
+        assert_eq!(finite_slices("checks", None, "st3-check-123-1.scope").2, first);
+        assert_ne!(finite_slices("landing", None, "st3-check-123-1.scope").2, first);
+    }
+
+    #[test]
+    fn nested_roots_share_only_their_exact_membership_envelope() {
+        let binding = crate::process::ResourceExecutionBinding {
+            membership_id: "member".into(), generation: "generation".into(), authority_epoch: "epoch".into(),
+        };
+        let (parent, member, first) = finite_slices("checks", Some(&binding), "st3-first-123-1.scope");
+        let (same_parent, same_member, second) = finite_slices("checks", Some(&binding), "st3-nested-123-2.scope");
+        assert_eq!(parent, same_parent);
+        assert_eq!(member, same_member);
+        assert_ne!(first, second);
+        assert_eq!(first.matches('-').count(), 4);
+        assert!(first.starts_with(&format!("{}-", member.as_ref().unwrap().trim_end_matches(".slice"))));
+        for different in [
+            crate::process::ResourceExecutionBinding { membership_id: "other".into(), ..binding.clone() },
+            crate::process::ResourceExecutionBinding { generation: "other".into(), ..binding.clone() },
+            crate::process::ResourceExecutionBinding { authority_epoch: "other".into(), ..binding.clone() },
+        ] {
+            assert_ne!(finite_slices("checks", Some(&different), "st3-first-123-1.scope").1, member);
+        }
+    }
+
+    #[test]
+    fn finite_properties_keep_member_and_parent_envelopes_separate() {
+        let parent = finite_properties(Some(Capacity { cores: 4, memory: 4 * GIB }), None, None).unwrap();
+        let child = finite_properties(Some(Capacity { cores: 1, memory: GIB }), Some(GIB / 2), None).unwrap();
+        assert!(parent.iter().any(|value| value == "CPUQuota=400%"));
+        assert!(parent.iter().any(|value| value == "MemoryMax=4294967296"));
+        assert!(parent.iter().any(|value| value == "MemoryHigh=infinity"));
+        assert!(child.iter().any(|value| value == "CPUQuota=100%"));
+        assert!(child.iter().any(|value| value == "MemoryMax=1073741824"));
+        assert!(child.iter().any(|value| value == "MemoryHigh=536870912"));
+        for properties in [&parent, &child] {
+            assert!(properties.iter().any(|value| value == "IOAccounting=yes"));
+        }
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(0), None).is_err());
+        assert!(finite_properties(Some(Capacity::DEFAULT), Some(4 * GIB), None).is_err());
+        assert!(finite_properties(None, Some(GIB), None).is_err());
+        assert!(finite_properties(None, None, None).unwrap().iter().any(|value| value == "IOAccounting=yes"));
+    }
+
+    #[test]
+    fn finite_accounting_readback_requires_io_and_expected_memory_high() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("io.stat"), "").unwrap();
+        std::fs::write(root.path().join("memory.high"), "max\n").unwrap();
+        std::fs::write(root.path().join("cgroup.controllers"), "cpu memory pids io\n").unwrap();
+        assert!(verify_finite_controls(root.path(), None, None).is_ok());
+        std::fs::remove_file(root.path().join("io.stat")).unwrap();
+        assert!(verify_finite_controls(root.path(), None, None).is_err());
+        std::fs::write(root.path().join("io.stat"), "").unwrap();
+        std::fs::write(root.path().join("memory.high"), "4096\n").unwrap();
+        assert!(verify_finite_controls(root.path(), None, None).is_err());
+        std::fs::write(root.path().join("memory.high"), "max\n").unwrap();
+        std::fs::write(root.path().join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        assert!(verify_finite_controls(root.path(), None, None).is_err());
+    }
 
     #[test]
     fn finite_cpu_readback_rejects_rounded_and_tighter_ancestor_limits() {

@@ -234,6 +234,8 @@ pub fn agent_card_input_subject(subject: &str) -> bool {
 pub struct AgentResourcesDelta {
     pub subjects: BTreeSet<String>,
     pub queues: bool,
+    /// Refresh queue/visibility inputs only for `subjects`; `queues` takes precedence.
+    pub subject_queues: bool,
     pub membership: bool,
 }
 

@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds the view replica_record_rows and the table record_repair_lookups (empty unless a repair waits for a deleted record). DELETE triggers on replica_records (completion health, resource preparation, custom, glass heads, directive notes, publication and the IVM sources) fire only for a record that is not valid, replaced in place when their definition differs. Readers accept storage version 23 (MAX_SUPPORTED_STORAGE_VERSION 23); nothing in this release writes it. New config [store] valid_record_delete_after (3d unless set) for the deletion that a later release switches on."
+    "detail": "Adds the view replica_record_rows and the table record_repair_lookups (empty unless a repair waits for a deleted record). DELETE triggers on replica_records (completion health, resource preparation, custom, glass heads, directive notes, publication and the IVM sources) fire only for a record that is not valid, replaced in place when their definition differs. Readers accept storage version 27 (MAX_SUPPORTED_STORAGE_VERSION 27; 23 and 24 are retired); nothing in this release writes it. New config [store] valid_record_delete_after (3d unless set) for the deletion that a later release switches on."
   },
   "rules": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Rollback to the previous release is supported: valid records are still stored and the store stays at storage version 20. The previous release puts its own definitions of custom_record_delete and directive_note_record_delete back on open; the other replaced DELETE triggers (glass heads, publication, completion health, resource preparation, IVM sources) keep this build's added condition that the deleted record is not valid, which changes nothing while every valid record is still stored and none is deleted. When a later release switches deletion on, its first deletion commits storage version 23, which the previous release refuses; that release's note states the floor."
+    "detail": "Rollback to the previous release is supported: valid records are still stored and the store stays at storage version 20. The previous release puts its own definitions of custom_record_delete and directive_note_record_delete back on open; the other replaced DELETE triggers (glass heads, publication, completion health, resource preparation, IVM sources) keep this build's added condition that the deleted record is not valid, which changes nothing while every valid record is still stored and none is deleted. When a later release switches deletion on, its first deletion commits storage version 27, which the previous release refuses; that release's note states the floor."
   }
 }

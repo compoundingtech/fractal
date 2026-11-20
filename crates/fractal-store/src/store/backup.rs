@@ -13,13 +13,28 @@ impl Store {
 
     fn snapshot_backup_header(&self) -> Result<Header> {
         let connection = self.readers.get();
-        let digests = projection_digest::tables(&connection)?;
-        let counts = connection
+        let mut digests = projection_digest::tables(&connection)?;
+        let mut counts = connection
             .prepare(
                 "SELECT table_name,row_count FROM projection_digest_state ORDER BY table_name",
             )?
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        // Archives commit logical blob bytes, as before bytes moved out of the graph file.
+        // Live projection digests deliberately omit this physical table, but omitting it
+        // from the archive would change even an empty store's header and graph digest.
+        let columns = serde_json::to_string(&projection_digest::columns(&connection, "blobs", &[])?)?;
+        let (count, accumulator) = projection_digest::scan(
+            &connection,
+            "blobs",
+            &columns,
+            concat!(
+                "SELECT json_array(hex(", smallclaims::blob_bytes!("b"),
+                "),b.hash||'',b.size) FROM blobs AS b"
+            ),
+        )?;
+        digests.insert("blobs".into(), projection_digest::table_digest("blobs", &columns, count, &accumulator));
+        counts.insert("blobs".into(), count);
         Ok(Header {
             format: super::backup_format::FORMAT.into(),
             version: super::backup_format::VERSION,

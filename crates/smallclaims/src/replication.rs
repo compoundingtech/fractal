@@ -392,6 +392,9 @@ pub struct ReplicaRecordView {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReplicationStatus {
     pub configured: bool,
+    /// Waiting claim signatures refused for the per-peer or total cap (`member_signatures`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claim_signatures_refused: u64,
     pub fleet_id: Option<String>,
     /// Current-daemon worker heartbeat and exchange evidence, never stored envelope counts.
     #[serde(default)]
@@ -453,6 +456,10 @@ pub struct ReplicationStatus {
     /// lacks their tombstones, and so the facts `claim_sources` and `operations` keep of them.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub peer_retired_unheld: u64,
+    /// Messages routed to the messages shard that this process appended to the graph instead
+    /// since it started, by error code. Absent from a daemon that does not count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_fallbacks: Option<BTreeMap<String, u64>>,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.
