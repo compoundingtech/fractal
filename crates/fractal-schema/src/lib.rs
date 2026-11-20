@@ -155,16 +155,18 @@ since keeps the legacy value, which equals what would be stored.
 ## Retired identity ledger
 
 `retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
-checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
-`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
-background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per background writer loan with its cursor in `meta`, resting outside the loan for
-max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
-identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
-stays retired and is also labeled in `retired_claim_withdrawals` or
-`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
-the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
-would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+checkpoint tables that record a trim's tombstones. Until a member trims (`[trim] local`, the
+default), triggers union every identity a row of `checkpoint_claims` or `checkpoint_envelopes`
+gains, through INSERT, UPDATE or before DELETE. A background job
+(`maintenance.retired_identities`) unions rows that predate the triggers, 4,096 per background
+writer loan with its cursor in `meta`, resting outside the loan for max(100 ms, 4 x the loan's
+hold), capped at 5 s. Once that import has finished, a member that trims makes the ledger its
+authority, judging it once: an identity that only an uncommitted checkpoint recorded, or that an
+older build's adoption withdrew (labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals`), was no deletion and leaves it, and the labels are spent. From then
+on an identity enters only as a trim deletes it, in the deleting transaction, and admission refuses
+a retired envelope or claim. Retired claim IDs a peer reports are added too. The ledger has no cap
+and no reclamation. Evidence still reads the checkpoint tables. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
 
@@ -174,9 +176,8 @@ equates with a BLOB.
 batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
 newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
 maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
-and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
-this table existed), and the writer floor; the chain's previous hash is the higher of the newest
-batch and the stored head.
+and in `retired_envelopes` (heads trimmed before this table existed), and the writer floor; the
+chain's previous hash is the higher of the newest batch and the stored head.
 
 ## Repaired claim replacements
 
@@ -192,9 +193,9 @@ Readers still use the records and `projection_digest_repaired_claims`.
 (claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
 read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
 cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
-them, including rows adoption later withdraws, so they only grow. Claim identities use the
-ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
-activation stops those withdrawals.
+them, including rows an older build's adoption withdrew, so they only grow. Claim identities use
+the ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until a member that
+trims makes the ledger its authority.
 
 ## Claim range digests
 
