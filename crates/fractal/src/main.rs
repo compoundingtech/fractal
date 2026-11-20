@@ -22265,13 +22265,13 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                         let page_started = std::time::Instant::now();
                         let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_compaction", || worker.compact_settled_signatures())?;
                         let page_elapsed = page_started.elapsed();
-                        longest = longest.max(page_elapsed);
+                        longest = longest.max(page.held);
                         compacted += page.compacted;
                         if page.finished || page.examined == 0 { break; }
                         std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                     }
                     if compacted != 0 {
-                        stderr_message("fractal", format_args!("settled signatures compacted: {compacted} claims in {:.0}s, longest page {} ms", compact_started.elapsed().as_secs_f64(), longest.as_millis()));
+                        stderr_message("fractal", format_args!("settled signatures compacted: {compacted} claims in {:.0}s, longest writer hold {} ms", compact_started.elapsed().as_secs_f64(), longest.as_millis()));
                     }
                     return Ok(None);
                 }

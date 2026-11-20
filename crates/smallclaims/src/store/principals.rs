@@ -1260,6 +1260,8 @@ pub struct SignatureCompaction {
     pub compacted: usize,
     /// Every claim an earlier release kept whole has been looked at; later pages do nothing.
     pub finished: bool,
+    /// How long this page held the writer, from its loan to its return.
+    pub held: std::time::Duration,
 }
 
 /// What a verdict recheck found.
@@ -1695,11 +1697,13 @@ impl Store {
             return Ok(SignatureCompaction::default());
         }
         let mut connection = self.connection.write_background();
+        let lent = std::time::Instant::now();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (examined, compacted, finished) = compaction::compact_page_tx(&transaction)?;
         transaction.commit()?;
-        Ok(SignatureCompaction { examined, compacted, finished })
+        drop(connection);
+        Ok(SignatureCompaction { examined, compacted, finished, held: lent.elapsed() })
     }
 
     /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose

@@ -20,14 +20,19 @@ const TABLES: [&str; 8] = [
     "claim_signature_judging",
 ];
 
-#[derive(Default)]
-struct Holds(Vec<Duration>);
+struct Holds(Vec<Duration>, Option<rusqlite::Connection>);
 
 impl Holds {
     fn time<T>(&mut self, work: impl FnOnce() -> T) -> T {
         let started = Instant::now();
         let result = work();
         self.0.push(started.elapsed());
+        // As the daemon's checkpointer does beside the writer: keep the WAL short, untimed.
+        if self.0.len() % 64 == 0
+            && let Some(checkpoint) = &self.1
+        {
+            let _ = checkpoint.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+        }
         result
     }
     fn report(&mut self, name: &str) {
@@ -97,10 +102,10 @@ fn main() {
     println!("migration_done={}", store.signature_migration().unwrap().done());
     let digest_before = store.replication_inventory().unwrap().digest;
 
-    let mut holds = Holds::default();
+    let mut holds = Holds(Vec::new(), rusqlite::Connection::open(&path).ok());
     while !holds.time(|| store.prune_settled_signature_judgments().unwrap()).finished {}
     holds.report("judging_prune_first");
-    let mut holds = Holds::default();
+    let mut holds = Holds(Vec::new(), rusqlite::Connection::open(&path).ok());
     loop {
         let pages = holds.time(|| release(&store));
         if pages == 0 {
@@ -118,10 +123,20 @@ fn main() {
     let before = sizes(&store);
     println!("signed={signed} user_version_before={}", pragma(&store, "user_version"));
 
-    let mut holds = Holds::default();
+    let mut holds = Holds(Vec::new(), rusqlite::Connection::open(&path).ok());
+    let mut writer = Holds(Vec::new(), None);
     let (mut examined, mut compacted) = (0, 0);
     loop {
         let page = holds.time(|| store.compact_settled_signatures().unwrap());
+        let held = page.held;
+        writer.0.push(held);
+        let wall = *holds.0.last().unwrap();
+        if wall.as_millis() >= 100 || held.as_millis() >= 100 {
+            println!(
+                "slow compaction loan #{}: wall {} ms, writer hold {} ms, examined={} compacted={}",
+                holds.0.len() - 1, wall.as_millis(), held.as_millis(), page.examined, page.compacted
+            );
+        }
         examined += page.examined;
         compacted += page.compacted;
         if page.finished || page.examined == 0 {
@@ -133,10 +148,11 @@ fn main() {
         100.0 * compacted as f64 / signed.max(1) as f64,
         pragma(&store, "user_version")
     );
-    holds.report("compaction");
+    holds.report("compaction_wall");
+    writer.report("compaction_writer_hold");
 
     let free = pragma(&store, "freelist_count");
-    let mut holds = Holds::default();
+    let mut holds = Holds(Vec::new(), rusqlite::Connection::open(&path).ok());
     loop {
         let pages = holds.time(|| release(&store));
         if pages == 0 {
