@@ -21,6 +21,11 @@ impl Holds {
 
     fn report(&mut self, name: &str) {
         let slow = self.0.iter().filter(|hold| hold.as_millis() >= 100).count();
+        let which = self.0.iter().enumerate().filter(|(_, hold)| hold.as_millis() >= 100)
+            .map(|(index, hold)| format!("#{index}:{}ms", hold.as_millis())).collect::<Vec<_>>();
+        if !which.is_empty() {
+            println!("{name}: slow loans {}", which.join(" "));
+        }
         self.0.sort();
         let at = |q: f64| self.0.get(((self.0.len() as f64 - 1.0) * q) as usize).copied().unwrap_or_default();
         println!(
