@@ -287,4 +287,47 @@ fn valid_records_go_after_the_window_and_readers_and_peers_see_the_same_records(
         alder.replication_status(true, Some(FLEET), &[]).unwrap().authority_digest,
         birch.replication_status(true, Some(FLEET), &[]).unwrap().authority_digest,
     );
+#[test]
+fn an_admitted_claim_is_one_with_an_envelope_and_no_record_in_another_state() {
+    let alder = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    note(&alder, 0);
+    alder.replication_snapshot().unwrap();
+    let admitted = || -> bool {
+        alder
+            .connection
+            .write()
+            .query_row(
+                &format!(
+                    "SELECT {} FROM claims WHERE kind='example.note'",
+                    smallclaims::store::record_bytes::admitted_claim_sql("claims")
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(admitted(), "a sealed claim with its valid record");
+    let set_state = |state: Option<&str>| {
+        let connection = alder.connection.write();
+        match state {
+            Some(state) => connection
+                .execute(
+                    "UPDATE replica_records SET state=?1 WHERE claim_id=(SELECT id FROM claims WHERE kind='example.note')",
+                    [state],
+                )
+                .unwrap(),
+            None => connection
+                .execute(
+                    "DELETE FROM replica_records WHERE claim_id=(SELECT id FROM claims WHERE kind='example.note')",
+                    [],
+                )
+                .unwrap(),
+        };
+    };
+    set_state(Some("invalid"));
+    assert!(!admitted(), "a record marked invalid excludes the claim");
+    set_state(Some("repaired"));
+    assert!(!admitted(), "a repaired record excludes the claim");
+    set_state(None);
+    assert!(admitted(), "a valid claim whose record is not stored is admitted");
 }

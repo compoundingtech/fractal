@@ -109,6 +109,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_cut_epoch",
         // Like message cut epochs, desired write generations invalidate local cursors.
         "local_desired_write_witness",
+        // Disposable local invalidation counters, not replicated actual-state authority.
+        "card_actual_revisions",
         // Rebuildable daily-digest arrival indexes, dependency work and staging:
         // replicated notice/document claims, not these cursors, are the authority.
         "local_ask_digest_pending",

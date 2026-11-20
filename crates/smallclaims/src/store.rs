@@ -3068,19 +3068,19 @@ impl Store {
         };
         let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
-            // The claim's own batch names its envelopes; a valid claim keeps no record of its
-            // own (`record_bytes`), and a repaired one is not an accepted copy.
-            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+            // The claim's own batch names its envelopes, whether or not its valid record is
+            // stored (`record_bytes`); a claim with a record in any other state, such as one a
+            // repair replaced, is not an accepted copy.
+            /* sqlite-large-value: allow-for-now lv-h920ade08c738 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!("SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
              FROM claims
              JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              JOIN replica_envelope_signatures AS signatures
                ON signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
                   AND signatures.envelope_hash=envelopes.envelope_hash
-             WHERE claims.id=?1
-               AND NOT EXISTS (SELECT 1 FROM replica_records
-                               WHERE claim_id=claims.id AND state='repaired')
+             WHERE claims.id=?1 AND NOT {}
                AND envelopes.receipt_state='validated'
                AND envelopes.writer=?2 AND signatures.member_key=?3",
+                record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
@@ -3090,6 +3090,36 @@ impl Store {
             if VerifiedEnvelopeSignature::verify(
                 shard.as_deref(), &fleet_id, &self.origin, sequence, &hash, &key, &signature,
             ).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Authenticate a claim's original writer using an admitted signed envelope and its
+    /// canonical membership window. A principal signature or caller-provided origin is not
+    /// writer provenance; a copy sealed by another member cannot satisfy this proof.
+    pub fn claim_has_authenticated_writer(&self, claim_id: &str, writer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let Some(fleet_id) = self.signing_fleet_id(&connection)? else { return Ok(false); };
+        let shard = fleet_meta(&connection, "shard_id")?;
+        let membership = self.fleet_membership_sealed()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT signatures.sequence,signatures.envelope_hash,signatures.member_key,signatures.signature
+             FROM replica_records records JOIN replica_envelopes envelopes USING(writer,sequence,envelope_hash)
+             JOIN replica_envelope_signatures signatures USING(writer,sequence,envelope_hash)
+             WHERE records.claim_id=?1 AND records.writer=?2 AND records.state='valid'
+               AND envelopes.receipt_state='validated'")?;
+        let rows = statement.query_map(params![claim_id, writer], |row|
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?;
+        for row in rows {
+            let (sequence, hash, key, signature) = row?;
+            let window = shard.as_deref().map_or_else(
+                || membership.window(writer, sequence),
+                |shard| membership.shard_window(shard, writer, sequence));
+            if matches!(window, crate::fleet::Window::Keyed(keys) if keys.contains(&key))
+                && VerifiedEnvelopeSignature::verify(shard.as_deref(), &fleet_id, writer,
+                    sequence, &hash, &key, &signature).is_some() {
                 return Ok(true);
             }
         }
@@ -10638,15 +10668,7 @@ impl Store {
             projection_digests: snapshot.projection_digests.clone(),
             received_envelopes: snapshot.envelope_rows as u64,
             pending_records: count("pending")?,
-            // A valid claim keeps no record of its own (`record_bytes`): count the claims, less
-            // those a repair replaced.
-            valid_records: connection.query_row(
-                "SELECT (SELECT COUNT(*) FROM claims)
-                    - (SELECT COUNT(DISTINCT claim_id) FROM replica_records
-                       WHERE state='repaired' AND claim_id IN (SELECT id FROM claims))",
-                [],
-                |row| row.get(0),
-            )?,
+            valid_records: count("valid")?,
             unknown_records: waiting_claims,
             waiting_claims,
             invalid_records: count("invalid")?,
