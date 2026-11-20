@@ -124,15 +124,16 @@ fn scrub_historical_environments(connection: &Connection) -> Result<()> {
         give_back_free_list(connection)?;
     }
     // Historical JSON bodies remain unbounded; scrubbing preserves their other fields.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb84813bc7eac owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "BEGIN IMMEDIATE;
-        DROP TABLE IF EXISTS shell_resources_scrub_v1;
+    // One transaction, rolled back on any error, so a failed rebuild leaves the table as it was.
+    let rebuild = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    rebuild.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fe95fd4aec7 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_resources_scrub_v1;
         CREATE TABLE shell_resources_scrub_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL);
         INSERT INTO shell_resources_scrub_v1(id, host, state, body)
             SELECT id, host, state, json_set(body,'$.command.environment',json('{}')) FROM shell_resources_v1;
         DROP TABLE shell_resources_v1;
         ALTER TABLE shell_resources_scrub_v1 RENAME TO shell_resources_v1;
-        CREATE INDEX shell_resources_host_v1 ON shell_resources_v1(host,state,id);
-        COMMIT;")?;
+        CREATE INDEX shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    rebuild.commit()?;
     checkpoint_shell_scrub(connection)?;
     let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     if incremental {
