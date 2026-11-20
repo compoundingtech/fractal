@@ -1293,6 +1293,13 @@ fn a_renewal_retried_after_its_receipt_expired_renews_again() {
     let reader = store.readers.get();
     let run = serde_json::to_string(&json!({"run": first.run})).unwrap();
     assert!(store.runtime.replay_safe_response_pinned(&reader, &run).unwrap());
+    // And so do those whose run has ended, or that name no run or are not JSON: only a
+    // renewal's step view is shortened; the rest wait for the 7-day cleanup.
+    for other in [r#"{"run":"mission-run/ended-long-ago"}"#, r#"{"status":"applied"}"#, "digest-0123"] {
+        assert!(store.runtime.replay_safe_response_pinned(&reader, other).unwrap(), "{other}");
+    }
+    let renewal = serde_json::to_string(&first).unwrap();
+    assert!(!store.runtime.replay_safe_response_pinned(&reader, &renewal).unwrap());
     drop(reader);
     // The retry is a new renewal: no expired-key error, and the lease moves on again.
     let retried = store.work_action(subject, "renew", &request("renewal-retry", None)).unwrap();

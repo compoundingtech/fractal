@@ -688,3 +688,27 @@ fn a_chunk_of_only_published_receipts_moves_the_pass_on() {
     assert_eq!(drain_replay_safe(&store, now, HOUR), 1);
     assert_eq!(keys(&store).len(), 100);
 }
+
+#[test]
+fn receipts_written_after_the_ordinary_pass_emptied_the_table_are_still_found() {
+    let store = memory();
+    for index in 0..5 {
+        receipt(&store, &format!("renewal-young-{index}"), true);
+    }
+    let completed = expiry(&store) - RETENTION_MS;
+    completed_at(&store, completed);
+    // The replay-safe pass leaves its cursor at the end, then the ordinary pass empties the table.
+    commit_clock_anchor(&store, completed + RETENTION_MS + 1);
+    assert_eq!(drain_replay_safe(&store, completed + 1, HOUR), 0);
+    store.connection.write().execute(
+        "UPDATE meta SET value='5' WHERE key='idempotency_replay_safe_through'", []).unwrap();
+    assert_eq!(store.cleanup_idempotency(completed + RETENTION_MS + 1).unwrap().deleted, 5);
+    // New receipts reuse rowids 1 and 2, below where the cursor was.
+    assert_eq!(receipt(&store, "renewal-a", true), 1);
+    receipt(&store, "renewal-b", true);
+    let later = expiry(&store) - RETENTION_MS;
+    completed_at(&store, later);
+    commit_clock_anchor(&store, later + HOUR + 1);
+    assert_eq!(drain_replay_safe(&store, later + HOUR + 1, HOUR), 2);
+    assert!(keys(&store).is_empty());
+}

@@ -212,6 +212,9 @@ pub fn cleanup_tx(
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-he5174c795ab6 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1", [key])?;
         }
     }
+    if result.deleted != 0 {
+        clamp_replay_safe_cursor(transaction)?;
+    }
     Ok(result)
 }
 
@@ -238,7 +241,7 @@ pub fn next_replay_safe_expiry(connection: &Connection, window_ms: i64) -> Resul
     Ok(connection.query_row(
         "SELECT CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
                 THEN 0 ELSE expires_at_unix_ms END
-         FROM idempotency WHERE rowid>?1 AND replay_safe=1 ORDER BY rowid LIMIT 1",
+         FROM idempotency WHERE rowid>?1 AND replay_safe<>0 ORDER BY rowid LIMIT 1",
         [cursor], |row| row.get::<_, i64>(0),
     ).optional()?.map(|expiry| shorten(expiry, window_ms)))
 }
@@ -292,12 +295,22 @@ pub fn cleanup_replay_safe_tx(
         }
         cursor = rowid;
     }
-    // A new receipt takes MAX(rowid)+1. Had the pass deleted the last row, the next one could
-    // reuse a rowid at or below the cursor and be missed, so the cursor never passes the end.
-    let end: i64 = transaction.query_row("SELECT COALESCE(MAX(rowid),0) FROM idempotency", [], |row| row.get(0))?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h739d374393d0 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![REPLAY_SAFE_CURSOR, cursor.min(end).to_string()],
+        params![REPLAY_SAFE_CURSOR, cursor.to_string()],
     )?;
+    clamp_replay_safe_cursor(transaction)?;
     Ok(result)
+}
+
+/// A new receipt takes MAX(rowid)+1. Once either pass deletes the last row, the next receipt
+/// can reuse a rowid at or below the cursor and would be missed, so after each pass the cursor
+/// never passes the end.
+fn clamp_replay_safe_cursor(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        "UPDATE meta SET value=CAST(MIN(CAST(value AS INTEGER),
+             (SELECT COALESCE(MAX(rowid),0) FROM idempotency)) AS TEXT) WHERE key=?1",
+        [REPLAY_SAFE_CURSOR],
+    )?;
+    Ok(())
 }
