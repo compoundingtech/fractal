@@ -1332,6 +1332,11 @@ impl Store {
         connection.install_runtime_finalizer(move |transaction| {
             finalizing_runtime.before_commit(transaction)
         })?;
+        // Keep memory-store transaction tests deterministic unless they explicitly schedule.
+        // Production stores resume persisted work without replication or a checkpoint.
+        if !shared_memory || !cfg!(any(test, feature = "test-support")) {
+            Self::install_deferred_drain(&connection, runtime.clone());
+        }
         Ok(Self {
             connection,
             admitted: None,
@@ -2099,7 +2104,7 @@ pub struct ReplicationAdmission {
     pub valid: usize,
     pub unknown: usize,
     pub invalid: usize,
-    /// Envelopes held as `unsigned` or `fenced` by the fleet membership rules.
+    /// Envelopes waiting for fleet membership or retryable runtime admission backpressure.
     pub held: usize,
     pub changed: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
@@ -8382,6 +8387,10 @@ impl Store {
         if let Some(generation) = generation {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
+        // Admission has returned every writer loan and released its admission mutex. Queue
+        // paced deferred preparation without waiting for new arrivals to stop. This also
+        // opts memory stores into maintenance when an explicit admission requests it.
+        self.rebuild_deferred_paced()?;
         Ok(admission)
     }
 
@@ -8580,11 +8589,13 @@ impl Store {
                         (AdmissionAuthority::Source, _) => None,
                     }};
                     outcome.verify += started.elapsed();
-                    if let Some(reason) = hold {
-                        hold_replica_envelope(&pass, envelope, reason)?;
+                    if hold.is_some() || prepared.admission_deferred(&pass)? {
+                        if let Some(reason) = hold {
+                            hold_replica_envelope(&pass, envelope, reason)?;
+                        }
                         // A historical degraded receipt selected by a schema retry must remain
-                        // discoverable after that retry's marker completes. Waiting for verified
-                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        // discoverable after that retry's marker completes. Waiting for authority
+                        // or runtime catch-up uses the ordinary pending lifecycle.
                         if retry_subject_references {
                             pass.execute(
                                 /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'

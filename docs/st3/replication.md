@@ -553,6 +553,30 @@ decoded, the set takes roughly twice its payload, plus its structures. The compa
 millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
 
+An out-of-order claim on an already prepared resource subject inserts only its immutable
+canonical sort key during admission. It marks preparation stale and queues the existing
+paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
+New arrivals reset a staged cursor only when their key is at or before its folded prefix;
+later keys preserve progress. A persisted round-robin cursor prevents restarted subjects
+from starving peers. After four prefix resets, the subject is prioritized for a complete
+paced rebuild; envelopes touching it wait retryably, without quarantine or receive errors.
+All claims in a held envelope wait together, including unrelated subjects in that envelope;
+other envelopes and peers remain eligible. Later envelopes touching the capped subject
+also wait for the prioritized rebuild, without a handler-error retry backoff.
+The cap clears only on complete publication, and emits one diagnostic per episode.
+Query-only readers
+use the canonical snapshot fold until publication; writer-context reads report
+`resource-preparation-not-caught-up` rather than doing that unbounded fallback.
+Envelope admission remains atomic, including its source rows and stale marker.
+The deferred worker publishes the complete observation only after its indexed walk finishes.
+Preparation cache version 2 adopts complete version-1 rows without a history rebuild;
+an older binary sees the version change and rebuilds before serving its readers.
+After a writer loan returns, the shared writer scheduler queues paced preparation loans,
+including work created by local commits. Foreground operations do not wait for an ever-growing
+queue to empty. On-disk stores also schedule persisted stale marks at startup, even without
+checkpointing or a new replication receive.
+
+
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
 envelope hash commits its original payload and chain metadata. Thus members holding the same
