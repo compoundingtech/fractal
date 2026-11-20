@@ -790,6 +790,39 @@ pub async fn desired_batch(
     blocking_store(move || store.desired_batch(&request)).await.map(Json)
 }
 
+/// Only write-time materializations and filesystem metadata of registered open connections.
+pub async fn storage_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    blocking_store(move || {
+        let store = &state.store;
+        let observation_trim = store.storage_census.snapshot();
+        let messages = crate::store::messages_shard::shard(store).map(|shard| {
+            Ok::<_, anyhow::Error>(json!({
+                "since_unix_ms": shard.append_census_since()?,
+                "per_kind": shard.append_census()?,
+            }))
+        }).transpose()?;
+        Ok(json!({
+            "node": state.node,
+            "sampled_at_unix_ms": client_now_ms(),
+            "byte_unit": "UTF-8 claim body bytes; excludes envelopes, indexes and SQLite amplification",
+            "checkpoint_enabled": store.storage_census.checkpoint_enabled(),
+            "local_trim_enabled": store.trims_locally(),
+            "graph": {
+                "since_unix_ms": store.append_census_since()?,
+                "per_kind": store.append_census()?,
+            },
+            "messages": messages,
+            "local_observations": crate::store::storage_census::append_counters(store)?,
+            "pin_sample_state": if observation_trim.pin_sample.is_some() { "sampled" } else { "unavailable" },
+            "observation_trim": observation_trim,
+            "pin_scope": "observations older than the last successful trim's retention cutoff",
+            "files_scope": "currently open Fractal-owned SQLite connections and their WAL/SHM sidecars; logical file lengths",
+            "not_covered": ["driver-owned harness spools"],
+            "files": smallclaims::sqlite::census_files::snapshot()?,
+        }))
+    }).await.map(Json)
+}
+
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
