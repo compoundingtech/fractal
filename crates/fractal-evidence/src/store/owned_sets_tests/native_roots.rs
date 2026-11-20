@@ -165,3 +165,101 @@ fn native_root_stops_are_root_only_and_other_kinds_still_refused() {
     }
     assert_eq!(parse_intent("version 2\nstop \"person/operator\"", "amber").unwrap_err().code, "invalid-stop-subject");
 }
+
+fn native_namespace_policy() -> owned_sets::PolicyRequest {
+    owned_sets::PolicyRequest {
+        namespaces: Some(vec![
+            "objective/garden/*".into(),
+            "github-source/garden*".into(),
+            "github-scope/garden*".into(),
+        ]),
+        ..enforce_policy(None)
+    }
+}
+
+#[test]
+fn native_namespace_policy_claims_roots_and_honors_unmanaged_exemptions() {
+    let store = Store::open_memory("amber").unwrap();
+    let agents = bundle("true", true);
+    let mut opts = options(&store, 10);
+    opts.policy = Some(native_namespace_policy());
+    let preview = store.owned_set_preview(&agents, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&agents, &opts, "claim-native-namespaces", "person/operator").unwrap();
+    let native = roots(1);
+    for subject in SUBJECTS {
+        let mut single = native.clone();
+        single.subjects.retain(|key, _| key == subject);
+        let before = store.index().unwrap();
+        assert_eq!(direct(&store, &single, &format!("refuse-{subject}")).unwrap_err().code, "set-managed-subject");
+        assert_eq!(store.index().unwrap(), before);
+    }
+    let mut opts = options(&store, 11);
+    opts.policy = Some(owned_sets::PolicyRequest {
+        unmanaged_allow: Some(SUBJECTS.iter().map(|subject| (*subject).into()).collect()),
+        ..Default::default()
+    });
+    opts.expected_subjects = store.owned_set_preview(&agents, &opts).unwrap().expected_subjects;
+    store.apply_owned_set(&agents, &opts, "exempt-native-namespaces", "person/operator").unwrap();
+    direct(&store, &native, "allowed-native-roots").unwrap();
+    for subject in SUBJECTS {
+        assert!(store.latest_claim(subject, Some("intent.desired")).unwrap().unwrap().body.get("owned_set").is_none());
+    }
+}
+
+#[test]
+fn native_namespace_policy_still_rejects_unsupported_families_in_both_glob_lists() {
+    for glob in ["person/operator", "exec/garden/*", "observer/garden/*", "resource/garden/*"] {
+        for exempt in [false, true] {
+            let mut request = native_namespace_policy();
+            if exempt {
+                request.unmanaged_allow = Some(vec![glob.into()]);
+            } else {
+                request.namespaces = Some(vec![glob.into()]);
+            }
+            assert_eq!(owned_sets::resolve_policy(None, Some(&request)).unwrap_err().code, "invalid-source-policy");
+        }
+    }
+}
+
+#[test]
+fn native_namespace_only_policy_requires_upgraded_readers_and_survives_replay() {
+    let stores = signed_fleet();
+    let advertise = |store: &Store, native_policy: bool| {
+        store.append_claim(&ClaimInput {
+            subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running","features":{
+                "owned_sets":1, "source_enforcement":1, "owned_set_native_roots":1,
+                "owned_set_native_policy":u8::from(native_policy)
+            }})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    let share_all = || {
+        for from in &stores {
+            for to in &stores {
+                if from.origin != to.origin { signed_share(from, to); }
+            }
+        }
+    };
+    for store in &stores { advertise(store, false); }
+    share_all();
+    let (amber, cobalt) = (&stores[0], &stores[1]);
+    let agents = bundle("true", true);
+    let mut opts = options(amber, 10);
+    opts.policy = Some(native_namespace_policy());
+    let preview = amber.owned_set_preview(&agents, &opts).unwrap();
+    assert_eq!(preview.blockers.len(), 3);
+    assert!(preview.blockers.iter().all(|blocker| blocker.contains("native source policy support")));
+    for store in &stores { advertise(store, true); }
+    share_all();
+    let preview = amber.owned_set_preview(&agents, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    opts.expected_subjects = preview.expected_subjects;
+    amber.apply_owned_set(&agents, &opts, "native-policy-readers", "person/operator").unwrap();
+    signed_share(amber, cobalt);
+    cobalt.connection.batched(replay_graph_from_nothing_tx).unwrap().unwrap();
+    assert_eq!(cobalt.owned_sets().unwrap().remove(0).receipt.policy.unwrap().namespaces.len(), 3);
+    assert_eq!(direct(cobalt, &roots(1), "replicated-native-namespace").unwrap_err().code, "set-managed-subject");
+}
