@@ -17,6 +17,7 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod effects;
+pub mod native_attach;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
@@ -12233,6 +12234,9 @@ fn append_claim_tx_admitted(
     authorization: Option<&assistant_write::AssistantWriteAuthorization>,
     source_forced: bool,
 ) -> Result<ClaimRecord> {
+    if native_attach::protected(kind) {
+        return Err(native_attach::writer_required().into());
+    }
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
         if kind != "message.sent" || actor != Some(authorization.principal())
@@ -24870,6 +24874,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if native_attach::protected(&input.kind) {
+            return Err(native_attach::writer_required());
+        }
         if input.kind == observation_minutes::KIND {
             return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
         }

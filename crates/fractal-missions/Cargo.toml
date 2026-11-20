@@ -13,6 +13,7 @@ test-support = ["fractal-delivery/test-support"]
 fractal-delivery = { path = "../fractal-delivery" }
 # Shared test modules of the store are named by their own path.
 fractal-store = { path = "../fractal-store" }
+fractal-runtime = { path = "../fractal-runtime" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 flate2 = "1"

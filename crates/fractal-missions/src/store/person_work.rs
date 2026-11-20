@@ -1,6 +1,8 @@
 //! The part of `store::person_work` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
+#[path = "person_work/native_attach.rs"]
+mod native_attach;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
 use crate::person_request::{StructuredRequest, answer_summary, append_option_notes_summary, deadline_summary};
 pub use fractal_delivery::store::person_work::*;
@@ -89,7 +91,10 @@ fn deadline_and_default(
     now: u128,
 ) -> Result<Option<AskDeadline>, FractalError> {
     // Capability requests always expire, independently of the optional work-ask policy.
-    let default_ms = if input.actor == "daemon/browser-pairing" { Some(300_000) } else { default_ms };
+    let default_ms = if matches!(input.actor.as_str(), "daemon/browser-pairing" | "daemon/native-attach") { Some(300_000) } else { default_ms };
+    if input.actor == "daemon/native-attach" && input.default_answer.is_some() {
+        return Err(FractalError::new("invalid-default-answer", "native attach requires an explicit person answer, never a deadline default"));
+    }
     let Some(default_ms) = default_ms else {
         if input.deadline_ms.is_some() || input.default_answer.is_some() {
             return Err(FractalError::new(
@@ -477,7 +482,7 @@ impl PersonWorkStore for Store {
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
         let program = input.actor == crate::model::PROGRAM_ASKER;
         if !crate::model::person_subject(&input.person)
-            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing" || program)
+            || !(input.actor.starts_with("agent/") || matches!(input.actor.as_str(), "daemon/browser-pairing" | "daemon/native-attach") || program)
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
@@ -689,6 +694,10 @@ impl PersonWorkStore for Store {
                     "grant_id":paired.id,"grant_subject":paired.subject
                 }));
             }
+            let native_approval = ask.as_ref()
+                .filter(|ask| ask.actor.as_deref() == Some("daemon/native-attach"))
+                .map(|ask| native_attach::admit(tx, ask, &view, input, cancel, authorization.is_some(), device))
+                .transpose()?;
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
                     && ask.body["fields"]["person"] == authorization.owner
@@ -787,6 +796,17 @@ impl PersonWorkStore for Store {
                     &json!({"fields":fields}), std::slice::from_ref(&claim.id), None).map_err(claim_append_error)?;
                 fractal_store::pairing::append_operation_receipt_tx(tx, &receipt).map_err(internal)?;
             }
+            if let Some(mut fields) = native_approval {
+                fields["answer_id"] = json!(claim.id);
+                let receipt = append_claim_tx(tx, &self.origin, &format!("custom/client/native-attach-answer-{}", claim.id),
+                    "custom.client.pairing-native-attach-answer-admitted", Some(response_actor),
+                    &json!({"fields":fields}), std::slice::from_ref(&claim.id), None).map_err(claim_append_error)?;
+                fractal_store::pairing::append_operation_receipt_tx(tx, &receipt).map_err(internal)?;
+            }
+            if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/native-attach")
+                && ask.body["fields"]["deadline_unix_ms"].as_u64().is_none_or(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline))) {
+                return Err(FractalError::new("stale-fence", "native attach approval deadline has passed"));
+            }
             // Past its deadline the ask's own member applies the default, which a later answer on
             // another member must not race; answers before it win (`standing_responses`). The
             // stored time decides, against the deadline the person's held clock moved
@@ -827,6 +847,9 @@ impl PersonWorkStore for Store {
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let ask = request(tx, &subject).map_err(internal)?
                 .ok_or_else(|| FractalError::new("missing-person-ask", "this step is not a person ask"))?;
+            if ask.actor.as_deref() == Some("daemon/native-attach") {
+                return Err(FractalError::new("forbidden", "capability approval cannot be overridden without paired-device admission"));
+            }
             if !actor.starts_with("person/") || ask.body["fields"]["person"] != actor || input.delegation.is_some() {
                 return Err(FractalError::new("forbidden", "only the ask's person can override its deadline answer"));
             }
@@ -1236,7 +1259,7 @@ impl PersonWorkStore for Store {
                 stable_input.actor = actor;
                 &stable_input
             };
-            if input.actor != "daemon/browser-pairing" && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
+            if !matches!(input.actor.as_str(), "daemon/browser-pairing" | "daemon/native-attach") && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
                 return Err(FractalError::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
             let key = if input.new_run.is_some() {

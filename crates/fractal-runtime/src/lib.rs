@@ -18,6 +18,7 @@ mod isolate;
 mod lane;
 mod priority;
 mod peer_process;
+pub mod native_attach;
 mod process;
 mod procfs;
 mod pty;
