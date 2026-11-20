@@ -83,11 +83,11 @@ fn main() {
     println!("idempotency_deleted={expired} idempotency_extended={extended}");
     holds.report("response_expiry");
 
-    // As `release_free_pages` does: 512 pages per write, until none are free.
+    // As `release_free_pages` does: FREE_PAGE_CHUNK (128) pages per write, until none are free.
     let mut holds = Holds::default();
     let free = pragma(&store, "freelist_count");
     let mut released = 0;
-    let chunk: u64 = std::env::var("FREE_PAGE_CHUNK").ok().and_then(|value| value.parse().ok()).unwrap_or(512);
+    let chunk: u64 = std::env::var("FREE_PAGE_CHUNK").ok().and_then(|value| value.parse().ok()).unwrap_or(128);
     println!("free_page_chunk={chunk}");
     if pragma(&store, "auto_vacuum") == 2 {
         loop {

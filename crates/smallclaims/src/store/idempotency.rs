@@ -4,21 +4,14 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-/// Completed new receipts last a day; their claims retain the operation identity, so a later
-/// retry gets `idempotency-key-expired` with the original claim instead of a second effect.
-pub const RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
-/// Receipts stored before the day-long window (up to `RETENTION_CUTOVER`) carry an expiry seven
-/// days after completion. They expire as if they had been written with the day-long window.
-const EARLIER_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-/// The last receipt written under the seven-day window, captured once at upgrade.
-const RETENTION_CUTOVER: &str = "idempotency_retention_24h_rowid";
-/// A receipt's expiry in the current window, for queries over `idempotency`.
-const EXPIRY_SQL: &str = "CASE WHEN rowid <= COALESCE((SELECT CAST(value AS INTEGER) FROM meta
-        WHERE key='idempotency_retention_24h_rowid'), 0)
-    THEN expires_at_unix_ms - (604800000 - 86400000) ELSE expires_at_unix_ms END";
-const _: () = assert!(EARLIER_RETENTION_MS - RETENTION_MS == 604_800_000 - 86_400_000);
-const LEGACY_CUTOFF_SQL: &str =
-    "(SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')";
+/// Completed new receipts last seven days; their claims retain the operation identity.
+pub const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+/// A receipt's expiry for cleanup. Receipts stored before expiry was recorded (2026-10-07) were
+/// kept for a separately scheduled deployment+30d follow-up; this is it: they are due now, and
+/// go through the same checks as any expired receipt, so one whose effect has no durable
+/// operation identity is still kept.
+const EXPIRY_SQL: &str = "CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta
+        WHERE key='idempotency_legacy_rowid') THEN 0 ELSE expires_at_unix_ms END";
 /// Limit both candidate inspection and mutations, including responses still in use.
 pub const CLEANUP_CHUNK: usize = 64;
 /// Stop starting response checks after this much work. A check, its mutation and COMMIT
@@ -36,7 +29,7 @@ pub struct Cleanup {
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     // Capture once, before any new request. Existing rows have no recoverable caller
-    // association and remain until the separately scheduled deployment+30d follow-up.
+    // association; cleanup treats them as due (see `EXPIRY_SQL`).
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h4d25c7671914 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value)
          SELECT 'idempotency_legacy_rowid',CAST(COALESCE(MAX(rowid),0) AS TEXT) FROM idempotency",
@@ -63,23 +56,6 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
             /* sqlite-large-value: allow-for-now lv-h7c28fba7c856 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE idempotency ADD COLUMN replay_safe INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
-    // Rows up to here were written with the seven-day trigger below replaces.
-    connection.execute(
-        "INSERT OR IGNORE INTO meta(key,value)
-         SELECT ?1,CAST(COALESCE(MAX(rowid),0) AS TEXT) FROM idempotency",
-        [RETENTION_CUTOVER],
-    )?;
-    // The trigger carries its window as a literal; an earlier release created it with seven days.
-    let trigger: Option<String> = connection
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='idempotency_completed_expiry'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if trigger.is_some_and(|sql| !sql.contains(&format!("+ {RETENTION_MS}"))) {
-        connection.execute_batch("DROP TRIGGER idempotency_completed_expiry;")?;
-    }
     connection.execute_batch(&format!(
         /* sqlite-large-value: allow-for-now lv-hdb2fa41c50c9 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS idempotency_completed_expiry AFTER INSERT ON idempotency
          BEGIN
@@ -92,19 +68,8 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
 }
 
 pub fn next_expiry(connection: &Connection) -> Result<Option<i64>> {
-    // A receipt from before expiry was recorded is already due (see `cleanup_tx`).
-    let legacy: bool = connection.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM idempotency WHERE rowid <= {LEGACY_CUTOFF_SQL})"),
-        [],
-        |row| row.get(0),
-    )?;
-    if legacy {
-        return Ok(Some(0));
-    }
     Ok(connection.query_row(
-        &format!("SELECT {EXPIRY_SQL} FROM idempotency
-         WHERE rowid > {LEGACY_CUTOFF_SQL}
-         ORDER BY rowid LIMIT 1"), [], |row| row.get(0),
+        &format!("SELECT {EXPIRY_SQL} FROM idempotency ORDER BY rowid LIMIT 1"), [], |row| row.get(0),
     ).optional()?)
 }
 
@@ -199,46 +164,13 @@ pub fn cleanup_tx(
     mut in_use: impl FnMut(&Transaction<'_>, &str) -> Result<bool>,
 ) -> Result<Cleanup> {
     let started = std::time::Instant::now();
-    let mut result = Cleanup::default();
-    // Receipts from before expiry was recorded (2026-10-07) were kept for a separately
-    // scheduled deployment+30d follow-up; this is it. Nothing associates them with a caller,
-    // and any retry of theirs is weeks late, so each goes unless its response is live.
-    let legacy = transaction
-        .prepare_cached(&format!(
-            "SELECT rowid,operation_id,response FROM idempotency
-             WHERE rowid <= {LEGACY_CUTOFF_SQL} ORDER BY rowid LIMIT ?1"
-        ))?
-        .query_map([limit.min(CLEANUP_CHUNK) as i64], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (rowid, key, response) in &legacy {
-        if result.examined != 0 && started.elapsed() >= CLEANUP_BUDGET {
-            return Ok(result);
-        }
-        result.examined += 1;
-        if in_use(transaction, response)? {
-            transaction.execute(
-                "UPDATE idempotency SET rowid=(SELECT MAX(rowid)+1 FROM idempotency),
-                 expires_at_unix_ms=?2 WHERE rowid=?1",
-                params![rowid, now_unix_ms.saturating_add(RETENTION_MS)],
-            )?;
-            result.extended += 1;
-        } else {
-            result.deleted +=
-                transaction.execute("DELETE FROM idempotency WHERE operation_id=?1", [key])?;
-        }
-    }
-    if !legacy.is_empty() {
-        return Ok(result);
-    }
     let candidates = transaction.prepare_cached(&format!(
         "SELECT rowid,operation_id,response,{EXPIRY_SQL},replay_safe FROM idempotency
-         WHERE rowid > {LEGACY_CUTOFF_SQL}
          ORDER BY rowid LIMIT ?1",
     ))?.query_map([limit.min(CLEANUP_CHUNK) as i64], |row|
         Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,bool>(4)?))
     )?.collect::<Result<Vec<_>,_>>()?;
+    let mut result = Cleanup::default();
     for (rowid, key, response, expiry, replay_safe) in candidates {
         if expiry > now_unix_ms
             || (result.examined != 0 && started.elapsed() >= CLEANUP_BUDGET)

@@ -1231,7 +1231,6 @@ impl ClaimSigner {
     }
 }
 
-/// What a verdict recheck found.
 /// One page of [`Store::prune_settled_signature_judgments`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct JudgingPrune {
@@ -1241,6 +1240,7 @@ pub struct JudgingPrune {
     pub finished: bool,
 }
 
+/// What a verdict recheck found.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerdictMismatch {
     pub claim_id: String,
@@ -1650,8 +1650,6 @@ impl Store {
         })
     }
 
-    /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
-    /// verdicts are still being queued. Three probes of small tables on a reader.
     /// Drop one page of the settled judging rows that earlier releases kept after a verdict was
     /// published (see `judging::discard_settled_tx`), in one short background writer loan.
     /// Waits until the candidate model serves: during bootstrap the rows are still being built.
@@ -1667,6 +1665,8 @@ impl Store {
         Ok(JudgingPrune { examined, deleted, finished })
     }
 
+    /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
+    /// verdicts are still being queued. Three probes of small tables on a reader.
     pub fn verdicts_pending(&self) -> Result<bool> {
         let connection = self.readers.get();
         let judging: bool = connection

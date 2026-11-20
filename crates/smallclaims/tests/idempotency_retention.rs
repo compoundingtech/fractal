@@ -210,8 +210,9 @@ fn retention_recovers_after_process_exit_before_response_delivery() {
     );
 }
 
-/// The deployment+30d follow-up: receipts from before expiry was recorded go, while the
-/// claim keeps recognizing the key.
+/// The deployment+30d follow-up: receipts from before expiry was recorded go when their effect
+/// has a durable operation identity, while the claim keeps recognizing the key. One without it
+/// stays: cleanup never discards an effect's only protection.
 #[test]
 fn retention_expires_legacy_keys_and_keeps_the_old_insert_shape() {
     let directory = tempfile::tempdir().unwrap();
@@ -226,7 +227,8 @@ fn retention_expires_legacy_keys_and_keeps_the_old_insert_shape() {
         .execute_batch(
             "DROP TRIGGER idempotency_completed_expiry;
          ALTER TABLE idempotency DROP COLUMN expires_at_unix_ms;
-         DELETE FROM meta WHERE key='idempotency_legacy_rowid';",
+         DELETE FROM meta WHERE key='idempotency_legacy_rowid';
+         INSERT INTO idempotency(operation_id,response) VALUES('legacy-unrecorded','{}');",
         )
         .unwrap();
     drop(connection);
@@ -234,8 +236,19 @@ fn retention_expires_legacy_keys_and_keeps_the_old_insert_shape() {
     let upgraded = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
     assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(0), "legacy receipts are due");
     commit_clock_anchor(&upgraded, before);
-    assert_eq!(upgraded.cleanup_idempotency(before).unwrap().deleted, 1);
-    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), None);
+    let cleaned = upgraded.cleanup_idempotency(before).unwrap();
+    assert_eq!((cleaned.deleted, cleaned.extended), (1, 1));
+    let kept: (i64, i64) = upgraded
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*),MAX(expires_at_unix_ms) FROM idempotency WHERE operation_id='legacy-unrecorded'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, (1, before + RETENTION_MS), "an effect without a durable identity keeps its receipt");
+    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(before + RETENTION_MS));
     assert_eq!(
         upgraded
             .put_document("doc/example/upgrade", b"old", &None, "old-key")
@@ -546,52 +559,3 @@ fn retention_expired_document_keeps_recognition_after_claim_tombstoning() {
     assert_eq!(store.index().unwrap(), before);
 }
 
-/// Receipts written under the seven-day window expire a day after completion, as new ones do;
-/// the trigger an earlier release created is replaced once.
-#[test]
-fn retention_shortens_receipts_written_under_the_seven_day_window() {
-    const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("claims.sqlite");
-    drop(Store::open(&path, "alder", Arc::new(Plain)).unwrap());
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(&format!(
-            "DELETE FROM meta WHERE key='idempotency_retention_24h_rowid';
-             DROP TRIGGER idempotency_completed_expiry;
-             CREATE TRIGGER idempotency_completed_expiry AFTER INSERT ON idempotency
-             BEGIN
-                 UPDATE idempotency SET expires_at_unix_ms=
-                     CAST(unixepoch('subsec') * 1000 AS INTEGER) + {WEEK_MS}
-                 WHERE operation_id=NEW.operation_id;
-             END;
-             INSERT INTO idempotency(operation_id,response,replay_safe) VALUES('week-old-window','{{}}',1);"
-        ))
-        .unwrap();
-    let written: i64 = connection
-        .query_row("SELECT expires_at_unix_ms FROM idempotency WHERE operation_id='week-old-window'", [], |row| row.get(0))
-        .unwrap();
-    drop(connection);
-    let completed = written - WEEK_MS;
-    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
-    assert_eq!(store.next_idempotency_expiry().unwrap(), Some(completed + RETENTION_MS));
-    store
-        .connection
-        .write()
-        .execute("INSERT INTO idempotency(operation_id,response,replay_safe) VALUES('day-window','{}',1)", [])
-        .unwrap();
-    let new: i64 = store
-        .connection
-        .write()
-        .query_row("SELECT expires_at_unix_ms FROM idempotency WHERE operation_id='day-window'", [], |row| row.get(0))
-        .unwrap();
-    assert!(new - completed < RETENTION_MS + 60_000, "new receipts last a day");
-    let at = completed + RETENTION_MS;
-    commit_clock_anchor(&store, at);
-    assert_eq!(store.cleanup_idempotency(at - 1).unwrap().deleted, 0);
-    assert_eq!(store.cleanup_idempotency(at).unwrap().deleted, 1);
-    // Reopening neither moves the cutover nor recreates the trigger.
-    drop(store);
-    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
-    assert_eq!(store.next_idempotency_expiry().unwrap(), Some(new));
-}

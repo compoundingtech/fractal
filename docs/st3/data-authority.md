@@ -404,7 +404,7 @@ order from the same admitted claims.
 | `glass_heads` | Shared projection | Canonical glass declaration heads derived from admitted claims. |
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
 | `held_keys` | Local | Which principal each key this node holds belongs to, and its delegation chain; the private keys are files in `STATE/keys`. |
-| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry and remain. |
+| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry; cleanup treats them as due and applies the same durable-identity check. |
 | `identity_dirty` | Local cache | Transaction-local naming-fold invalidation marker; excluded from replicated digests and cleared during projection replay. |
 | `identity_heads` | Shared projection | Immutable storage identity, canonical public ID, naming revision and lifecycle availability derived from declaration and naming facts. All columns participate in projection digests and shuffle/restart/checkpoint coverage. |
 | `identity_names` | Shared projection | Reserved historical names and their immutable identity and naming claim. All columns participate in projection digests; replay reconstructs reservations from durable facts. |
