@@ -8546,8 +8546,12 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
     ));
     let path = request.uri().path();
+    // This read-only snapshot is also consumed by same-UID daemon companions with no
+    // agent identity. Unavailable ancestry must not turn it into an attributed operation.
+    let companion_read = matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD)
+        && path == "/v1/internal/fleet/leave-state";
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
-        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || (path.starts_with(INTERNAL_ROUTE_PREFIX) && !companion_read)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
         || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
