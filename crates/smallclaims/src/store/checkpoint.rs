@@ -877,6 +877,7 @@ impl Store {
             Some(admitted) => admitted.open_connection_with_vfs(flags, None)?,
             None => Connection::open_with_flags(&self.path, flags)?,
         };
+        crate::sqlite::census_files::register(&connection);
         connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
         connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
         Ok(())

@@ -626,6 +626,7 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         [id.clone()],
     )?;
     let shard = stores.get(&id).expect("the shard just opened").clone();
+    smallclaims::store::append_census::install(&shard.connection.write())?;
     shard.bind_fleet_authority(Arc::new(GraphAuthority(Arc::downgrade(graph))))?;
     let key = graph
         .graph

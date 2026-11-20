@@ -43,6 +43,7 @@ mod projection_gate;
 pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
+pub mod append_census;
 pub mod prepared_envelope;
 mod replica_record;
 mod wire_archive;
@@ -2541,7 +2542,7 @@ const SHARD_BOUNDS_GENERATION_TRIGGERS: &str = /* sqlite-large-value: allow-for-
 /// Upper bound on signature requests or answers in one exchange.
 pub const REPLICATION_SIGNATURE_LIMIT: usize = 512;
 
-/// One kind of envelope that `st3 doctor` reports: admitted before this node knew better.
+/// One kind of envelope that `fractal doctor` reports: admitted before this node knew better.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetAdmissionResidue {
     pub writer: String,
@@ -3126,7 +3127,7 @@ impl Store {
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;
-    /// `st3 doctor` reports them. It reads every validated envelope, 2.6 million on a 56 GB
+    /// `fractal doctor` reports them. It reads every validated envelope, 2.6 million on a 56 GB
     /// store, so the daemon runs it off the request path: in pages of [`RESIDUE_PAGE`]
     /// envelopes, each its own short read snapshot, so it never holds the WAL back for long.
     pub fn fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
@@ -7337,7 +7338,7 @@ impl Store {
             // The seal has committed: a failed hand-off must not fail it. The next ordinary pass
             // judges whatever it left, and the job wakes if that pass leaves work.
             self.verdicts_due.store(true, Ordering::Release);
-            eprintln!("st3: sealed claims were not handed to the signature job: {error:#}");
+            eprintln!("fractal: sealed claims were not handed to the signature job: {error:#}");
         }
         Ok(())
     }

@@ -214,7 +214,7 @@ impl ProofOwnership {
         }
         if !failures.is_empty() {
             eprintln!(
-                "st3: checkpoint proof orphan cleanup refused: {}",
+                "fractal: checkpoint proof orphan cleanup refused: {}",
                 failures.join("; ")
             );
             bail!("checkpoint proof cleanup refused: {}", failures.join("; "));

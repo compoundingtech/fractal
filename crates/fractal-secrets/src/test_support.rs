@@ -12,7 +12,7 @@ pub use crate::startup::login_shell;
 pub use crate::startup::pause_startup_replay;
 
 /// A temporary directory whose path is already canonical. macOS puts temporary directories
-/// below the `/var` and `/tmp` symlinks, and st3 records the canonical path it resolves, so a
+/// below the `/var` and `/tmp` symlinks, and Fractal records the canonical path it resolves, so a
 /// test that compares paths needs the same spelling the code under test returns. The macOS
 /// per-user temporary directory is long even before canonicalizing adds `/private`, and a Unix
 /// socket path may not pass 103 bytes, so macOS tests root below `/tmp` instead.

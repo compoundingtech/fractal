@@ -14,6 +14,10 @@ export type LaneMembership = typeof LaneMembership.Type
 
 export interface LaneOptions {
   readonly host: string
+  /** Host-local workload key; the execution host freezes its resource estimate. */
+  readonly profile?: string
+  /** Filesystem path for a seeded disk reservation; does not override its bytes. */
+  readonly diskPath?: string
   readonly maxMembers?: number
   /** Bytes, charged by the host accountant; not a client-side semaphore. */
   readonly capacity?: { readonly cores: number; readonly memory: number }
