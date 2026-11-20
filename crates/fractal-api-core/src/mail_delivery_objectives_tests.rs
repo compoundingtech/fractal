@@ -468,3 +468,33 @@ fn paged_capture_resolves_committed_writer_loan_before_certifying() {
         assert!(snapshot.unknown > 0, "the resolved generation must fence the mixed paged read");
     });
 }
+
+#[test]
+fn runtime_identity_inputs_during_capture_keep_coverage_unknown() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-concurrent-graph", json!([]));
+    frontier(&store, sent);
+    let mut writes = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        writes += 1;
+        store.append_claim(&ClaimInput {
+            subject: "agent/example-unrelated".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/example-unrelated".into()),
+            fields: serde_json::from_value(json!({"status":"running",
+                "runtime_id":"example-unrelated-runtime","incarnation_id":format!("unrelated-{writes}")})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }).unwrap();
+    assert!(writes > 0);
+    assert!(store.index().unwrap() > snapshot.source_cut);
+    assert_eq!(snapshot.source_work, [1, 0, 0]);
+    assert_eq!(snapshot.unknown, 1);
+    let publication = store.extension::<Publication>();
+    let (_sender, receiver) = tokio::sync::watch::channel(0);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    assert_eq!(rows(&store, sent).unwrap()[0]["status"], "no-data");
+    // A later capture without overlapping writes can recover.
+    assert_eq!(capture(&store, sent).unwrap().unknown, 0);
+}

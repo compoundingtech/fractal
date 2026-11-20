@@ -231,23 +231,26 @@ fn delete_thread(
 /// Claims a hold can reach, at about 4 ms each in a 40 ms budget, with room to spare.
 const WARM_CLAIMS: usize = 24;
 
+/// The tables `warm` reads by claim, each through an index that starts with claim_id. Not
+/// claim_verdict_links: a deletion leaves its links (they have no index by claim), so reading
+/// them by claim would scan the table.
+pub(super) const BY_CLAIM: [&str; 8] = [
+    "replica_records",
+    "claim_signatures",
+    "claim_signature_candidates",
+    "claim_signature_nonce_uses",
+    "claim_signature_judging",
+    "claim_verdicts",
+    "claim_verdict_dependency_edges",
+    "claim_signature_originals",
+];
+
 /// Read, before the writer hold, the rows that deleting the first claims judged will touch, so
 /// the hold finds their pages cached. On a 57 GB member most deletes took 3–8 ms, but the
 /// signature cleanup (`principals::forget_claim_tx`) sometimes took 100–390 ms for one claim:
 /// every plan is an index search, so it was waiting on cold pages across the signature tables.
 /// Only a hint: a table this build lacks, or any other error, is skipped.
 fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
-    const BY_CLAIM: [&str; 9] = [
-        "replica_records",
-        "claim_signatures",
-        "claim_signature_candidates",
-        "claim_signature_nonce_uses",
-        "claim_signature_judging",
-        "claim_verdicts",
-        "claim_verdict_links",
-        "claim_verdict_dependency_edges",
-        "claim_signature_originals",
-    ];
     let read = |sql: &str, id: &str| -> rusqlite::Result<()> {
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9fa486291dca owner=fractal_store::store::mail_retirement TODO=trace-statement-and-value-representation */ sql)?;
         let mut rows = statement.query([id])?;

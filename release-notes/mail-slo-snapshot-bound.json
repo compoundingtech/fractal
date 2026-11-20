@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow SQLite WAL restart during mail objective captures and resolve distinct identities once per capture",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "Mail acceptance, unknown coverage and source freshness semantics are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Mail-delivery objectives read retained source metadata in indexed 128-row pages without a scan-wide snapshot, allowing WAL restart during capture. Canonical identity references are resolved once per distinct spelling within each capture. Input-scoped native notifications replace global wake coalescing; there is no cooldown. Pending relevant changes and overlapping mail-input cuts publish unknown coverage rather than certifying stale or mixed observations. Idle heartbeat and lifecycle boundary timers remain active."},
+  "downtime": {"status": "none", "detail": "Takes effect on daemon restart; no migration required."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no migration."}
+}

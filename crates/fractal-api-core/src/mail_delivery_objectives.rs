@@ -21,6 +21,7 @@ struct Publication {
     incarnation: Mutex<Option<String>>,
     #[cfg(test)]
     captures: std::sync::atomic::AtomicUsize,
+
 }
 #[derive(Debug)]
 struct Snapshot {
@@ -42,8 +43,9 @@ fn now() -> u64 {
         .map_or(0, |duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
-/// One subscription owns source capture. Timers renew the producer heartbeat and wake the
-/// objective evaluator at actual lifecycle/budget boundaries; they never poll source tables.
+/// One source-specific subscription owns capture. Changes coalesce while capture runs;
+/// unrelated API wakes never recapture. Timers only renew the producer heartbeat or
+/// evaluate actual lifecycle/budget boundaries, including retained-source expiry.
 pub fn start(state: &crate::api::AppState) {
     let publication = state.store.extension::<Publication>();
     if publication.started.swap(true, Ordering::AcqRel) { return; }
@@ -175,9 +177,12 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
     Ok(vec![row])
 }
 
-fn canonical(connection: &rusqlite::Connection, recipient: &str) -> anyhow::Result<String> {
-    Ok(crate::store::identities::resolve_reference_conn(connection,
-        &crate::store::normalize_message_party(recipient))?)
+fn canonical(connection: &rusqlite::Connection, cache: &mut BTreeMap<String, String>, recipient: &str) -> anyhow::Result<String> {
+    if let Some(canonical) = cache.get(recipient) { return Ok(canonical.clone()); }
+    let canonical = crate::store::identities::resolve_reference_conn(connection,
+        &crate::store::normalize_message_party(recipient))?;
+    cache.insert(recipient.to_owned(), canonical.clone());
+    Ok(canonical)
 }
 
 fn native_frontier(store: &Store, connection: &rusqlite::Connection, recipient: &str) -> anyhow::Result<Option<u64>> {
@@ -262,8 +267,11 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
         let mut source_through_ms = now;
         let mut checked_recipients = std::collections::BTreeSet::new();
         let mut uncovered_recipients = std::collections::BTreeSet::new();
+        // Resolve each distinct reference once per capture. Concurrent relevant input
+        // changes invalidate the publication below, including its identity mappings.
+        let mut identities = BTreeMap::new();
         for (message, recipient, sent, fields) in raw {
-            let recipient = canonical(&connection, &recipient)?;
+            let recipient = canonical(&connection, &mut identities, &recipient)?;
             if !recipient.starts_with("agent/") { continue; }
             covered_from_ms = covered_from_ms.min(sent);
             let expiry = sent.saturating_add(DEADLINE).saturating_add(HORIZON).saturating_add(FRESHNESS).saturating_add(1);
@@ -308,7 +316,7 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
             #[cfg(test)]
             { source_work[1] += raw.len(); }
             for (recipient, at) in raw {
-                let key = (message.clone(), canonical(&connection, &recipient)?);
+                let key = (message.clone(), canonical(&connection, &mut identities, &recipient)?);
                 accepted.entry(key).and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }
             let raw = step_query.query_map([message], |row| Ok((row.get::<_, String>(0)?,
@@ -320,7 +328,7 @@ fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) ->
                 // before any harness handoff; its actor is not the target input consumer.
                 let consumer = if consumer.is_empty() || matches!(kind.as_str(), "message.closed" | "message.expired") {
                     String::new()
-                } else { canonical(&connection, &consumer)? };
+                } else { canonical(&connection, &mut identities, &consumer)? };
                 steps.entry((message.clone(), consumer)).or_default().entry(kind)
                     .and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }
