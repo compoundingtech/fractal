@@ -315,3 +315,163 @@ fn a_store_fenced_at_24_keeps_the_reference_writer_off() {
         "no facade became a reference"
     );
 }
+
+fn user_version(store: &Store) -> u32 {
+    store.readers.get().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap()
+}
+
+fn writer_flag(store: &Store) -> Option<String> {
+    store
+        .readers
+        .get()
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [smallclaims::store::principals::compaction::COMPACTION_WRITER_FLAG],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+/// Leave every compacted claim as a release before version 24 kept it: its facade as its one
+/// candidate, carried by the node, and the store at version 20 without the writer's flag.
+fn whole(store: &Store) -> i64 {
+    let connection = store.connection.write();
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE restoring AS
+               SELECT s.claim_id, s.signature FROM claim_signatures s JOIN claim_signature_counts USING(claim_id)
+                WHERE NOT EXISTS(SELECT 1 FROM claim_signature_candidates d WHERE d.claim_id=s.claim_id);
+             DELETE FROM claim_signature_counts WHERE claim_id IN (SELECT claim_id FROM restoring);
+             INSERT INTO claim_signature_candidates(claim_id,signature,key,nonce)
+               SELECT claim_id, signature, json_extract(signature,'$.key'), json_extract(signature,'$.nonce') FROM restoring;
+             INSERT INTO claim_signature_sources(claim_id,signature,writer)
+               SELECT claim_id, signature, 'studio' FROM restoring;
+             DELETE FROM meta WHERE key LIKE 'claim_signature_compaction%';
+             PRAGMA user_version=20;",
+        )
+        .unwrap();
+    let restored = connection.query_row("SELECT COUNT(*) FROM restoring", [], |row| row.get(0)).unwrap();
+    connection.execute_batch("DROP TABLE restoring;").unwrap();
+    restored
+}
+
+fn pace(store: &Store) -> (usize, usize) {
+    let (mut pages, mut total) = (0, 0);
+    for _ in 0..10_000 {
+        let page = store.compact_settled_signatures().unwrap();
+        pages += 1;
+        total += page.compacted;
+        assert!(page.examined <= smallclaims::store::principals::compaction::COMPACTION_PAGE);
+        if page.finished {
+            return (pages, total);
+        }
+    }
+    panic!("the paced compaction must finish");
+}
+
+#[test]
+fn the_writer_compacts_each_claim_as_it_settles_and_fences_the_store() {
+    let (_directory, store, _anchor) = studio();
+    assert_eq!(user_version(&store), 20, "a store with nothing settled stays at 20");
+    assert_eq!(writer_flag(&store), None);
+    let claims = [note(&store, None, "a node note"), note(&store, Some("person/ada"), "delegated")];
+    seal(&store);
+    drain(&store);
+    let signed = count(&store, "SELECT COUNT(*) FROM claim_signatures");
+    assert_eq!(compacted(&store), signed, "judging compacts each claim as it settles");
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_signature_sources"), 0);
+    assert_eq!(user_version(&store), 24);
+    assert_eq!(writer_flag(&store).as_deref(), Some("1"));
+    for claim in &claims {
+        assert_eq!(verdict(&store, claim), Verdict::Verified);
+        assert!(store.claim_signature(&claim.id).unwrap().is_some());
+    }
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    assert!(store.signature_state_faults().unwrap().is_empty());
+}
+
+#[test]
+fn the_paced_pass_compacts_what_an_earlier_release_kept_whole() {
+    let (_directory, store, _anchor) = studio();
+    for index in 0..1_200 {
+        note(&store, if index % 2 == 0 { None } else { Some("person/ada") }, &format!("note {index}"));
+    }
+    seal(&store);
+    drain(&store);
+    let signed = count(&store, "SELECT COUNT(*) FROM claim_signatures");
+    assert_eq!(whole(&store), signed);
+    assert_eq!(compacted(&store), 0);
+    let before = verdicts(&store);
+
+    let (pages, total) = pace(&store);
+    assert!(pages >= 3, "{signed} claims take several short loans, not one ({pages})");
+    assert_eq!(total as i64, signed);
+    assert_eq!(compacted(&store), signed);
+    assert_eq!(user_version(&store), 24);
+    assert_eq!(verdicts(&store), before);
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    drain(&store);
+    assert_eq!(verdicts(&store), before);
+    assert_eq!(pace(&store), (1, 0), "once done, a pass is one cheap look");
+}
+
+#[test]
+fn an_unsettled_claim_stays_whole_until_it_settles() {
+    let (_directory, store, _anchor) = studio();
+    let waiting = note(&store, None, "queued again");
+    let other = note(&store, None, "settled");
+    seal(&store);
+    drain(&store);
+    whole(&store);
+    store
+        .connection
+        .write()
+        .execute("INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)", [&waiting.id])
+        .unwrap();
+    pace(&store);
+    let candidates = |claim: &ClaimRecord| {
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claim_signature_candidates WHERE claim_id=?1",
+                [&claim.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(candidates(&waiting), 1, "a queued claim keeps its candidate");
+    assert_eq!(candidates(&other), 0);
+    drain(&store);
+    assert_eq!(candidates(&waiting), 0, "it compacts when its verdict settles");
+    assert_eq!(verdict(&store, &waiting), Verdict::Verified);
+}
+
+#[test]
+fn a_claim_a_rollback_left_whole_is_found_after_the_pass_is_done() {
+    let (_directory, store, _anchor) = studio();
+    note(&store, None, "before the rollback");
+    seal(&store);
+    drain(&store);
+    whole(&store);
+    pace(&store);
+    let signed = count(&store, "SELECT COUNT(*) FROM claim_signatures");
+    assert_eq!(compacted(&store), signed);
+    // The reader release keeps the fence and the flag but compacts nothing it judges.
+    let restored = {
+        let connection = store.connection.write();
+        connection
+            .execute_batch(
+                "DELETE FROM claim_signature_counts WHERE claim_id=(SELECT MIN(claim_id) FROM claim_signatures);
+                 INSERT INTO claim_signature_candidates(claim_id,signature,key,nonce)
+                   SELECT claim_id, signature, json_extract(signature,'$.key'), json_extract(signature,'$.nonce')
+                     FROM claim_signatures WHERE claim_id=(SELECT MIN(claim_id) FROM claim_signatures);",
+            )
+            .unwrap();
+        connection.changes()
+    };
+    assert_eq!(restored, 1);
+    assert_eq!(compacted(&store), signed - 1);
+    assert_eq!(pace(&store).1, 1);
+    assert_eq!(compacted(&store), signed);
+}

@@ -27,7 +27,8 @@ pub const COMPACTION_BUDGET: std::time::Duration = std::time::Duration::from_mil
 /// A settled claim that compaction may keep as its facade alone: one candidate, a published
 /// verdict that is not held, an inline text facade, a nonce use (so the signature verified on
 /// this claim), nothing queued or fresh for it, no judging row (a settled fold keeps none, so a
-/// row left means pending or large) and no version 21 originals. `judging::unavailable` adds
+/// row left means pending or large; queueing a claim also gives it one) and no version 21
+/// originals. `judging::unavailable` adds
 /// the requeue cursors.
 const SETTLED: &str = "n.candidates=1 AND v.verdict<>'held' AND typeof(s.signature)='text'
    AND EXISTS(SELECT 1 FROM claim_signature_nonce_uses u WHERE u.claim_id=d.claim_id)
