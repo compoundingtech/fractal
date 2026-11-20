@@ -4702,6 +4702,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "usage.limits.observed" => &[
             ("readings", FieldSpec { required: true, ..array() }),
             ("credit_readings", FieldSpec { required: true, ..array() }),
+            ("source_frontier", object()),
+            ("period_readings", array()),
+            ("gaps", array()),
         ],
         // The harness's own subagent ID names the subagent within its parent seat. The prompt and
         // transcript stay on the host.
