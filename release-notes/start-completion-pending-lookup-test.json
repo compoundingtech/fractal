@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "Fix the start-completion quiescence regression test to assert durable successful adoption instead of unwrapping a completed start from the pending-only lookup.",
+  "summary": "Observe completed starts using the exact launched member, including its operation provenance, and prove durable adoption before counting quiet reconciliation passes.",
   "replay": {
     "status": "none",
-    "detail": "Test-only assertions; no claim changes."
+    "detail": "Existing receipts remain valid; no replay is required."
   },
   "schema": {
     "status": "none",
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No runtime or authority changes."
+    "detail": "Completion observation now receives the launched member's operation metadata; exact-incarnation and operation-provenance checks remain unchanged."
   },
   "compatibility": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No deployment action is needed."
+    "detail": "Normal daemon upgrade; no planned downtime."
   },
   "manual": {
     "status": "none",

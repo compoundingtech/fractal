@@ -8724,8 +8724,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Adopt only a fresh physical observation of this operation's exact
         // incarnation. This includes command-only seats and one-shots that
         // already ended; readiness and restart completion remain separate.
+        // Observe the launched member, whose tags carry this operation's provenance.
         let observation = if let Some(incarnation) = incarnation.as_deref() {
-            self.runtime.observe_start(member)?.filter(|observation| {
+            self.runtime.observe_start(&prepared.launch_member)?.filter(|observation| {
                 observation.incarnation_id.as_deref() == Some(incarnation)
                     && matches!(observation.status.as_str(), "running" | "exited" | "stopped" | "vanished")
             })
