@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Agent roster refreshes classify at most 4096 claim rows per delta and assemble large rosters through resumable subject-keyset pages. Each background roster snapshot has a two-second cooperative wall deadline. Completed pages survive cancelled attempts; bounded claim and local-timeline reconciliation certifies the assembled roster at one final cut before replacing the previous complete publication.",
+  "summary": "Agent roster refreshes classify at most 4096 claim rows per delta and assemble large rosters through resumable subject-keyset pages. Each background roster snapshot has a two-second cooperative wall deadline. Completed pages survive cancelled attempts; queue and visibility metadata are diffed without discarding completed cards, while timed-out delta pages independently shrink. Bounded claim and local-timeline reconciliation certifies the assembled roster at one final cut before replacing the previous complete publication.",
   "replay": {"status": "none", "detail": "No persisted projection replay. Overflow rebuilds only the in-memory roster cache from the complete current cut."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No membership, invalidation, retention or checkpoint policy change."},

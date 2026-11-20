@@ -2,6 +2,10 @@
 use super::*;
 use crate::store::AgentResourcesChange;
 
+#[cfg(test)]
+#[path = "roster_assembly_tests.rs"]
+mod tests;
+
 #[derive(Default)]
 pub(super) struct Assemblies(Mutex<[Option<Assembly>; 2]>);
 
@@ -15,6 +19,7 @@ struct Assembly {
     rows: BTreeMap<String, Value>,
     valid_until: Option<u128>,
     width: usize,
+    delta_width: usize,
     reconcile: Option<Reconcile>,
 }
 
@@ -26,13 +31,18 @@ struct Reconcile {
     previous: Vec<Value>,
     dirty: BTreeSet<String>,
     rebuild: bool,
+    membership_after: Option<String>,
+    queues: bool,
+    queue_after: Option<String>,
+    queue_valid_until: Option<u128>,
 }
 
 impl Assembly {
     fn new(generation: u64) -> Self {
         Self { generation, policy: crate::config::idle_residency_policy(), cursor: None,
             scanning: true, floor: 0, local_floor: 0, rows: BTreeMap::new(),
-            valid_until: None, width: AGENT_ROSTER_WARM_CHUNK, reconcile: None }
+            valid_until: None, width: AGENT_ROSTER_WARM_CHUNK,
+            delta_width: crate::store::seats::AGENT_ROSTER_DELTA_ROWS, reconcile: None }
     }
 
     fn apply(&mut self, names: &BTreeSet<String>, rows: Vec<Value>, valid_until: Option<u128>) {
@@ -57,7 +67,7 @@ impl Assembly {
                 drop(connection);
                 let (rows, expiry) = fold_page(store, history, index, &names)?;
                 Ok((index, local, names, rows, expiry))
-            })?;
+            }).inspect_err(|_| self.width = (self.width / 2).max(1))?;
             if self.cursor.is_none() { self.floor = index; self.local_floor = local; }
             self.cursor = names.last().cloned().or_else(|| self.cursor.take());
             self.scanning = names.len() == self.width;
@@ -72,11 +82,19 @@ impl Assembly {
                 local_after: self.local_floor, previous: if target > self.floor {
                     self.rows.values().cloned().collect()
                 } else { Vec::new() },
-                dirty: BTreeSet::new(), rebuild: false });
+                dirty: BTreeSet::new(), rebuild: false, membership_after: None,
+                queues: self.valid_until.is_some_and(|expiry| client_now_ms() >= expiry),
+                queue_after: None, queue_valid_until: None });
             return Ok(None);
         }
         let reconcile = self.reconcile.as_mut().expect("a reconciliation was started");
-        let limit = crate::store::seats::AGENT_ROSTER_DELTA_ROWS;
+        if !reconcile.queues && self.valid_until.is_some_and(|expiry| client_now_ms() >= expiry) {
+            // A lease deadline invalidates metadata, not the completed membership sweep.
+            reconcile.queues = true;
+            reconcile.queue_after = None;
+            reconcile.queue_valid_until = None;
+        }
+        let limit = self.delta_width;
         if reconcile.after < reconcile.target {
             let (through, change) = agent_roster_snapshot(store, |_| {
                 let connection = store.readers.get();
@@ -88,14 +106,14 @@ impl Assembly {
                 let through = indices.last().copied().unwrap_or(reconcile.target);
                 let change = store.changed_agent_resources(reconcile.after, through, &reconcile.previous)?;
                 Ok((through, change))
-            })?;
+            }).inspect_err(|_| self.delta_width = (self.delta_width / 2).max(1))?;
             reconcile.after = through;
             match change {
                 AgentResourcesChange::Delta(delta) => {
                     reconcile.dirty.extend(delta.subjects);
-                    // Queue and structural changes can alter visibility/metadata of cards
-                    // absent from the previous rows. Revisit membership, not just known IDs.
-                    reconcile.rebuild |= delta.queues;
+                    // Queue metadata may change outside the actor/assignee cards. Diff it
+                    // in resumable pages; an ordinary renewal/progress is not a cold rebuild.
+                    reconcile.queues |= delta.queues;
                 }
                 AgentResourcesChange::Invalidated { .. } => reconcile.rebuild = true,
             }
@@ -110,24 +128,61 @@ impl Assembly {
                 )?.query_map(rusqlite::params![reconcile.local_after, reconcile.local_target,
                     reconcile.target, limit], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
-            })?;
+            }).inspect_err(|_| self.delta_width = (self.delta_width / 2).max(1))?;
             reconcile.local_after = rows.last().map_or(reconcile.local_target, |(id, _)| *id);
             reconcile.dirty.extend(rows.into_iter().map(|(_, subject)| subject));
             return Ok(None);
         }
         if reconcile.rebuild {
-            self.floor = reconcile.target;
-            self.local_floor = reconcile.local_target;
-            self.cursor = None;
-            self.scanning = true;
-            self.rows.clear();
-            self.valid_until = None;
-            self.reconcile = None;
+            let lower = reconcile.membership_after.as_ref()
+                .map_or_else(|| "agent/".to_owned(), |id| format!("{id}\0"));
+            let names = agent_roster_snapshot(store, |index| {
+                Ok(store.readers.get().prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+                    .query_map(rusqlite::params![index, lower, "agent0", self.width],
+                        |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+            }).inspect_err(|_| self.width = (self.width / 2).max(1))?;
+            reconcile.membership_after = names.last().cloned().or_else(|| reconcile.membership_after.take());
+            reconcile.rebuild = names.len() == self.width;
+            reconcile.dirty.extend(names);
+            // Structural invalidation can require every card, but never discards already
+            // assembled rows or the original membership cursor while discovering them.
+            return Ok(None);
+        }
+        if reconcile.queues {
+            use std::ops::Bound::{Excluded, Unbounded};
+            let names = self.rows.range::<str, _>((
+                Excluded(reconcile.queue_after.as_deref().unwrap_or("")), Unbounded,
+            )).take(self.width).map(|(name, _)| name.clone()).collect::<BTreeSet<_>>();
+            let (metadata, expiry, visible) = agent_roster_snapshot(store, |index| {
+                let (metadata, expiry) = queue_page(store, &names)?;
+                let visible = if history { names.clone() } else {
+                    store.current_view_candidates_for_generic_reads(&store.readers.get(), names.clone(), index, true)?
+                };
+                Ok((metadata, expiry, visible))
+            }).inspect_err(|_| self.width = (self.width / 2).max(1))?;
+            for item in metadata {
+                let name = item["id"].as_str().expect("queue metadata names its subject");
+                if !visible.contains(name) || self.rows.get(name).is_none_or(|old| {
+                    AGENT_QUEUE_FIELDS.iter().any(|field| old[*field] != item[*field])
+                }) {
+                    reconcile.dirty.insert(name.to_owned());
+                }
+            }
+            reconcile.queue_valid_until = reconcile.queue_valid_until.into_iter().chain(expiry).min();
+            reconcile.queue_after = names.last().cloned().or_else(|| reconcile.queue_after.take());
+            reconcile.queues = names.len() == self.width;
+            if !reconcile.queues {
+                // Replace expired deadlines after the complete metadata pass, instead of
+                // retaining an old minimum and restarting the roster on every renewal.
+                self.valid_until = reconcile.queue_valid_until;
+            }
             return Ok(None);
         }
         if !reconcile.dirty.is_empty() {
             let names = reconcile.dirty.iter().take(self.width).cloned().collect::<BTreeSet<_>>();
-            let (rows, expiry) = agent_roster_snapshot(store, |index| fold_page(store, history, index, &names))?;
+            let (rows, expiry) = agent_roster_snapshot(store, |index| fold_page(store, history, index, &names))
+                .inspect_err(|_| self.width = (self.width / 2).max(1))?;
             for name in &names { reconcile.dirty.remove(name); }
             // Every refold is at or after this target. Reconcile again from that floor to
             // cover writes (including new names behind the subject cursor) during refolds.
@@ -158,10 +213,7 @@ impl Assembly {
     }
 }
 
-fn fold_page(store: &Store, history: bool, index: u64, names: &BTreeSet<String>)
-    -> anyhow::Result<(Vec<Value>, Option<u128>)>
-{
-    if names.is_empty() { return Ok((Vec::new(), None)); }
+fn queue_page(store: &Store, names: &BTreeSet<String>) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
     let mut metadata = Vec::with_capacity(names.len());
     let mut expiry = None;
     for name in names {
@@ -170,6 +222,14 @@ fn fold_page(store: &Store, history: bool, index: u64, names: &BTreeSet<String>)
         metadata.extend(agent_queue_metadata(store, &BTreeSet::from([name.clone()]))?);
         expiry = expiry.into_iter().chain(store.agent_queue_valid_until(client_now_ms(), Some(name))?).min();
     }
+    Ok((metadata, expiry))
+}
+
+fn fold_page(store: &Store, history: bool, index: u64, names: &BTreeSet<String>)
+    -> anyhow::Result<(Vec<Value>, Option<u128>)>
+{
+    if names.is_empty() { return Ok((Vec::new(), None)); }
+    let (metadata, expiry) = queue_page(store, names)?;
     let mut rows = client_agent_resources_selected(store, history, index, Some((names, &metadata)))?;
     add_agent_todos(store, &mut rows, index)?;
     #[cfg(any(test, feature = "test-support"))]
@@ -194,18 +254,10 @@ pub(super) fn resume(store: &Store, history: bool) -> anyhow::Result<Option<Capt
     let state = states[usize::from(history)].as_mut().expect("assembly started");
     let generation = store.fractal.presented_agents.generation();
     if state.generation != generation || state.policy != crate::config::idle_residency_policy()
-        || state.valid_until.is_some_and(|expiry| client_now_ms() >= expiry)
     { *state = Assembly::new(generation); }
     loop {
         smallclaims::read_budget::check()?;
-        let ready = match state.step(store, history) {
-            Ok(ready) => ready,
-            Err(error) => {
-                // A slow page resumes with less work, never by repeating the full sweep.
-                state.width = (state.width / 2).max(1);
-                return Err(error);
-            }
-        };
+        let ready = state.step(store, history)?;
         let Some((index, local, subagents)) = ready else { continue; };
         let mut rows = state.rows.values().cloned().collect::<Vec<_>>();
         rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
