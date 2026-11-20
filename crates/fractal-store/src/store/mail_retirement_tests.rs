@@ -253,3 +253,52 @@ fn a_spent_budget_stops_before_the_next_sent_claim() {
     assert_eq!(retire_all(&store, later), (1, 2));
     assert_eq!(retired(&store), first.iter().chain(&second).cloned().collect());
 }
+
+#[test]
+fn mail_citing_mail_gives_one_answer_whatever_the_order_and_the_budget() {
+    // A thread whose only citer is agent mail that retires too: whether the pass meets the
+    // citer before or after the thread it cites, and however the holds fall, both retire.
+    for cited_closes_first in [true, false] {
+        for budget in [Duration::ZERO, Duration::from_secs(1)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = member(&dir.path().join("claims.sqlite3"), true);
+            let mut cited = thread(&store, "message/cited", SENDER, RECIPIENT, false);
+            let close_cited = |store: &Store, cited: &mut Vec<String>| {
+                cited.push(store.append_claim(&lifecycle("message/cited", "message.closed")).unwrap().id);
+            };
+            if cited_closes_first {
+                close_cited(&store, &mut cited);
+            }
+            let mut citer = vec![store.append_claim(&sent("message/citer", SENDER, RECIPIENT, vec![cited[0].clone()])).unwrap().id];
+            for kind in ["message.delivered", "message.read", "message.closed"] {
+                citer.push(store.append_claim(&lifecycle("message/citer", kind)).unwrap().id);
+            }
+            if !cited_closes_first {
+                close_cited(&store, &mut cited);
+            }
+            let later = now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS;
+            loop {
+                if !store.retire_closed_mail_step_within(later, budget).unwrap().more {
+                    break;
+                }
+            }
+            assert_eq!(
+                retired(&store),
+                cited.iter().chain(&citer).cloned().collect(),
+                "cited closes first: {cited_closes_first}, budget {budget:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mail_that_stays_keeps_what_it_cites() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    let cited = thread(&store, "message/cited", SENDER, RECIPIENT, true);
+    // Its citer is still open, so it stays, and so does what it cites.
+    store.append_claim(&sent("message/open-citer", SENDER, RECIPIENT, vec![cited[0].clone()])).unwrap();
+    retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS);
+    assert!(retired(&store).is_empty());
+    assert!(cited.iter().all(|id| claims(&store).contains(id)));
+}

@@ -89,7 +89,7 @@ impl Store {
         {
             let connection = self.readers.get();
             for subject in deferred.iter().take(CANDIDATES) {
-                judged.push((None, subject.clone(), judge_thread(&connection, subject)?));
+                judged.push((None, subject.clone(), judge_thread(&connection, subject, cutoff)?));
             }
         }
         let rejudged = judged.len();
@@ -191,7 +191,7 @@ impl Store {
             let judgement = if judged.iter().any(|(_, seen, _)| *seen == subject) {
                 Judgement::Keep
             } else {
-                judge_thread(&connection, &subject)?
+                judge_thread(&connection, &subject, cutoff)?
             };
             judged.push((Some(index), subject, judgement));
         }
@@ -272,44 +272,85 @@ fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
     }
 }
 
-/// The rule's answer for the thread `subject`.
-fn judge_thread(connection: &Connection, subject: &str) -> Result<Judgement> {
-    let claims: Vec<(String, Option<String>, String, Option<String>, Option<String>)> = connection
+/// How many threads deep a chain of mail citing mail is followed; past it the thread stays.
+const CITATION_DEPTH: usize = 8;
+
+/// The rule's answer for the thread `subject`, a function of the claims alone and never of how
+/// far a pass has got, so every member that holds the same claims gives the same answer. A
+/// claim outside the thread that cites it keeps it unless that claim is mail whose own thread
+/// retires under this rule: judging a thread before or after its mail citer went must not
+/// change the answer. A citer already gone was retired, so it keeps nothing.
+fn judge_thread(connection: &Connection, subject: &str, cutoff: u64) -> Result<Judgement> {
+    judge(connection, subject, cutoff, 0, &mut BTreeMap::new())
+}
+
+/// `depth` 0 is a thread whose closed claim the caller found old enough; deeper is a citer's
+/// thread, which must show one itself. `kept` remembers citer threads already judged, and
+/// marks one being judged as kept, so a cycle keeps its threads.
+fn judge(
+    connection: &Connection,
+    subject: &str,
+    cutoff: u64,
+    depth: usize,
+    kept: &mut BTreeMap<String, bool>,
+) -> Result<Judgement> {
+    let claims: Vec<(String, Option<String>, String, Option<String>, Option<String>, String)> = connection
         .prepare_cached(
             "SELECT id, json_extract(body,'$._operation.id'), kind,
-                    json_extract(body,'$.fields.from'), json_extract(body,'$.fields.to')
+                    json_extract(body,'$.fields.from'), json_extract(body,'$.fields.to'), accepted_at_unix_ms
              FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1 AND kind>='message.' AND kind<'message/' ORDER BY store_index",
         )?
-        .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+        .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?
         .collect::<rusqlite::Result<_>>()?;
     if claims.is_empty() {
         return Ok(Judgement::Keep);
     }
     // Without its sent claim a thread's people are unknown: wait for it.
-    let Some((_, _, _, from, to)) = claims.iter().find(|(_, _, kind, _, _)| kind == "message.sent") else {
+    let Some((_, _, _, from, to, _)) = claims.iter().find(|(_, _, kind, ..)| kind == "message.sent") else {
         return Ok(Judgement::Defer);
     };
     let person = |party: &Option<String>| party.as_deref().is_some_and(|party| party.starts_with("person/"));
     if person(from) || person(to) {
         return Ok(Judgement::Keep);
     }
+    let old_enough = claims.iter().any(|(_, _, kind, _, _, accepted)| {
+        kind == "message.closed" && accepted.parse::<u64>().is_ok_and(|accepted| accepted <= cutoff)
+    });
+    if depth > 0 && !old_enough {
+        return Ok(Judgement::Keep);
+    }
     let own: std::collections::BTreeSet<&str> = claims.iter().map(|(id, ..)| id.as_str()).collect();
-    let mut citers = connection.prepare_cached(
-        "SELECT citation.citer FROM local_trim_citations AS citation
-         WHERE citation.cited=?1 AND EXISTS(SELECT 1 FROM claims WHERE claims.id=citation.citer)",
-    )?;
     for (id, ..) in &claims {
-        let cited_from_outside = citers
-            .query_map([id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .iter()
-            .any(|citer| !own.contains(citer.as_str()));
-        if cited_from_outside {
-            return Ok(Judgement::Keep);
+        let citers: Vec<(String, String, String)> = connection
+            .prepare_cached(
+                "SELECT citation.citer, citer.kind, citer.subject FROM local_trim_citations AS citation
+                 JOIN claims AS citer ON citer.id=citation.citer WHERE citation.cited=?1",
+            )?
+            .query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (citer, kind, citer_subject) in citers {
+            if own.contains(citer.as_str()) {
+                continue;
+            }
+            if !kind.starts_with("message.") || depth + 1 >= CITATION_DEPTH {
+                return Ok(Judgement::Keep);
+            }
+            let citer_kept = match kept.get(&citer_subject) {
+                Some(citer_kept) => *citer_kept,
+                None => {
+                    kept.insert(citer_subject.clone(), true);
+                    let citer_kept = !matches!(judge(connection, &citer_subject, cutoff, depth + 1, kept)?, Judgement::Retire(_));
+                    kept.insert(citer_subject, citer_kept);
+                    citer_kept
+                }
+            };
+            if citer_kept {
+                return Ok(Judgement::Keep);
+            }
         }
     }
-    let mut ordered: Vec<_> = claims.into_iter().map(|(id, operation, kind, _, _)| (id, operation, kind)).collect();
+    let mut ordered: Vec<_> = claims.into_iter().map(|(id, operation, kind, ..)| (id, operation, kind)).collect();
     ordered.sort_by_key(|(_, _, kind)| match kind.as_str() {
         "message.sent" => 1,
         "message.closed" => 2,
