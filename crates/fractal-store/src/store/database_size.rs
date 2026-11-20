@@ -91,10 +91,12 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
     Some((i64::try_from(per_day).ok()?, span))
 }
 
-/// The free pages one write gives back to the filesystem: 512 KiB of 4 KiB pages. On a 32 GB
-/// store a chunk of 2,048 took 132 ms (p99 226 ms). On a 57 GB member returning 2.4 GB, 512
-/// took 93 ms at p50 and 393 ms at most; a quarter of that keeps the longest hold under 100 ms.
+/// The free pages one write gives back to the filesystem: 512 KiB of 4 KiB pages. On a copy of a
+/// real member giving back 9% of its file, chunks of 512 held the writer up to 225 ms and chunks of
+/// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
+// The literal in `release_free_pages` spells this chunk.
+const _: () = assert!(FREE_PAGE_CHUNK == 128);
 
 /// Run `work`, whose commits redo themselves after a crash (giving free pages back, retiring
 /// closed mail), without waiting on the disk at commit, then restore the connection's settings.
@@ -164,7 +166,7 @@ impl Store {
         if mode != 2 || before == 0 {
             return Ok(0);
         }
-        // FREE_PAGE_CHUNK (128) pages. Each step gives back one, so the pragma runs to its end.
+        // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
         committing_without_fsync(&connection, || {
             let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
             let mut steps = statement.query([])?;

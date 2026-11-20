@@ -659,7 +659,7 @@ resource "refresh/file" { kind "filesystem.file" }
 observer "refresh/file" {
   resource "resource/refresh/file"
   provider "local.file"
-  locator "/tmp/st3-refresh-test"
+  locator "/tmp/fractal-refresh-test"
   field "status"
 }
 "#;
@@ -718,7 +718,7 @@ resource "fenced/file" { kind "filesystem.file" }
 observer "fenced/file" {
   resource "resource/fenced/file"
   provider "local.file"
-  locator "/tmp/st3-fenced-file"
+  locator "/tmp/fractal-fenced-file"
   field "status"
 }
 "#, "node", "fenced-run").unwrap();
@@ -798,7 +798,7 @@ resource "quiet/file" { kind "filesystem.file" }
 observer "quiet/file" {
   resource "resource/quiet/file"
   provider "local.file"
-  locator "/tmp/st3-quiet-file"
+  locator "/tmp/fractal-quiet-file"
   field "status"
 }
 "#;
@@ -845,7 +845,7 @@ resource "manual/file" { kind "filesystem.file" }
 observer "manual/file" {
   resource "resource/manual/file"
   provider "local.file"
-  locator "/tmp/st3-manual-file"
+  locator "/tmp/fractal-manual-file"
   field "status"
 }
 "#;
@@ -889,7 +889,7 @@ resource "ordered/file" { kind "filesystem.file" }
 observer "ordered/file" {
   resource "resource/ordered/file"
   provider "local.file"
-  locator "/tmp/st3-ordered-file"
+  locator "/tmp/fractal-ordered-file"
   field "status"
 }
 "#;

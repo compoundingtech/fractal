@@ -1005,6 +1005,13 @@ objective only after every member runs a build that knows it.
 ID` adds, for a declared objective, its subject and revision, the sample counts by class, each open
 sample over target with its age, and its response. `fractal slo chart ID` draws the budget left a
 minute at a time from the local seven-day history, which records declared rows like any other.
+
+`fractal doctor` presents every objective and account budget from the same native SLO
+projection, including declared objectives, as `slo/ID`. It retains the native status, tone,
+current reading, target and window. SLO verdicts describe, they do not gate: every row is
+informational, so a red or quiet objective never fails `fractal doctor --strict`, and no SLO
+row is presented as a successful check. Doctor does not re-evaluate SLO thresholds.
+
 A declaration this build cannot read, as one replicated from a newer build, is the one row `NAME`,
 `no-data`, whose explanation names its revision and why.
 

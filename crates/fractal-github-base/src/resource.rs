@@ -1715,7 +1715,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_local_file_is_a_distinct_observation() {
-        let path = std::env::temp_dir().join("st3-file-that-does-not-exist");
+        let path = std::env::temp_dir().join("fractal-file-that-does-not-exist");
         let observation = RegisteredResourceProvider
             .observe(ObservationRequest {
                 provider: "local.file".into(),
