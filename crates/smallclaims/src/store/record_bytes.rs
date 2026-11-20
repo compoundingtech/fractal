@@ -180,6 +180,95 @@ pub fn admitted_claim_sql(alias: &str) -> String {
     )
 }
 
+/// How many records the envelope `alias` (a row of `replica_envelopes`) has in
+/// `replica_record_rows`: its stored records, and one for each claim of its batch with a position
+/// that no stored record of it holds. SQLite runs a view compound in full for a correlated term,
+/// so counting through the view scanned every record and claim; each term here seeks its own
+/// index.
+pub fn envelope_record_count_sql(alias: &str) -> String {
+    format!(
+        "((SELECT COUNT(*) FROM replica_records AS counted
+           WHERE counted.writer={alias}.writer AND counted.sequence={alias}.sequence
+             AND counted.envelope_hash={alias}.envelope_hash)
+          + (SELECT COUNT(*) FROM claims AS counted INDEXED BY claims_batch_index
+             JOIN claim_positions AS positions ON positions.claim_id=counted.id
+             WHERE counted.batch_id={alias}.batch_id AND NOT EXISTS (
+                 SELECT 1 FROM replica_records AS stored
+                 WHERE stored.writer={alias}.writer AND stored.sequence={alias}.sequence
+                   AND stored.envelope_hash={alias}.envelope_hash AND stored.position=positions.position)))"
+    )
+}
+
+/// Whether the envelope `alias` has a record in `replica_record_rows` that is not repaired, of a
+/// claim accepted at or after `cut`: a late envelope, which no cut before then holds. Each term
+/// seeks its own index, as in [`envelope_record_count_sql`].
+pub fn envelope_has_late_record_sql(alias: &str, cut: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM replica_records AS other CROSS JOIN claims AS late ON late.id=other.claim_id
+              WHERE other.writer={alias}.writer AND other.sequence={alias}.sequence
+                AND other.envelope_hash={alias}.envelope_hash AND other.state<>'repaired'
+                AND CAST(late.accepted_at_unix_ms AS INTEGER) >= {cut})
+          OR EXISTS(SELECT 1 FROM claims AS late INDEXED BY claims_batch_index
+              JOIN claim_positions AS positions ON positions.claim_id=late.id
+              WHERE late.batch_id={alias}.batch_id AND CAST(late.accepted_at_unix_ms AS INTEGER) >= {cut}
+                AND NOT EXISTS (
+                    SELECT 1 FROM replica_records AS stored
+                    WHERE stored.writer={alias}.writer AND stored.sequence={alias}.sequence
+                      AND stored.envelope_hash={alias}.envelope_hash AND stored.position=positions.position)))"
+    )
+}
+
+/// Assert that `sql` seeks every table it reads: no step scans a table or builds an automatic
+/// index. A view compound or a subquery read as it is produced (`SCAN records`) is not a table.
+#[cfg(test)]
+pub(crate) fn assert_plan_seeks(connection: &Connection, sql: &str) {
+    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let count = statement.parameter_count();
+    let plan = statement
+        .query_map(rusqlite::params_from_iter(vec![rusqlite::types::Null; count]), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let produced = |step: &str| {
+        step == "SCAN CONSTANT ROW"
+            || step == "SCAN records"
+            || step == "SCAN replica_record_rows"
+            || step.starts_with("SCAN (subquery-")
+    };
+    let scans: Vec<&String> = plan
+        .iter()
+        .filter(|step| (step.starts_with("SCAN ") && !produced(step)) || step.contains("AUTOMATIC"))
+        .collect();
+    assert!(scans.is_empty(), "{scans:?} in {plan:#?} for {sql}");
+}
+
+#[cfg(test)]
+mod view_plan_tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// Without statistics the planner assumes large tables, as on a real store.
+    #[test]
+    fn envelope_record_counts_and_late_checks_seek_and_scan_nothing() {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        for sql in [
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE rowid>?1 AND rowid<=?2",
+                envelope_record_count_sql("envelopes")
+            ),
+            format!(
+                "SELECT {} FROM replica_envelopes envelopes WHERE writer=?1",
+                envelope_has_late_record_sql("envelopes", "?2")
+            ),
+            "SELECT COUNT(*) FROM replica_record_rows WHERE claim_id=?1".into(),
+            crate::store::checkpoint::sealed_envelope_records_sql(),
+        ] {
+            assert_plan_seeks(&connection, &sql);
+        }
+    }
+}
+
 /// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
 /// valid, a repaired one, or a valid one a store has not yet deleted), and for each valid claim
 /// whose record is gone the row it had: its envelope, found by the claim's batch, its position

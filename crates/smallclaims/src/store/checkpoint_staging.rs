@@ -608,13 +608,11 @@ impl StagedSet {
             let connection = store.readers.get();
             let page = connection
                 .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                            envelopes.accepted_at_unix_ms,
-                            (SELECT COUNT(*) FROM replica_record_rows records
-                             WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
-                               AND records.envelope_hash=envelopes.envelope_hash)
+                    /* sqlite-large-value: allow-for-now lv-h0957c7ddabac owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                            envelopes.accepted_at_unix_ms, {}
                      FROM replica_envelopes envelopes
                      WHERE envelopes.rowid > ?1 AND envelopes.rowid <= ?2",
+                     super::record_bytes::envelope_record_count_sql("envelopes")),
                 )?
                 .query_map([after, upto], |row| {
                     let accepted: String = row.get(3)?;
