@@ -1396,26 +1396,44 @@ fn repeated_earlier_insertions_do_not_starve_other_deferred_subjects() {
         /* sqlite-large-value: allow-for-now lv-h18bb32aab672 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT subject FROM local_resource_preparation",
         [],
     ).unwrap();
-    for attempt in 0..12 {
-        assert!(super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap());
+    let mut rejected = 0;
+    let mut converged = false;
+    for attempt in 0..100 {
+        if !super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap() {
+            converged = true;
+            break;
+        }
+        // Each attempt is atomic: a capped subject rolls back only this arrival.
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hbe6d428f7fd6 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT arrival").unwrap();
         let id = format!("earlier/{:04}", 9999 - attempt);
-        smallclaims::store::canonical::record_position_tx(&transaction, &id, 0).unwrap();
+        for suffix in ["/a", "/b"] {
+            smallclaims::store::canonical::record_position_tx(&transaction, &format!("{id}{suffix}"), 0).unwrap();
+        }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hd72749b681fb owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
-             SELECT ?1,batch_id,subject,'resource.observed','fixture',
+            /* sqlite-large-value: allow-for-now lv-h03a49cdca749 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT ?1||suffix,batch_id,subject,'resource.observed','fixture',
                     '{\"fields\":{\"kind\":\"custom.example\",\"facts\":{\"early\":true}}}','[]','1'
-             FROM claims WHERE subject=?2 LIMIT 1",
+             FROM (SELECT batch_id,subject FROM claims WHERE subject=?2 LIMIT 1)
+             CROSS JOIN (SELECT '/a' AS suffix UNION ALL SELECT '/b')",
             params![id, SUBJECTS[0]],
         ).unwrap();
-        flush(&transaction).unwrap();
+        match flush(&transaction) {
+            Ok(()) => transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-he110a500c61b owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "RELEASE arrival").unwrap(),
+            Err(error) => {
+                assert!(error.to_string().contains("not-caught-up"));
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h1bec9034b076 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO arrival; RELEASE arrival").unwrap();
+                rejected += 1;
+            }
+        }
     }
     let other_pending: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)",
         [SUBJECTS[1]], |row| row.get(0),
     ).unwrap();
-    assert!(!other_pending, "round-robin loans finish the unchanging subject");
-    assert!(queued(&transaction, "deferred"), "the hot subject still needs its prefix");
-    finish_deferred(&transaction);
+    assert!(!other_pending, "other deferred subjects finish too");
+    assert!(rejected > 0, "the hot subject receives bounded restart backpressure");
+    assert!(converged, "the hot subject publishes despite repeated earlier attempts");
+    assert!(!queued(&transaction, "deferred"));
     assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
     assert_eq!(snapshot(&transaction, SUBJECTS[1]), canonical_snapshot(&transaction, SUBJECTS[1]));
     transaction.rollback().unwrap();

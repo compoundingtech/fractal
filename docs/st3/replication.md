@@ -581,8 +581,14 @@ An out-of-order claim on an already prepared resource subject inserts only its i
 canonical sort key during admission. It marks preparation stale and queues the existing
 paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
 New arrivals reset a staged cursor only when their key is at or before its folded prefix;
-later keys preserve progress. A persisted round-robin cursor prevents repeatedly restarted
-subjects from starving other subjects. Query-only readers
+later keys preserve progress. A persisted round-robin cursor prevents restarted subjects
+from starving peers. After four prefix resets, the subject is prioritized for a complete
+paced rebuild; envelopes touching it wait retryably, without quarantine or receive errors.
+All claims in a held envelope wait together, including unrelated subjects in that envelope;
+other envelopes and peers remain eligible. Later envelopes touching the capped subject
+also wait for the prioritized rebuild, without a handler-error retry backoff.
+The cap clears only on complete publication, and emits one diagnostic per episode.
+Query-only readers
 use the canonical snapshot fold until publication; writer-context reads report
 `resource-preparation-not-caught-up` rather than doing that unbounded fallback.
 Envelope admission remains atomic, including its source rows and stale marker.

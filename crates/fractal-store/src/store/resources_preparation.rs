@@ -399,13 +399,14 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7195b921ea2f owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h2fc800fafc8e owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
         DELETE FROM local_resource_preparation_deferred;
         DELETE FROM local_resource_preparation_stale;
         DELETE FROM local_resource_preparation_rebuild;
+        DELETE FROM meta WHERE key>='preparation_restarts/' AND key<'preparation_restarts0';
         INSERT INTO local_resource_preparation_dirty(subject)
         SELECT DISTINCT subject FROM claims
         WHERE (claims.subject >= 'resource/' AND claims.subject < 'resource0')
@@ -624,6 +625,11 @@ pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::D
         // Each seek uses the queue's primary key; one hot subject cannot starve its peers.
         let subject: Option<String> = transaction.query_row(
             "SELECT COALESCE(
+                (SELECT substr(key,22) FROM meta
+                 WHERE key>='preparation_restarts/' AND key<'preparation_restarts0'
+                 AND CAST(value AS INTEGER)>=4
+                 AND EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=substr(key,22))
+                 ORDER BY key LIMIT 1),
                 (SELECT subject FROM local_resource_preparation_deferred
                  WHERE subject > COALESCE((SELECT value FROM meta WHERE key='preparation_drain_cursor'),'')
                  ORDER BY subject LIMIT 1),
@@ -636,6 +642,13 @@ pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::D
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [&subject],
         )?;
+        let capped_episode: usize = transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hf9a7b8521369 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='5' WHERE key=?1 AND value='4'",
+            [format!("preparation_restarts/{subject}")],
+        )?;
+        if capped_episode != 0 {
+            tracing::info!(subject, restart_cap = 4, "preparation drain prioritizing capped subject; envelopes touching it are deferred");
+        }
         if !step_deferred(transaction, &subject, deadline)? {
             return Ok(true);
         }
@@ -731,10 +744,28 @@ fn end_deferral(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h4de9c4537b6c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hccdb0d69eb62 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_stale WHERE subject=?1", [subject])?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h3159d84d27a3 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",
+        [format!("preparation_restarts/{subject}")],
+    )?;
     Ok(())
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    // Gate the committed cap before this flush mutates it: every claim already admitted
+    // in this atomic transaction must survive a reset that reaches the cap mid-flush.
+    let capped: Option<String> = transaction.query_row(
+        "SELECT claims.subject FROM local_resource_preparation_pending pending
+         CROSS JOIN claims ON claims.id=pending.claim_id
+         JOIN meta ON meta.key='preparation_restarts/' || claims.subject
+         WHERE CAST(meta.value AS INTEGER)>=4
+         AND EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=claims.subject)
+         LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()?;
+    if let Some(subject) = capped {
+        anyhow::bail!("resource-preparation-not-caught-up: {subject}");
+    }
     let dirty = transaction
         .prepare("SELECT subject FROM local_resource_preparation_dirty ORDER BY subject")?
         .query_map([], |row| row.get::<_, String>(0))?
@@ -813,6 +844,20 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
 
 /// Insert an immutable ordering key without rebuilding the subject's history.
 fn defer_insert(transaction: &Transaction<'_>, subject: &str, id: &str, key: &[u8]) -> Result<()> {
+    let counter = format!("preparation_restarts/{subject}");
+    let restarts: u32 = transaction.query_row(
+        "SELECT value FROM meta WHERE key=?1", [&counter], |row| row.get::<_, String>(0),
+    ).optional()?.map(|value| value.parse()).transpose()?.unwrap_or(0);
+    let invalidates_prefix: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_rebuild WHERE subject=?1 AND after_key>=?2)",
+        params![subject, key], |row| row.get(0),
+    )?;
+    if invalidates_prefix {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hcb2777ea484d owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![counter, (restarts + 1).to_string()],
+        )?;
+    }
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h9a465c53bd9c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_claims(claim_id,subject,sort_key) VALUES(?1,?2,?3)
          ON CONFLICT(claim_id) DO UPDATE SET subject=excluded.subject,sort_key=excluded.sort_key",

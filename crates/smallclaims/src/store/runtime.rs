@@ -147,6 +147,17 @@ pub trait Runtime: Send + Sync {
         None
     }
 
+    /// Hold an entire replicated batch before any admission mutation while runtime work catches
+    /// up. This is backpressure, not invalid input: the envelope remains pending and later
+    /// backlog passes retry it normally. Called under the writer with current stored state.
+    fn defer_replicated_batch(
+        &self,
+        _connection: &Connection,
+        _batch: &ReplicaBatch,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
     /// is kept (some kinds stay local observations), validates it, appends it through the graph
     /// and projects it. The bool says whether the claim is new rather than an idempotent repeat.
