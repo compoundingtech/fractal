@@ -87,6 +87,7 @@ mod binary_payloads;
 pub mod record_bytes;
 pub mod member_signatures;
 pub mod envelope_release;
+pub mod signed_claims;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -960,6 +961,9 @@ pub struct Store {
     /// When the daemon's WAL recycle restarts a WAL that keeps growing; only tests change it.
     pub wal_escalation: Mutex<wal_escalation::WalEscalation>,
     pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
+    /// What signed-claim exchanges found (`signed_claims`): released envelopes each older peer
+    /// lacks, and signed envelopes refused.
+    pub(crate) signed_claims: Mutex<signed_claims::Tally>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1392,6 +1396,7 @@ impl Store {
             trim_row_cost_micros: AtomicU64::new(0),
             trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
             wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
+            signed_claims: Mutex::new(signed_claims::Tally::default()),
             runtime,
         })
     }
@@ -2031,6 +2036,7 @@ impl CompactReplicationInventory {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: crate::replication::replication_capabilities(),
         }
     }
 
@@ -5012,6 +5018,27 @@ pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BY
 /// A page whose upper bound already fits is kept without measuring; otherwise each envelope is
 /// measured as serde writes it, counting bytes without keeping them.
 pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
+    // Signed envelopes take what room the envelopes leave; those that do not fit go in a later
+    // exchange.
+    let signed = std::mem::take(&mut exchange.signed_envelopes);
+    fit_envelopes(exchange, budget)?;
+    if signed.is_empty() {
+        return Ok(());
+    }
+    let mut size = serialized_len(&*exchange)?;
+    for (kept, envelope) in signed.into_iter().enumerate() {
+        // The first also opens the field: its name, quotes, colon, comma and brackets.
+        let added = serialized_len(&envelope)?.saturating_add(if kept > 0 { 1 } else { 24 });
+        match size.checked_add(added) {
+            Some(next) if next <= budget => size = next,
+            _ => break,
+        }
+        exchange.signed_envelopes.push(envelope);
+    }
+    Ok(())
+}
+
+fn fit_envelopes(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
     let envelopes = std::mem::take(&mut exchange.envelopes);
     // The body without envelopes includes their empty brackets; each kept envelope adds its own
     // serialized bytes and, after the first, one separating comma.
@@ -5661,6 +5688,7 @@ impl TestReplica {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -5690,6 +5718,7 @@ impl TestReplica {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         };
         (missing, inventory)
     }
@@ -5760,6 +5789,7 @@ pub fn compact_replication_exchange_lists_only_ranges_that_differ() {
         accepts: None,
         checkpoint: None,
         claim_range_query: None,
+        capabilities: Vec::new(),
     })
     .unwrap()
     .len();
@@ -5865,6 +5895,7 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
         accepts: None,
         checkpoint: None,
         claim_range_query: None,
+        capabilities: Vec::new(),
     };
     let (missing, _) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert_eq!(missing, test_envelope_ids("origin", 9..=10, "a"));
@@ -7772,6 +7803,7 @@ impl Store {
                 // peer then adopts nothing).
                 checkpoint: None,
                 claim_range_query: None,
+                capabilities: crate::replication::replication_capabilities(),
             },
             envelopes: Vec::new(),
             signature_requests,
@@ -7779,6 +7811,8 @@ impl Store {
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary()?),
             claim_member_signatures: Vec::new(),
+            signed_envelopes: Vec::new(),
+            unservable_released: 0,
         })
     }
 
@@ -7887,6 +7921,7 @@ impl Store {
                     None => self.replica_envelopes(missing)?,
                 }
             };
+            let (signed_envelopes, unservable_released) = self.signed_envelopes_answering(snapshot, remote)?;
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
@@ -7906,6 +7941,7 @@ impl Store {
                 // peer then adopts nothing).
                 checkpoint: None,
                     claim_range_query: None,
+                    capabilities: crate::replication::replication_capabilities(),
                 },
                 envelopes,
                 signature_requests: Vec::new(),
@@ -7913,6 +7949,8 @@ impl Store {
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
                 claim_member_signatures: Vec::new(),
+                signed_envelopes,
+                unservable_released,
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -7944,6 +7982,7 @@ impl Store {
                 .take(replication_page_limit(remote))
                 .collect::<Vec<_>>()
         };
+        let (signed_envelopes, unservable_released) = self.signed_envelopes_answering(snapshot, remote)?;
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
@@ -7956,6 +7995,7 @@ impl Store {
             projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
+                capabilities: crate::replication::replication_capabilities(),
                 // Members agree on no checkpoint, so none is advertised (an older
                 // peer then adopts nothing).
                 checkpoint: None,
@@ -7982,6 +8022,8 @@ impl Store {
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
+            signed_envelopes,
+            unservable_released,
         })
     }
 
@@ -8457,6 +8499,19 @@ impl Store {
         if let Err(error) = self.receive_claim_member_signatures(&input.claim_member_signatures) {
             eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
         }
+        // The claims of envelopes the peer released (`signed_claims`). A failure leaves them for
+        // a later exchange, which sends them again.
+        let (signed_envelopes, refused_signed_envelopes) = self
+            .receive_signed_envelopes(fleet_id, input.shard_id.as_deref(), &input.signed_envelopes)
+            .unwrap_or_else(|error| {
+                eprintln!("st3: signed envelopes from {relay} not admitted: {error:#}");
+                (0, 0)
+            });
+        // A peer that cannot take signed claims never gets the envelopes this member released.
+        if !input.inventory.can(crate::replication::SIGNED_CLAIMS) {
+            let lacking = self.released_missing(&snapshot, &input.inventory).map_err(internal)?;
+            self.note_unservable_released(relay, lacking.len() as u64).map_err(internal)?;
+        }
         Ok(ReplicationReceipt {
             received,
             duplicate,
@@ -8468,8 +8523,11 @@ impl Store {
                 accepts: None,
                 checkpoint: None,
                 claim_range_query: None,
+                capabilities: Vec::new(),
             },
             claim_ranges,
+            signed_envelopes,
+            refused_signed_envelopes,
         })
     }
 
@@ -10719,7 +10777,10 @@ impl Store {
 
             peers.push(status);
         }
+        let (unservable_released, refused_signed_envelopes) = self.signed_claim_tally()?;
         Ok(ReplicationStatus {
+            unservable_released,
+            refused_signed_envelopes,
             configured,
             fleet_id: fleet_id.map(str::to_owned),
             health: self.replication_health(configured)?,

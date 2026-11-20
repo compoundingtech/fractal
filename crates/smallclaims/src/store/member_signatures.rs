@@ -351,7 +351,7 @@ fn claim_writer_tx(connection: &Connection, id: &str) -> Result<Option<(String, 
         .optional()?)
 }
 
-fn insert_signature_tx(connection: &Connection, signature: &ClaimMemberSignature) -> Result<usize> {
+pub(crate) fn insert_signature_tx(connection: &Connection, signature: &ClaimMemberSignature) -> Result<usize> {
     Ok(connection.execute(
         /* sqlite-large-value: allow-for-now lv-hcf3fa63cc69a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signatures(claim_id, member_key, signature) VALUES (?1, ?2, ?3)",
         params![signature.claim_id, signature.member_key, signature.signature],

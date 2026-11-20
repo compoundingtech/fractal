@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS released_envelopes (
     batch_id TEXT,
     original_rowid INTEGER NOT NULL,
     released_at_unix_ms INTEGER NOT NULL,
+    member_key TEXT NOT NULL,
+    envelope_signature TEXT NOT NULL,
     PRIMARY KEY(writer, sequence, envelope_hash)
 );
 CREATE INDEX IF NOT EXISTS released_envelopes_batch ON released_envelopes(batch_id);
@@ -108,6 +110,7 @@ pub struct EnvelopeRelease {
 /// What judging a claim's writer signature needs, read before the page takes the writer.
 struct Authority {
     fleet_id: String,
+    shard: Option<String>,
     membership: crate::fleet::Membership,
 }
 
@@ -128,11 +131,10 @@ impl Store {
         let Some(fleet_id) = self.signing_fleet_id(&self.readers.get())? else {
             return waiting("this store has no fleet");
         };
-        let authority = Authority { fleet_id, membership: self.fleet_membership_sealed()? };
-        let origin = self.origin.clone();
+        let authority = Authority { fleet_id, shard: self.bound_shard()?, membership: self.fleet_membership_sealed()? };
         let (report, released, changes) = self
             .connection
-            .batched(move |tx| release_page(tx, &origin, &authority, min_age_ms))
+            .batched(move |tx| release_page(tx, &authority, min_age_ms))
             .map_err(anyhow::Error::msg)??;
         if !released.is_empty() {
             self.mark_payloads_released(&released, changes)?;
@@ -180,7 +182,7 @@ fn cursor(connection: &Connection) -> Result<i64> {
 
 type Released = (EnvelopeRelease, Vec<ReplicaEnvelopeId>, (i64, i64));
 
-fn release_page(tx: &Transaction<'_>, origin: &str, authority: &Authority, min_age_ms: u64) -> Result<Released> {
+fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) -> Result<Released> {
     let started = Instant::now();
     let mut after = cursor(tx)?;
     let changes_before = saved_inventory::changes(tx)?;
@@ -210,8 +212,8 @@ fn release_page(tx: &Transaction<'_>, origin: &str, authority: &Authority, min_a
         report.scanned += 1;
         after = rowid;
         if let (true, Some(batch)) = (admitted, batch)
-            && releasable(tx, origin, authority, &envelope, &batch)?
-            && release_tx(tx, rowid, &envelope)?
+            && let Some(signature) = releasable(tx, authority, &envelope, &batch)?
+            && release_tx(tx, rowid, &envelope, &signature)?
         {
             released.push(envelope);
             report.released += 1;
@@ -231,23 +233,42 @@ fn release_page(tx: &Transaction<'_>, origin: &str, authority: &Authority, min_a
     Ok((report, released, (changes_before, saved_inventory::changes(tx)?)))
 }
 
-/// Whether `envelope`, of batch `batch`, can lose its payload: its rows allow it
-/// ([`ELIGIBLE_SQL`]), no claim of its batch is of a kind whose readers need the envelope
-/// ([`kept_kind`]), and every one carries its writer's signature by a key membership admits for
-/// that writer and sequence, and has the id its stored row hashes to.
-fn releasable(tx: &Connection, origin: &str, authority: &Authority, envelope: &ReplicaEnvelopeId, batch: &str) -> Result<bool> {
+/// The writer's envelope signature `envelope`, of batch `batch`, keeps when it can lose its
+/// payload: its rows allow it ([`ELIGIBLE_SQL`]), it has its writer's envelope signature by a key
+/// membership admits for that writer and sequence (which binds the identity a signed envelope
+/// carries, `signed_claims`), no claim of its batch is of a kind whose readers need the envelope
+/// ([`kept_kind`]), and every claim carries its writer's signature by such a key and has the id
+/// its stored row hashes to. `None` when it stays.
+fn releasable(tx: &Connection, authority: &Authority, envelope: &ReplicaEnvelopeId, batch: &str) -> Result<Option<(String, String)>> {
     if retired::envelope_refused(tx, &envelope.writer, envelope.sequence, &envelope.hash)? {
-        return Ok(false);
+        return Ok(None);
     }
     let eligible: bool = tx
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c3e7cfc9c6d owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ ELIGIBLE_SQL)?
         .query_row(/* sqlite-large-value: allow-for-now lv-haf548599f1ef owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| row.get(0))?;
     if !eligible {
-        return Ok(false);
+        return Ok(None);
     }
     let keys = match authority.membership.window(&envelope.writer, envelope.sequence) {
         crate::fleet::Window::Keyed(keys) => keys,
-        crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(false),
+        crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(None),
+    };
+    let message = crate::fleet::envelope_signature_message_in(
+        authority.shard.as_deref(), &authority.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
+    );
+    let Some(envelope_signature) = tx
+        .prepare_cached(
+            "SELECT member_key, signature FROM replica_envelope_signatures
+             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+        )?
+        .query_map(params![envelope.writer, envelope.sequence, envelope.hash], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature))
+    else {
+        return Ok(None);
     };
     let claims = tx
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6d430f1b6cf owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ &format!(
@@ -260,8 +281,8 @@ fn releasable(tx: &Connection, origin: &str, authority: &Authority, envelope: &R
         "SELECT member_key, signature FROM claim_member_signatures WHERE claim_id=?1",
     )?;
     for claim in &claims {
-        if kept_kind(origin, claim) || claim.origin != envelope.writer || !crate::hash::claim_id_is_content_hash(claim)? {
-            return Ok(false);
+        if kept_kind(claim) || claim.origin != envelope.writer || !crate::hash::claim_id_is_content_hash(claim)? {
+            return Ok(None);
         }
         let message = crate::fleet::keys::claim_signature_message(
             &authority.fleet_id, &envelope.writer, envelope.sequence, &claim.id,
@@ -272,44 +293,51 @@ fn releasable(tx: &Connection, origin: &str, authority: &Authority, envelope: &R
             .iter()
             .any(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature));
         if !signed {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    Ok(true)
+    Ok(Some(envelope_signature))
 }
 
 /// A claim whose envelope this member keeps whatever its age, because a reader of it reads the
 /// envelope itself: the membership fold and every fleet barrier read `fleet.*` claims by their
 /// envelope signatures, principals and pairing their own provenance, the declared-admission
 /// barrier a member's `daemon.started` advertisement by its envelope signature, and idle wakes
-/// another writer's `message.sent` by the time its envelope arrived here.
-fn kept_kind(origin: &str, claim: &ClaimRecord) -> bool {
+/// another writer's `message.sent` by the time its envelope arrived: every member but its writer
+/// reads that, so no member releases one, nor takes one as a signed claim.
+pub(crate) fn kept_kind(claim: &ClaimRecord) -> bool {
     ["fleet.", "principal.", "pairing.", "custom.client.pairing"]
         .iter()
         .any(|prefix| claim.kind.starts_with(prefix))
         || claim.kind == "daemon.started"
-        || (claim.kind == "message.sent" && claim.origin != origin)
+        || claim.kind == "message.sent"
 }
 
-/// Keep `envelope`'s identity and delete its payload row, its envelope signatures, any hold and
-/// its valid records, in the page's transaction. False when another identity already holds its
+/// Keep `envelope`'s identity with the writer's envelope `signature`, and delete its payload row,
+/// its envelope signatures, any hold and its claims' valid records, in the page's transaction.
+/// Its blobs' records stay: `replica_record_rows` makes none for a blob. False when another identity already holds its
 /// rowid in `released_envelopes`, as after a trim deleted the newest rows and an envelope took one
 /// of their rowids again; it then stays.
-fn release_tx(tx: &Connection, rowid: i64, envelope: &ReplicaEnvelopeId) -> Result<bool> {
+fn release_tx(tx: &Connection, rowid: i64, envelope: &ReplicaEnvelopeId, signature: &(String, String)) -> Result<bool> {
     let kept = tx
         .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-hf6c7e0f4d53c owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
-                 accepted_at_unix_ms, batch_id, original_rowid, released_at_unix_ms)
-             SELECT writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, batch_id, rowid, ?2
+                 accepted_at_unix_ms, batch_id, original_rowid, released_at_unix_ms, member_key,
+                 envelope_signature)
+             SELECT writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, batch_id, rowid, ?2, ?3, ?4
              FROM replica_envelopes WHERE rowid=?1",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h5ae5cf1b36cc owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![rowid, i64::try_from(now_ms())?])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h5ae5cf1b36cc owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![rowid, i64::try_from(now_ms())?, signature.0, signature.1])?;
     if kept == 0 {
         return Ok(false);
     }
-    for table in ["replica_envelope_signatures", "replica_envelope_holds", "replica_records"] {
+    for (table, which) in [
+        ("replica_envelope_signatures", ""),
+        ("replica_envelope_holds", ""),
+        ("replica_records", " AND claim_id IS NOT NULL"),
+    ] {
         tx.prepare_cached(&format!(
-            /* sqlite-large-value: allow-for-now lv-h5e86b51b796f owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+            /* sqlite-large-value: allow-for-now lv-h5e86b51b796f owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3{which}"
         ))?
         .execute(/* sqlite-large-value: allow-for-now lv-hb7a4188d5c54 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash])?;
     }

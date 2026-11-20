@@ -32,6 +32,69 @@ pub struct ReplicationInventory {
     /// exchange's `claim_ranges`. Older peers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_range_query: Option<ClaimRangeQuery>,
+    /// What the sending node can take beyond envelopes, such as [`SIGNED_CLAIMS`]. Older peers
+    /// leave it out and ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+/// A node that lists this capability takes the claims of an envelope its peer released as
+/// [`SignedEnvelope`]s (`store::signed_claims`).
+pub const SIGNED_CLAIMS: &str = "signed-claims-v1";
+
+/// What this build lists in its inventories' `capabilities`.
+pub fn replication_capabilities() -> Vec<String> {
+    vec![SIGNED_CLAIMS.to_owned()]
+}
+
+impl ReplicationInventory {
+    /// Whether the node that sent this inventory lists `capability`.
+    pub fn can(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|listed| listed == capability)
+    }
+}
+
+/// The claims of an envelope its sender released (`store::envelope_release`), each signed by its
+/// writer, in place of the payload the sender no longer holds. The envelope's identity is bound
+/// by its writer's envelope signature; the batch header gives the batch id each claim id hashes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SignedEnvelope {
+    pub writer: String,
+    pub sequence: u64,
+    pub hash: String,
+    pub previous_hash: Option<String>,
+    pub accepted_at_unix_ms: u128,
+    /// The writer's member key and its signature over this envelope's identity.
+    pub member_key: String,
+    pub signature: String,
+    pub batch: SignedBatchHeader,
+    pub claims: Vec<SignedClaim>,
+    /// The bytes of each blob a claim names, by hash.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blobs: BTreeMap<String, crate::claim::EnvelopePayload>,
+}
+
+/// A batch's header: what its id hashes (`batch/{origin}/{sequence}/{hash}`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SignedBatchHeader {
+    pub id: String,
+    pub origin: String,
+    pub replica_sequence: u64,
+    pub previous_hash: Option<String>,
+    pub hash: String,
+    pub accepted_at_unix_ms: u128,
+}
+
+/// One claim of a [`SignedEnvelope`]: its content, its position in the batch, its writer's
+/// signature (`store::member_signatures`), and the principal's signature it carried, if any.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SignedClaim {
+    pub claim: crate::claim::ClaimRecord,
+    pub position: u64,
+    pub member_key: String,
+    pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_signature: Option<crate::principal::ClaimSignature>,
 }
 
 /// A checkpoint as an inventory advertises it.
@@ -89,6 +152,14 @@ pub struct ReplicationExchange {
     /// so a claim authenticates without its envelope. Older peers neither send nor read them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claim_member_signatures: Vec<crate::store::member_signatures::ClaimMemberSignature>,
+    /// The claims of envelopes the sender released and the receiver lacks, sent only to a node
+    /// that lists [`SIGNED_CLAIMS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_envelopes: Vec<SignedEnvelope>,
+    /// How many released envelopes the receiver lacks that this exchange could not carry,
+    /// because the receiver does not list [`SIGNED_CLAIMS`]. Local to the sender; never sent.
+    #[serde(skip)]
+    pub unservable_released: u64,
 }
 
 /// The claim-range protocol version this build speaks.
@@ -209,6 +280,11 @@ pub struct ReplicationReceipt {
     /// that walks them. Local to this node; never sent to a peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_ranges: Option<ClaimRangeComparison>,
+    /// Signed envelopes admitted, and refused (a claim or signature that does not verify).
+    #[serde(default)]
+    pub signed_envelopes: usize,
+    #[serde(default)]
+    pub refused_signed_envelopes: usize,
 }
 
 /// A node's first sync after it joins: it ends once the node holds the same envelopes as a
@@ -361,6 +437,14 @@ pub struct ReplicationStatus {
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<crate::fleet::RemovalNotice>,
+    /// For each peer that does not take signed claims, how many envelopes this node released
+    /// that the peer lacks and cannot get here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unservable_released: BTreeMap<String, u64>,
+    /// Signed envelopes refused since this process started: a claim, a signature or a batch
+    /// that did not verify.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub refused_signed_envelopes: u64,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.

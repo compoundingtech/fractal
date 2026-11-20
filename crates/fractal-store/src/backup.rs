@@ -17,7 +17,7 @@ use crate::message_body::BodyAttachment as _;
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, ShardDigest, TableDigest, VERSION,
     VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS, VERSION_WITH_SHARDS,
-    VERSION_WITH_QUARANTINE,
+    VERSION_WITH_QUARANTINE, VERSION_WITH_SIGNED_CLAIMS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -161,9 +161,9 @@ fn check_header(header: &Header) -> Result<()> {
     // Builds before version 5 say only "unsupported claim backup format/version"; this one also
     // names what it found and what it restores.
     ensure!(
-        header.format == FORMAT && (VERSION..=VERSION_WITH_QUARANTINE).contains(&header.version),
+        header.format == FORMAT && (VERSION..=VERSION_WITH_SIGNED_CLAIMS).contains(&header.version),
         "unsupported claim backup format/version: {:?} version {}; this build restores {FORMAT:?} \
-         versions {VERSION} to {VERSION_WITH_QUARANTINE}",
+         versions {VERSION} to {VERSION_WITH_SIGNED_CLAIMS}",
         header.format,
         header.version
     );
@@ -234,6 +234,10 @@ pub fn verify_file(path: &Path) -> Result<Header> {
             Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
             Record::Envelope(_) => envelopes += 1,
             Record::Checkpoint(_) | Record::Signatures(_) => {}
+            Record::SignedEnvelopes(_) => ensure!(
+                header.version >= VERSION_WITH_SIGNED_CLAIMS,
+                "signed envelopes in an archive that does not declare them"
+            ),
             Record::MessageBody(body) => {
                 ensure!(
                     header.version >= VERSION_WITH_BODIES,
@@ -348,6 +352,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     let mut shard_page = Vec::new();
     let mut checkpoint = None;
     let mut restored_bodies = Vec::new();
+    let mut signed_admitting = false;
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup ended during restore")?;
         match record {
@@ -368,6 +373,17 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
             }
             Record::Signatures(signatures) => {
                 store.receive_backup_signatures(&header, &signatures)?
+            }
+            Record::SignedEnvelopes(signed) => {
+                // Every envelope is in by now; admit them first, so their membership claims
+                // admit the signed claims' writers.
+                if !signed_admitting {
+                    store.receive_backup_page(&header, &page)?;
+                    page.clear();
+                    store.admit_restored_backlog()?;
+                    signed_admitting = true;
+                }
+                store.receive_backup_signed_envelopes(&header, &signed)?;
             }
             Record::Ledger(page) => store.receive_backup_ledger(&page)?,
             // `verify_file` admitted shard records only for a shard the header lists, which is

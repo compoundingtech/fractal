@@ -181,6 +181,9 @@ impl Store {
         if !quarantined.is_empty() || header.ledgers.contains_key("replica_restore_quarantine") {
             header.version = super::backup_format::VERSION_WITH_QUARANTINE;
         }
+        if self.released_envelopes()? > 0 {
+            header.version = super::backup_format::VERSION_WITH_SIGNED_CLAIMS;
+        }
         let mut hash = Sha256::new();
         write_record(output, &mut hash, &Record::Header(header.clone()))?;
         let mut after = (String::new(), 0_u64, String::new());
@@ -215,6 +218,32 @@ impl Store {
             if !signatures.is_empty() {
                 write_record(output, &mut hash, &Record::Signatures(signatures))?;
             }
+        }
+        // The envelopes this member released have no payload to archive: their claims go as
+        // signed envelopes, after every envelope, so a restore admits them by the membership the
+        // restored log folds.
+        let mut after = (String::new(), 0_u64, String::new());
+        loop {
+            let identities = self
+                .readers
+                .get()
+                .prepare_cached(
+                    "SELECT writer,sequence,envelope_hash FROM released_envelopes
+                     WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
+                     ORDER BY writer,sequence,envelope_hash LIMIT ?4",
+                )?
+                .query_map(params![after.0, after.1, after.2, smallclaims::store::signed_claims::SIGNED_ENVELOPE_LIMIT], |r| {
+                    Ok(ReplicaEnvelopeId { writer: r.get(0)?, sequence: r.get(1)?, hash: r.get(2)? })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let Some(last) = identities.last() else { break };
+            after = (last.writer.clone(), last.sequence, last.hash.clone());
+            let signed = self.signed_envelopes(&identities)?;
+            anyhow::ensure!(
+                signed.len() == identities.len(),
+                "a released envelope's claims cannot all be archived as signed claims"
+            );
+            write_record(output, &mut hash, &Record::SignedEnvelopes(signed))?;
         }
         // A trim records its complete tombstones before deleting any rows.
         // A snapshot between deletion chunks must include that manifest too.
@@ -418,6 +447,19 @@ impl Store {
 
     /// Add one archived ledger page by union. Admission reads none of these ledgers, and sequence
     /// allocation reads them only for its own writer, which a restore names afresh.
+    /// Admit one archived page of signed envelopes, after every archived envelope: the
+    /// membership the restored log folds admits their writers' keys. Each must verify.
+    pub fn receive_backup_signed_envelopes(
+        &self,
+        header: &Header,
+        signed: &[smallclaims::replication::SignedEnvelope],
+    ) -> Result<()> {
+        let fleet = header.fleet_id.as_deref().unwrap_or("");
+        let (_, refused) = self.receive_signed_envelopes(fleet, None, signed)?;
+        anyhow::ensure!(refused == 0, "{refused} archived signed envelopes do not verify");
+        Ok(())
+    }
+
     pub fn receive_backup_ledger(&self, page: &super::backup_ledgers::LedgerPage) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
@@ -640,8 +682,12 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
                ORDER BY writer,sequence,envelope_hash LIMIT ?4),
              dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
+               ORDER BY writer,sequence,envelope_hash LIMIT ?4),
+             released AS (SELECT writer,sequence,envelope_hash FROM released_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4)
-             SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
+             SELECT * FROM live UNION SELECT * FROM dropped UNION SELECT * FROM released
+             ORDER BY writer,sequence,envelope_hash LIMIT ?4"
         )?.query_map(params![after.0,after.1,after.2,PAGE,include_quarantined], |r| Ok(ReplicaEnvelopeId {
             writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
         }))?.collect::<rusqlite::Result<Vec<_>>>()?;

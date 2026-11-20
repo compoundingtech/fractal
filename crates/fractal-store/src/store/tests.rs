@@ -5383,10 +5383,13 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes: vec![candidate],
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
 
     let target = Store::open_memory("target").unwrap();
@@ -5464,10 +5467,13 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
             accepts: None,
             checkpoint: None,
             claim_range_query: None,
+            capabilities: Vec::new(),
         },
         envelopes,
         signature_requests: Vec::new(),
         signatures: Vec::new(),
+        signed_envelopes: Vec::new(),
+        unservable_released: Default::default(),
     };
     let left = Store::open_memory("left").unwrap();
     let right = Store::open_memory("right").unwrap();
@@ -6265,6 +6271,8 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                     envelopes: vec![envelope],
                     signature_requests: Vec::new(),
                     signatures: Vec::new(),
+                    signed_envelopes: Vec::new(),
+                    unservable_released: Default::default(),
                 },
             )
             .unwrap();
@@ -13656,7 +13664,7 @@ fn releasing_an_envelope_fires_no_trigger_that_rebuilds_or_moves_the_inventory()
         // claim without a stored position, which a release requires. None changes a projection
         // or a digest.
         let exempt = name.contains("checkpoint_capture")
-            || name == "replica_envelopes_saved_inventory_DELETE"
+            || name.contains("_saved_inventory_")
             || name == "claim_positions_record_delete_v1";
         if !spared && !fleet && !exempt {
             blind.push(name);
