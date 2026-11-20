@@ -458,7 +458,7 @@ fn validate_digest_source(connection: &Connection, subject: &str, actor: &str, f
             && source.get("digest_count").and_then(Value::as_str).and_then(|count| count.parse::<u64>().ok()).is_some(),
             "notices unavailable: invalid digest document reference or count");
         let bytes: Vec<u8> = connection.query_row(
-            "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2 AND length(b.bytes)<65536",
+            concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2 AND b.size<65536"),
             params![name, hash], |row| row.get(0),
         )?;
         anyhow::ensure!(bytes.len() < 64 * 1024 && hex::encode(Sha256::digest(&bytes)) == hash,

@@ -333,6 +333,8 @@ pub mod mail_retirement;
 #[cfg(test)]
 mod mail_retirement_tests;
 #[cfg(test)]
+mod blob_file_tests;
+#[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
@@ -9795,7 +9797,7 @@ fn validate_documents(
         let (name, hash) = split_document_ref(reference)?;
         let bytes: Option<Vec<u8>> = transaction
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -19861,6 +19863,9 @@ pub fn project_mission_run_created(
             format!("claim `{}` has an invalid mission run subject", claim.id),
         )
     })?;
+    if fields.get("native_turn").is_some() {
+        return adhoc_work::project_native_turn(transaction, claim);
+    }
     if fields.get("ad_hoc_title").is_some() {
         return adhoc_work::project_start(transaction, claim);
     }
@@ -22184,6 +22189,16 @@ pub fn enrich_step_definition_cached(
     view: &mut StepRunView,
     definitions: &mut PinnedDefinitions,
 ) -> rusqlite::Result<()> {
+    if view.run.starts_with("mission-run/native-turn/") {
+        let fresh: Option<bool> = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-hcf0f7f13c0e5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
+                FROM claims WHERE subject=?1 AND kind='mission-run.created'
+                ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+            [&view.run], |row| row.get(0),
+        ).optional()?;
+        view.fresh_context = fresh.unwrap_or(false);
+        return Ok(());
+    }
     if let Some(mission) = definitions.of(connection, &view.generation)? {
         apply_step_definition(view, mission);
     }
@@ -23727,26 +23742,26 @@ pub fn cancel_mission_run_tx(
             now,
         )?);
     }
-    let revision: String = transaction
-        .query_row(
-            "SELECT revision FROM run_generations WHERE id=?1",
-            [&generation_id],
-            |row| row.get(0),
-        )
-        .map_err(internal)?;
-    let mission: MissionSpec = transaction
-        .query_row(
+    // A native finite episode has no graph revision or finally section. Its authoritative
+    // creation metadata owns one leaf; use the same cancellation/cleanup transitions below.
+    let native_turn = run_id.starts_with("native-turn/") && transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='mission-run.created'
+            AND json_type(body,'$.fields.native_turn')='object')",
+        [format!("mission-run/{run_id}")], |row| row.get::<_, bool>(0),
+    ).map_err(internal)?;
+    let final_paths = if native_turn {
+        BTreeSet::new()
+    } else {
+        let revision: String = transaction.query_row(
+            "SELECT revision FROM run_generations WHERE id=?1", [&generation_id], |row| row.get(0),
+        ).map_err(internal)?;
+        let mission: MissionSpec = transaction.query_row(
             "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-            params![mission_id, revision],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(internal)
-        .and_then(|body| serde_json::from_str(&body).map_err(internal))?;
-    let final_paths = flatten_mission_step_specs(&mission)
-        .into_iter()
-        .filter(|step| step.finally)
-        .map(|step| step.path.clone())
-        .collect::<BTreeSet<_>>();
+            params![mission_id, revision], |row| row.get::<_, String>(0),
+        ).map_err(internal).and_then(|body| serde_json::from_str(&body).map_err(internal))?;
+        flatten_mission_step_specs(&mission).into_iter().filter(|step| step.finally)
+            .map(|step| step.path.clone()).collect::<BTreeSet<_>>()
+    };
     let mut statement = transaction
         .prepare(
             "SELECT subject, step_path, lease_owner FROM step_runs
@@ -25613,7 +25628,6 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
