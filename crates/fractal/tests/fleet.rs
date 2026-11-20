@@ -9738,11 +9738,12 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     n1.binary = old.clone();
     o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
     n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
-    // Only a member that trims locally retires mail; the key exists in both builds.
+    // Only a member that trims locally retires mail, and only once it opts in after upgrading:
+    // the release refuses `mail`, an unknown key.
     let config = n1.root.join("config/st3/config.toml");
     let mut text = fs::read_to_string(&config).unwrap();
     text.push_str("\n[trim]\nlocal = true\n");
-    fs::write(&config, text).unwrap();
+    fs::write(&config, &text).unwrap();
     for node in [&mut o, &mut n1] {
         node.start().await;
     }
@@ -9761,8 +9762,9 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
         }
     }
 
-    // Upgrade the member in place; a week later its closed agent thread retires.
+    // Upgrade the member in place and opt it in; a week later its closed agent thread retires.
     n1.stop();
+    fs::write(&config, format!("{text}mail = true\n")).unwrap();
     n1.binary = PathBuf::from(st3());
     n1.start().await;
     let week_later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
@@ -9800,8 +9802,10 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     }
     assert!(thread_kinds(&n1, &agent).await.is_empty(), "a retired claim came back");
 
-    // Roll the member back in place: the release reads the trimmed store and still refuses them.
+    // Roll the member back in place, without the key the release doesn't know: it reads the
+    // trimmed store and still refuses them.
     n1.stop();
+    fs::write(&config, &text).unwrap();
     n1.binary = old;
     n1.start().await;
     o.note("o-after-rollback").await;

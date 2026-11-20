@@ -365,11 +365,12 @@ impl CheckpointConfig {
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
 /// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped. A member that trims locally also
-/// retires closed agent and daemon graph mail a week after it closes, at its own paced rate
-/// (`daily_claims` does not apply); `mail = false` keeps it. On by default for such members by
-/// Factory's decision of 2026-11-20 (every current member trims locally), replacing its
-/// 2026-10-30 "keep all messages forever" for non-person mail; person threads are always kept.
+/// that drops more goes on the next day where it stopped. With `mail = true`, a member that
+/// trims locally also retires closed agent and daemon graph mail a week after it closes, at its
+/// own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default for such members (Factory's
+/// decision of 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person
+/// mail where it is on).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -387,10 +388,10 @@ impl TrimConfig {
         self == &Self::default()
     }
 
-    /// Whether this member retires closed graph mail: only one that trims locally, unless
-    /// `mail = false`.
+    /// Whether this member retires closed graph mail: only one that trims locally and sets
+    /// `mail = true`.
     pub fn retires_mail(&self) -> bool {
-        self.local && self.mail != Some(false)
+        self.local && self.mail == Some(true)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -2447,7 +2448,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
-        assert!(config.trim.retires_mail(), "a member that trims locally retires closed mail");
+        assert!(!config.trim.retires_mail(), "retiring closed mail is off unless set");
+        let retiring: Config = toml::from_str("[trim]\nlocal = true\nmail = true\n").unwrap();
+        assert!(retiring.trim.retires_mail());
         let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
         assert!(!kept.trim.retires_mail());
         assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");

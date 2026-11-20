@@ -13,7 +13,7 @@
 //! there; today the claim range comparison only shows the difference).
 //!
 //! Only a member whose retired ledger is the authority (`[trim] local`) retires, and only while
-//! `[trim] mail` is on (the default there). It deletes through the trim's own path, one claim at
+//! `[trim] mail = true`. It deletes through the trim's own path, one claim at
 //! a time inside a writer hold bounded by a time budget, and never touches envelopes,
 //! checkpoints or seals. Stream mail lives in the messages shard and is not touched here.
 use super::*;

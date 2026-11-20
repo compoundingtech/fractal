@@ -23,8 +23,8 @@ and the checkpoint waits for it, so no member drops a claim its peers keep. See
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.
 
-Graph mail is the exception to `durable` on a member that trims locally (`[trim] local`, and not
-`[trim] mail = false`). There, a closed agent or daemon thread retires a week after it closes: all
+Graph mail is the exception to `durable` on a member that trims locally and opts in (`[trim] local`
+and `[trim] mail = true`). There, a closed agent or daemon thread retires a week after it closes: all
 its `message.*` claims are deleted and their IDs join the retired set
 (`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
 and any thread another claim cites are kept forever. The rule reads only the claims, so every such
@@ -33,7 +33,7 @@ thread whose closed claim arrived before its sent claim waits on a short list an
 once the sent claim is there. A citation that reaches one member before it judges a thread and
 another only after it retired it leaves the two apart: the first keeps its copy until set exchange
 applies a peer's retired set to it (the retired set wins there; today the claim range comparison
-only shows the difference). On by default for such members (Factory, 2026-11-20); retired mail
+only shows the difference). Off unless `[trim] mail = true`, until the owner decides whether it becomes the default for such members; retired mail
 does not come back on a rollback. Each
 writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
 Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint inside the commit,
