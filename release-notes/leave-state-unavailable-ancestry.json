@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow Fabric adapters to read leave-state when process ancestry is unavailable, restoring client grant updates.",
+  "replay": {"status": "none", "detail": "No replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No persisted schema or data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated upgrade required."},
+  "compatibility": {"status": "none", "detail": "Exact leave-state GET and HEAD requests remain available without process ancestry; person headers, actor-bearing mutations and identified agent/run routes retain their existing restrictions."},
+  "downtime": {"status": "none", "detail": "No additional startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator action or configuration changes required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new rollback restrictions."}
+}
