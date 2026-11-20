@@ -242,16 +242,26 @@ async fn run_replication_admission_observed(
                     || was_deferred
                     || current.replication_projection_needs_recovery()?;
                 let projected = if projection_attempted {
-                    current.project_replication_backlog_unless_catching_up()?.unwrap_or(false)
+                    current.project_replication_backlog_unless_catching_up()?
                 } else {
-                    true
+                    Some(true)
                 };
-                Ok::<_, anyhow::Error>(projected && (admission.changed || repairs != 0 || was_deferred))
+                let retry_after = if projected.is_none() {
+                    Some(current.replication_projection_throttle_remaining().unwrap_or_default())
+                } else {
+                    None
+                };
+                Ok::<_, anyhow::Error>((
+                    projected == Some(true) && (admission.changed || repairs != 0 || was_deferred),
+                    retry_after,
+                ))
             })
         }).await;
-        match result {
-            Ok(Ok(true)) => on_changed(),
-            Ok(Ok(false)) => {}
+        let retry_after = match result {
+            Ok(Ok((projected, retry_after))) => {
+                if projected { on_changed(); }
+                retry_after
+            }
             Ok(Err(error)) => {
                 tracing::error!(error = %error, "replication admission maintenance stopped");
                 return;
@@ -260,9 +270,16 @@ async fn run_replication_admission_observed(
                 tracing::error!(error = %error, "replication admission maintenance task failed");
                 return;
             }
-        }
+        };
         on_turn(false);
-        if changed.changed().await.is_err() { break; }
+        if let Some(delay) = retry_after {
+            // Quiet peers need a continuation too. Release the Store and writer before
+            // waiting; a new publication can still advance this deadline.
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                result = changed.changed() => { if result.is_err() { break; } },
+            }
+        } else if changed.changed().await.is_err() { break; }
     }
     drop(observer);
 }
@@ -437,6 +454,60 @@ mod tests {
     #[tokio::test]
     async fn admission_worker_processes_persisted_publication_before_observer_registration() {
         quiet_admission_after_publication(true).await;
+    }
+
+    #[tokio::test]
+    async fn admission_worker_projects_after_catch_up_throttle_expires_without_traffic() {
+        let (_root, store, claim_id) = held_replication_fixture();
+        publish_capped_preparation(&store);
+        let now = smallclaims::store::now_ms();
+        {
+            let mut peers = store.replication_sync.lock().unwrap();
+            let measured = peers.get_mut("quiet-source").unwrap().measured.as_mut().unwrap();
+            measured.peer_only_envelopes = u64::MAX;
+            measured.measured_at_unix_ms = now;
+        }
+        let interval = smallclaims::store::replication_settle_intervals_ms().0;
+        store.last_replication_projection_unix_ms.store(
+            (now as u64).saturating_sub(interval.saturating_sub(1_000)),
+            std::sync::atomic::Ordering::Release,
+        );
+        assert!(store.replication_catching_up());
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let projected = notify.clone();
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(run_replication_admission_observed(
+            Arc::downgrade(&store),
+            move || projected.notify_one(),
+            move |working| { turns.send(working).unwrap(); },
+        ));
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        assert!(store.replication_projection_deferred());
+        {
+            let reader = store.readers.get();
+            assert!(reader.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
+                |row| row.get::<_, bool>(0),
+            ).unwrap());
+            assert!(!reader.query_row(
+                "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+                [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(100), notify.notified()).await.is_err());
+        // No receives or writes follow admission: the throttle deadline must wake us.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.replication_projection_deferred());
+        assert!(store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+            [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+        ).unwrap(), "notify only after successful projection");
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        assert!(tokio::time::timeout(Duration::from_millis(100), observed.recv()).await.is_err());
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
     }
 
     fn legacy() -> (tempfile::TempDir, Arc<Store>) {

@@ -8760,15 +8760,21 @@ impl Store {
     /// replay the whole graph after every exchange. It projects at most once per interval
     /// instead, and again as soon as it has caught up. `None` means it deferred.
     pub fn project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
-        let since = (now_ms() as u64).saturating_sub(
-            self.last_replication_projection_unix_ms
-                .load(Ordering::Acquire),
-        );
-        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
+        if self.replication_projection_throttle_remaining().is_some() {
             self.defer_replication_projection();
             return Ok(None);
         }
         self.project_replication_backlog().map(Some)
+    }
+
+    /// Time until a catch-up projection may run again, without bypassing its throttle.
+    pub fn replication_projection_throttle_remaining(&self) -> Option<std::time::Duration> {
+        let since = (now_ms() as u64).saturating_sub(
+            self.last_replication_projection_unix_ms.load(Ordering::Acquire),
+        );
+        let interval = replication_settle_intervals_ms().0;
+        (since < interval && self.replication_catching_up())
+            .then(|| std::time::Duration::from_millis(interval - since))
     }
 
     /// Whether admitted replicated claims wait for a deferred projection.
