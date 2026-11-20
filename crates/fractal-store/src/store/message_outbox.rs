@@ -10,9 +10,12 @@
 //! [`ATTEMPTS`] tries it is appended to the graph as a legacy `message.sent` claim, as it would
 //! have been before the shard, and a member whose shard did not open drains to the graph at once.
 //!
-//! The table is local: it never replicates and is outside every digest. In this build nothing
-//! enqueues, so the outbox stays empty and the daemon's drainer is idle; a later release (4c-3)
-//! fills it, and a rollback from that release to this one still drains what it left.
+//! The table is local: it never replicates and is outside every digest. The daemon's senders that
+//! write from inside a graph transaction queue here (`message_routing::queue_tx`, 4c-3): mission
+//! cancellation, route-item, GitHub watch wakes, resource changes and workflow failures. What a
+//! method queues leaves when it returns ([`DrainOnReturn`]) or after a reconcile pass, and the
+//! daemon's drain task takes the rest, in the order they were queued. A rollback to a release
+//! whose senders don't queue still drains what this one left.
 
 use super::*;
 
@@ -42,7 +45,7 @@ CREATE INDEX IF NOT EXISTS local_message_outbox_order ON local_message_outbox(qu
 /// Queue the message `input` in the caller's graph transaction, so it commits or rolls back with
 /// the write that sends it. A sender calls this instead of appending to the shard while it holds
 /// a graph transaction; the daemon's drainer sees the row when the transaction commits. A repeat with the same
-/// subject changes nothing. Nothing calls this yet: the daemon's senders move to it in 4c-3.
+/// subject changes nothing. The daemon's transactional senders call it through `message_routing::queue_tx`.
 pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
     if input.kind != "message.sent" {
         return Err(FractalError::new(
