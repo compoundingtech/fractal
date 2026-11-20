@@ -142,11 +142,9 @@ pub async fn doctor(
 fn native_slo_checks(rows: &[Value]) -> impl Iterator<Item = DoctorCheck> + '_ {
     rows.iter().map(|row| DoctorCheck {
         name: format!("slo/{}", row["id"].as_str().unwrap_or_default()),
-        status: match row["tone"].as_str() {
-            Some("green") => "pass",
-            Some("red") => "fail",
-            _ => "warn",
-        }.into(),
+        // An SLO verdict describes; it never gates `fractal doctor --strict`. Every row is
+        // informational: pass is reserved for checks, so unknown stays distinct from success.
+        status: "info".into(),
         message: format!(
             "{}; {}; target {}; {}",
             row["status"].as_str().unwrap_or("no-data"),
@@ -162,28 +160,31 @@ mod native_slo_doctor_tests {
     use super::*;
 
     #[test]
-    fn doctor_preserves_every_native_row_and_its_evaluation() {
+    fn doctor_preserves_every_native_row_and_its_evaluation_without_gating() {
         let rows = [
-            ("agents/mail-delivery", "missed", "red", "fail"),
-            ("build/admission", "met", "green", "pass"),
-            ("cpu/idle", "no-data", "quiet", "warn"),
-            ("example/merge-latency/p50", "at-risk", "yellow", "warn"),
-            ("ios-live-share", "missed", "red", "fail"),
-            ("database-archive", "met", "green", "pass"),
-            ("fleet/roll-completion", "no-data", "quiet", "warn"),
+            ("agents/mail-delivery", "missed", "red"),
+            ("build/admission", "met", "green"),
+            ("cpu/idle", "no-data", "quiet"),
+            ("example/merge-latency/p50", "at-risk", "yellow"),
+            ("ios-live-share", "missed", "red"),
+            ("database-archive", "not-eligible", "quiet"),
+            ("fleet/roll-completion", "no-data", "quiet"),
         ];
-        let native = rows.iter().map(|(id, status, tone, _)| json!({
+        let native = rows.iter().map(|(id, status, tone)| json!({
             "id": id, "kind": "objective", "status": status, "tone": tone,
             // Deliberately do not imply the verdict from these display strings.
             "current": "native reading", "target": "native target", "window": "30d"
         })).collect::<Vec<_>>();
         let checks = native_slo_checks(&native).collect::<Vec<_>>();
         assert_eq!(checks.len(), rows.len());
-        for (check, (id, verdict, _, severity)) in checks.iter().zip(rows) {
+        for (check, (id, verdict, tone)) in checks.iter().zip(rows) {
             assert_eq!(check.name, format!("slo/{id}"));
-            assert_eq!(check.status, severity);
+            // SLO verdicts describe; a red or quiet objective never fails `--strict`.
+            assert_eq!(check.status, "info", "{id} ({tone}) must not gate strict diagnostics");
+            assert_ne!(check.status, "pass", "{id}: an SLO row is never a successful check");
             assert_eq!(check.message, format!("{verdict}; native reading; target native target; 30d"));
         }
+        assert!(!checks.iter().any(|check| check.status == "fail" || check.status == "warn"));
     }
 
     #[test]
