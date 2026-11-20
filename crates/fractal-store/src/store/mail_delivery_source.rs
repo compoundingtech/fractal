@@ -29,8 +29,17 @@ pub fn create_schema(connection: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install after marks and stream mirror tables exist. Backfill is deliberately repeatable:
-/// source rows survive source retention, and rollbacks can leave newly admitted source facts.
+/// Meta key recording that the backfill ran in this file. A change to the backfill, or to a
+/// trigger's body (which `IF NOT EXISTS` would leave in place), needs a new key, and a trigger
+/// change its `DROP TRIGGER` first, so files already carrying this key backfill again.
+const BACKFILLED: &str = "mail_delivery_source_backfilled_v1";
+
+/// Install after marks and stream mirror tables exist. The triggers keep the ledger current from
+/// every source: claims, marks, stagings and the stream mirror. They live in the file, so they
+/// fire whichever build writes, a rolled-back one included, and nothing drops them. What
+/// predates them is backfilled once per file, behind [`BACKFILLED`]: it used to be rescanned on
+/// every open, about 9 s of writer time at each start on a member with 180,000 sent messages.
+/// Source rows still survive source retention, since nothing here deletes.
 pub fn install(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-h928dbba5cdb3 owner=fractal_store::store::mail_delivery_source TODO=bound-or-reference-values-and-reclamation */
@@ -64,8 +73,7 @@ pub fn install(connection: &Connection) -> anyhow::Result<()> {
         END;",
     )?;
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h24098c683ff1 owner=fractal_store::store::mail_delivery_source TODO=prepare-body-and-predecessor-values */
-        "CREATE TRIGGER IF NOT EXISTS mail_delivery_send_v1 AFTER INSERT ON claims
+        /* sqlite-large-value: allow-for-now lv-h0b8af0a5090d owner=fractal_store::store::mail_delivery_source TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS mail_delivery_send_v1 AFTER INSERT ON claims
         WHEN NEW.kind='message.sent' BEGIN
             INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields)
             VALUES(NEW.subject,COALESCE(json_extract(NEW.body,'$.fields.to'),json_extract(NEW.body,'$.to'),''),
@@ -104,8 +112,13 @@ pub fn install(connection: &Connection) -> anyhow::Result<()> {
             INSERT INTO local_mail_delivery_steps_v1(message,consumer,kind,at_ms)
             VALUES(NEW.message,NEW.consumer,'message.staged',NEW.recorded_at_unix_ms)
             ON CONFLICT(message,consumer,kind) DO UPDATE SET at_ms=MIN(at_ms,excluded.at_ms);
-        END;
-        INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields)
+        END;",
+    )?;
+    if backfilled(connection)? {
+        return Ok(());
+    }
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h16e935b6b7af owner=fractal_store::store::mail_delivery_source TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields)
         SELECT subject,COALESCE(json_extract(body,'$.fields.to'),json_extract(body,'$.to'),''),
             CAST(accepted_at_unix_ms AS INTEGER),
             json_object('from',COALESCE(json_extract(body,'$.fields.from'),json_extract(body,'$.from')),
@@ -144,7 +157,18 @@ pub fn install(connection: &Connection) -> anyhow::Result<()> {
                 AND step.kind IN ('message.delivered','message.read','message.closed','message.expired'))
             AND NOT EXISTS(SELECT 1 FROM local_mail_input_acceptance_v1 accepted WHERE accepted.message=source.message));",
     )?;
+    // After the backfill, so a crash between them only repeats it: every statement above is
+    // idempotent.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h2a25c13e32ae owner=fractal_store::store::mail_delivery_source TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'done')",
+        [BACKFILLED],
+    )?;
     Ok(())
+}
+
+/// Whether the one-time backfill of what predates the triggers has run in this file.
+fn backfilled(connection: &Connection) -> anyhow::Result<bool> {
+    Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILLED], |row| row.get(0))?)
 }
 
 /// The stream mirror calls this with the source shard's timestamp, never mirror wall time.
