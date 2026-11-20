@@ -24,9 +24,13 @@ fn ready(store: &Store, schedule: &DesiredSubject, since: u128) -> bool {
 
 fn traffic_measurement(store: &Store, peer: &str, missing: u64, at: u128) {
     let healthy = store.replication_admission_healthy().unwrap();
+    let basis = smallclaims::store::InventoryBasis {
+        local_inventory_generation: store.replication_snapshot().unwrap().inventory_generation,
+        ..Default::default()
+    };
     let mut sync = store.replication_sync.lock().unwrap();
     let progress = sync.entry(peer.into()).or_default();
-    progress.observe_on(5, Some((missing, missing + 7)), Default::default(), at);
+    progress.observe_on(5, Some((missing, missing + 7)), basis, at);
     progress.observe_schedule_progress(healthy, at);
 }
 
@@ -46,6 +50,68 @@ fn continuous_traffic_needs_three_distinct_measurements_since_boundary() {
     traffic_measurement(&store, "peer", 23, since + 2);
     assert!(ready(&store, &schedule, since));
     assert!(!ready(&store, &schedule, since + 1), "old samples cannot release a new boundary");
+}
+
+#[test]
+fn replacement_membership_relayed_before_exchange_cannot_reuse_healthy_streak() {
+    use crate::schedule_standby::tests::{FLEET, pair, sync};
+    let _clock = smallclaims::store::clock_snapshot();
+    let (relay, old_peer, _) = pair();
+    let store = Store::open_memory("node").unwrap();
+    let node_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(&relay.member_public_key().unwrap()).unwrap();
+    store.set_member_key(Some(node_key.clone())).unwrap();
+    let membership_claim = |subject: &str, kind: &str, fields: Value| {
+        relay.append_claim(&crate::model::ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    membership_claim("host/node", "fleet.member-admitted", serde_json::json!({
+        "fleet_id": FLEET, "member_key": node_key.public(), "via": "invite",
+        "sponsor": "host/ivory", "mode": "listening"
+    }));
+    sync(&relay, &store);
+    let schedule = publish(&store, "host \"node\";", "initial");
+    let since = now_ms();
+    for offset in 0..3 { traffic_measurement(&store, "jade", 20, since + offset); }
+    let old_key = old_peer.member_public_key().unwrap();
+    store.replication_sync.lock().unwrap().get_mut("jade").unwrap()
+        .measured_member_key = Some(old_key.clone());
+    let admitted = || schedule_admission_ready(&store, "node", &["jade".into()], since, &schedule).unwrap();
+    assert!(admitted(), "the original authenticated incarnation has a healthy streak");
+
+    let replacement = crate::fleet::MemberKey::generate().unwrap().0;
+    membership_claim("host/jade", "fleet.member-removed", serde_json::json!({
+        "member_key": old_key, "high_water": 100, "reason": "replacement",
+        "removed_by": "person/test"
+    }));
+    membership_claim("host/jade", "fleet.member-admitted", serde_json::json!({
+        "fleet_id": FLEET, "member_key": replacement.public(), "via": "invite",
+        "sponsor": "host/ivory", "mode": "listening", "writer_floor": 100
+    }));
+    // Only the relay exchanges with this observer. The replacement never contacts it.
+    sync(&relay, &store);
+    assert!(matches!(store.fleet_membership().unwrap().state("jade"),
+        crate::fleet::MemberState::Current(member) if member.member_key == replacement.public()));
+    assert!(!admitted(), "a fresh old-incarnation measurement cannot authorize its replacement");
+    assert!(!store.replication_sync.lock().unwrap()["jade"].schedule_progress_since(since),
+        "discard old progress immediately, rather than waiting for a direct exchange");
+}
+
+#[test]
+fn admission_discards_a_streak_measured_against_a_different_inventory_basis() {
+    let store = Store::open_memory("node").unwrap();
+    let schedule = publish(&store, "host \"node\";", "initial");
+    let since = now_ms();
+    for offset in 0..3 { traffic_measurement(&store, "peer", 20, since + offset); }
+    assert!(ready(&store, &schedule, since));
+    store.replication_sync.lock().unwrap().get_mut("peer").unwrap()
+        .window_basis.local_inventory_generation += 1;
+    assert!(!ready(&store, &schedule, since));
+    assert!(!store.replication_sync.lock().unwrap()["peer"].schedule_progress_since(since));
 }
 
 #[test]

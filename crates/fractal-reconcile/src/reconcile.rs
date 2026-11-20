@@ -265,9 +265,33 @@ fn schedule_admission_ready(
     let sync = store.replication_peer_sync(&peers);
     let strict = schedule_requires_complete_history(store, schedule)?;
     if strict && sync.len() != peers.len() { return Ok(false); }
-    let progress = store.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+    // Membership can arrive through another peer before this peer exchanges again. Never
+    // let a replaced incarnation's samples authorize its successor, even while still fresh.
+    let membership = store.fleet_membership()?;
+    let inventory_generation = store.replication_snapshot()?.inventory_generation;
+    let mut progress = store.replication_sync.lock().unwrap_or_else(PoisonError::into_inner);
+    for name in sync.keys() {
+        let Some(sample) = progress.get_mut(name) else { return Ok(false) };
+        if strict || sync[name].peer_only_envelopes == 0 || !sample.schedule_progress_since(since) {
+            continue;
+        }
+        let current_key = match membership.state(name) {
+            crate::fleet::MemberState::Current(member) => Some(member.member_key.as_str()),
+            crate::fleet::MemberState::NotMember => None,
+            _ => {
+                sample.schedule_measurements = [0; 3];
+                return Ok(false);
+            },
+        };
+        if sample.measured_member_key.as_deref() != current_key
+            || sample.window_basis.local_inventory_generation != inventory_generation
+        {
+            sample.schedule_measurements = [0; 3];
+            return Ok(false);
+        }
+    }
     Ok(schedule_progress_ready(sync.iter().map(|(name, peer)| {
-        (peer, progress.get(name).is_some_and(|progress| progress.schedule_progress_since(since)))
+        (peer, progress.get(name).is_some_and(|sample| sample.schedule_progress_since(since)))
     }), since, strict))
 }
 
