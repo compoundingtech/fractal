@@ -8690,6 +8690,7 @@ fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
     match mode {
         fractal_runtime::Isolation::Scope => "scope",
+        fractal_runtime::Isolation::DarwinSlot { .. } => "darwin-slot",
         fractal_runtime::Isolation::Detached => "detached",
         fractal_runtime::Isolation::DegradedDetached => "degraded-detached",
     }
@@ -10151,9 +10152,13 @@ fn doctor_report_within(
             }),
         }
         let isolation = fractal_runtime::isolation_mode();
+        let custody_available =
+            !cfg!(target_os = "macos") || fractal_runtime::darwin_slot::available();
         checks.push(DoctorCheck {
             name: "process-isolation".into(),
-            status: if isolation == fractal_runtime::Isolation::DegradedDetached {
+            status: if isolation == fractal_runtime::Isolation::DegradedDetached
+                || !custody_available
+            {
                 "warn"
             } else {
                 "pass"
@@ -10161,8 +10166,17 @@ fn doctor_report_within(
             .into(),
             message: match isolation {
                 fractal_runtime::Isolation::Scope => "Linux tasks use transient systemd user scopes".into(),
+                fractal_runtime::Isolation::DarwinSlot { slot } => {
+                    format!("explicit finite executions use Darwin slot {slot}")
+                }
                 fractal_runtime::Isolation::Detached => {
-                    "tasks use detached process groups on this platform".into()
+                    if !custody_available {
+                        "helperUnavailable: Darwin custody helper is unavailable; ordinary tasks remain detached".into()
+                    } else if cfg!(target_os = "macos") {
+                        "ordinary tasks use detached process groups; explicit finite launches can request Darwin slot custody".into()
+                    } else {
+                        "tasks use detached process groups on this platform".into()
+                    }
                 }
                 fractal_runtime::Isolation::DegradedDetached => {
                     "systemd user scopes are unavailable; a daemon restart can stop tasks".into()

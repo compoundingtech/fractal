@@ -251,6 +251,11 @@
     "slo/objectives.kdl"
    ]
   },
+  "fractal-mac-custody": {
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
+  },
   "fractal-migrate": {
    "extra": []
   },

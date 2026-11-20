@@ -2177,6 +2177,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-mac-custody"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fractal-migrate"
 version = "0.1.0"
 dependencies = [
@@ -2376,6 +2386,7 @@ name = "fractal-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fractal-mac-custody",
  "libc",
  "portable-pty",
  "pty-client",

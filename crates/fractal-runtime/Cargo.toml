@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+fractal-mac-custody = { path = "../fractal-mac-custody" }
 libc = "0.2"
 portable-pty = "0.9"
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }

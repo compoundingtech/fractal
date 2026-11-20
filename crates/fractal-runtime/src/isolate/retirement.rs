@@ -82,6 +82,8 @@ pub struct ScopeRetirementProof {
     pub active_state: String,
     pub control_group: String,
     pub cgroup: Option<CgroupEnding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub darwin: Option<super::darwin_slot::RetirementProof>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -144,6 +146,14 @@ impl ScopeRetirementProof {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
             "work scope ending changed its bound unit"
         );
+        if let Some(slot) = super::darwin_slot::slot_for_unit(&self.unit) {
+            ensure!(self.load_state == "darwin-slot" && self.active_state == "inactive"
+                && self.control_group.is_empty() && self.cgroup.is_none(),
+                "Darwin retirement has contradictory evidence");
+            return self.darwin.as_ref().context("Darwin retirement lacks helper proof")?
+                .validate(slot.name(), expected_unit);
+        }
+        ensure!(self.darwin.is_none(), "systemd retirement has unexpected Darwin evidence");
         match self.load_state.as_str() {
             "not-found" => ensure!(
                 self.active_state == "inactive"
@@ -187,6 +197,7 @@ fn properties(unit: &str, output: &str) -> Result<ScopeRetirementProof> {
         active_state: property("ActiveState")?,
         control_group: property("ControlGroup")?,
         cgroup: None,
+        darwin: None,
     };
     ensure!(
         matches!(proof.load_state.as_str(), "loaded" | "not-found"),
@@ -218,6 +229,7 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
                 Ok(format!("/{}", relative.display()))
             }).transpose()?.unwrap_or_default(),
         cgroup: None,
+        darwin: None,
     };
     ensure!(matches!(proof.load_state.as_str(), "loaded" | "not-found"),
         "work scope load state is unverified");
@@ -271,6 +283,7 @@ fn capture_cgroup(path: &Path) -> Result<Option<CgroupEnding>> {
 // complete proof, not just absence, so repeated reads need neither manager nor cgroup I/O.
 static CLOSED: Mutex<std::collections::BTreeMap<String, ScopeRetirementProof>> =
     Mutex::new(std::collections::BTreeMap::new());
+static DARWIN_RETIREMENT: Mutex<()> = Mutex::new(());
 
 fn remember_closed(proof: &ScopeRetirementProof) {
     CLOSED.lock().unwrap_or_else(PoisonError::into_inner)
@@ -280,6 +293,9 @@ fn remember_closed(proof: &ScopeRetirementProof) {
 
 /// Read-only ending evidence for an already operation-bound work or server scope.
 pub(crate) fn observe_closed_scope(unit: &str) -> Result<Option<ScopeRetirementProof>> {
+    if super::darwin_slot::slot_for_unit(unit).is_some() {
+        return Ok(CLOSED.lock().unwrap_or_else(PoisonError::into_inner).get(unit).cloned());
+    }
     if mode() != Isolation::Scope {
         return Ok(None);
     }
@@ -323,6 +339,24 @@ pub fn end_scope_with_proof(
     unit: &str,
     guard: &dyn Fn() -> Result<()>,
 ) -> Result<Option<ScopeRetirementProof>> {
+    if let Some(slot) = super::darwin_slot::slot_for_unit(unit) {
+        let _retirement = DARWIN_RETIREMENT.lock().unwrap_or_else(PoisonError::into_inner);
+        guard()?;
+        if let Some(proof) = CLOSED.lock().unwrap_or_else(PoisonError::into_inner).get(unit).cloned() {
+            proof.validate(unit)?;
+            return Ok(Some(proof));
+        }
+        let receipt = super::darwin_slot::current_helper()?.cancel(unit, guard)?;
+        let darwin = super::darwin_slot::RetirementProof::from_receipt(slot.name(), unit, &receipt)?;
+        let proof = ScopeRetirementProof {
+            version: 1, unit: unit.into(), load_state: "darwin-slot".into(),
+            active_state: "inactive".into(), control_group: String::new(),
+            cgroup: None, darwin: Some(darwin),
+        };
+        proof.validate(unit)?;
+        remember_closed(&proof);
+        return Ok(Some(proof));
+    }
     if mode() != Isolation::Scope || !is_work_scope(unit) {
         tracing::debug!(caller = "end_scope_with_proof", recorded_scope = unit, guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope retirement skipped");
         return Ok(None);
@@ -412,6 +446,28 @@ fn retirement_guard(unit: &str, guard: &dyn Fn() -> Result<()>, phase: &str) -> 
 mod tests {
     use super::*;
     const UNIT: &str = "st3-op-example-1-1.scope";
+
+    #[test]
+    fn darwin_proof_is_bound_to_exact_job_and_cannot_be_systemd_absence() {
+        let unit = format!("st3-darwin-heavy1-{}.scope", "a".repeat(64));
+        let receipt = super::super::darwin_slot::decode_receipt(
+            br#"{"schema":"fractal.darwin-custody.v2","status":{"status":"retired","sweeps":1,"signals":2}}"#,
+        ).unwrap();
+        let mut proof = ScopeRetirementProof {
+            version: 1, unit: unit.clone(), load_state: "darwin-slot".into(),
+            active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            darwin: Some(super::super::darwin_slot::RetirementProof::from_receipt(
+                "heavy1", &unit, &receipt,
+            ).unwrap()),
+        };
+        proof.validate(&unit).unwrap();
+        proof.unit = format!("st3-darwin-heavy1-{}.scope", "b".repeat(64));
+        assert!(proof.validate(&proof.unit).is_err());
+        proof.unit = unit.clone();
+        proof.darwin = None;
+        proof.load_state = "not-found".into();
+        assert!(proof.validate(&unit).is_err());
+    }
     #[test]
     fn historical_terminal_scopes_do_not_repeat_manager_observation() {
         let calls = std::cell::Cell::new(0);
@@ -420,6 +476,7 @@ mod tests {
             Ok(ScopeRetirementProof {
                 version: 1, unit: unit.into(), load_state: "not-found".into(),
                 active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+                darwin: None,
             })
         };
         for index in 0..5000 {
