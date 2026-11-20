@@ -1402,30 +1402,20 @@ impl Store {
 }
 
 impl Store {
-    /// Rebuild what this member's trims deferred (the runtime's derived state of the subjects
-    /// they touched), a budget's worth per transaction with a trim's pacing, until none is left.
-    /// It runs when a trim stops and at each checkpoint step, so a crash cannot strand it.
+    /// Queue deferred runtime work without waiting for arrivals to stop. Each bounded
+    /// transaction runs on the existing writer scheduler, which serves other loans while
+    /// pacing and checks for newly deferred local work after every writer turn.
     pub(crate) fn rebuild_deferred_paced(&self) -> Result<()> {
-        // Most steps have nothing deferred: one read, and no writer.
-        if !self.runtime.deferred_pending(&self.readers.get())? {
-            return Ok(());
-        }
-        let _span = crate::profile::span("trim.rebuild_deferred");
-        loop {
-            let mut connection = self.connection.write_background();
-            let held_since = std::time::Instant::now();
-            let transaction = connection.transaction()?;
-            let more = self.runtime.rebuild_deferred(&transaction, TRIM_CHUNK_BUDGET)?;
-            let committing = std::time::Instant::now();
-            transaction.commit()?;
-            let held = held_since.elapsed();
-            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0, None);
-            drop(connection);
-            if !more {
-                return Ok(());
-            }
-            self.pause_trim_chunk(held);
-        }
+        Self::install_deferred_drain(&self.connection, self.runtime.clone());
+        Ok(())
+    }
+
+    pub(super) fn install_deferred_drain(connection: &crate::sqlite::WriterConnection, runtime: std::sync::Arc<dyn super::Runtime>) {
+        let checking_runtime = runtime.clone();
+        connection.install_deferred_maintenance(
+            move |connection| checking_runtime.deferred_pending(connection),
+            move |transaction| runtime.rebuild_deferred(transaction, TRIM_CHUNK_BUDGET),
+        );
     }
 
     /// The claims a local trim may still delete today (`trim_locally_at_most`).
