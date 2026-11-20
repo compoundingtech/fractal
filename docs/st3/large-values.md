@@ -98,6 +98,35 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Native fleet roll receipt source
+
+The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
+`lv-h854866002229`, append `lv-h781e5c867fe7`, and rebuild
+`lv-h84af57247816`. The separate local index retains authenticated graph claim
+IDs and JSON-encoded receipt keys; it does not duplicate receipt bodies or make
+unsigned files authoritative. The unique receipt-key index remains a
+variable-sized key. One ordered transaction preserves immutable conflict checks
+and source order. Rebuild revalidates each retained claim's canonical signature,
+declaration role, host identity and dependency chain before admitting it again;
+revoked authority cannot retain cached good adoption.
+
+The schema work is to establish complete key/value costs and lossless
+retention/reclamation, not to cap or discard valid signed facts. Append and
+rebuild work must retain dependency ordering and atomic replacement. The native
+graph remains the durable signed authority and supports restart reconstruction;
+the earlier unsigned local ledger is deliberately not replayed as trusted data.
+Neither one-row insertion nor the API body boundary alone proves SQL-work bounds.
+
+The `fractal_api_core::roll_source` maintainer also owns
+`lv-h0a0a9ff62f14`, `lv-h465d993a66cb`, `lv-hc76357e25b55`, and
+`lv-hc9ae27e75a8c`. These unresolved call-site entries use the read-only native
+run/creation selectors and the prepared `SELECT EXISTS` declaration-visibility
+query. They do not add mutation tables or duplicate native input bodies.
+The incremental run selector consumes a captured native index; ordinary quiet
+frontiers retain only unresolved run obligations rather than rewalking history.
+Initial capture and authority/source-lifetime changes reconstruct those
+obligations from canonical signed inputs.
+
 ### Shell environment scrub
 
 The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
