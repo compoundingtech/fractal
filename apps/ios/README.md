@@ -332,6 +332,10 @@ default, `test` only when explicitly selected) and the daily Fabric
 settings pinned before invoking Xcode. Before publishing the signed snapshot,
 it requires defined Rust bridge symbols in the app executable: the real module
 and disabled stub share the same Swift class name, so that name alone is not proof.
+The worker logs UTC ISO timestamped phase starts for dependency installation,
+Expo configuration, Fabric packaging, prebuild/CocoaPods, JavaScript export,
+Xcode compilation and artifact verification. Cached phases still emit their
+start marker and report reuse.
 Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
 with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
 transform cache whenever the inlined values change; a successful build also

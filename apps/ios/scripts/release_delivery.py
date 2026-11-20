@@ -410,6 +410,7 @@ def build_release(args):
         save(output / "failure.json", {"reason": "source_inputs_preparation_failed",
                                      "detail": str(error)})
         raise
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=pnpm_install", flush=True)
     identities = {"workspace": identity}
     if (inputs.get("packages") != identities
             or not (repo / "node_modules").is_dir()):
@@ -420,11 +421,13 @@ def build_release(args):
         save(inputs_file, inputs)
     else:
         print("Reusing locked pnpm workspace dependencies", flush=True)
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=expo_config", flush=True)
     config = json.loads(run(["pnpm", "exec", "expo", "config", "--type", "public", "--json"],
                             cwd=app, env=env, capture=True))
     if config["ios"]["bundleIdentifier"] != bundle_id(args.variant):
         raise ValueError("Tracked ref lacks the selected app variant; refusing another identity")
     # Reuse the documented builder inside the same gated worker as Xcode.
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=fabric_build", flush=True)
     run(["sh", "modules/fractal-fabric/build.sh"], cwd=app,
         env={**env, "FRACTAL_NIX_CACHE_ONLY": "1"})
     fabric_hash = framework_hash(repo)
@@ -441,6 +444,7 @@ def build_release(args):
     regenerate = (inputs.get("native") != native_identity
                   or not list((app / "ios").glob("*.xcworkspace"))
                   or not (app / "ios/Podfile.lock").exists())
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=prebuild_pod_install", flush=True)
     if regenerate:
         run(["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--clean", "--no-install"],
             cwd=app, env=env)
@@ -473,6 +477,7 @@ def build_release(args):
     if framework_hash(repo) != fabric_hash:
         raise ValueError("FractalFabricRust.xcframework changed before linking")
     derived = cache / "derived"
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=export_ios", flush=True)
     run(["pnpm", "run", "export:ios"], cwd=app, env=env)
     signing = (["CODE_SIGN_STYLE=Manual", f"DEVELOPMENT_TEAM={args.team}",
                 "CODE_SIGN_IDENTITY=Apple Development",
@@ -481,10 +486,12 @@ def build_release(args):
                if args.variant == "test" else
                ["CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
                 "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates"])
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=xcodebuild", flush=True)
     run(["xcodebuild", "-workspace", str(workspace), "-scheme", workspace.stem,
          "-configuration", "Release", "-sdk", "iphoneos", "-destination", "generic/platform=iOS",
          "-derivedDataPath", str(derived), "-jobs", "4", *signing, "build"],
         cwd=app, env=env)
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "phase=verify", flush=True)
     # DerivedData survives native identity changes. Select only the current Expo
     # product; unrelated products from earlier generated workspaces may remain.
     # Bundle ID, native commit and embedded JS stamp are still verified below.

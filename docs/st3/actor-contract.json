@@ -2532,7 +2532,25 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st slo ingest-roll": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st slo ls": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st slo roll-intent": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,
