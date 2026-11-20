@@ -418,10 +418,13 @@ impl MailboxLeaseStore for Store {
             if count == 0 { duration } else { std::time::Duration::ZERO }
         });
         let pinned = self.readers.has_pinned_reader();
-        let budget = smallclaims::read_budget::current().unwrap_or_else(|| {
-            let wall = if pinned { CARD_FAULT_PINNED_WALL_BACKSTOP } else { duration };
-            smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", wall)
-        });
+        let wall = if pinned { CARD_FAULT_PINNED_WALL_BACKSTOP } else { duration };
+        // An enclosing roster/request budget may shorten this capture, never lengthen
+        // its own backstop: optional fault work must leave time for the rest of the card.
+        let budget = smallclaims::read_budget::current().map_or_else(
+            || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", wall),
+            |parent| parent.child(wall),
+        );
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
