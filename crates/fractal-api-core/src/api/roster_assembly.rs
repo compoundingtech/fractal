@@ -28,7 +28,6 @@ struct Reconcile {
     local_target: u64,
     after: u64,
     local_after: u64,
-    previous: Vec<Value>,
     dirty: BTreeSet<String>,
     rebuild: bool,
     membership_after: Option<String>,
@@ -122,9 +121,7 @@ impl Assembly {
                 Ok((index, crate::store::roster_local_frontier(&store.readers.get(), index)?))
             })?;
             self.reconcile = Some(Reconcile { target, local_target, after: self.floor,
-                local_after: self.local_floor, previous: if target > self.floor {
-                    self.rows.values().cloned().collect()
-                } else { Vec::new() },
+                local_after: self.local_floor,
                 dirty: BTreeSet::new(), rebuild: false, membership_after: None,
                 queues: self.valid_until.is_some_and(|expiry| client_now_ms() >= expiry),
                 queue_after: None, queue_valid_until: None });
@@ -142,7 +139,7 @@ impl Assembly {
             let (through, change) = agent_roster_snapshot(store, |_| {
                 let connection = store.readers.get();
                 let (through, _) = claim_page_cut(&connection, reconcile.after, reconcile.target, limit)?;
-                let change = store.changed_agent_resources(reconcile.after, through, &reconcile.previous)?;
+                let change = store.changed_agent_resources(reconcile.after, through, self.rows.values())?;
                 Ok((through, change))
             }).inspect_err(|_| self.delta_width = (self.delta_width / 2).max(1))?;
             reconcile.after = through;
@@ -214,10 +211,6 @@ impl Assembly {
             let (rows, expiry) = agent_roster_snapshot(store, |index| fold_page(store, history, index, &names))
                 .inspect_err(|_| self.width = (self.width / 2).max(1))?;
             for name in &names { reconcile.dirty.remove(name); }
-            // Child invalidation matches roots against these cards. Keep additions,
-            // updates and removals in sync before a later tail is classified.
-            reconcile.previous.retain(|row| row["id"].as_str().is_none_or(|id| !names.contains(id)));
-            reconcile.previous.extend(rows.iter().cloned());
             self.apply(&names, rows, expiry);
             return Ok(None);
         }
@@ -238,7 +231,7 @@ impl Assembly {
             drop(connection);
             let change = if reconcile.after == index {
                 AgentResourcesChange::Delta(Default::default())
-            } else { store.changed_agent_resources(reconcile.after, index, &reconcile.previous)? };
+            } else { store.changed_agent_resources(reconcile.after, index, self.rows.values())? };
             let mut names = reconcile.dirty.clone();
             names.extend(local_names);
             match &change {
@@ -262,7 +255,6 @@ impl Assembly {
                 // Keep classified/compared coverage; only extend its unconsumed tail.
                 reconcile.target = index;
                 reconcile.local_target = local;
-                reconcile.previous = self.rows.values().cloned().collect();
                 Ok(None)
             }
             Completion::Changed { index, local, change, names } => {
@@ -272,7 +264,6 @@ impl Assembly {
                 reconcile.local_after = local;
                 reconcile.record(change);
                 reconcile.dirty.extend(names);
-                reconcile.previous = self.rows.values().cloned().collect();
                 Ok(None)
             }
             Completion::Ready { index, local, names, rows, expiry, subagents } => {
@@ -282,10 +273,6 @@ impl Assembly {
                 reconcile.local_after = local;
                 reconcile.dirty.clear();
                 self.apply(&names, rows, expiry);
-                // If publication itself exhausts the pass budget, the next attempt starts
-                // from these certified rows rather than classifying their claims again.
-                self.reconcile.as_mut().expect("reconciliation retained").previous =
-                    self.rows.values().cloned().collect();
                 Ok(Some((index, local, subagents)))
             }
         }

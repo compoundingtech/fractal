@@ -94,11 +94,11 @@ const SEAT_QUEUE_MOVE_HISTORY_LIMIT: usize = 20;
 pub trait SeatsStore {
     /// Classify the bounded claim interval by the dependencies that cards actually read.
     /// Unknown or structural claims still cold-build; queue changes are diffed separately.
-    fn changed_agent_resources(
+    fn changed_agent_resources<'a>(
             &self,
             after: u64,
             through: u64,
-            previous: &[Value],
+            previous: impl IntoIterator<Item = &'a Value> + Clone,
         ) -> Result<AgentResourcesChange>;
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
@@ -446,11 +446,11 @@ pub trait SeatsStore {
 
 impl SeatsStore for Store {
 
-    fn changed_agent_resources(
+    fn changed_agent_resources<'a>(
             &self,
             after: u64,
             through: u64,
-            previous: &[Value],
+            previous: impl IntoIterator<Item = &'a Value> + Clone,
         ) -> Result<AgentResourcesChange> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
@@ -474,7 +474,7 @@ impl SeatsStore for Store {
             // Match the previous root too: a removed child's declaration has no live tag.
             if subject.starts_with("exec/") || subject.starts_with("pty/") {
                 let suffix = subject.split_once('/').map_or("", |(_, suffix)| suffix);
-                delta.subjects.extend(previous.iter().filter_map(|card| {
+                delta.subjects.extend(previous.clone().into_iter().filter_map(|card| {
                     let agent = card["id"].as_str()?;
                     let root = agent.strip_prefix("agent/")?;
                     suffix.strip_prefix(root)?.starts_with('/').then(|| agent.to_owned())
@@ -568,7 +568,7 @@ impl SeatsStore for Store {
         if !owners.is_empty() {
             // Existing cards carry their historical ownership; current declarations also
             // find agents newly made visible by an owner transition.
-            delta.subjects.extend(previous.iter().filter(|item| {
+            delta.subjects.extend(previous.into_iter().filter(|item| {
                 item["owner_run_id"].as_str().is_some_and(|owner| owners.contains(owner))
                     || item["operational"]["owner_generation"].as_str().is_some_and(|owner| owners.contains(owner))
             }).filter_map(|item| item["id"].as_str().map(str::to_owned)));
@@ -736,7 +736,7 @@ impl SeatsStore for Store {
         let (changed, membership) = match &previous {
             None => (0, true),
             Some(previous) if previous.index == index => (self.agent_roster_fault_retries(history).len(), false),
-            Some(previous) => match self.changed_agent_resources(previous.index, index, &previous.items)? {
+            Some(previous) => match self.changed_agent_resources(previous.index, index, previous.items.iter())? {
                 AgentResourcesChange::Delta(mut delta) => {
                     delta.subjects.extend(self.agent_roster_fault_retries(history));
                     (delta.subjects.len(), delta.membership)
@@ -1066,7 +1066,7 @@ impl SeatsStore for Store {
         || -> Result<runtime::AgentResourcesEntry> {
         let (previous, invalidation) = match previous {
             Some(entry) if entry.index == index => (Some((entry, AgentResourcesDelta::default())), "safe_delta"),
-            Some(entry) => match self.changed_agent_resources(entry.index, index, &entry.items)? {
+            Some(entry) => match self.changed_agent_resources(entry.index, index, entry.items.iter())? {
                 AgentResourcesChange::Delta(delta) => (Some((entry, delta)), "safe_delta"),
                 AgentResourcesChange::Invalidated { reason, .. } => (None, reason),
             },
