@@ -7984,8 +7984,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "messages_stream_selectors": u8::from(messages_shard.is_ok()),
                     // A complete stream inbox: it counts and lists stream mail as graph mail,
                     // and its senders find a message in either store before they send it, so
-                    // mail to its seats may go to the stream (`messages_shard::inbox_hosts`).
-                    // Nothing routes on it in this build; the writers move to it in 4c-2b.
+                    // mail to its seats may go to the stream (`messages_shard::inbox_hosts`,
+                    // read by `message_routing::legacy_reason`).
                     "messages_stream_inbox": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),

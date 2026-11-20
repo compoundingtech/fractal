@@ -511,7 +511,8 @@ pub fn advertising_hosts(
 /// read as [`advertising_hosts`] reads the shard's feature: a member that lists, counts and
 /// dedupes stream mail as it does graph mail, so a sender may route its seats' mail to the
 /// stream. A host that rolls back to a build without it stops counting once its new start
-/// replicates. Nothing routes on it in this build; the writers move to it in 4c-2b.
+/// replicates. Senders route on it through `message_routing::legacy_reason`, which keeps a
+/// graph claim for any recipient whose host does not advertise it.
 pub fn inbox_hosts(graph: &super::Store, configured_peers: &[String]) -> anyhow::Result<BTreeSet<String>> {
     hosts_advertising(graph, configured_peers, "messages_stream_inbox")
 }
