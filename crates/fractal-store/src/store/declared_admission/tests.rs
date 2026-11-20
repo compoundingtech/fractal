@@ -54,6 +54,97 @@ fn peer(store: &Store, anchor: &MemberKey) -> (Store, Arc<MemberKey>) {
 }
 
 #[test]
+fn recovery_observations_require_every_signed_fleet_reader() {
+    use crate::store::resource_membership::{Admission, Coverage, DiskFit, Fit, LaneRequest, Owner};
+    use fractal_runtime::{Capacity, RequestClass};
+    let (store, anchor) = enabled();
+    started(&store, json!({"resource_recovery_observations":1}));
+    store.replication_snapshot().unwrap();
+    let (peer, _) = peer(&store, &anchor);
+    store.start_resource_authority("alder", "epoch").unwrap();
+    let request = LaneRequest {
+        id: "recovery".into(), name: "recovery".into(), host: "alder".into(),
+        max_members: 1, capacity: Some(Capacity { cores: 1, memory: 1024 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None,
+        class: RequestClass::Recovery, disk: None, io: None,
+        profile: None, profile_estimate: None, disk_path: None,
+        owner: Owner { run: "mission-run/recovery".into(), step: "step-run/recovery".into(),
+            attempt: 1, invocation: None },
+    };
+    let fit = Fit { room: request.capacity, recovery_capable: true,
+        disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..Fit::default() };
+    for advertisement in [json!({}), json!({"resource_recovery_observations":0})] {
+        started(&peer, advertisement);
+        sync(&peer, &store);
+        let before = store.index().unwrap();
+        let error = store.request_resource_membership(&request, fit.clone(), 1).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code,
+            "resource-recovery-feature-barrier");
+        assert_eq!(store.index().unwrap(), before, "no observation or membership may be written");
+    }
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert!(matches!(store.request_resource_membership(&request,
+        Fit { held_bytes: 1024, ..fit.clone() }, 2).unwrap(), Admission::Queued { .. }));
+    let mut queued = vec![request.clone()];
+    for index in 0..crate::store::resource_admission_objectives::REPLAY_PAGE_SIZE {
+        let mut extra = request.clone();
+        extra.id = format!("recovery-{index:03}");
+        extra.name = extra.id.clone();
+        assert!(matches!(store.request_resource_membership(&extra,
+            Fit { held_bytes: 1024, ..fit.clone() }, 2).unwrap(), Admission::Queued { .. }));
+        queued.push(extra);
+    }
+    let mut refused = request.clone();
+    refused.id = "refused-recovery".into();
+    refused.name = refused.id.clone();
+    assert!(matches!(store.request_resource_membership(&refused,
+        Fit { recovery_capable: false, ..fit.clone() }, 3).unwrap(), Admission::Refused { .. }));
+    started(&peer, json!({"resource_recovery_observations":0}));
+    sync(&peer, &store);
+    let coverage = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 1000)
+        .unwrap().claims.last().unwrap().body["fields"]["complete"].clone();
+    assert_eq!(coverage(), true);
+    // No authority restart: withdrawal commits custody but withholds its terminal fact.
+    for (index, member) in queued.iter().enumerate() {
+        store.withdraw_resource_membership(&member.id, &member.owner, 4).unwrap();
+        if index % 16 == 0 {
+            // Continuous withheld traffic during repair must not reset or starve
+            // previously pending IDs. They remain queued until readers recover.
+            assert!(store.replay_resource_admission_observations().unwrap());
+        }
+    }
+    assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().state, "retired");
+    assert_eq!(coverage(), false);
+    assert!(store.fractal.extensions.get::<crate::store::resource_admission_objectives::Coverage>().0
+        .load(std::sync::atomic::Ordering::Acquire), "authority acquisition proof is still live");
+    let observations = || store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::KIND], None, 0, 1000).unwrap().claims;
+    assert_eq!(observations().iter().rfind(|claim| claim.body["fields"]["id"] == request.id)
+        .unwrap().body["fields"]["state"], "queued");
+    assert!(store.replay_resource_admission_observations().unwrap());
+    assert_eq!(coverage(), false, "a tick cannot certify while fleet support is absent");
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert_eq!(coverage(), false, "advertisement alone cannot repair stale evidence");
+    // Idle authority maintenance, with no new membership request or restart:
+    // one tick cannot replay more than the configured page.
+    let before = observations().len();
+    assert!(store.replay_resource_admission_observations().unwrap());
+    assert!(observations().len() - before <= crate::store::resource_admission_objectives::REPLAY_PAGE_SIZE);
+    assert_eq!(coverage(), false);
+    assert!(!store.replay_resource_admission_observations().unwrap());
+    let events = observations();
+    let retired = events.iter().rfind(|claim| claim.body["fields"]["id"] == request.id).unwrap();
+    assert_eq!(retired.body["fields"]["state"], "retired");
+    assert_eq!(coverage(), true);
+    let cut = store.claims_by_kinds_after(
+        &[crate::store::resource_admission_objectives::COVERAGE_KIND], None, 0, 1000).unwrap();
+    assert!(retired.store_index < cut.claims.last().unwrap().store_index);
+}
+
+#[test]
 fn absent_declarations_do_not_require_a_feature_barrier() {
     publish(&Store::open_memory("alder").unwrap(), PLAIN, "plain").unwrap();
 }

@@ -607,8 +607,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
         anyhow::bail!("runtime does not support generation-fenced payload cancellation")
     }
-    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
-        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
+        anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
@@ -1052,21 +1052,17 @@ impl RuntimeControl for NativeRuntime {
     fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
         self.exec.signal_if(id, Some(generation), libc::SIGTERM)
     }
-    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+    fn resource_exec_cgroup(&self, id: &str, generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         let current = match self.exec.observe(id)? {
             Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
                 if current.generation_id == generation => current,
             _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
         };
-        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let Some(unit) = current.scope_unit else { return Ok(Default::default()); };
         let snapshot = fractal_runtime::systemd::snapshot()?;
-        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(Default::default()); };
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
-        match fs::read_to_string(group.join("memory.peak")) {
-            Ok(value) => Ok(Some(value.trim().parse()?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        crate::store::resource_profile_learner::cgroup::read(group)
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
@@ -1342,6 +1338,7 @@ impl NativeRuntime {
                 let lane = fractal_runtime::FiniteLane {
                     name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
                     memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
+                    class: request.class.clone(),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
@@ -3379,6 +3376,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             hook();
         }
         self.reconcile_shell_resources()?;
+        if self.resource_authority.get().is_some_and(|authority| authority.is_ok()) {
+            // Keep an idle authority's deferred evidence repair alive independently
+            // of new membership traffic; each maintenance pass processes one page.
+            if let Err(error) = self.store.replay_resource_admission_observations() {
+                tracing::warn!(%error, "resource admission observation replay deferred");
+            }
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.

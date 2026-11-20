@@ -103,7 +103,6 @@ pub enum RefusalCode {
     Retiring,
     Uncertain,
     InvalidState,
-    // Reader arm for newer recovery-class refusal rows; this host does not admit that class.
     RecoveryNotAllowed,
 }
 
@@ -160,6 +159,8 @@ pub struct Fit {
     /// Fresh mount observations for queued predecessors, keyed by reservation path.
     pub disk_mounts: BTreeMap<String, DiskFit>,
     pub heavy_io_slots: Option<u32>,
+    pub pressure_blocked: bool,
+    pub recovery_capable: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -197,6 +198,17 @@ pub struct Membership {
     pub refusal_code: Option<RefusalCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<BlockedBy>,
+    #[serde(default)]
+    pub admission_decision: Option<AdmissionDecision>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdmissionDecision {
+    pub class: RequestClass,
+    pub at_ms: u64,
+    pub exemption: Option<String>,
+    pub free_bytes_at_admission: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -224,7 +236,7 @@ impl From<&ExecGeneration> for ExecutionIdentity {
 pub fn dependency(host: &str, lane: &str) -> String { format!("resource-membership/{host}/{lane}") }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb7bab5eb8be2 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h94d100aa2222 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
         host TEXT PRIMARY KEY, epoch TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS resource_lane_policies_v1 (
         host TEXT NOT NULL, lane TEXT NOT NULL, policy TEXT NOT NULL, PRIMARY KEY(host,lane));
@@ -233,7 +245,10 @@ pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError>
         state TEXT NOT NULL, queued_at INTEGER NOT NULL, memory INTEGER NOT NULL,
         body TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS resource_memberships_queue_v1
-        ON resource_memberships_v1(host,lane,state,queued_at,id);")
+        ON resource_memberships_v1(host,lane,state,queued_at,id);
+        CREATE TABLE IF NOT EXISTS resource_admission_pending_v1 (
+        host TEXT NOT NULL, membership_id TEXT PRIMARY KEY);
+        CREATE INDEX IF NOT EXISTS resource_admission_pending_host_v1 ON resource_admission_pending_v1(host);")
         .map_err(internal)
 }
 
@@ -297,6 +312,16 @@ fn admission(member: Membership) -> Admission {
 pub const BACKFILL_AGING_MS: u64 = 15 * 60 * 1000;
 
 fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, disk_fit: Option<DiskFit>) -> Result<Option<(BlockedBy, String)>> {
+    if fit.pressure_blocked {
+        return Ok(Some((BlockedBy::Psi, "host PSI brake: sustained pressure, recovery hysteresis, or unavailable observation".into())));
+    }
+    if request.class == RequestClass::Recovery {
+        let held: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
+            WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')
+            AND json_extract(body,'$.request.class')='recovery')",
+            rusqlite::params![request.host,request.id], |row| row.get(0))?;
+        if held { return Ok(Some((BlockedBy::Holder, "host recovery slot occupied".into()))); }
+    }
     if !super::host_holds::blocking_tx(connection, &request.host, &request.name)?.is_empty() {
         return Ok(Some((BlockedBy::Hold, "host held".into())));
     }
@@ -314,6 +339,13 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
     let finite_held: u64 = connection.query_row("SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
         WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
         rusqlite::params![request.host,request.id], |row| row.get(0))?;
+    let finite_cores: u64 = connection.query_row("SELECT coalesce(sum(json_extract(body,'$.request.capacity.cores')),0)
+        FROM resource_memberships_v1 WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
+        rusqlite::params![request.host,request.id], |row| row.get(0))?;
+    if request.capacity.is_some_and(|capacity| fit.room.is_none_or(|room|
+        finite_cores.saturating_add(u64::from(capacity.cores)) > u64::from(room.cores))) {
+        return Ok(Some((BlockedBy::Holder, "held CPU quotas prevent admission".into())));
+    }
     let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
     let outside_free = holder_free.saturating_sub(fit.outside_bytes);
     let free = outside_free.saturating_sub(fit.reserve_bytes);
@@ -343,7 +375,7 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
             { disk_held = disk_held.saturating_add(disk.bytes); }
         }
     }
-    if request.disk.as_ref().is_some_and(|disk| disk_fit.is_none_or(|mount|
+    if request.class != RequestClass::Recovery && request.disk.as_ref().is_some_and(|disk| disk_fit.is_none_or(|mount|
         u128::from(mount.available) < u128::from(mount.floor) + u128::from(disk_held) + u128::from(disk.bytes))) {
         return Ok(Some((BlockedBy::Disk, "mount free-space floor or peak disk reservations prevent admission".into())));
     }
@@ -410,7 +442,7 @@ impl Store {
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1
-            ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'landing' THEN 0 WHEN 'check' THEN 1 ELSE 2 END,rowid")?;
+            ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'recovery' THEN 0 WHEN 'landing' THEN 1 WHEN 'check' THEN 2 ELSE 3 END,rowid")?;
         let bodies = statement.query_map([host], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         bodies.into_iter().map(|body| Ok(serde_json::from_str(&body)?)).collect()
     }
@@ -477,6 +509,7 @@ impl Store {
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
         let complete = super::resource_admission_objectives::recover(&transaction, host, epoch)?;
         transaction.commit()?;
+        super::resource_admission_objectives::activate(self);
         self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
             .store(complete, std::sync::atomic::Ordering::Release);
         Ok(())
@@ -565,6 +598,7 @@ impl Store {
         anyhow::ensure!(!request.owner.run.is_empty() && !request.owner.step.is_empty() && request.owner.attempt > 0, "resource execution owner required");
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
+        super::resource_admission_objectives::validate_publication(&transaction, &request.host, &request.class)?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
             let expected = InstalledPolicy::for_request(request);
@@ -594,7 +628,7 @@ impl Store {
                 queued_at: now_ms, admitted_at: None, payload_released_at: None, execution_ended_at: None,
                 retirement_requested_at: None, retired_at: None, disk_filesystem: None,
                 roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(),
-                refusal_code: None, blocked_by: None }
+                refusal_code: None, blocked_by: None, admission_decision: None }
         };
         let previous = exists.then(|| member.state.clone());
         if member.state != "queued" {
@@ -605,7 +639,11 @@ impl Store {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let (queue_elapsed, uncertain) = self.resource_admission_elapsed(&request.id, member.queued_at, now_ms);
         member.clock_uncertain |= uncertain || member.clock_epoch != epoch;
-        let refused = if request.capacity.is_none() {
+        let refused = if request.class == RequestClass::Recovery && !fit.recovery_capable {
+            Some((RefusalCode::RecoveryNotAllowed, "profile is not declared recoveryCapable on this host".into()))
+        } else if request.class == RequestClass::Recovery && fit.disk.is_none() {
+            Some((RefusalCode::UnsupportedCoverage, "recovery admission requires a measured filesystem free-space observation".into()))
+        } else if request.capacity.is_none() {
             Some((RefusalCode::MissingProfile, "finite execution requires an explicit resource profile".to_owned()))
         } else if request.coverage == Coverage::Enforced && !cfg!(target_os = "linux") {
             Some((RefusalCode::UnsupportedCoverage, "whole-tree resource enforcement requires Linux".to_owned()))
@@ -631,7 +669,7 @@ impl Store {
             if !exists { write(&transaction, &member)?; }
             let mut statement = transaction.prepare("SELECT body FROM resource_memberships_v1
                 WHERE host=?1 AND state='queued'
-                ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'landing' THEN 0 WHEN 'check' THEN 1 ELSE 2 END,rowid")?;
+                ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'recovery' THEN 0 WHEN 'landing' THEN 1 WHEN 'check' THEN 2 ELSE 3 END,rowid")?;
             let queued = statement.query_map([&request.host], |row| row.get::<_, String>(0))?;
             let mut predecessor = None;
             for body in queued {
@@ -669,6 +707,11 @@ impl Store {
             if member.reason.is_empty() {
                 member.state = "admitted".into(); member.admitted_at = Some(now_ms);
                 member.disk_filesystem = fit.disk.map(|mount| mount.filesystem);
+                member.admission_decision = Some(AdmissionDecision {
+                    class: request.class.clone(), at_ms: now_ms,
+                    exemption: (request.class == RequestClass::Recovery).then(|| "disk-floor".into()),
+                    free_bytes_at_admission: fit.disk.map(|mount| mount.available),
+                });
                 member.grant = Some(Grant { membership_id: request.id.clone(), authority_epoch: epoch,
                     generation: uuid::Uuid::new_v4().to_string(), coverage: request.coverage });
             }
@@ -970,9 +1013,9 @@ mod tests {
     fn future_resource_classes_cannot_acquire_membership() {
         let store = fixture();
         let mut future = request("future");
-        future.class = RequestClass::Unknown("recovery".into());
+        future.class = RequestClass::Unknown("future-class".into());
         assert!(store.request_resource_membership(&future, test_fit(), 1).unwrap_err()
-            .to_string().contains("unsupported resource class recovery"));
+            .to_string().contains("unsupported resource class future-class"));
         assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
     }
 
@@ -982,7 +1025,7 @@ mod tests {
         let request = request("future-custody");
         let grant = grant(&store, &request, 1);
         store.update_resource_membership(&grant, |member| {
-            member.request.class = RequestClass::Unknown("recovery".into());
+            member.request.class = RequestClass::Unknown("future-class".into());
             Ok(())
         }).unwrap();
         let before = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
@@ -1045,7 +1088,7 @@ mod tests {
 
         for (class, refusal, complete) in [
             (RequestClass::Unknown("future-class".into()), None, false),
-            (RequestClass::Unknown("recovery".into()), Some(RefusalCode::RecoveryNotAllowed), false),
+            (RequestClass::Recovery, Some(RefusalCode::RecoveryNotAllowed), false),
             (RequestClass::Agent, Some(RefusalCode::RecoveryNotAllowed), false),
             (RequestClass::Check, None, true),
         ] {
@@ -1701,7 +1744,8 @@ mod tests {
         holder.name = format!("resource-test-{}", uuid::Uuid::new_v4().simple());
         let current = grant(&store, &holder, wall());
         let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity,
-            member_capacity: holder.capacity, memory_high_bytes: None, require_enforced: false };
+            member_capacity: holder.capacity, memory_high_bytes: None,
+            class: holder.class.clone(), require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: current.membership_id.clone(), generation: current.generation.clone(),
