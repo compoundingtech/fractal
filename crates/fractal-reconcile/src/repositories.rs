@@ -60,7 +60,7 @@ mod tests {
         std::fs::create_dir(repository.join("nested")).unwrap();
         assert_eq!(
             workspace_repository(&repository.join("nested")),
-            Some(repository.clone())
+            Some(root.path().join(".bare"))
         );
         let linked = root.path().join("linked");
         git(
@@ -74,7 +74,7 @@ mod tests {
                 linked.to_str().unwrap(),
             ],
         );
-        assert_eq!(workspace_repository(&linked), Some(repository));
+        assert_eq!(workspace_repository(&linked), Some(root.path().join(".bare")));
         let bare = root.path().join("origin.git");
         let bare_linked = root.path().join("bare-linked");
         git(

@@ -262,7 +262,7 @@ pub mod test_support {
         assert!(status.success(), "git {arguments:?}");
     }
 
-    /// A bare origin with one commit on main, and a clone of it.
+    /// A bare origin, a store-shaped `.bare` container, and its main worktree.
     pub fn repository(root: &Path) -> PathBuf {
         let origin = root.join("origin.git");
         let seed = root.join("seed");
@@ -281,7 +281,19 @@ pub mod test_support {
         );
         git(
             root,
-            &["clone", "--quiet", &origin.to_string_lossy(), "repo"],
+            &["clone", "--quiet", "--bare", &origin.to_string_lossy(), ".bare"],
+        );
+        // TMPDIR may itself be inside the real mr store. Use its actual container
+        // topology rather than an ordinary clone that store admission must reject.
+        let bare = root.join(".bare");
+        git(
+            &bare,
+            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        );
+        git(&bare, &["fetch", "--quiet", "origin"]);
+        git(
+            &bare,
+            &["worktree", "add", "--quiet", &clone.to_string_lossy(), "main"],
         );
         // A commit that reaches origin after the clone is only visible after a fetch.
         std::fs::write(seed.join("README"), "second\n").unwrap();
