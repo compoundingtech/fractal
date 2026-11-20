@@ -1,10 +1,11 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { auditCaches } from './cache-audit.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // SITE_CI_APP_ID and SITE_CI_APP_PRIVATE_KEY identify an App installed on
 // compoundingtech/private with Contents: write for repository dispatches.
 // The target workflow reads docs/site from main, never from dispatch payload data.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Publish docs change notification',
   on: { push: { branches: ['main'], paths: ['docs/site/**'] } },
   permissions: {},
@@ -35,4 +36,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, { notify: 'Sends a repository dispatch without a checkout, build or cache.' }))
+}, { notify: 'Sends a repository dispatch without a checkout, build or cache.' })))

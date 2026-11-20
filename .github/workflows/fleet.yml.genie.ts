@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { withCompatArchives } from './compat-archive.ts'
 import { swiftClientJobs } from './swift-client.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
@@ -28,7 +29,7 @@ import {
   linuxRunner,
   requiredLinuxRunner,
   controlLinuxRunner,
-  prerequisiteLinuxRunner,
+  plainLinuxRunner,
   linuxStageJob as namespaceStageJob,
   evidenceStageJob,
   evidenceEnvironment,
@@ -292,8 +293,8 @@ const evidenceGateRunInputs: Record<string, { needs: string[], values: Record<st
 const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
   name: `evidence-gate-${check}`,
   ...(evidenceGateRunInputs[check] ? { needs: evidenceGateRunInputs[check].needs } : {}),
-  // Receipt verification starts independently of hosted saturation and runner selection.
-  'runs-on': prerequisiteLinuxRunner,
+  // Receipt verification uses owned roles independently of runner selection.
+  'runs-on': plainLinuxRunner,
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
@@ -366,7 +367,7 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
 // the job summary, nothing more: it never fails, is not a required check, and nothing reads its result.
 const presignNoticeJob = {
   name: 'evidence-presign-notice',
-  'runs-on': 'ubuntu-latest',
+  'runs-on': plainLinuxRunner,
   'timeout-minutes': 3,
   'continue-on-error': true,
   needs: evidenceGateChecks.map((check) => `evidence-gate-${check}`),
@@ -423,7 +424,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     // Retain the complete effective merge tree even after its ephemeral ref disappears.
     'evidence-source': {
       name: 'evidence-source',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       'continue-on-error': true,
       permissions: { contents: 'read' },
@@ -452,7 +453,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     // Start independently: Python/Git classification only, no build toolchain.
     'upgrade-impact': {
       name: 'upgrade-impact',
-      'runs-on': controlLinuxRunner,
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       steps: [
         ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
@@ -524,7 +525,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     'hm-module-eval': {
       name: 'hm-module-eval',
       ...afterPickRunner,
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 10,
       steps: [
         ...fullHistoryCheckoutSteps({ 'persist-credentials': false }).slice(0, queue ? 1 : undefined),
@@ -728,7 +729,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and no picker output.
-      'runs-on': controlLinuxRunner,
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       steps: [
         refusedStep('linux-gate'),
@@ -1010,4 +1011,4 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
 
 export const fleetWorkflow = buildFleetWorkflow()
 
-export default githubWorkflow(fleetWorkflow)
+export default githubWorkflow(withoutForkPRJobs(fleetWorkflow))

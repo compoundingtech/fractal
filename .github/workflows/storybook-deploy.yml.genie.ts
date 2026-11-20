@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { megarepoApplyStep, readOnlyBinaryCaches } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -49,7 +50,7 @@ fi`,
   },
 ]
 
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox(auditCaches({
   actionlint: defaultActionlintConfig,
   name: 'Storybook deploy',
   on: {
@@ -114,4 +115,4 @@ STORYBOOK_SUMMARY`,
   },
 }, {
   deploy: 'Storybook uses a clean static build and read-only upstream Nix caches; no Actions build cache is configured.',
-})))
+}))))

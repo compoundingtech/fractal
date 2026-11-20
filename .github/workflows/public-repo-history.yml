@@ -18,7 +18,7 @@ concurrency:
 jobs:
   public-repo-history:
     name: public-repo-history
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 10
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -72,4 +72,4 @@ jobs:
         env:
           CACHE_REASON: Scans introduced Git content; trusted scanner identity requires the separately activated required-workflow rule.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}

@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { readFileSync } from 'node:fs'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -6,7 +7,7 @@ import { auditCaches } from './cache-audit.ts'
 // Never check out PR code or download its artifacts with this write-scoped token.
 // This main-owned metadata-only job never executes the triggering PR, including forks.
 // Keep admission off the hosted dispatch queue it is meant to drain.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Draft CI admission',
   on: {
     workflow_run: {
@@ -35,4 +36,4 @@ export default githubWorkflow(auditCaches({
       }],
     },
   },
-}, { admission: 'Reads PR/run metadata and requests draft cancellation; no checkout, build or cache.' }))
+}, { admission: 'Reads PR/run metadata and requests draft cancellation; no checkout, build or cache.' })))

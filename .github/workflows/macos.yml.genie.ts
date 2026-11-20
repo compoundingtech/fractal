@@ -1,3 +1,5 @@
+import { plainLinuxRunner } from './workspace-ci.ts'
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
@@ -32,7 +34,7 @@ const workflow = scopeLinuxNixSandbox(readyPRJobs(withCompatArchives(auditCaches
     'fractal-mac-changes': {
       name: 'fractal-mac-changes',
       if: "github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       outputs: { relevant: '${{ steps.detect.outputs.relevant }}' },
       steps: [
@@ -173,7 +175,7 @@ nix path-info --recursive "$toolchain" | cachix push "$FRACTAL_CACHIX_CACHE"`,
 
 // Keep the publisher's positive main-push conjuncts visible to cache-policy validation.
 // PR draft guards are unnecessary for a job that never admits PR events.
-export default githubWorkflow({
+export default githubWorkflow(withoutForkPRJobs({
   ...workflow,
   jobs: {
     ...workflow.jobs,
@@ -182,4 +184,4 @@ export default githubWorkflow({
       if: publisherOnly,
     },
   },
-})
+}))

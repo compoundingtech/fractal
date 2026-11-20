@@ -1,10 +1,11 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, plainLinuxRunner } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // Label changes refresh the changelog opt-out; drafts still allocate no runners.
-export default githubWorkflow(readyPRJobs(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Public repository check",
   concurrency: {
@@ -26,11 +27,11 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     'fractal-changelog': {
       name: 'fractal-changelog',
       if: "github.event_name == 'pull_request'",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       permissions: { contents: 'read' },
       steps: [
-        // PR code executes only on a disposable hosted runner, with no secrets or write token.
+        // Same-repository candidate code receives no secrets or write token.
         ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         { name: 'Test changelog requirement policy', run: 'node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs' },
         {
@@ -44,7 +45,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ],
     },
     "public-repo": {
-      "runs-on": 'ubuntu-latest',
+      "runs-on": plainLinuxRunner,
       "steps": [
         {
           "uses": "actions/checkout@v4"
@@ -69,4 +70,4 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ]
     }
   }
-}, {"public-repo": "Runs standard-library guards and queries published release metadata; builds nothing.", "fractal-changelog": "Checks the full Git diff and pure changelog policy without dependencies or compilation."})))
+}, {"public-repo": "Runs standard-library guards and queries published release metadata; builds nothing.", "fractal-changelog": "Checks the full Git diff and pure changelog policy without dependencies or compilation."}))))

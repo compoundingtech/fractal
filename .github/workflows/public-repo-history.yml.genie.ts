@@ -1,13 +1,14 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
-import { fullHistoryCheckoutSteps } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, plainLinuxRunner } from './workspace-ci.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 
 // Ordinary content check until a separate trust anchor is activated.
 // A future organization `workflows` rule can select this path at an approved SHA.
 // Only then does github.workflow_sha pin scanner/policy to a trusted revision;
 // without that rule a candidate can change its own workflow and scanner.
-export default githubWorkflow(readyPRJobs(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(readyPRJobs(auditCaches({
   name: 'Public repository history',
   on: {
     pull_request: { types: [...readyPullRequestTypes] },
@@ -21,7 +22,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
   jobs: {
     'public-repo-history': {
       name: 'public-repo-history',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 10,
       env: {
         BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
@@ -47,4 +48,4 @@ export default githubWorkflow(readyPRJobs(auditCaches({
   },
 }, {
   'public-repo-history': 'Scans introduced Git content; trusted scanner identity requires the separately activated required-workflow rule.',
-})))
+}))))

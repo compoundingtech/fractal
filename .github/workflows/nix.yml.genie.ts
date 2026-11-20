@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { cachixPushStep, defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
@@ -7,7 +8,7 @@ const publisherIf = "github.ref == 'refs/heads/main' && (github.event_name == 'p
 
 // Persistent-store verification stays disabled until its dedicated pool is qualified.
 // The separate main-only publisher builds the consumer package on a hosted worker.
-export default githubWorkflow(scopeLinuxNixSandbox({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox({
   actionlint: {
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'ci1'],
@@ -156,4 +157,4 @@ export default githubWorkflow(scopeLinuxNixSandbox({
     }
     } }).jobs,
   }
-}))
+})))

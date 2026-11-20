@@ -19,7 +19,7 @@ concurrency:
 jobs:
   linux-test-build:
     name: daily-test-build
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on:
       [
         "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
@@ -243,7 +243,7 @@ jobs:
   isolation-vm:
     name: daily-isolation-vm
     needs: [linux-test-build, compat-archives-x86_64-unknown-linux-gnu]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (!cancelled()) && (github.ref == 'refs/heads/main') }}
     runs-on:
       [
         "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }};github.run-id=${{ github.run_id }}",
@@ -668,7 +668,7 @@ jobs:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     needs: [linux-test-build, compat-archives-x86_64-unknown-linux-gnu]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (!cancelled()) && (github.ref == 'refs/heads/main') }}
   daily-tests:
     name: daily-tests
     runs-on:
@@ -879,7 +879,7 @@ jobs:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     needs: [linux-test-build, compat-archives-x86_64-unknown-linux-gnu]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (!cancelled()) && (github.ref == 'refs/heads/main') }}
   daily-tests-shard-2:
     name: daily-tests-shard-2
     runs-on:
@@ -1090,7 +1090,7 @@ jobs:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     needs: [linux-test-build, compat-archives-x86_64-unknown-linux-gnu]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (!cancelled()) && (github.ref == 'refs/heads/main') }}
   linux-fleet-compat:
     name: daily-fleet-compat
     runs-on:
@@ -1281,7 +1281,7 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     needs: [compat-archives-x86_64-unknown-linux-gnu]
   perf-cost:
     name: daily-perf-cost
@@ -1464,10 +1464,10 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-12.outcome }}","hit":"${{ steps.cache-12.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
   perf-load:
     name: daily-perf-load
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on:
       [
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
@@ -1607,7 +1607,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   perf-load-hog:
     name: daily-perf-load-hog
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on:
       [
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
@@ -1718,7 +1718,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   perf-load-hog-macos:
     name: daily-perf-load-hog-macos
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 60
     defaults:
@@ -1807,7 +1807,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   daily-macos-check:
     name: daily-macos-check
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 45
     defaults:
@@ -1887,7 +1887,7 @@ jobs:
       - perf-load-hog
       - perf-load-hog-macos
       - daily-macos-check
-    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (always()) && (github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1914,11 +1914,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   compat-archives-x86_64-unknown-linux-gnu:
     name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
-    runs-on:
-      [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
-        "namespace-features:github.run-id=${{ github.run_id }}",
-      ]
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -2002,3 +1998,4 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (success()) }}

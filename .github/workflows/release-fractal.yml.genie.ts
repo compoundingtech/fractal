@@ -1,6 +1,7 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob, megarepoApplyStep } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob, megarepoApplyStep, plainLinuxRunner } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -13,7 +14,7 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // so release breakage fails on main instead of at tag time. Daily candidates dispatch isolated exact-source builds.
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
 // the tag trigger below. Only the daily workflow prepares untagged stable candidates and publishes with explicit product GO.
-export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Fractal tag release",
   "run-name": "${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}",
@@ -91,7 +92,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   "jobs": {
     "validate-source": {
       name: 'Validate the requested release source',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       steps: [
         ...fullHistoryCheckoutSteps(
@@ -151,7 +152,7 @@ fi`,
           ]
         }
       },
-      "runs-on": "${{ matrix.runner }}",
+      "runs-on": "${{ matrix.runner == 'ubuntu-latest' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'ci1-priority' || matrix.runner == 'ubuntu-latest' && 'ci1' || matrix.runner }}",
       "timeout-minutes": "${{ matrix.runner == 'macos-15' && 10 || 5 }}",
       "steps": [
         {
@@ -175,7 +176,7 @@ fi`,
     embed: {
       name: 'release-web-embed',
       needs: 'validate-source',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 20,
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' } },
@@ -315,7 +316,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "embed",
         "installer"
       ],
-      "runs-on": "ubuntu-latest",
+      "runs-on": plainLinuxRunner,
       "outputs": { "artifact-id": "${{ steps.release.outputs.artifact-id }}" },
       "steps": [
         {
@@ -392,7 +393,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       name: 'report-cancelled-release-publishers',
       needs: ['publishEmbed', 'publishEdge'],
       if: "always() && contains(needs.*.result, 'cancelled')",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       permissions: { contents: 'read', actions: 'read' },
       env: {
@@ -415,4 +416,4 @@ exit 1`,
       }],
     }
   }
-}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release after embed publication in the shared mutation lock; builds nothing.", "observePublishers": "Fails visibly on cancelled publishers and explains re-dispatch of the original push event; performs no release mutations."}))))
+}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release after embed publication in the shared mutation lock; builds nothing.", "observePublishers": "Fails visibly on cancelled publishers and explains re-dispatch of the original push event; performs no release mutations."})))))

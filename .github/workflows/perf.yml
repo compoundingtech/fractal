@@ -18,8 +18,8 @@ concurrency:
 jobs:
   scope:
     name: Performance scope
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) }}
-    runs-on: ubuntu-latest
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -114,7 +114,7 @@ jobs:
   perf-load:
     name: perf-load
     needs: [scope]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
     runs-on:
       [
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
@@ -249,7 +249,7 @@ jobs:
   perf-load-hog:
     name: perf-load-hog
     needs: [scope]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'workflow_dispatch' && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'workflow_dispatch' && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
     continue-on-error: true
     runs-on:
       [
@@ -355,7 +355,7 @@ jobs:
           overwrite: true
   perf-load-hog-macos:
     name: perf-load-hog-macos
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'workflow_dispatch') }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'workflow_dispatch') }}
     continue-on-error: true
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 60

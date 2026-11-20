@@ -1,12 +1,14 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
+import { plainLinuxRunner } from './workspace-ci.ts'
 
 // SHADOW ONLY: this job reports whether a pull request would be rejected for lacking a trusted signed note; it never fails and is not
 // a required check. `pull_request_target` always runs the workflow file of the BASE branch, so a pull request cannot edit or delete this
 // job, and the checkout below is the base branch tip. The pull request's code is never checked out or executed: scripts/ci-signed-tree
 // fetches its head commit as git objects and reads them as data, with the verifier, keys, policy and lane file of the base checkout.
 // No secret is used and the token is read-only.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Signed tree (shadow)',
   on: {
     pull_request_target: { types: ['opened', 'synchronize', 'reopened', 'ready_for_review'] },
@@ -17,7 +19,7 @@ export default githubWorkflow(auditCaches({
   jobs: {
     'signed-tree': {
       name: 'signed-tree',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       'continue-on-error': true,
       defaults: { run: { shell: 'bash' } },
@@ -38,4 +40,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, { 'signed-tree': 'Reads git objects and notes only; builds nothing and restores no cache.' }))
+}, { 'signed-tree': 'Reads git objects and notes only; builds nothing and restores no cache.' })))

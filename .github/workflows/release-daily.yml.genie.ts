@@ -1,11 +1,12 @@
-import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
+import { withoutForkPRJobs } from './ready-pr.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, plainLinuxRunner } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // Prepares an untagged daily draft from verified main archives, or builds an exact first-parent main SHA.
 // Stable publication creates the tag after an explicit dispatch with the exact candidate tag, SHA and product GO.
 // Tags made at publication with this workflow's token do not start a second build.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   name: 'Fractal release candidates and publication',
   on: {
@@ -143,7 +144,7 @@ export default githubWorkflow(auditCaches({
       name: 'report-cancelled-release-jobs',
       needs: ['build', 'release', 'publish'],
       if: "always() && contains(needs.*.result, 'cancelled')",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       permissions: { contents: 'read' },
       steps: [
@@ -177,4 +178,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, {"build": "Builds an explicitly dispatched exact first-parent main SHA in SHA-isolated concurrency without release mutations, exposing the successful build run ID.", "release": "Prepares untagged draft candidates from verified main release artifacts or the completed exact-SHA build, serialized with publication.", "publish": "Creates the tag and publishes an exact draft candidate only with explicit product GO and, for an older candidate, an override naming its tag; serialized with candidate mutations and builds nothing.", "observe": "Fails visibly if a build or mutation job is cancelled, including pending concurrency cancellation, and directs operators to re-dispatch every original input; performs no mutations.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))
+}, {"build": "Builds an explicitly dispatched exact first-parent main SHA in SHA-isolated concurrency without release mutations, exposing the successful build run ID.", "release": "Prepares untagged draft candidates from verified main release artifacts or the completed exact-SHA build, serialized with publication.", "publish": "Creates the tag and publishes an exact draft candidate only with explicit product GO and, for an older candidate, an override naming its tag; serialized with candidate mutations and builds nothing.", "observe": "Fails visibly if a build or mutation job is cancelled, including pending concurrency cancellation, and directs operators to re-dispatch every original input; performs no mutations.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."})))

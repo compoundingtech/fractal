@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   publish-x86_64-linux:
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     concurrency:
       group: "nix-publish-${{ inputs.sha || github.sha }}"
       cancel-in-progress: false
@@ -101,7 +101,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   nix-release-x86_64-linux:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     runs-on: ci1
     timeout-minutes: 180
     steps:

@@ -50,7 +50,7 @@ permissions:
 jobs:
   build:
     name: build-exact-release-candidate
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && github.ref == 'refs/heads/main' && inputs.recover_draft != true
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name == 'workflow_dispatch') && (inputs.mode == 'candidate') && (inputs.sha != '') && (inputs.run == '') && (github.ref == 'refs/heads/main') && (inputs.recover_draft != true) }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     concurrency:
@@ -107,7 +107,7 @@ jobs:
   release:
     name: daily-release-candidate
     needs: build
-    if: ${{ always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') && inputs.mode != 'publish' && github.ref == 'refs/heads/main' }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (always()) && (!cancelled()) && (needs.build.result == 'success' || needs.build.result == 'skipped') && (inputs.mode != 'publish') && (github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -166,7 +166,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   publish:
     name: publish-approved-release
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name == 'workflow_dispatch') && (inputs.mode == 'publish') && (github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -223,8 +223,8 @@ jobs:
   observe:
     name: report-cancelled-release-jobs
     needs: [build, release, publish]
-    if: always() && contains(needs.*.result, 'cancelled')
-    runs-on: ubuntu-latest
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (always()) && (contains(needs.*.result, 'cancelled')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -242,7 +242,7 @@ jobs:
   advance:
     name: advance-compatibility-baselines
     needs: publish
-    if: github.ref == 'refs/heads/main'
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
@@ -15,6 +16,7 @@ import {
   fractalWebStoreCache,
   genieNixCacheStep,
   genieSetupSteps,
+  plainLinuxRunner,
   linuxRunner,
   linuxStageJob,
   linuxStageRunner,
@@ -37,7 +39,7 @@ const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => s
 // exact entries before provisioning Nix or restoring gigabytes; fill only missing entries.
 const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => ({
   name: `warm-${stage}`,
-  'runs-on': stage === 'genie' ? 'ubuntu-latest' : linuxStageRunner,
+  'runs-on': stage === 'genie' ? plainLinuxRunner : linuxStageRunner,
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
@@ -96,7 +98,7 @@ const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   jobs: {
     'main-checks': {
       name: 'main-checks',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 125,
       permissions: { contents: 'read', actions: 'read' },
       steps: [
@@ -108,7 +110,7 @@ const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
       name: 'report red main',
       needs: ['main-checks'],
       if: "always() && needs.main-checks.result == 'failure'",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       permissions: {},
       steps: [{
         name: 'Signal revert needed',
@@ -136,7 +138,7 @@ exit 1`,
     'isolation-vm': warmJob('isolation-vm', commonSetupSteps),
     'typescript-cache': {
       name: 'warm-typescript',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 10,
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [
@@ -167,7 +169,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     // Fractal-web runs on GitHub-hosted capacity, whose cache is separate from Namespace's.
     'fractal-web-cache': {
       name: 'warm-fractal-web',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 15,
       defaults: { run: { shell: 'bash' } },
       steps: [
@@ -215,4 +217,4 @@ fi`,
   },
 }, {"main-checks": "Waits for exact-SHA hosted push checks through the API and builds nothing.", "hosted-proof-failure": "Reports failed required hosted push proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
 
-export default githubWorkflow(upkeepWorkflow)
+export default githubWorkflow(withoutForkPRJobs(upkeepWorkflow))

@@ -110,6 +110,19 @@ with tempfile.TemporaryDirectory() as tmp:
 workflow = (ROOT / '.github/workflows/perf.yml').read_text()
 assert '  merge_group:' not in workflow, 'optional loads must not add merge-queue work'
 conditions = {}
+fork_guard = ("((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || "
+              "github.event.pull_request.head.repo.full_name == github.repository) && "
+              "(github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)")
+
+def inner_condition(condition):
+    """Assert both admission wrappers, then isolate the scope predicate under test."""
+    prefix = '${{ ' + fork_guard + ' && '
+    assert condition.startswith(prefix) and condition.endswith(' }}'), condition
+    condition = condition[len(prefix):-3]
+    draft_prefix = "(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ("
+    assert condition.startswith(draft_prefix) and condition.endswith(')'), condition
+    return condition[len(draft_prefix):-1]
+
 for job in ['scope', 'perf-load', 'perf-load-hog']:
     match = re.search(r'^  ' + job + r':\n.*?^    if: (.+)$', workflow, re.M | re.S)
     assert match, job
@@ -117,7 +130,7 @@ for job in ['scope', 'perf-load', 'perf-load-hog']:
     conditions[job] = ast.literal_eval(raw) if raw.startswith(('\"', "'")) else raw
 
 def admits(job, event='pull_request', action='synchronize', label='', result='success', output='false', cancelled=False):
-    expression = conditions[job].removeprefix("${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (").removesuffix(") }}")
+    expression = inner_condition(conditions[job])
     context = locals()
     for source, target in [('github.event_name', 'event'), ('github.event.action', 'action'),
                            ('github.event.label.name', 'label'), ('needs.scope.result', 'result'),
@@ -133,9 +146,9 @@ def admits(job, event='pull_request', action='synchronize', label='', result='su
 # Performance runs by manual dispatch only; the daily long lanes run the load jobs on main
 # (ci-daily-long-report-test). The hog run costs a second performance runner, so even if PR
 # triggers return it runs only on manual dispatch, never for a pull request, a label or a schedule.
-# The generator wraps every job condition in its draft-PR guard; the job's own condition is inside.
+# Assert the outer fork/workflow-run and nested draft guards before testing the job's own predicate.
 assert re.search(r'^on:\n  workflow_dispatch: \{\}\n\n', workflow, re.M), 'Performance is manual dispatch only'
-hog_condition = conditions['perf-load-hog'].removeprefix("${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (").removesuffix(') }}')
+hog_condition = inner_condition(conditions['perf-load-hog'])
 assert "github.event_name == 'workflow_dispatch'" in hog_condition, hog_condition
 assert 'pull_request' not in hog_condition and 'schedule' not in hog_condition and 'push' not in hog_condition, hog_condition
 def hog_admits(event, result='success', output='false', cancelled=False):
@@ -158,7 +171,9 @@ assert re.search(r'^  perf-load-hog:\n(?:    .*\n)*?    continue-on-error: true$
 # The macOS hog run is manual dispatch only: a macOS runner is costly and nothing waits on it.
 macos = re.search(r'^  perf-load-hog-macos:\n((?:    .*\n|\n)*)', workflow, re.M)
 assert macos, 'the macOS hog job exists'
-assert re.search(r"^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.draft == false\) && \(github\.event_name == 'workflow_dispatch'\) \}\}$", macos.group(1), re.M), 'the macOS hog job runs only on manual dispatch'
+macos_raw = re.search(r'^    if: (.+)$', macos.group(1), re.M).group(1)
+macos_condition = ast.literal_eval(macos_raw) if macos_raw.startswith(('"', "'")) else macos_raw
+assert inner_condition(macos_condition) == "github.event_name == 'workflow_dispatch'", 'the macOS hog job runs only on manual dispatch'
 assert re.search(r'^    continue-on-error: true$', macos.group(1), re.M), 'the macOS hog run reports without failing the workflow'
 assert 'namespace-profile-macos-arm64' in macos.group(1), 'the macOS hog job runs on a macOS runner'
 assert 'scripts/ci-perf load-hog' in macos.group(1) or 'load-hog' in macos.group(1), 'the macOS hog job runs the hog stage'

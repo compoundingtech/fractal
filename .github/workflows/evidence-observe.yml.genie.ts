@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
 
@@ -11,7 +12,7 @@ export const evidenceRunner = 'evidence-ci'
 // is set on the runner group by the operator.
 export const evidenceGroup = 'evidence-observers'
 
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Evidence observe',
   on: {
     workflow_run: { workflows: ['Workspace CI'], types: ['completed'] },
@@ -55,4 +56,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, { observe: 'Reads GitHub metadata and Git objects only; builds nothing.' }))
+}, { observe: 'Reads GitHub metadata and Git objects only; builds nothing.' })))

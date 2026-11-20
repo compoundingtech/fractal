@@ -1,9 +1,10 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
 import { megarepoApplyStep, pnpmStoreEnv, readOnlyBinaryCaches } from './workspace-ci.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox(auditCaches({
   name: 'iOS landing screenshots',
   on: { workflow_dispatch: {} },
   permissions: { contents: 'read' },
@@ -74,4 +75,4 @@ nix develop .#web -c nix shell nixpkgs#cocoapods -c apps/ios/scripts/landing-scr
       ],
     },
   },
-}, { capture: 'One-off screenshot capture uses read-only upstream Nix caches only; no build cache is uploaded.' })))
+}, { capture: 'One-off screenshot capture uses read-only upstream Nix caches only; no build cache is uploaded.' }))))

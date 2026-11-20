@@ -1,3 +1,4 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { auditCaches } from './cache-audit.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore } from './build-snapshot.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
@@ -93,7 +94,7 @@ const requestEnv = {
 
 // Only the two status jobs hold `statuses: write`, and neither checks out the requested commit:
 // the suite job runs that commit's code with a read-only token.
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox(auditCaches({
   name: 'burst',
   'run-name': 'burst ${{ inputs.suite }} ${{ inputs.sha }} ${{ inputs.request }}',
   on: {
@@ -177,4 +178,4 @@ ${postStatus('$state', 'exit=${EXIT:-none} request=$REQUEST')}`,
 }, {
   pending: 'Validates the request and posts a commit status without a checkout.',
   report: 'Posts the final commit status without a checkout.',
-})))
+}))))

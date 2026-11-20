@@ -1,10 +1,12 @@
+import { plainLinuxRunner } from './workspace-ci.ts'
+
 // Optional execution-only lane: no required-check or reusable-evidence registration.
 const swiftImage = 'swift:6.0.3-jammy@sha256:95f6ef898992dc840b35517e780f6f6db9661432775ab0b33cc0a531ea749bdb'
 
 export const swiftClientJobs = {
   'swift-client-changes': {
     name: 'swift-client-changes',
-    'runs-on': 'ubuntu-latest',
+    'runs-on': plainLinuxRunner,
     'timeout-minutes': 5,
     permissions: { contents: 'read' },
     outputs: { relevant: '${{ steps.detect.outputs.relevant }}' },
@@ -50,7 +52,7 @@ PY`,
     name: 'swift-client',
     needs: ['swift-client-changes'],
     if: "${{ !cancelled() && needs.swift-client-changes.result == 'success' && needs.swift-client-changes.outputs.relevant == 'true' }}",
-    'runs-on': 'ubuntu-latest',
+    'runs-on': plainLinuxRunner,
     'timeout-minutes': 15,
     permissions: { contents: 'read' },
     steps: [

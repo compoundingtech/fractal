@@ -9,7 +9,7 @@ attempt to pass `linux-test-build`, `linux-clippy` and `linux-fleet-compat`. It 
 borrows PR or merge-group results and does not launch a second copy of the proof graph.
 Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
 lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
-Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
+Genie, TypeScript and web cache warmers use the owned Linux roles. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI and both
 public-content guards. Public checks retain each main push in its own run group;
 only pull-request events cancel in-progress runs. Main upkeep retains each landed source
@@ -34,7 +34,7 @@ signed freshness evidence runs the same commands through `scripts/ci-genie-fresh
 
 ### Swift client execution
 
-`swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
+`swift-client` is an optional, path-filtered Workspace CI lane on the owned Linux roles.
 It compiles and tests `clients/swift/FractalClient` with the digest-pinned official
 Swift 6.0.3 image because the repository's Nix Swift package is 5.10.1, below the
 package's Swift tools 6.0 requirement. `scripts/ci-swift-client` mounts the checkout
@@ -43,7 +43,7 @@ The lane uses the ordinary Workspace CI events and ready-PR admission.
 Changes to Swift clients, Swift templates, codegen sources, shared client fixtures,
 or the lane definition select execution; manual dispatch always selects it.
 It does not register a required context or sign/consume reusable evidence:
-its result is hosted execution proof only, not a replacement for a merge gate.
+its result is execution proof only, not a replacement for a merge gate.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
@@ -55,8 +55,10 @@ The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
 
-Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
-TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
+Every **ready, same-repository** pull request gets the Linux gate, the freshness check,
+TypeScript client check and web lane. Fork PRs allocate no runners, including on
+`pull_request_target`; `workflow_run` observers also require a same-repository origin.
+Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
@@ -70,7 +72,7 @@ cancellation, and never checks out PR code or downloads its artifacts. Ready PRs
 merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
 The observer runs on the existing owned priority role, independently of the hosted
 queue it drains. Its inline payload is generated from main, never from the triggering
-PR; even fork-triggered admission only reads metadata and exposes no new secret.
+PR. Fork-triggered observers are excluded before job allocation.
 It qualifies Python 3.10+ before executing the unchanged cancellation helper.
 Cancellation is asynchronous: the request summary is not terminal cancellation proof,
 and scheduling can start a legacy job before the observer runs. The one-day observation
@@ -84,6 +86,16 @@ GitHub treats draft-phase skipped required contexts as satisfied. The merge-grou
 all required checks and applies the exact-source evidence policy regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
 old draft event and stays skipped; use the ready transition or a new push for fresh checks.
+
+Job guards do not protect against fork-controlled YAML: a fork can remove a guard.
+Before enabling these routes, CI Manager / the repository owner must configure
+runner-group or repository restrictions to disallow public-repository fork PRs on
+self-hosted runners, and require approval for outside-collaborator workflow runs.
+This workflow change does not modify those settings. Keep the migration draft
+until the settings prerequisite is confirmed. A reviewed external contribution
+must enter an authorized same-repository PR and pass the real required checks;
+do not dispatch its fork head onto the fleet or manufacture passing checks.
+
  `Workspace CI` also runs on the `merge_group` event, so GitHub's merge queue receives
 the required checks for each queued entry.
 Checkout uses GitHub's default `pull_request` merge ref, not the contributor's unmerged
@@ -117,23 +129,19 @@ gate explicitly permits to skip; failure, cancellation or an unexplained skip fa
 the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
 the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
-The four required Workspace gates (`linux-gate`, `typescript-client`, `fractal-web`,
-`genie-freshness`) and supporting controls (`upgrade-impact` and web change detection)
-use the existing `ci1-priority` owned role only for `merge_group` and protected-main
-`push` events. Their labels do not depend on picker output. PRs and manual runs
-retain GitHub-hosted `ubuntu-latest` for these jobs.
-Genie and TypeScript retain their existing Nix setup and commands; TypeScript's
-Node setup is already explicit. The moved web aggregator installs pinned Node
-on owned runners only when uncovered relevant receipts need validation.
-CI-script tests, Home Manager evaluation and real web execution retain their existing
-hosted placement. The picker, eight evidence gates and compatibility archive producers
-instead use the same ephemeral `nscloud-ubuntu-24.04-amd64-8x16-with-features` shape
-as required PR stages,
-at priority 1 for merge groups and 2 otherwise. None depends on picker output.
-These are the complete prerequisite paths for the fast-lane required checks
-`linux-test-build`, `linux-clippy` and `linux-fleet-compat`; unrelated hosted jobs,
-including source retention, cannot delay their admission. Fork source is not moved
-onto persistent owned runners. Queue watchers remain independently hosted.
+Plain Linux metadata, receipt gates, compatibility archive preparation, Swift
+execution and aggregators use only `ci1-priority` for merge groups/main pushes,
+and `ci1` otherwise. The route is independent of picker output and has no hosted
+or Namespace fallback. This includes `upgrade-impact`, web change detection,
+`linux-gate`, `fractal-web`, Home Manager evaluation and source retention.
+Receipt verification and its existing skip/refusal semantics are unchanged here.
+
+Secret-bearing Genie/TypeScript validation, CI-script tests, real web execution
+and publishers retain their existing placement until the protected post-merge
+mission cutover. The credentialed picker retains the independently provisioned
+prerequisite shape introduced in #6917; this change does not alter that shared
+shape or its token. Queue watchers with write authority remain separate.
+Namespace eligibility is undecided; no additional job is routed there.
 
 Workspace main-push concurrency is grouped by workflow and branch with cancellation
 of running work disabled. GitHub retains the running run and only its newest pending
@@ -146,15 +154,16 @@ Rust jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common
 `ci1-merge` role. An overflowed group uses the Namespace 8x16 shape for build/test
 stages. Both label forms retain priority 1 and the same run affinity; every consumer
 still uses its own exact-source producer archive.
-A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
+An independently provisioned picker reads the common group3 role census; unavailable metadata retains the
 existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
 Merge overflow is enabled by default. `CI_MERGE_OVERFLOW=off` restores the owned-only admission policy. A positive complete runner census below the admission minimum selects Namespace; missing or malformed runner metadata retains the owned role.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
-uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
-installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
-use GitHub-hosted Ubuntu. Operations found no owned macOS runner, so Mac placement is explicitly
-hosted rather than a claim of owned Mac capacity. Release jobs no longer need Namespace outside
-PR validation. Linux release jobs put the flake-pinned C compiler on PATH before installer tests
+retains its existing Namespace priority 2 route for same-repository PRs. Fork PRs are excluded.
+Native Mac releases and installer checks retain GitHub-hosted `macos-15` (ARM64)
+pending the separate Darwin migration. The Linux installer case and assembly use
+owned roles, retaining their check names and matrix values. Publishers remain
+hosted pending the protected post-merge cutover.
+Linux release jobs put the flake-pinned C compiler on PATH before installer tests
 and Cargo: self-hosted runners do not inherit Ubuntu's host toolchain. Target linking
 still uses the pinned Zig/glibc-baseline wrapper. The `main` release concurrency group
 preserves an active run, including a build waiting for a runner. New pushes replace
@@ -164,9 +173,9 @@ identities remain intact. A cancelled pending run is not evidence of active-run
 cancellation; the run-level concurrency state distinguishes them. Required PR checks
 use priority 2, including the required `bundled-sqlite-packages` package-link check;
 that check retains priority 1 for merge groups. Optional benchmarks, main upkeep
-and manual Workspace work use priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
-and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
-existing artifacts and need no build runner. Priorities order waiting jobs, without
+and manual Workspace work use priority 3. Release workflow PR validation uses priority 2.
+Tag and daily publishing retain GitHub-hosted `ubuntu-latest` pending their protected-lane
+cutover; assembly uses owned roles. Priorities order waiting jobs, without
 preempting active jobs or reserving capacity. PR picking, Namespace shapes/affinity, tests
 and required checks are retained. Already queued runs retain
 the labels from their workflow revision.

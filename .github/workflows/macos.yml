@@ -26,8 +26,8 @@ concurrency:
 jobs:
   fractal-mac-changes:
     name: fractal-mac-changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
-    runs-on: ubuntu-latest
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 5
     outputs:
       relevant: ${{ steps.detect.outputs.relevant }}
@@ -73,7 +73,7 @@ jobs:
   fractal-mac:
     name: fractal-mac
     needs: [fractal-mac-changes]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true') }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true') }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 20
     defaults:
@@ -97,7 +97,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   ios-rust-toolchain-cache:
     name: Publish iOS Rust toolchain cache
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'compoundingtech' && github.event.repository.fork == false
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name == 'push') && (github.ref == 'refs/heads/main') && (github.repository_owner == 'compoundingtech') && (github.event.repository.fork == false) }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 60
     permissions:
@@ -162,7 +162,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   macos-ci:
     name: macos-ci
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 120
     defaults:
@@ -377,11 +377,7 @@ jobs:
     needs: [compat-archives-aarch64-apple-darwin]
   compat-archives-aarch64-apple-darwin:
     name: Prepare verified compatibility archives (aarch64-apple-darwin)
-    runs-on:
-      [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
-        "namespace-features:github.run-id=${{ github.run_id }}",
-      ]
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -429,4 +425,4 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}

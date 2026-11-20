@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise fractal-web change detection, its fail-closed paths, the gate and the generated jobs."""
 
+import ast
 import os
 import json
 from pathlib import Path
@@ -449,7 +450,11 @@ for event in ("pull_request", "merge_group", "push"):
     for skip in ("true", "false"):
         actual = []
         for condition in conditions:
-            text = condition.removeprefix('"').removesuffix('"').replace("${{", "").replace("}}", "")
+            text = ast.literal_eval(condition) if condition.startswith(('"', "'")) else condition
+            text = text.replace("${{", "").replace("}}", "")
+            text = text.replace("github.event.pull_request.head.repo.full_name", "'compoundingtech/fractal'")
+            text = text.replace("github.event.workflow_run.head_repository.full_name", "'compoundingtech/fractal'")
+            text = text.replace("github.repository", "'compoundingtech/fractal'")
             text = text.replace("github.event_name", repr(event)).replace("!cancelled()", "True")
             text = text.replace("github.event.pull_request.draft", "False").replace("success()", "True")
             text = re.sub(r"(?<!['\w])false(?!['\w])", "False", text)
@@ -469,8 +474,8 @@ for block in (changes, gate_job):
     labels = block.split("    runs-on:", 1)[1].split("    timeout-minutes:", 1)[0]
     assert "github.event_name == 'merge_group'" in labels
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in labels
-    assert '["ci1-priority"]' in labels and '["ubuntu-latest"]' in labels
-    assert "needs." not in labels and "namespace-" not in labels
+    assert '["ci1-priority"]' in labels and '["ci1"]' in labels
+    assert "needs." not in labels and "namespace-" not in labels and "ubuntu-" not in labels
 assert "runs-on: ubuntu-latest" in execution, "retain the web performance environment"
 assert "uses: actions/setup-node@v4" in gate_job, "owned receipt validators need an explicit Node runtime"
 assert "runner.environment == 'self-hosted'" in gate_job and "node-version: 24.18.0" in gate_job
@@ -516,7 +521,7 @@ required = [check["context"] for ruleset in json.loads(settings)["rulesets"] if 
             for rule in ruleset["rules"] if rule["type"] == "required_status_checks"
             for check in rule["parameters"]["required_status_checks"]]
 assert "fractal-web" in required, "fractal-web is a required check on main"
-print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
+print("passed: generated jobs are unfiltered, bounded and fail closed; plain web controls use ci1, execution stays hosted")
 
 client = blocks["typescript-client"]
 assert "nix develop '.#web' -c pnpm install --frozen-lockfile" in client

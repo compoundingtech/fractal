@@ -2229,6 +2229,22 @@ class HistoryFetch(unittest.TestCase):
 class WorkflowStructure(unittest.TestCase):
     """The loops factory named, checked on the workflow files themselves."""
 
+    FORK_GUARD = ("((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || "
+                  "github.event.pull_request.head.repo.full_name == github.repository) && "
+                  "(github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)")
+
+    def inner_job_condition(self, condition):
+        """Assert and remove exactly the outer admission conjunction, preserving the draft/inner predicates."""
+        prefix = '${{ ' + self.FORK_GUARD + ' && '
+        self.assertTrue(condition.startswith(prefix), condition)
+        self.assertTrue(condition.endswith(' }}'), condition)
+        return condition[len(prefix):-3]
+
+    def test_every_fleet_job_preserves_the_outer_fork_admission_guard(self):
+        for name, block in self.blocks().items():
+            with self.subTest(job=name):
+                self.inner_job_condition(self.job_condition(block))
+
     def test_no_workflow_has_an_unfiltered_push_trigger_so_a_notes_push_starts_nothing(self):
         for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
             text = path.read_text()
@@ -2348,7 +2364,7 @@ class WorkflowStructure(unittest.TestCase):
 
     @staticmethod
     def truth(expression, gates, event, refused=()):
-        """Evaluate a generated job or step condition for the given gate decisions and event (and gates that refused)."""
+        """Evaluate gate predicates with same-repository PR and workflow-run identities and a ready PR."""
         expression = expression.strip()
         if expression.startswith('"'):
             expression = json.loads(expression)
@@ -2359,6 +2375,9 @@ class WorkflowStructure(unittest.TestCase):
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip != 'true'", str(not value))
         for gate in ('linux-gate', 'rust-tests', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.refuse == 'true'", str(gate in refused))
+        for identity in ('github.event.pull_request.head.repo.full_name',
+                         'github.event.workflow_run.head_repository.full_name', 'github.repository'):
+            expression = expression.replace(identity, repr('example/repo'))
         expression = expression.replace("github.event_name != 'pull_request' || github.event.pull_request.draft == false", 'True')
         expression = expression.replace('!cancelled()', 'True')
         expression = expression.replace("github.event_name == 'merge_group'", str(event == 'merge_group'))
@@ -2845,6 +2864,7 @@ class WorkflowStructure(unittest.TestCase):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         condition = re.search(r'^    if: (.*)$', job, re.M).group(1)
+        condition = self.inner_job_condition(condition)
         # Other conjuncts (the draft filter) may be added around it; this one must stay whole. A pull request gets the
         # key only from this repository (unit A3); a fork, whose head repository differs, never does.
         self.assertIn("(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && "

@@ -17,7 +17,7 @@ concurrency:
 jobs:
   signed-tree:
     name: signed-tree
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ci1"]') }}
     timeout-minutes: 5
     continue-on-error: true
     defaults:
@@ -41,3 +41,4 @@ jobs:
         env:
           CACHE_REASON: Reads git objects and notes only; builds nothing and restores no cache.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) && (success()) }}

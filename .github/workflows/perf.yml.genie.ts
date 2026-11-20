@@ -1,9 +1,10 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { perfLoadJobs } from './perf-load.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
-import { linuxRunner, linuxStageRunner, performanceRunner } from './workspace-ci.ts'
+import { linuxRunner, linuxStageRunner, performanceRunner, plainLinuxRunner } from './workspace-ci.ts'
 
 // Ignore unrelated label events before either the scope job or the load job starts.
 // Give those events separate concurrency groups so they cannot cancel or replace PR work.
@@ -15,7 +16,7 @@ const admitted = `!cancelled() && (${relevantEvent}) && (needs.scope.result != '
 // (daily-long.yml, docs/ci.md), from the same definitions (perf-load.ts). Main's daily runs seed the
 // durable snapshots and real baseline reports a dispatched run compares with; Performance always stays
 // on Namespace. Pushes to main no longer start it: newer pushes cancelled nearly every run.
-export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
+export default githubWorkflow(withoutForkPRJobs(scopeLinuxNixSandbox(readyPRJobs({
   name: 'Performance',
   on: {
     workflow_dispatch: {},
@@ -34,7 +35,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
     scope: {
       name: 'Performance scope',
       if: relevantEvent,
-      'runs-on': 'ubuntu-latest',
+      'runs-on': plainLinuxRunner,
       'timeout-minutes': 5,
       permissions: { contents: 'read', 'pull-requests': 'read' },
       outputs: { run: '${{ steps.scope.outputs.run }}' },
@@ -64,4 +65,4 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
       ...perfLoadJobs['perf-load-hog-macos'],
     },
   },
-})))
+}))))

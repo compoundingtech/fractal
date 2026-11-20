@@ -1,7 +1,8 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { auditCaches } from './cache-audit.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Namespace usage',
   on: { schedule: [{ cron: '5 3 * * *' }], workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
@@ -20,4 +21,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, { usage: 'Queries GitHub job metadata without builds or caches.' }))
+}, { usage: 'Queries GitHub job metadata without builds or caches.' })))

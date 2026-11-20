@@ -1,8 +1,9 @@
+import { withoutForkPRJobs } from './ready-pr.ts'
 import { auditCaches } from './cache-audit.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // A capacity observation needs one authenticated Namespace runner, without a workspace build.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withoutForkPRJobs(auditCaches({
   name: 'Namespace capacity',
   on: { workflow_dispatch: {}, schedule: [{ cron: '17 * * * *' }] },
   permissions: { contents: 'read' },
@@ -36,4 +37,4 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       ],
     },
   },
-}, { 'namespace-capacity': 'Reads Namespace concurrency without builds or caches.' }))
+}, { 'namespace-capacity': 'Reads Namespace concurrency without builds or caches.' })))

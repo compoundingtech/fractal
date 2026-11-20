@@ -231,9 +231,14 @@ class Rule1SigningEvents(Fixture):
         condition = re.search(r'^    if: (.*)$', job, re.M).group(1)
         self.assertIn("!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || "
                       "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))", condition)
-        # The only mention of a pull request is the generator's draft guard, which never admits one on its own.
-        self.assertEqual(condition.replace("(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ", '').count('pull_request'), 0)
-        for event in ('pull_request', 'merge_group', 'push', 'workflow_dispatch', 'schedule'):
+        # Assert the outer admission guard separately, then check that neither it nor the draft guard
+        # hides a pull-request signing branch in the job's own predicate.
+        prefix = '${{ ' + FORK_GUARD + ' && '
+        self.assertTrue(condition.startswith(prefix), condition)
+        self.assertTrue(condition.endswith(' }}'), condition)
+        inner = condition[len(prefix):-3]
+        self.assertEqual(inner.replace("(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ", '').count('pull_request'), 0)
+        for event in ('pull_request', 'pull_request_target', 'workflow_run', 'merge_group', 'push', 'workflow_dispatch', 'schedule'):
             for ref in ('refs/heads/main', 'refs/pull/1/merge', 'refs/heads/gh-readonly-queue/main/x'):
                 self.assertEqual(evaluate(condition, event, ref), event in ('merge_group', 'push', 'workflow_dispatch') and
                                  (event == 'merge_group' or ref == 'refs/heads/main'), (event, ref))
@@ -580,11 +585,20 @@ def step_chunk(block, name):
     raise AssertionError(f'no step {name!r}')
 
 
+FORK_GUARD = ("((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || "
+              "github.event.pull_request.head.repo.full_name == github.repository) && "
+              "(github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)")
+
+
 def evaluate(expression, event, ref):
-    """A generated condition over the event and ref only (always(), !cancelled() and the draft flag read as true)."""
+    """Evaluate a ready, same-repository event (including PR head and workflow-run origin identities)."""
     text = expression.strip()
     if text.startswith('${{'):
         text = text[3:-2].strip()
+    for identity in ('github.event.pull_request.head.repo.full_name',
+                     'github.event.workflow_run.head_repository.full_name', 'github.repository'):
+        text = text.replace(identity, repr('org/repo'))
+    text = text.replace("'org/repo' == 'org/repo'", 'True')
     text = text.replace('github.event.pull_request.draft == false', 'True').replace('!cancelled()', 'True').replace('always()', 'True')
     text = re.sub(r"github\.event_name (==|!=) '([a-z_]+)'", lambda m: str((event == m.group(2)) == (m.group(1) == '==')), text)
     text = re.sub(r"github\.ref == '([^']+)'", lambda m: str(ref == m.group(1)), text)

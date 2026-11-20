@@ -18,11 +18,15 @@ export const releaseMacosRunnerProfile = `namespace-profile-macos-arm64;job.prio
 export const releaseLinuxRunner = "${{ fromJSON(needs['pick-runner'].outputs.ci1 || '[\"ci1-priority\"]') }}"
 export const macosRunnerProfile = 'namespace-profile-macos-arm64'
 export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
-/** Required gates and tiny controls use existing owned capacity only after trusted queue admission.
- * Every PR (including same-repository PRs), manual run and non-main push stays hosted.
- * Never use this for the picker or watchdog: both must remain independent of that pool.
+/** Legacy control placement remains for secret-bearing validation until its protected-lane cutover.
+ * Plain jobs use plainLinuxRunner instead; do not move signing credentials with their compute.
  */
 export const controlLinuxRunner = "${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '[\"ci1-priority\"]' || '[\"ubuntu-latest\"]') }}"
+
+/** Plain Linux work uses only existing owned roles, independently of the credentialed picker.
+ * Namespace eligibility is undecided; this route has no hosted or Namespace fallback.
+ */
+export const plainLinuxRunner = "${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '[\"ci1-priority\"]' || '[\"ci1\"]') }}"
 
 /**
  * The Linux gate's stage jobs. On 2026-10-03 the shape label `nscloud-ubuntu-24.04-amd64-16x32`
@@ -947,15 +951,13 @@ export const fractalWebNoteEnv = {
   APP_TEST_SET: appTestSetExpression,
 } as const
 
-/**
- * Path-sensitive web control jobs use owned capacity only for trusted queue/main
- * events; every PR stays hosted. Neither control depends on the runner picker.
- * Execution retains its hosted performance environment.
+/** Path-sensitive web controls use the owned roles without depending on the picker.
+ * The signing execution job keeps its existing placement until the protected-lane cutover.
  */
 export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
-    'runs-on': controlLinuxRunner,
+    'runs-on': plainLinuxRunner,
     // The job budget includes runner setup and teardown, not just the detection steps.
     'timeout-minutes': 3,
     permissions: { contents: 'read' },
@@ -1065,7 +1067,7 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     // Explicit trusted evidence covers PR and merge-group trees; all other relevant runs
     // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
-    'runs-on': controlLinuxRunner,
+    'runs-on': plainLinuxRunner,
     // The job budget includes runner setup and teardown, not just the gate steps.
     'timeout-minutes': 3,
     permissions: { contents: 'read' },
