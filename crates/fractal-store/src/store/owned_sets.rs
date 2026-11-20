@@ -1477,7 +1477,7 @@ pub fn plan_tx(
         || !input.resource_refreshes.is_empty()
         || !input.replica_repairs.is_empty()
         || input.subjects.values().any(|s| {
-            (!matches!(s.kind.as_str(), "agent" | "schedule" | "subscription")
+            (!matches!(s.kind.as_str(), "agent" | "schedule" | "subscription" | "objective" | "github-source" | "github-scope")
                 && !(s.kind == "resource" && crate::graph::declared_uri(&s.desired).is_some())
                 && task_parent(s).is_none_or(|parent| {
                     input.subjects.get(parent).is_none_or(|p| p.kind != "agent")
@@ -1488,7 +1488,7 @@ pub fn plan_tx(
     {
         return Err(FractalError::new(
             "unsupported-set-member",
-            "owned sets manage top-level agents with their exec and pty tasks, missions, schedules and subscriptions only",
+            "owned sets manage top-level agents with their exec and pty tasks, missions, schedules, subscriptions, objectives, GitHub sources and GitHub scopes only",
         ));
     }
     let old = selected(transaction, None)?
@@ -1551,6 +1551,13 @@ pub fn plan_tx(
                 .chain(view.receipt.retired.values())
                 .any(|m| matches!(m.kind.as_str(), "exec" | "pty"))
         });
+    // Older daemons reject receipts carrying these declaration-only roots, including retirement.
+    let native_roots = input.subjects.values().any(|s| {
+        matches!(s.kind.as_str(), "objective" | "github-source" | "github-scope")
+    }) || old.as_ref().is_some_and(|view| {
+        view.receipt.members.values().chain(view.receipt.retired.values())
+            .any(|m| matches!(m.kind.as_str(), "objective" | "github-source" | "github-scope"))
+    });
     // Older daemons drop revisions carrying a policy (the receipt hash covers it) or
     // subscription members, and ignore debt.
     let source_enforcement = policy.is_some()
@@ -1585,6 +1592,12 @@ pub fn plan_tx(
         }
         if manual_seats && !advertised("seat_rollout_manual")? {
             blockers.push(format!("host/{} has not advertised manual seat-rollout support; upgrade before activation", member.name));
+        }
+        if native_roots && !advertised("owned_set_native_roots")? {
+            blockers.push(format!(
+                "host/{} has not advertised owned-set native root support; upgrade before activation",
+                member.name
+            ));
         }
         if tasks && !advertised("owned_set_tasks")? {
             blockers.push(format!(
@@ -1714,6 +1727,8 @@ pub fn plan_tx(
                 "update future occurrences; retain created runs".to_owned()
             } else if s.starts_with("subscription/") {
                 "update deliveries; retain delivered messages".to_owned()
+            } else if s.starts_with("objective/") || s.starts_with("github-source/") || s.starts_with("github-scope/") {
+                "update declaration; retain historical facts and acquisition authority".to_owned()
             } else if let Some(prior) = existing {
                 let old_subject = claim(transaction, &prior.claim, None)?
                     .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok());
@@ -1862,6 +1877,8 @@ pub fn plan_tx(
                         "stop future occurrences; retain runs"
                     } else if m.kind == "subscription" {
                         "stop deliveries; retain delivered messages"
+                    } else if matches!(m.kind.as_str(), "objective" | "github-source" | "github-scope") {
+                        "retire declaration; retain historical facts and acquisition authority"
                     } else {
                         if manual {
                             "publish retirement; rollout pending (manual)"
@@ -2284,7 +2301,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), FractalE
         ));
     }
     for (s, m) in revision.members.iter().chain(&revision.retired) {
-        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule" | "subscription" | "exec" | "pty")
+        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule" | "subscription" | "exec" | "pty" | "objective" | "github-source" | "github-scope")
             || !s.starts_with(&format!("{}/", m.kind))
             || m.claim.is_empty()
             || m.revision.is_empty()
