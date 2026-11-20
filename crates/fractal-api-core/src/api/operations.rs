@@ -138,7 +138,7 @@ pub async fn doctor(
 }
 
 /// Doctor presents the same native evaluations as the SLO list, including declared objectives.
-/// Tone is already evaluated by the daemon; this adapter only translates diagnostic severity.
+/// Tone is already evaluated by the daemon; this adapter renders it informationally only.
 fn native_slo_checks(rows: &[Value]) -> impl Iterator<Item = DoctorCheck> + '_ {
     rows.iter().map(|row| DoctorCheck {
         name: format!("slo/{}", row["id"].as_str().unwrap_or_default()),
@@ -146,8 +146,9 @@ fn native_slo_checks(rows: &[Value]) -> impl Iterator<Item = DoctorCheck> + '_ {
         // informational: pass is reserved for checks, so unknown stays distinct from success.
         status: "info".into(),
         message: format!(
-            "{}; {}; target {}; {}",
+            "{} ({}); {}; target {}; {}",
             row["status"].as_str().unwrap_or("no-data"),
+            row["tone"].as_str().unwrap_or("unknown tone"),
             row["current"].as_str().unwrap_or_default(),
             row["target"].as_str().unwrap_or_default(),
             row["window"].as_str().unwrap_or_default(),
@@ -162,27 +163,30 @@ mod native_slo_doctor_tests {
     #[test]
     fn doctor_preserves_every_native_row_and_its_evaluation_without_gating() {
         let rows = [
-            ("agents/mail-delivery", "missed", "red"),
-            ("build/admission", "met", "green"),
-            ("cpu/idle", "no-data", "quiet"),
-            ("example/merge-latency/p50", "at-risk", "yellow"),
-            ("ios-live-share", "missed", "red"),
-            ("database-archive", "not-eligible", "quiet"),
-            ("fleet/roll-completion", "no-data", "quiet"),
+            ("agents/mail-delivery", "missed", "red", "objective"),
+            ("build/admission", "met", "green", "objective"),
+            ("cpu/idle", "no-data", "quiet", "objective"),
+            ("example/merge-latency/p50", "at-risk", "yellow", "objective"),
+            ("ios-live-share", "missed", "red", "objective"),
+            ("database-archive", "not-eligible", "quiet", "objective"),
+            ("fleet/roll-completion", "no-data", "quiet", "objective"),
+            // A budget met on status can still be red by tone: most of its allowance is spent.
+            ("CAM-R01/anthropic", "met", "red", "budget"),
         ];
-        let native = rows.iter().map(|(id, status, tone)| json!({
-            "id": id, "kind": "objective", "status": status, "tone": tone,
+        let native = rows.iter().map(|(id, status, tone, kind)| json!({
+            "id": id, "kind": kind, "status": status, "tone": tone,
             // Deliberately do not imply the verdict from these display strings.
             "current": "native reading", "target": "native target", "window": "30d"
         })).collect::<Vec<_>>();
         let checks = native_slo_checks(&native).collect::<Vec<_>>();
         assert_eq!(checks.len(), rows.len());
-        for (check, (id, verdict, tone)) in checks.iter().zip(rows) {
+        for (check, (id, verdict, tone, _)) in checks.iter().zip(rows) {
             assert_eq!(check.name, format!("slo/{id}"));
             // SLO verdicts describe; a red or quiet objective never fails `--strict`.
             assert_eq!(check.status, "info", "{id} ({tone}) must not gate strict diagnostics");
             assert_ne!(check.status, "pass", "{id}: an SLO row is never a successful check");
-            assert_eq!(check.message, format!("{verdict}; native reading; target native target; 30d"));
+            // The served tone stays visible even when it disagrees with the status word.
+            assert_eq!(check.message, format!("{verdict} ({tone}); native reading; target native target; 30d"));
         }
         assert!(!checks.iter().any(|check| check.status == "fail" || check.status == "warn"));
     }
