@@ -18,6 +18,37 @@ pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationTex
     Ok(MissionDeclarationText { text: document.to_string(), legacy: has_legacy_loop_shapes(mission) })
 }
 
+fn escalation_node(value: &crate::model::EscalationOverride) -> Option<KdlNode> {
+    use crate::model::{EscalationClock, EscalationAction, EscalationOverride};
+    let policies = match value {
+        EscalationOverride::Inherit => return None,
+        EscalationOverride::Disable => {
+            let mut root = node("escalation", []);
+            root.push(kdl::KdlEntry::new_prop("disabled", true));
+            return Some(root);
+        }
+        EscalationOverride::Replace { policies } => policies,
+    };
+    Some(block(node("escalation", []), policies.iter().map(|policy| {
+        let mut root = text("policy", &policy.id);
+        property(&mut root, "state", policy.state.as_str());
+        property(&mut root, "clock", match policy.clock {
+            EscalationClock::SinceProgress => "since-progress",
+            EscalationClock::SinceEntered => "since-entered",
+        });
+        block(root, policy.stages.iter().map(|stage| {
+            let delay = [(86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s"), (1, "ms")]
+                .into_iter().find(|(unit, _)| stage.after_ms % unit == 0).unwrap();
+            let mut stage_node = text("stage", &format!("{}{}", stage.after_ms / delay.0, delay.1));
+            match &stage.action {
+                EscalationAction::Notify(to) => property(&mut stage_node, "notify", to.as_str()),
+                EscalationAction::Ask(to) => property(&mut stage_node, "ask", to.as_str()),
+            }
+            stage_node
+        }).collect())
+    }).collect()))
+}
+
 fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     let mut root = text("mission", &mission.id);
     property(&mut root, "state", match mission.state { MissionState::Draft => "draft", MissionState::Ready => "ready", MissionState::Retired => "retired" });
@@ -36,7 +67,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
 
 fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
-    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, authority, inputs,
+    let MissionSpec { id: _, subject: _, state: _, revision: _, escalation, system, resources, authority, inputs,
         max_active_runs, timeout_ms: _, target_at: _, milestones, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
@@ -45,6 +76,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     let goals = if parent.is_some() { goals.get(1..).ok_or_else(||
         FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
     for milestone in milestones {
         let mut item = text("milestone", &milestone.id);
         property(&mut item, "at", milestone.at.as_str());
@@ -135,7 +167,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
 }
 
 fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
-    let StepSpec { id, path: _, fresh_context, keep_open, queue: _, queue_position: _, title,
+    let StepSpec { id, path: _, escalation, fresh_context, keep_open, queue: _, queue_position: _, title,
         goals, constraints, agent_constraints, timeout_ms, capacity, resource_lane, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,
         baselines, documents, declarations_kdl, products, produces_mission, uses_mission, after_run,
@@ -147,6 +179,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         comment(&mut root, "display-only resource lane: embedded exec redacted; this step is not republishable source");
     }
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
     }
