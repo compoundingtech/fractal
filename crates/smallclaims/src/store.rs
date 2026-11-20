@@ -524,6 +524,11 @@ WHERE kind='transport.observed';"
 /// Shared by startup and the offline owner-index preparation command.
 pub const TRANSPORT_PAIR_INDEX: &str = transport_pair_index!();
 
+/// Retained WAL capacity after a reset, not a bound on uncheckpointed writes.
+/// Observed high-water files reached 6–10 GB. Keep 512 MiB for burst reuse (half
+/// the 1 GiB restart-escalation threshold), without retaining those peaks forever.
+pub const WAL_JOURNAL_SIZE_LIMIT: i64 = 512 * 1024 * 1024;
+
 macro_rules! core_schema {
     ($begin:literal, $end:literal) => {
         concat!(r#"
@@ -1262,6 +1267,8 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
+        // Connection-local: apply on every open, including existing and admitted stores.
+        connection.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT)?;
         let path = if readers.is_admitted() {
             path
         } else {
