@@ -146,6 +146,9 @@ pub struct Config {
     /// when it differs from the default.
     #[serde(skip_serializing_if = "TrimConfig::is_default")]
     pub trim: TrimConfig,
+    /// How this member keeps its own store. Defaults unless set.
+    #[serde(skip_serializing_if = "StoreConfig::is_default")]
+    pub store: StoreConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -398,6 +401,34 @@ impl TrimConfig {
         );
         anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
+    }
+}
+
+/// `[store]`: `valid_record_delete_after` is how long after this member first runs a build that
+/// keeps no valid replica record it starts deleting the ones it holds, as a number followed by
+/// `s`, `m`, `h` or `d` (`3d` unless set). Until then a rollback to the previous release finds
+/// every record it reads; the first deletion moves the store to a storage version that release
+/// refuses, so lengthen it to keep that rollback open longer.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_record_delete_after: Option<String>,
+}
+
+impl StoreConfig {
+    pub const DEFAULT_VALID_RECORD_DELETE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// How long after this member first runs the build it starts deleting valid records.
+    pub fn valid_record_delete_after_ms(&self) -> Result<u64> {
+        self.valid_record_delete_after.as_deref().map_or(
+            Ok(Self::DEFAULT_VALID_RECORD_DELETE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.valid_record_delete_after"),
+        )
     }
 }
 
@@ -966,6 +997,7 @@ impl Default for Config {
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
+            store: StoreConfig::default(),
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
@@ -1291,6 +1323,7 @@ impl Config {
         }
         self.limits.validate()?;
         self.trim.validate()?;
+        self.store.valid_record_delete_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")

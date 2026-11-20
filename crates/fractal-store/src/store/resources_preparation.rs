@@ -190,7 +190,7 @@ fn capture_work(connection: &Connection) -> Result<()> {
 // Canonical position and repair-membership tables are installed after runtime DDL.
 // Install their dependent triggers in the open transaction, before replay or writes.
 fn create_tracking_triggers(connection: &Connection) -> Result<()> {
-    use smallclaims::store::record_bytes::{replaced_update_trigger, update_event};
+    use smallclaims::store::record_bytes::{RECORD_DELETE_MATTERS, replace_if_changed, replaced_update_trigger, update_event};
     let relevant = RELEVANT;
     // Keep notifications body-free. An unchanged canonical key (for example sealing a local
     // batch) is discarded at flush rather than needlessly refolding that subject's history.
@@ -206,13 +206,21 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
             } else {
                 (event.to_owned(), "")
             };
-            connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-h644b8879386d owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event}{suffix} AFTER {clause} ON {table} BEGIN
+            // A valid record's deletion changes no claim (`record_bytes`).
+            let when = if table == "replica_records" && event == "DELETE" {
+                format!(" WHEN {RECORD_DELETE_MATTERS}")
+            } else {
+                String::new()
+            };
+            let sql = format!(
+                /* sqlite-large-value: allow-for-now lv-hf0878f8059c5 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event}{suffix} AFTER {clause} ON {table}{when} BEGIN
                  INSERT INTO local_resource_preparation_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL
                  AND EXISTS (SELECT 1 FROM claims WHERE id={row}.{identity} AND {relevant})
                  AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_pending WHERE claim_id={row}.{identity}); END;"
-            ))?;
+            );
+            replace_if_changed(connection, "TRIGGER", &format!("preparation_{table}_{event}{suffix}"), &sql)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc48b9de3a658 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &sql)?;
         }
     }
     // UPDATE can move an identity as well as changing its canonical inputs.

@@ -68,6 +68,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelopes",
         "replica_records",
         "claim_positions",
+        "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",
         "retired_envelopes",

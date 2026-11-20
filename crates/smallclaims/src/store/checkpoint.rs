@@ -464,7 +464,7 @@ pub fn sealed_envelope_records_sql() -> String {
     format!(
         "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
                 records.state, records.position
-         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
          JOIN batches ON batches.id=claims.batch_id
          JOIN replica_envelopes envelopes
            ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
@@ -600,7 +600,7 @@ impl Store {
                 .prepare_cached(
                     "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
                             envelopes.accepted_at_unix_ms,
-                            (SELECT COUNT(*) FROM replica_records records
+                            (SELECT COUNT(*) FROM replica_record_rows records
                              WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
                                AND records.envelope_hash=envelopes.envelope_hash)
                      FROM replica_envelopes envelopes
