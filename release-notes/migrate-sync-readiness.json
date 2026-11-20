@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow replicated host migration during active resumable peer exchanges",
+  "replay": {"status": "none", "detail": "No replay changes. Received exchange pages remain durable and resume admission and inventory reconciliation after restart."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Host migration retains zero pending replication records, verified first sync when present, and the configured checkpoint-worker gate. It no longer requires all peer workers to report idle or backoff simultaneously. Peer phases are not a write fence; received pages commit transactionally and retries deduplicate envelopes."},
+  "compatibility": {"status": "none", "detail": "No daemon or wire upgrade required. Existing service ordering still stops replication auxiliaries before the daemon and fences state/store ownership before moving the complete store."},
+  "downtime": {"status": "none", "detail": "No additional wait or polling; existing bounded service cutover is unchanged."},
+  "manual": {"status": "none", "detail": "Retry a previously refused migrate host dry-run with the updated mover; no manual worker stop is required."},
+  "recovery": {"status": "none", "detail": "Existing readiness-based migration rollback remains available. Revert this change to restore the simultaneous peer-phase gate."}
+}

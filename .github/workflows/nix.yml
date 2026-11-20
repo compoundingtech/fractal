@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - name: Require an exact commit on main
         env:
@@ -38,7 +38,7 @@ jobs:
         run: |
           [[ "$PUBLISH_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Provide a full commit SHA"; exit 1; }
           [[ "$(git rev-parse HEAD)" == "$PUBLISH_SHA" ]] || { echo "::error::Checkout does not match the requested commit"; exit 1; }
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
           git merge-base --is-ancestor "$PUBLISH_SHA" origin/main || { echo "::error::Publication source must be an ancestor of origin/main"; exit 1; }
           printf "PUBLISH_SHA=%s\n" "$PUBLISH_SHA" >> "$GITHUB_ENV"
       - # v3.24.1
@@ -74,7 +74,11 @@ jobs:
           : "${CACHIX_AUTH_TOKEN:?Configure the repository-scoped FRACTAL_CACHIX_AUTH_TOKEN write secret}"
           output=$(readlink -f "$RUNNER_TEMP/fractal-native")
           "$(cat "$RUNNER_TEMP/cachix-path")/bin/cachix" push "$CACHE_NAME" "$output"
-          nix path-info --store "https://$CACHE_NAME.cachix.org" --recursive --json "$output" > "$RUNNER_TEMP/fractal-native-closure.json"
+          umask 077
+          cache_netrc=$(mktemp "$RUNNER_TEMP/fractal-cache-netrc.XXXXXX")
+          trap 'rm -f -- "$cache_netrc"' EXIT
+          printf "machine %s.cachix.org\nlogin token\npassword %s\n" "$CACHE_NAME" "$CACHIX_AUTH_TOKEN" > "$cache_netrc"
+          nix --option netrc-file "$cache_netrc" path-info --store "https://$CACHE_NAME.cachix.org" --recursive --json "$output" > "$RUNNER_TEMP/fractal-native-closure.json"
           printf "source=%s\noutput=%s\ncache=https://%s.cachix.org\n" "$PUBLISH_SHA" "$output" "$CACHE_NAME" > "$RUNNER_TEMP/fractal-native-publication.txt"
           cat "$RUNNER_TEMP/fractal-native-publication.txt" >> "$GITHUB_STEP_SUMMARY"
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')

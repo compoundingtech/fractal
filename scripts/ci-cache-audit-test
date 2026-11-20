@@ -81,10 +81,16 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
             assert '?rev=$PUBLISH_SHA&shallow=1#packages.x86_64-linux.fractal' in block
             assert 'group: "nix-publish-${{ inputs.sha || github.sha }}"' in block
             assert 'cancel-in-progress: false' in block
-            assert 'ref: "${{ inputs.sha || github.sha }}"' in block and 'fetch-depth: 0' in block
+            assert 'ref: ${{ inputs.sha || github.sha }}' in block and 'fetch-depth: 1' in block
+            assert 'git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main' in block
             assert 'git merge-base --is-ancestor "$PUBLISH_SHA" origin/main' in block
             assert '[[ "$(git rev-parse HEAD)" == "$PUBLISH_SHA" ]]' in block
-            assert 'nix path-info --store "https://$CACHE_NAME.cachix.org" --recursive --json "$output"' in block, 'publication needs a remote full-closure proof'
+            proof = next((line for line in block.splitlines() if 'path-info' in line and 'fractal-native-closure.json' in line), '')
+            assert all(part in proof for part in (
+                'nix ', 'path-info', '--store "https://$CACHE_NAME.cachix.org"',
+                '--recursive', '--json', '"$output"',
+            )), 'publication needs a remote full-closure proof'
+            assert '--option netrc-file "$cache_netrc"' in proof, 'the private-cache proof must authenticate'
             assert 'name: fractal-native-publication' in block and 'fractal-native-closure.json' in block
         elif workflow.name == 'nix.yml':
             assert 'scripts/ci-nix-release build' in block and 'scripts/ci-nix-release verify-cache' in block
