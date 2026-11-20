@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Read ten new quiet minutes from an explicitly isolated, representative member.
+
+Run with python3 (3.11+). Never starts, stops or pauses a member/seat. The operator
+must supply the configuration files actually used, with instance-specific paths
+and network isolation supplied as launch overrides. Only GET requests are sent.
+The receipt is a separate population, never a production cpu/idle observation.
+"""
+import argparse
+import hashlib
+import http.client
+import json
+from pathlib import Path
+import socket
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost", timeout=15)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
+
+
+def get(path, route):
+    connection = UnixHTTP(path)
+    try:
+        connection.request("GET", route)
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError(f"{route}: HTTP {response.status}")
+        return json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def cpu(report):
+    return next(row for row in report["targets"] if row["name"] == "cpu")
+
+
+def build_commit(health):
+    build = health.get("build")
+    commit = build.get("commit") if isinstance(build, dict) else None
+    if not isinstance(commit, str) or not commit.strip():
+        raise ValueError("member health requires a nonempty build.commit")
+    return commit
+
+
+def finish_receipt(receipt, minutes, expected_workers, initial_health, final_health):
+    # Publish a verdict only after the final real health read and identity validation succeed.
+    if build_commit(final_health) != build_commit(initial_health):
+        raise ValueError("isolated build changed during quiet reference")
+    receipt.update(baseline(minutes, expected_workers))
+
+
+def baseline(minutes, expected_workers):
+    """Exact consecutive population; missing/unknown observations are never zero."""
+    if len(minutes) != 10 or any(b["minute"] != a["minute"] + 1 for a, b in zip(minutes, minutes[1:])):
+        raise ValueError("quiet reference needs ten consecutive closed minutes")
+    for minute in minutes:
+        if minute["expected_workers"] != expected_workers:
+            raise ValueError("quiet reference worker topology changed")
+        if minute["cpu_ns"] is None or minute["missing_reason"] is not None:
+            raise ValueError(f"unknown CPU in minute {minute['minute']}: {minute['missing_reason']}")
+        if minute["idle"] is not True or minute["seats_busy"] is not False or minute["busy"]:
+            raise ValueError(f"minute {minute['minute']} is not confirmed quiet")
+        if minute["wall_ns"] <= 0:
+            raise ValueError("quiet reference has no wall-time denominator")
+    cpu_ns = sum(minute["cpu_ns"] for minute in minutes)
+    wall_ns = sum(minute["wall_ns"] for minute in minutes)
+    cores = cpu_ns / wall_ns
+    return {"population": "representative isolated controlled quiet reference",
+            "objective": "cpu/quiet-reference", "production_objective": False,
+            "minutes": 10, "cpu_ns": cpu_ns, "wall_ns": wall_ns, "cores": cores,
+            "max_cores": 0.5, "status": "met" if cores <= 0.5 else "missed",
+            "minute_evidence": minutes}
+
+
+def file_sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--socket", required=True, help="isolated member's Unix socket")
+    parser.add_argument("--reference-socket", required=True, help="production member, read-only comparison")
+    parser.add_argument("--config", type=Path, required=True, help="configuration used by isolated member")
+    parser.add_argument("--reference-config", type=Path, required=True)
+    parser.add_argument("--binary", type=Path, required=True, help="binary used by isolated daemon and worker")
+    parser.add_argument("--reference-binary", type=Path, required=True)
+    parser.add_argument("--expected-workers", type=int, required=True)
+    parser.add_argument("--isolation-evidence", required=True,
+                        help="receipt/reference proving isolated state/network and launch overrides; not a production member")
+    args = parser.parse_args()
+    if Path(args.socket).resolve() == Path(args.reference_socket).resolve():
+        parser.error("quiet reference must not be the production member")
+    if not 1 <= args.expected_workers <= 8:
+        parser.error("representative reference requires 1..8 replication workers")
+    config = args.config.read_bytes()
+    if config != args.reference_config.read_bytes():
+        parser.error("configuration differs: use the same config with explicit isolation launch overrides")
+    binary_sha256 = file_sha256(args.binary)
+    if binary_sha256 != file_sha256(args.reference_binary):
+        parser.error("reference and isolated binaries differ")
+    reference_health = get(args.reference_socket, "/v1/health")
+    health = get(args.socket, "/v1/health")
+    if build_commit(health) != build_commit(reference_health):
+        raise ValueError("reference and isolated member must report the same nonempty build.commit")
+    reference = cpu(get(args.reference_socket, "/v1/client/request-latency"))
+    if not reference["minute_evidence"] or reference["minute_evidence"][-1]["expected_workers"] != args.expected_workers:
+        raise ValueError("reference member has not demonstrated the requested worker topology")
+    # Start at the next full UTC minute, never use previously collected idle time.
+    first = int(time.time() // 60) + 1
+    deadline = time.monotonic() + 14 * 60
+    receipt = {"population": "representative isolated controlled quiet reference", "status": "no-data",
+               "production_objective": False, "build": health["build"],
+               "configuration_sha256": hashlib.sha256(config).hexdigest(),
+               "binary_sha256": binary_sha256,
+               "isolation_evidence": args.isolation_evidence, "expected_workers": args.expected_workers,
+               "first_minute": first}
+    while time.monotonic() < deadline:
+        report = cpu(get(args.socket, "/v1/client/request-latency"))
+        minutes = [m for m in report["minute_evidence"] if first <= m["minute"] < first + 10]
+        # Seat settlement intentionally trails a boundary. Wait for that, not fabricated quiet.
+        if len(minutes) == 10 and all(m["seats_busy"] is not None for m in minutes):
+            receipt["minute_evidence"] = minutes
+            try:
+                finish_receipt(receipt, minutes, args.expected_workers, health,
+                               get(args.socket, "/v1/health"))
+            except ValueError as error:
+                receipt["reason"] = str(error)
+                print(json.dumps(receipt, sort_keys=True))
+                return 1
+            print(json.dumps(receipt, sort_keys=True))
+            return 0 if receipt["status"] == "met" else 1
+        time.sleep(60)
+    receipt["reason"] = "ten new consecutive confirmed quiet minutes were not covered"
+    receipt["minute_evidence"] = minutes
+    print(json.dumps(receipt, sort_keys=True))
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError, StopIteration, http.client.HTTPException) as error:
+        print(json.dumps({"population": "representative isolated controlled quiet reference",
+                          "production_objective": False, "status": "no-data", "reason": str(error)}))
+        sys.exit(1)

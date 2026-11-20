@@ -9,8 +9,8 @@
 //! It needs passwordless `sudo -n`, systemd as PID 1, cgroups v2 and `python3` on a Nix host,
 //! whose closure it binds into each tile for the probes. Without `ST_TILES_ROOT_TEST=1` every
 //! test returns at once. Each test creates its own registry and state directory under
-//! `/var/lib/st-tiles-test-*`, whose tiles the launcher gives user IDs from a test range that no
-//! account holds, and removes them all with `st tiles remove`, and any unit left running, when it
+//! `/var/lib/fractal-tiles-test-*`, whose tiles the launcher gives user IDs from a test range that no
+//! account holds, and removes them all with `fractal tiles remove`, and any unit left running, when it
 //! ends. It never reads or changes a real login, key or running seat.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -120,12 +120,12 @@ fn as_uid<S: AsRef<std::ffi::OsStr>>(uid: u32, args: &[S]) -> Output {
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SWEPT: std::sync::Once = std::sync::Once::new();
 
-/// A disposable host: a root-owned directory with a copy of st, a registry, and one system user
+/// A disposable host: a root-owned directory with a copy of fractal, a registry, and one system user
 /// per tile. Dropping it stops the tiles and removes the users and the directory.
 struct Host {
     _serial: std::sync::MutexGuard<'static, ()>,
     dir: PathBuf,
-    st: PathBuf,
+    fractal_cli: PathBuf,
     registry: PathBuf,
     tiles: Vec<TileUser>,
 }
@@ -135,9 +135,9 @@ impl Host {
         Self::with(tiles, tasks_max, "", false)
     }
 
-    /// A host whose registry also has `head`'s top-level settings, and whose tiles can run st
-    /// itself when `st_inside`.
-    fn with(tiles: &[&str], tasks_max: u32, head: &str, st_inside: bool) -> Self {
+    /// A host whose registry also has `head`'s top-level settings, and whose tiles can run fractal
+    /// itself when `fractal_inside`.
+    fn with(tiles: &[&str], tasks_max: u32, head: &str, fractal_inside: bool) -> Self {
         let serial = SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -151,7 +151,7 @@ impl Host {
                 .subsec_nanos()
                 % 0xffff
         );
-        let dir = PathBuf::from(format!("/var/lib/st-tiles-test-{tag}"));
+        let dir = PathBuf::from(format!("/var/lib/fractal-tiles-test-{tag}"));
         ok(sudo(
             ["install", "-d", "-o", "root", "-g", "root", "-m", "0755"]
                 .iter()
@@ -165,7 +165,7 @@ impl Host {
                 .map(std::ffi::OsStr::new)
                 .chain([bin.as_os_str()]),
         ));
-        let st = bin.join("st3");
+        let fractal_cli = bin.join("st3");
         ok(sudo([
             "install".as_ref(),
             "-o".as_ref(),
@@ -175,13 +175,13 @@ impl Host {
             "-m".as_ref(),
             "0755".as_ref(),
             std::ffi::OsStr::new(test_env!("CARGO_BIN_EXE_fractal-unstamped")),
-            st.as_os_str(),
+            fractal_cli.as_os_str(),
         ]));
         let mut host = Self {
             _serial: serial,
             registry: dir.join("tiles.toml"),
             dir,
-            st,
+            fractal_cli,
             tiles: Vec::new(),
         };
         let names: Vec<String> = tiles
@@ -192,9 +192,9 @@ impl Host {
         let mut roots = vec![python.clone()];
         let mut path = vec![python.parent().unwrap().to_path_buf()];
         let mut read_only = Vec::new();
-        if st_inside {
-            // st's own libraries, from the store paths its loader names.
-            let libraries = text(&ok(Command::new("ldd").arg(&host.st).output().unwrap()));
+        if fractal_inside {
+            // fractal's own libraries, from the store paths its loader names.
+            let libraries = text(&ok(Command::new("ldd").arg(&host.fractal_cli).output().unwrap()));
             roots.extend(libraries.split_whitespace().filter_map(|word| {
                 let rest = word.strip_prefix("/nix/store/")?;
                 Some(PathBuf::from("/nix/store").join(rest.split('/').next()?))
@@ -258,9 +258,9 @@ impl Host {
         host
     }
 
-    fn st(&self, args: &[&str]) -> Output {
+    fn fractal_cli(&self, args: &[&str]) -> Output {
         let mut command = Command::new("sudo");
-        command.arg("-n").arg(&self.st).arg("tiles");
+        command.arg("-n").arg(&self.fractal_cli).arg("tiles");
         let (verb, rest) = args.split_first().unwrap();
         command
             .arg(verb)
@@ -271,7 +271,7 @@ impl Host {
     }
 
     fn prepare(&self, name: &str) -> Output {
-        ok(self.st(&["prepare", name]))
+        ok(self.fractal_cli(&["prepare", name]))
     }
 
     fn tile(&self, suffix: &str) -> &TileUser {
@@ -289,7 +289,7 @@ impl Host {
         let mut command = Command::new("sudo");
         command
             .arg("-n")
-            .arg(&self.st)
+            .arg(&self.fractal_cli)
             .args(["tiles", "run", "--registry"])
             .arg(&self.registry)
             .arg(&tile.name)
@@ -349,7 +349,7 @@ impl Drop for Host {
     fn drop(&mut self) {
         for tile in &self.tiles {
             // `remove` stops the tile, removes its state and gives its user ID back.
-            let _ = self.st(&["remove", &tile.name]);
+            let _ = self.fractal_cli(&["remove", &tile.name]);
             let _ = sudo([
                 "systemctl",
                 "stop",
@@ -397,7 +397,7 @@ fn sweep() {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("st-tiles-test-")
+        if name.to_string_lossy().starts_with("fractal-tiles-test-")
             && entry.metadata().is_ok_and(|m| {
                 m.modified()
                     .is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() > 3600))
@@ -658,9 +658,9 @@ fn a_tile_reads_no_key_of_its_supervisor() {
     }
     let host = Host::new(&["a"], 64);
     let a = host.tile("a");
-    // st writes a node key the way the daemon does: a 0600 file in a 0700 directory.
+    // fractal writes a node key the way the daemon does: a 0600 file in a 0700 directory.
     let state = tempfile::Builder::new()
-        .prefix("st-tiles-supervisor-")
+        .prefix("fractal-tiles-supervisor-")
         .tempdir_in("/var/tmp")
         .unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -965,7 +965,7 @@ fn a_tile_ends_completely_however_its_launch_ends() {
             }
             "stopped" => {
                 ok(sudo([
-                    host.st.as_os_str(),
+                    host.fractal_cli.as_os_str(),
                     "tiles".as_ref(),
                     "stop".as_ref(),
                     a.name.as_ref(),
@@ -973,7 +973,7 @@ fn a_tile_ends_completely_however_its_launch_ends() {
             }
             _ => drop(tile.stdin.take()),
         }
-        // `st tiles run` waits for the unit to be gone.
+        // `fractal tiles run` waits for the unit to be gone.
         let status = tile.wait().unwrap();
         // A stop is a clean end for systemd; a killed launcher or init is a failure.
         match ending {
@@ -997,7 +997,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
     }
     let host = Host::new(&["a"], 64);
     let a = host.tile("a");
-    let as_user = Command::new(&host.st)
+    let as_user = Command::new(&host.fractal_cli)
         .args(["tiles", "run", "--registry"])
         .arg(&host.registry)
         .args([&a.name, "--", "true"])
@@ -1007,7 +1007,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
     assert!(String::from_utf8_lossy(&as_user.stderr).contains("runs as root"));
     // Root outside the tile's unit is refused before any namespace is made.
     let outside = sudo([
-        host.st.as_os_str(),
+        host.fractal_cli.as_os_str(),
         "tiles".as_ref(),
         "enter".as_ref(),
         "--registry".as_ref(),
@@ -1027,7 +1027,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
     ]));
     ok(sudo(["chmod".as_ref(), "0666".as_ref(), copy.as_os_str()]));
     let writable = sudo([
-        host.st.as_os_str(),
+        host.fractal_cli.as_os_str(),
         "tiles".as_ref(),
         "run".as_ref(),
         "--registry".as_ref(),
@@ -1057,7 +1057,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
         &a.uid.to_string(),
         &account,
     ]));
-    let taken = host.st(&["run", &a.name, "--", "true"]);
+    let taken = host.fractal_cli(&["run", &a.name, "--", "true"]);
     let _ = sudo(["userdel", &account]);
     assert!(!taken.status.success());
     assert!(
@@ -1065,7 +1065,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
         "{}",
         String::from_utf8_lossy(&taken.stderr)
     );
-    // A st that someone other than root can change never runs as root in a tile's unit.
+    // A fractal that someone other than root can change never runs as root in a tile's unit.
     let user_st = Command::new("sudo")
         .arg("-n")
         .arg(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
@@ -1087,11 +1087,11 @@ fn a_launch_with_an_inherited_descriptor_does_not_hand_it_to_the_tile() {
     let a = host.tile("a");
     let secret = tempfile::NamedTempFile::new_in("/var/tmp").unwrap();
     std::fs::write(secret.path(), "inherited").unwrap();
-    // Root's shell opens the file on descriptor 9 and keeps it open across exec into st.
+    // Root's shell opens the file on descriptor 9 and keeps it open across exec into Fractal.
     let script = format!(
         "exec 9<{} 8>&1 && exec {} tiles run --registry {} {} -- python3 -c \"$0\"",
         secret.path().display(),
-        host.st.display(),
+        host.fractal_cli.display(),
         host.registry.display(),
         a.name
     );
@@ -1150,7 +1150,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
     let registry = host.registry();
     for tile in [a, b] {
         ok(sudo([
-            host.st.as_os_str(),
+            host.fractal_cli.as_os_str(),
             "tiles".as_ref(),
             "prepare".as_ref(),
             "--registry".as_ref(),
@@ -1255,7 +1255,7 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
     }
     // A gateway like st-sekrets.service, run by this test's user over a disposable store.
     let gateway_dir = tempfile::Builder::new()
-        .prefix("st-tiles-sekrets-")
+        .prefix("fractal-tiles-sekrets-")
         .tempdir_in("/var/tmp")
         .unwrap();
     std::fs::set_permissions(gateway_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1313,7 +1313,7 @@ fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
             "-i".as_ref(),
             format!("ST_SEKRETS_SOCKET={}", socket.display()).as_ref(),
             "HOME=/nonexistent".as_ref(),
-            host.st.as_os_str(),
+            host.fractal_cli.as_os_str(),
             "sekrets".as_ref(),
             "whoami".as_ref(),
         ],
@@ -1406,7 +1406,7 @@ fn the_launcher_allocates_each_tiles_user_id_and_gives_it_back() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(!processes_of(a.uid).is_empty(), "the stray process started");
-    let refused = host.st(&["remove", &a.name]);
+    let refused = host.fractal_cli(&["remove", &a.name]);
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("still runs processes"));
     assert_eq!(host.registry().uid(&a.name), Some(a.uid));
@@ -1414,7 +1414,7 @@ fn the_launcher_allocates_each_tiles_user_id_and_gives_it_back() {
     let _ = stray.wait();
 
     // Removing the tile removes its state and gives the ID back.
-    ok(host.st(&["remove", &a.name]));
+    ok(host.fractal_cli(&["remove", &a.name]));
     let state = host.registry().tile_state(&a.name);
     assert!(
         !sudo([
@@ -1493,7 +1493,7 @@ fn the_launcher_allocates_each_tiles_user_id_and_gives_it_back() {
         narrow.as_os_str(),
     ]));
     let holds = sudo([
-        host.st.as_os_str(),
+        host.fractal_cli.as_os_str(),
         "tiles".as_ref(),
         "prepare".as_ref(),
         "--registry".as_ref(),

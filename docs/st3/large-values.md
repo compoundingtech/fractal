@@ -98,6 +98,56 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Native fleet roll receipt source
+
+The `fractal_api_core::roll_completion` maintainer owns signed-reference schema
+`lv-h854866002229`, append `lv-h781e5c867fe7`, and rebuild
+`lv-h84af57247816`. The separate local index retains authenticated graph claim
+IDs and JSON-encoded receipt keys; it does not duplicate receipt bodies or make
+unsigned files authoritative. The unique receipt-key index remains a
+variable-sized key. One ordered transaction preserves immutable conflict checks
+and source order. Rebuild revalidates each retained claim's canonical signature,
+declaration role, host identity and dependency chain before admitting it again;
+revoked authority cannot retain cached good adoption.
+
+The schema work is to establish complete key/value costs and lossless
+retention/reclamation, not to cap or discard valid signed facts. Append and
+rebuild work must retain dependency ordering and atomic replacement. The native
+graph remains the durable signed authority and supports restart reconstruction;
+the earlier unsigned local ledger is deliberately not replayed as trusted data.
+Neither one-row insertion nor the API body boundary alone proves SQL-work bounds.
+
+The `fractal_api_core::roll_source` maintainer also owns
+`lv-h0a0a9ff62f14`, `lv-h465d993a66cb`, `lv-hc76357e25b55`, and
+`lv-hc9ae27e75a8c`. These unresolved call-site entries use the read-only native
+run/creation selectors and the prepared `SELECT EXISTS` declaration-visibility
+query. They do not add mutation tables or duplicate native input bodies.
+The incremental run selector consumes a captured native index; ordinary quiet
+frontiers retain only unresolved run obligations rather than rewalking history.
+Initial capture and authority/source-lifetime changes reconstruct those
+obligations from canonical signed inputs.
+
+### Shell environment scrub
+
+The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
+reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
+
+- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+  checked integer `complete=1`. The conservative catalog still makes no size proof.
+- `lv-h9abbf1dff207` rewrites historical `shell_resources_v1.body` JSON to remove
+  environments while preserving all other command/result fields. Those bodies
+  remain unbounded inline values; changing their representation requires the
+  owning producer's chunk/reference work, not changing this security scrub.
+- `lv-h017f6a53ca41` is the literal `VACUUM` reclamation sink. It binds no value,
+  but its physical cleanup cost covers the database. Trace that cost into the
+  bounded representation and reclamation work before removing the exception.
+- `lv-haceef5fded64` inserts the fixed completion key only after physical erasure.
+  Keep its cleanup/transaction costs in the same producer's representation review.
+
+These registrations do not change the scrub or claim that its UPDATE or VACUUM
+has bounded work. A bounded body representation and keyed reclamation would be
+the structural improvement; this registration preserves current behavior.
+
 ### GitHub capture rebuildable projection
 
 The `fractal_reconcile::reconcile::github_capture` maintainer owns the
@@ -980,3 +1030,44 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+### Shell request identity and cancellation (#6762)
+
+The `fractal_store::store::shell_resources` maintainer owns
+`lv-h319ba7a29fc7`, replacing `lv-h379f0157342b`: request submission now
+uses conflict-preserving insertion. Execution ID, host and state TEXT keys and
+the serialized command/result body remain inline to preserve atomic request
+identity and replay. Neither one row per command nor conflict suppression bounds
+encoded bytes. The `bound-or-reference-values-and-reclamation` obligation remains:
+reference or physically bound the complete execution values and keys, preserving
+request identity and cleanup semantics.
+
+The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
+`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
+so cancellation-before-submission is atomic with request lookup. The 36-character
+check and seven-day retention are not general encoded-size or statement-cost
+proofs: an expiry can delete an unbounded number of rows inside submission.
+Values remain inline to retain the existing cancellation authority transition.
+The schema's `chunk-or-reference-variable-columns` task covers the identifier
+and index representation; the insertion/expiry
+`bound-or-reference-values-and-reclamation` tasks must bound physical storage
+and incremental reclamation without weakening cancellation tombstones or replay.
+This review records transitional debt, not a permanent exemption or size proof.
+
+### Durable phone service minutes
+
+The `fractal_store::store::observation_minutes` maintainer owns the summary
+report, exact-minute, once-only cardinality and live-window sinks (`lv-hfcc0104f3a41`,
+`lv-h8d4d7e936cfe`, `lv-h0b3749d94a8e`, `lv-h9b74750ad85e`). They read canonical
+claim bodies through source/report, subject and numeric-minute seek indexes. The phone
+producer limits a report to 32 validated samples and canonical bounded histogram
+bins, but these producer limits do not establish a general physical value-size
+proof. The tracing TODO retains exact source, report and minute identities while
+resolving body/key representation; it is not permission to scan retained history.
+
+The schema site's `lv-ha5268709f026` identity includes the additive
+`claims_observation_report_index` and `claims_observation_minute_time_index`.
+The first uses source/report strings as variable index keys; the second combines
+a numeric minute with a variable subject key. Both index existing canonical
+claims without adding authoritative tables. Any later reference conversion must
+preserve exact retry, conflict exclusion, minute range and replication semantics.

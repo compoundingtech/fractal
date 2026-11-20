@@ -301,20 +301,20 @@ fn start_with_meter(
                     let result = summary.write().unwrap_or_else(std::sync::PoisonError::into_inner)
                         .publish(buckets, attention, Instant::now(), (client_now_ms() / 1000) as u64);
                     if let Err(error) = result {
-                        eprintln!("st3: WARN population metrics refresh failed: {error:#}");
+                        eprintln!("fractal: WARN population metrics refresh failed: {error:#}");
                     } else if !registered {
                         register_metrics(&meter, Arc::clone(&summary));
                         registered = true;
                     }
                 }
                 Ok(Err(error)) => {
-                    eprintln!("st3: WARN population metrics refresh failed: {error:#}");
+                    eprintln!("fractal: WARN population metrics refresh failed: {error:#}");
                     // Keep an unconsumed deadline from the last complete cut, but
                     // never retry an unchanged defective fold on a polling timer.
                     next = next.filter(|at| *at > tokio::time::Instant::now());
                 }
                 Err(error) => {
-                    eprintln!("st3: WARN population metrics refresh task failed: {error}");
+                    eprintln!("fractal: WARN population metrics refresh task failed: {error}");
                     next = next.filter(|at| *at > tokio::time::Instant::now());
                 }
             }

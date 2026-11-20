@@ -433,58 +433,6 @@ pub fn install() {
     });
 }
 
-/// How a target fares in its windows.
-pub struct Verdict {
-    pub met: bool,
-    pub message: String,
-}
-
-fn share(window: &Value) -> f64 {
-    window["over_target_share"].as_f64().unwrap_or_default()
-}
-
-fn describe_window(name: &str, window: &Value) -> String {
-    if window["count"].as_u64().unwrap_or_default() == 0 {
-        return format!("{name} none");
-    }
-    format!(
-        "{name} p99 {} ms, max {} ms, {:.1}% over of {}",
-        round(window["p99_ms"].as_f64().unwrap_or_default()),
-        round(window["max_ms"].as_f64().unwrap_or_default()),
-        share(window) * 100.0,
-        window["count"]
-    )
-}
-
-fn round(ms: f64) -> f64 {
-    if ms >= 10.0 {
-        ms.round()
-    } else {
-        (ms * 10.0).round() / 10.0
-    }
-}
-
-const WINDOWS: [&str; 3] = ["1m", "5m", "1h"];
-
-/// A p99 target is missed in a window when more than 1% of its samples are over; a max target
-/// when any one is. Both counts are exact, not read from the histogram.
-pub fn verdict(windows: &Value, p99: bool) -> Verdict {
-    let met = WINDOWS.iter().all(|name| {
-        let window = &windows[*name];
-        if p99 {
-            share(window) <= 0.01
-        } else {
-            window["over_target"].as_u64().unwrap_or_default() == 0
-        }
-    });
-    let message = WINDOWS
-        .iter()
-        .map(|name| describe_window(name, &windows[*name]))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    Verdict { met, message }
-}
-
 /// One measurement of the store.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DatabaseSize {
@@ -512,6 +460,66 @@ pub struct DatabaseSize {
     pub physical_growth_bytes_per_day: Option<i64>,
     /// The span the physical growth was measured over, within half an hour of a day.
     pub physical_growth_span_ms: Option<u128>,
+}
+
+/// Independently measured archive file lengths, never subtracted from the hot-store gauge.
+/// These are capacity measurements, not proof of object integrity or catalogue completeness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ArchiveBytes {
+    pub segment_file_bytes: u64,
+    pub index_bytes: u64,
+    pub overlay_bytes: u64,
+    pub staging_bytes: u64,
+    pub orphan_bytes: u64,
+    pub backup_bytes: u64,
+    pub files: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArchiveSizeStatus { NotActivated, Available, Unavailable }
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DatabaseArchiveSize {
+    pub measured_at_unix_ms: u128,
+    /// Hash of the canonical local measurement root, never the private filesystem path.
+    pub scope: String,
+    pub status: ArchiveSizeStatus,
+    pub bytes: Option<ArchiveBytes>,
+    /// Segment files plus separately owned index and overlay files.
+    pub archive_bytes: Option<u64>,
+    /// All files, additionally including staging, orphans and backup-owned copies.
+    pub capacity_bytes: Option<u64>,
+    pub growth_bytes_per_day: Option<i64>,
+    pub growth_span_ms: Option<u128>,
+    pub baseline_at_unix_ms: Option<u128>,
+    pub error: Option<String>,
+}
+
+static DATABASE_ARCHIVE: std::sync::Mutex<Option<DatabaseArchiveSize>> = std::sync::Mutex::new(None);
+
+pub fn note_database_archive_size(size: &DatabaseArchiveSize) {
+    *DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size.clone());
+}
+
+pub fn database_archive_size() -> Option<DatabaseArchiveSize> {
+    DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+fn database_archive_row(size: Option<DatabaseArchiveSize>, now: u128) -> Value {
+    let fresh = size.as_ref().is_some_and(|size| size.measured_at_unix_ms <= now
+        && now - size.measured_at_unix_ms <= 2 * 60 * 60 * 1000);
+    json!({
+        "name": "database-archive",
+        "kind": "gauge",
+        "about": "Separately measured local wire-archive bytes and net daily growth; not a hot-store saving or durability proof",
+        "fresh": fresh,
+        "status": if fresh { size.as_ref().map(|size| size.status) } else { None },
+        "size": size,
+        "integrity": "not-assessed",
+        "catalogue_coverage": Value::Null,
+        "budget": Value::Null,
+    })
 }
 
 /// This member's newest store size, which the daemon measures hourly.
@@ -564,6 +572,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "size": database_size().map_or(Value::Null, |size| json!(size)),
             "budget": database_budget(),
         }),
+        database_archive_row(database_archive_size(), u128::from(smallclaims::windows::budgets::unix_ms())),
     ]
 }
 
@@ -618,6 +627,15 @@ pub fn cpu_verdict(row: &Value) -> CpuVerdict {
         idle,
         idle_met: idle.map(|cores| cores <= idle_max),
     }
+}
+
+/// Productive seats alone made the idle minimum impossible, independently of any overlapping
+/// missing telemetry. This is ineligibility, not a passing measurement or a CPU coverage claim.
+pub fn cpu_idle_busy(row: &Value) -> bool {
+    let minutes = row["minutes"].as_u64();
+    let needed = row["idle_min_minutes"].as_u64();
+    let busy = row["idle"]["not_idle"]["seat"].as_u64();
+    matches!((minutes, needed, busy), (Some(60), Some(needed @ 1..=60), Some(busy)) if busy > 60 - needed)
 }
 
 /// `n` cores, as a target or a reading says it.
@@ -686,239 +704,46 @@ fn process_threads() -> Value {
     json!({"total": total, "by_name": by_name})
 }
 
-/// `st doctor`'s line for the writer-hold objective: met when no hold or read transaction in any
-/// window passed the target and none in progress has. It names the holder of the most writer
-/// time in the hour and the oldest hold in progress past the target.
-fn writer_hold_line(target: &Value) -> (String, &'static str, String) {
-    let max = target["max_ms"].as_f64().unwrap_or_default();
-    let holds = verdict(&target["windows"], false);
-    let reads = verdict(&target["read_windows"], false);
-    let oldest = &target["in_progress"][0];
-    let held_now = oldest["held_ms"].as_f64().filter(|held| *held > max);
-    let open = target["open_reads"].as_array().map_or(0, Vec::len);
-    let mut message = format!("max ≤ {max} ms: {}", holds.message);
-    if let Some(top) = target["holders"].get(0) {
-        message.push_str(&format!(
-            "; most held by {} ({} holds, {} ms in all, max {} ms in 1h)",
-            top["holder"].as_str().unwrap_or_default(),
-            top["count"],
-            round(top["total_ms"].as_f64().unwrap_or_default()),
-            round(top["max_ms"].as_f64().unwrap_or_default()),
-        ));
-    }
-    if let Some(held) = held_now {
-        message.push_str(&format!(
-            "; held now by {} for {} ms",
-            oldest["holder"].as_str().unwrap_or_default(),
-            round(held)
-        ));
-    }
-    if !reads.met || open > 0 {
-        let longest = target["long_reads"].get(0).map_or(String::new(), |read| {
-            format!(", last by {}", read["holder"].as_str().unwrap_or_default())
-        });
-        message.push_str(&format!("; reads past target: {}{longest}; {open} open", reads.message));
-    }
-    let waiting = &target["waiting"];
-    if waiting["writer"].as_u64().is_some_and(|n| n > 0) || waiting["read"].as_u64().is_some_and(|n| n > 0) {
-        message.push_str(&format!("; waiting now: {} for the writer, {} for a read", waiting["writer"], waiting["read"]));
-    }
-    if let Some(total) = target["threads"]["total"].as_u64() {
-        message.push_str(&format!("; {total} threads"));
-    }
-    let met = holds.met && reads.met && held_now.is_none() && open == 0;
-    ("slo/writer-hold".into(), if met { "pass" } else { "info" }, message)
-}
-
-/// `st doctor`'s lines for the windows the request-latency read reports: one per target, and one
-/// for each of the ten paths furthest over their target in the last five minutes. A miss is
-/// `info`, not `warn`: a target describes, and `st doctor --strict` gates releases.
-pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
-    let status = |met: bool| if met { "pass" } else { "info" };
-    let mut lines = Vec::new();
-    for target in report["targets"].as_array().into_iter().flatten() {
-        let name = target["name"].as_str().unwrap_or_default();
-        if target["population"].as_str().is_some_and(|p| p.starts_with("client-observed")) {
-            let min_percent = target["min_percent"].as_u64();
-            let share = min_percent.is_some();
-            let seen = WINDOWS.iter().any(|w| target["windows"][*w]["count"].as_u64().unwrap_or(0) > 0);
-            let met = min_percent.map_or_else(|| verdict(&target["windows"],true).met, |min| {
-                WINDOWS.iter().all(|w| {
-                    let row=&target["windows"][*w];
-                    u128::from(row["over_target"].as_u64().unwrap_or(0))*100
-                        <= u128::from(row["foreground_ms"].as_u64().unwrap_or(0))*u128::from(100-min)
-                })
-            });
-            let text = WINDOWS.iter().map(|w| {
-                let row = &target["windows"][*w];
-                if share {format!("{w} {} live / {} foreground ms",row["live_ms"],row["foreground_ms"])}
-                else {describe_window(w,row)}
-            }).collect::<Vec<_>>().join(" · ");
-            let goal=min_percent.map_or_else(||format!("p99 ≤ {} ms",target["p99_ms"]),|min|format!("live ≥ {min}%"));
-            lines.push((format!("slo/{name}"), if seen {status(met)} else {"info"},
-                format!("{goal}; client-observed reported population only; closed UTC minutes, delayed/incomplete coverage: {text}")));
-            continue;
-        }
-        match name {
-            "sql-statement" => {
-                let max = target["max_ms"].as_f64().unwrap_or_default();
-                let p99 = verdict(&target["windows"], true);
-                let under_max = WINDOWS
-                    .iter()
-                    .all(|w| target["windows"][*w]["max_ms"].as_f64().unwrap_or_default() <= max);
-                lines.push((
-                    format!("slo/{name}"),
-                    status(p99.met && under_max),
-                    format!("p99 ≤ {} ms, max ≤ {max} ms: {}", target["p99_ms"], p99.message),
-                ));
-            }
-            "transaction" => {
-                for (part, label) in [("read", "read"), ("write", "write"), ("writer_hold", "writer-hold")] {
-                    let verdict = verdict(&target[part], false);
-                    lines.push((
-                        format!("slo/transaction/{label}"),
-                        status(verdict.met),
-                        format!("max ≤ {} ms: {}", target["max_ms"], verdict.message),
-                    ));
-                }
-            }
-            "cpu" => lines.extend(cpu_lines(target)),
-            "database" => lines.push(database_line(target)),
-            "writer-hold" => lines.push(writer_hold_line(target)),
-            _ => {
-                let own = verdict(&target["windows"], true);
-                lines.push((
-                    format!("slo/{name}"),
-                    status(own.met),
-                    format!("p99 ≤ {} ms: {}", target["p99_ms"], own.message),
-                ));
-                let remote = &target["remote_windows"];
-                if WINDOWS.iter().any(|w| remote[*w]["count"].as_u64().unwrap_or_default() > 0) {
-                    let remote_verdict = verdict(remote, true);
-                    lines.push((
-                        format!("slo/{name}/remote"),
-                        status(remote_verdict.met),
-                        format!(
-                            "from another machine, p99 ≤ {} ms: {}",
-                            target["remote_p99_ms"], remote_verdict.message
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-    let mut missed = report["paths"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|path| path["target"].is_string() && share(&path["windows"]["5m"]) > 0.01)
-        .collect::<Vec<_>>();
-    missed.sort_by(|a, b| share(&b["windows"]["5m"]).total_cmp(&share(&a["windows"]["5m"])));
-    for path in missed.into_iter().take(10) {
-        lines.push((
-            format!(
-                "slo/{}/{}",
-                path["target"].as_str().unwrap_or_default(),
-                path["path"].as_str().unwrap_or_default()
-            ),
-            "info",
-            describe_window("5m", &path["windows"]["5m"]),
-        ));
-    }
-    lines
-}
-
-/// `st doctor`'s two CPU lines: the member over the hour, and over the hour's idle minutes. Each
-/// says PASS, MISS or UNKNOWN; an unknown one is `info`, never `pass`.
-fn cpu_lines(target: &Value) -> [(String, &'static str, String); 2] {
-    let verdict = cpu_verdict(target);
-    let word = |met: Option<bool>| match met {
-        Some(true) => "PASS",
-        Some(false) => "MISS",
-        None => "UNKNOWN",
-    };
-    let status = |met: Option<bool>| if met == Some(true) { "pass" } else { "info" };
-    let max = target["max_cores"].as_f64().unwrap_or_default();
-    let windows = WINDOWS
-        .iter()
-        .map(|w| {
-            let window = &target["windows"][*w];
-            window["cores"].as_f64().map_or_else(
-                || format!("{w} unknown ({} minutes known)", window["minutes"].as_u64().unwrap_or_default()),
-                |cores| format!("{w} {cores:.2} cores"),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let idle_max = target["idle_max_cores"].as_f64().unwrap_or_default();
-    let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
-    let idle = match verdict.idle {
-        Some(cores) => format!("{cores:.2} cores over {} idle minutes", verdict.idle_minutes),
-        None if verdict.minutes < smallclaims::windows::cpu_minutes::MINUTES => {
-            format!("the hour holds {} of 60 minutes, {} idle", verdict.minutes, verdict.idle_minutes)
-        }
-        None => format!("{} idle minutes, fewer than {needed}", verdict.idle_minutes),
-    };
-    [
-        (
-            "slo/cpu".into(),
-            status(verdict.hour_met),
-            format!("{}: ≤ {} over the hour, daemon and replication workers: {windows}", word(verdict.hour_met), cores(max)),
-        ),
-        (
-            "slo/cpu/idle".into(),
-            status(verdict.idle_met),
-            format!("{}: ≤ {} over the hour's idle minutes: {idle}", word(verdict.idle_met), cores(idle_max)),
-        ),
-    ]
-}
-
-/// `st doctor`'s line for open projection divergences: met while there are no more open than the
-/// target allows, which is none. A miss is `info` like every other target's: the fault itself goes
-/// to the fleet's fault agent, and while a peer still differs the replication check fails.
-pub fn divergence_line(open: u64) -> (String, &'static str, String) {
-    let max_open = targets().divergence.max_open;
-    (
-        "slo/projection-divergence".into(),
-        if open <= max_open { "pass" } else { "info" },
-        format!(
-            "open P1 projection bugs ≤ {max_open}: {open} open; `st subject daemon/NODE` for the member that found one shows it with what a reproduction needs"
-        ),
-    )
-}
-
-/// `st doctor`'s line for the store's size: met when the pages in use and their daily growth are
-/// both within target. Growth needs an hour of samples; until then only the size is judged.
-fn database_line(target: &Value) -> (String, &'static str, String) {
-    const GB: f64 = 1e9;
-    const MB: f64 = 1e6;
-    let max_live = target["max_live_gb"].as_f64().unwrap_or_default();
-    let max_growth = target["max_growth_mb_per_day"].as_f64().unwrap_or_default();
-    let size = &target["size"];
-    let Some(live) = size["live_bytes"].as_f64() else {
-        return ("slo/database".into(), "info", "not measured yet".into());
-    };
-    let file = size["file_bytes"].as_f64().unwrap_or_default();
-    let growth = size["growth_bytes_per_day"].as_f64();
-    let met = live / GB <= max_live && growth.is_none_or(|growth| growth / MB <= max_growth);
-    let growth = growth.map_or("growth not known yet".to_owned(), |growth| {
-        let span = size["growth_span_ms"].as_f64().unwrap_or_default() / 3_600_000.0;
-        format!("growth {:+.0} MB a day over {span:.0} h", growth / MB)
-    });
-    (
-        "slo/database".into(),
-        if met { "pass" } else { "info" },
-        format!(
-            "live ≤ {max_live} GB, growth ≤ {max_growth} MB a day: live {:.2} GB of a {:.2} GB file, {growth}",
-            live / GB,
-            file / GB
-        ),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_row_is_a_separate_informational_gauge_and_stale_is_unknown() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::Available, bytes: Some(ArchiveBytes::default()),
+            archive_bytes: Some(0), capacity_bytes: Some(0), growth_bytes_per_day: None,
+            growth_span_ms: None, baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size.clone()), 100);
+        assert_eq!(row["name"], "database-archive");
+        assert_eq!(row["kind"], "gauge");
+        assert_eq!(row["status"], "available");
+        assert!(row["budget"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert_eq!(row["integrity"], "not-assessed");
+        assert!(row["catalogue_coverage"].is_null());
+        for now in [99, 100 + 2 * 60 * 60 * 1000 + 1] {
+            let stale = database_archive_row(Some(size.clone()), now);
+            assert_eq!(stale["fresh"], false);
+            assert!(stale["status"].is_null());
+        }
+        let missing = database_archive_row(None, 100);
+        assert_eq!(missing["fresh"], false);
+        assert!(missing["size"].is_null());
+    }
+
+    #[test]
+    fn unconfigured_archive_is_not_a_zero_byte_success() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::NotActivated, bytes: None, archive_bytes: None,
+            capacity_bytes: None, growth_bytes_per_day: None, growth_span_ms: None,
+            baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size), 100);
+        assert_eq!(row["status"], "not-activated");
+        assert!(row["size"]["archive_bytes"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert!(row["budget"].is_null());
+    }
 
     #[test]
     fn database_unknown_growth_cannot_prove_health_or_hide_live_breach() {
@@ -1017,61 +842,6 @@ mod tests {
     }
 
     #[test]
-    fn the_database_line_judges_size_and_daily_growth() {
-        let target = |size: Value| {
-            json!({"name": "database", "max_live_gb": 8.0, "max_growth_mb_per_day": 300.0, "size": size})
-        };
-        assert_eq!(database_line(&target(Value::Null)).1, "info");
-        let (name, status, message) = database_line(&target(json!({
-            "live_bytes": 6e9, "file_bytes": 14e9, "growth_bytes_per_day": null
-        })));
-        assert_eq!((name.as_str(), status), ("slo/database", "pass"));
-        assert!(message.contains("live 6.00 GB of a 14.00 GB file, growth not known yet"), "{message}");
-        let line = database_line(&target(json!({
-            "live_bytes": 6e9, "file_bytes": 14e9, "growth_bytes_per_day": 450e6, "growth_span_ms": 86_400_000
-        })));
-        assert_eq!(line.1, "info");
-        assert!(line.2.contains("growth +450 MB a day over 24 h"), "{}", line.2);
-        assert_eq!(database_line(&target(json!({"live_bytes": 9e9, "file_bytes": 9e9}))).1, "info");
-        let shrinking = database_line(&target(json!({
-            "live_bytes": 6e9, "file_bytes": 14e9, "growth_bytes_per_day": -2e9, "growth_span_ms": 86_400_000
-        })));
-        assert_eq!(shrinking.1, "pass");
-    }
-
-    #[test]
-    fn the_writer_hold_line_names_the_top_holder_and_a_hold_in_progress() {
-        let window = |count: u64, over: u64, max: f64| {
-            json!({"count": count, "over_target": over, "over_target_share": over as f64 / count.max(1) as f64,
-                "p50_ms": 1.0, "p99_ms": max, "max_ms": max})
-        };
-        let windows = |over, max| json!({"1m": window(10, over, max), "5m": window(10, over, max), "1h": window(10, over, max)});
-        let quiet = json!({"name": "writer-hold", "max_ms": 100, "windows": windows(0, 8.0),
-            "read_windows": windows(0, 3.0), "open_reads": [], "in_progress": [], "long_reads": [],
-            "holders": [{"holder": "/v1/messages", "count": 10, "total_ms": 40.0, "max_ms": 8.0}]});
-        let (name, status, message) = writer_hold_line(&quiet);
-        assert_eq!((name.as_str(), status), ("slo/writer-hold", "pass"));
-        assert!(message.contains("most held by /v1/messages (10 holds, 40 ms in all, max 8 ms in 1h)"), "{message}");
-        let mut busy = quiet.clone();
-        busy["windows"] = windows(1, 5750.0);
-        busy["holders"] = json!([{"holder": "/v1/internal/replication/export", "count": 3, "total_ms": 8000.0, "max_ms": 5750.0}]);
-        busy["in_progress"] = json!([{"holder": "/v1/internal/replication/receive", "held_ms": 1200.0}]);
-        busy["read_windows"] = windows(1, 2500.0);
-        busy["long_reads"] = json!([{"holder": "/v1/internal/replication/export"}]);
-        busy["waiting"] = json!({"writer": 12, "read": 0});
-        busy["threads"] = json!({"total": 118});
-        let (_, status, message) = writer_hold_line(&busy);
-        assert_eq!(status, "info");
-        assert!(message.contains("most held by /v1/internal/replication/export"), "{message}");
-        assert!(message.contains("held now by /v1/internal/replication/receive for 1200 ms"), "{message}");
-        assert!(message.contains("last by /v1/internal/replication/export; 0 open"), "{message}");
-        assert!(message.contains("waiting now: 12 for the writer, 0 for a read; 118 threads"), "{message}");
-        let mut open = quiet;
-        open["open_reads"] = json!([{"read_id": 1}]);
-        assert_eq!(writer_hold_line(&open).1, "info");
-    }
-
-    #[test]
     fn the_request_latency_report_carries_the_writer_hold_objective() {
         install();
         let rows = store_report(json!({}));
@@ -1137,71 +907,6 @@ mod tests {
             "{SOURCE}\nobjective \"change-rollout\" {{\n  about \"x\"\n  indicator \"interval\" {{\n    subject-prefix \"custom/acme/change/\"\n    start \"custom.acme.change-ready\"\n    stop \"custom.acme.change-applied\"\n  }}\n  window \"7d\"\n  target \"p95\" within=\"5m\"\n}}\n"
         );
         assert!(error(&interval).contains("is a fleet declaration"), "{}", error(&interval));
-    }
-
-    #[test]
-    fn a_window_misses_a_p99_target_past_one_percent_and_a_max_target_at_once() {
-        let window = |count: u64, over: u64| {
-            json!({"count": count, "over_target": over,
-                "over_target_share": over as f64 / count.max(1) as f64,
-                "p50_ms": 1.0, "p99_ms": 2.0, "max_ms": 3.0})
-        };
-        let windows = |over| json!({"1m": window(100, over), "5m": window(100, over), "1h": window(1000, over)});
-        assert!(verdict(&windows(1), true).met);
-        assert!(!verdict(&windows(2), true).met);
-        assert!(!verdict(&windows(1), false).met);
-        assert!(verdict(&windows(0), false).met);
-        assert!(verdict(&windows(0), true).message.contains("1m p99 2 ms, max 3 ms, 0.0% over of 100"));
-    }
-    #[test]
-    fn the_cpu_lines_say_pass_miss_or_unknown_for_the_hour_and_its_idle_minutes() {
-        let row = |hour: Option<f64>, minutes: u64, idle_minutes: u64, idle: Option<f64>| {
-            cpu_row(json!({
-                "windows": {"1m": {"cores": 0.25, "minutes": 1}, "5m": {"cores": 0.2, "minutes": 5},
-                    "1h": {"cores": hour, "minutes": minutes}},
-                "minutes": minutes,
-                "idle": {"minutes": idle_minutes, "cores": idle, "not_idle": {}},
-            }))
-        };
-        let [hour, idle] = cpu_lines(&row(Some(0.4), 60, 24, Some(0.12)));
-        assert_eq!((hour.0.as_str(), hour.1), ("slo/cpu", "pass"));
-        assert_eq!(
-            hour.2,
-            "PASS: ≤ 1 core over the hour, daemon and replication workers: 1m 0.25 cores · 5m 0.20 cores · 1h 0.40 cores"
-        );
-        assert_eq!((idle.0.as_str(), idle.1), ("slo/cpu/idle", "pass"));
-        assert_eq!(idle.2, "PASS: ≤ 0.5 core over the hour's idle minutes: 0.12 cores over 24 idle minutes");
-        let [hour, idle] = cpu_lines(&row(Some(1.3), 60, 24, Some(0.7)));
-        assert_eq!((hour.1, idle.1), ("info", "info"));
-        assert!(hour.2.starts_with("MISS: ") && idle.2.starts_with("MISS: "), "{hour:?} {idle:?}");
-        // Too few idle minutes judge nothing, however low their CPU.
-        let [_, idle] = cpu_lines(&row(Some(0.4), 60, 9, Some(0.01)));
-        assert_eq!(idle.1, "info");
-        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: 9 idle minutes, fewer than 10");
-        // A daemon up less than the hour knows neither.
-        let [hour, idle] = cpu_lines(&row(None, 42, 30, Some(0.01)));
-        assert_eq!((hour.1, idle.1), ("info", "info"));
-        assert!(hour.2.starts_with("UNKNOWN: ") && hour.2.ends_with("1h unknown (42 minutes known)"), "{}", hour.2);
-        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: the hour holds 42 of 60 minutes, 30 idle");
-        assert_eq!(
-            cpu_verdict(&row(None, 42, 30, Some(0.01))),
-            CpuVerdict { hour: None, hour_met: None, minutes: 42, idle_minutes: 30, idle: None, idle_met: None }
-        );
-        let lines = doctor_lines(&json!({"targets": [row(Some(0.4), 60, 24, Some(0.12))], "paths": []}));
-        assert_eq!(lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>(), ["slo/cpu", "slo/cpu/idle"]);
-    }
-
-    #[test]
-    fn client_share_doctor_uses_declared_minimum_and_empty_population_is_info() {
-        let window=json!({"count":10000,"foreground_ms":10000,"live_ms":9500,"over_target":500,"over_target_share":0.05});
-        let windows=json!({"1m":window,"5m":window,"1h":window});
-        let mut target=json!({"name":"ios-live-share","population":"client-observed-foreground-ms","min_percent":90,"windows":windows});
-        let report=|target:Value|json!({"targets":[target],"paths":[]});
-        assert_eq!(doctor_lines(&report(target.clone()))[0].1,"pass");
-        target["min_percent"]=json!(99);
-        assert_eq!(doctor_lines(&report(target.clone()))[0].1,"info");
-        target["windows"]=json!({"1m":{"count":0},"5m":{"count":0},"1h":{"count":0}});
-        assert_eq!(doctor_lines(&report(target))[0].1,"info");
     }
 
 }

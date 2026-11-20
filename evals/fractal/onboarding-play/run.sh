@@ -4,7 +4,7 @@
 # fixtures and prints the plan. A paid run needs --paid and a run cap:
 #
 #   evals/fractal/onboarding-play/run.sh --paid --max-runs 2 --harness claude \
-#     --claude-config-dir /path/to/a/login/you/made --st-bin target/debug/fractal
+#     --claude-config-dir /path/to/a/login/you/made --fractal-bin target/debug/fractal
 #
 # Each run starts a throwaway fractal (own HOME, own daemon, no service) from the candidate binary,
 # lets the Assistant play the onboarding with a person who never types (the `silent` variant) or
@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-paid=false; max_runs=0; harness=claude; variants="silent,skip"; st_bin="${FRACTAL_BIN-${ST_BIN:-}}"
+paid=false; max_runs=0; harness=claude; variants="silent,skip"; fractal_bin="${FRACTAL_BIN-${ST_BIN:-}}"
 claude_dir=""; codex_home=""; out="$here/reports/run-$(date -u +%Y%m%dT%H%M%SZ)"
 overall_s=900; person="person/avery"; plumbing=false
 usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
     --max-runs) max_runs="${2:?}"; shift ;;
     --harness) harness="${2:?}"; shift ;;
     --variants) variants="${2:?}"; shift ;;
-    --st-bin) st_bin="${2:?}"; shift ;;
+    --fractal-bin) fractal_bin="${2:?}"; shift ;;
     --claude-config-dir) claude_dir="${2:?}"; shift ;;
     --codex-home) codex_home="${2:?}"; shift ;;
     --out) out="${2:?}"; shift ;;
@@ -42,16 +42,16 @@ done
 if $plumbing; then
   # Model-free, live: a throwaway fractal with no harness, so no Assistant ever starts and nothing is
   # spent. Proves the collector runs against a real graph and that the judge fails an empty play.
-  [ -x "${st_bin:-}" ] || { echo "--plumbing needs --st-bin" >&2; exit 2; }
+  [ -x "${fractal_bin:-}" ] || { echo "--plumbing needs --fractal-bin" >&2; exit 2; }
   root="$(mktemp -d)"; mkdir -p "$root/home/.config" "$root/home/.local/state" "$root/home/.local/bin" "$root/run"
   # What `fractal setup --install` would put in ~/.local/bin, linked rather than copied: the candidate
   # binary and the pty on this machine's PATH.
-  ln -s "$st_bin" "$root/home/.local/bin/st3"; ln -s "$st_bin" "$root/home/.local/bin/st"
+  ln -s "$fractal_bin" "$root/home/.local/bin/st3"; ln -s "$fractal_bin" "$root/home/.local/bin/st"
   ln -s "$(command -v pty)" "$root/home/.local/bin/pty"
   plumb_env=(env -i PATH="$root/home/.local/bin:$PATH" HOME="$root/home" USER=avery LANG="${LANG:-C.UTF-8}"
     XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/home/.local/state" XDG_RUNTIME_DIR="$root/run"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    FRACTAL_BIN="$st_bin" ST_BIN="$st_bin")
+    FRACTAL_BIN="$fractal_bin" ST_BIN="$fractal_bin")
   cleanup_plumbing() {
     local pid
     for pid in $(pgrep -u "$(id -u)" -x st3 || true); do
@@ -59,7 +59,7 @@ if $plumbing; then
     done
   }
   trap cleanup_plumbing EXIT
-  "${plumb_env[@]}" "$st_bin" setup --person avery --node evalbox --yes --install false --service false \
+  "${plumb_env[@]}" "$fractal_bin" setup --person avery --node evalbox --yes --install false --service false \
     --start true --harness none >"$root/setup.log" 2>&1 || { cat "$root/setup.log" >&2; exit 1; }
   mkdir -p "$out"
   "${plumb_env[@]}" "$here/collect.sh" silent "$(date +%s%N | cut -c1-13)" none >"$out/plumbing.json"
@@ -76,7 +76,7 @@ fi
 
 # ---- guards before any spend ------------------------------------------------------------------
 [ "$max_runs" -ge 1 ] 2>/dev/null || { echo "--paid needs --max-runs N with N >= 1" >&2; exit 2; }
-[ -x "${st_bin:-}" ] || { echo "--st-bin must name the candidate fractal binary" >&2; exit 2; }
+[ -x "${fractal_bin:-}" ] || { echo "--fractal-bin must name the candidate fractal binary" >&2; exit 2; }
 case "$harness" in
   claude) [ -d "$claude_dir" ] || { echo "--claude-config-dir must name a directory you logged in to" >&2; exit 2; } ;;
   codex) [ -d "$codex_home" ] || { echo "--codex-home must name a directory you logged in to" >&2; exit 2; } ;;
@@ -93,7 +93,7 @@ now_ms() { date +%s%N | cut -c1-13; }
 harness_args=(); [ "$harness" = claude ] && harness_args=(--claude-channel false)
 trouble='(rate.?limit|usage limit|limit reached|quota|not logged in|please log in|/login|log in to|authentication|unauthori[sz]ed|invalid api key)'
 
-stop_throwaway() { # kill the daemon this run started: the st3 whose environment holds our HOME
+stop_throwaway() { # kill the daemon this run started: the daemon whose environment holds our HOME
   local pid
   for pid in $(pgrep -u "$(id -u)" -x st3 || true); do
     if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "HOME=$1/home"; then kill "$pid" 2>/dev/null || true; fi
@@ -107,10 +107,10 @@ for variant in "${plan[@]}"; do
   run_env=(env -i PATH="$PATH" HOME="$root/home" USER=avery LANG="${LANG:-C.UTF-8}" TERM=xterm-256color
     XDG_CONFIG_HOME="$root/home/.config" XDG_STATE_HOME="$root/home/.local/state" XDG_RUNTIME_DIR="$root/run"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    FRACTAL_BIN="$st_bin" ST_BIN="$st_bin" EVAL_PERSON="$person")
+    FRACTAL_BIN="$fractal_bin" ST_BIN="$fractal_bin" EVAL_PERSON="$person")
   [ -n "$claude_dir" ] && run_env+=(CLAUDE_CONFIG_DIR="$claude_dir")
   [ -n "$codex_home" ] && run_env+=(CODEX_HOME="$codex_home")
-  fractal() { "${run_env[@]}" "$st_bin" "$@"; }
+  fractal() { "${run_env[@]}" "$fractal_bin" "$@"; }
   echo "== run $ran/${#plan[@]}: $variant (throwaway $root)"
   started="$(now_ms)"; skip_ms=none; verdict=""
   fractal setup --person "${person#person/}" --node evalbox --yes --install false --service false \

@@ -151,6 +151,10 @@ fn context(scratch: &Path) -> CheckpointContext {
 
 fn failed(store: &Store, context: &CheckpointContext) {
     assert!(matches!(store.checkpoint_step(context).unwrap().as_slice(), [CheckpointAction::ProofFailed { .. }]));
+    let worker = store.checkpoint_status(context.now_unix_ms, &[]).unwrap().worker.unwrap();
+    assert_eq!(worker.phase, smallclaims::store::checkpoint_agreement::CheckpointPhase::ProofFailed);
+    let reason = worker.error.unwrap();
+    assert!(reason.starts_with("proof mismatches: ") && reason.len() > "proof mismatches: ".len());
 }
 
 fn diagnostics(store: &Store) -> Vec<String> {
@@ -173,6 +177,12 @@ fn unchanged_failed_input_is_not_copied_or_replayed_even_after_restart() {
     assert_eq!(before.len(), 1);
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 2);
     assert!(store.checkpoint_step(&context).unwrap().is_empty());
+    let worker = store.checkpoint_status(context.now_unix_ms, &[]).unwrap().worker.unwrap();
+    assert_eq!(worker.phase, smallclaims::store::checkpoint_agreement::CheckpointPhase::ProofFailed);
+    let failure = worker.error.unwrap();
+    assert!(failure.contains("proof retry backoff; last recorded mismatches: "));
+    let mismatches = failure.split_once("last recorded mismatches: ").unwrap().1.to_owned();
+    assert!(!mismatches.is_empty());
     // A later claim is outside the sealed proof, and must not invalidate its failure identity.
     note(&store);
     context.now_unix_ms += CHECKPOINT_PROOF_BACKOFF_MS;
@@ -191,6 +201,10 @@ fn unchanged_failed_input_is_not_copied_or_replayed_even_after_restart() {
     drop(store);
     let store = Store::open(&path, "alder", runtime.clone()).unwrap();
     assert!(store.checkpoint_step(&context).unwrap().is_empty());
+    let worker = store.checkpoint_status(context.now_unix_ms, &[]).unwrap().worker.unwrap();
+    assert_eq!(worker.phase, smallclaims::store::checkpoint_agreement::CheckpointPhase::ProofFailed);
+    assert_eq!(worker.error.unwrap(),
+        format!("proof input previously failed; last recorded mismatches: {mismatches}"));
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 2);
     assert_eq!(diagnostics(&store), before);
     assert!(std::fs::read_dir(&context.scratch).unwrap().all(|entry| {
@@ -227,6 +241,9 @@ fn changed_rules_retry_after_backoff_and_can_recover_without_suppressing_diagnos
     runtime.revision.store(2, Ordering::Relaxed);
     store.checkpoint_step(&context).unwrap();
     assert!(matches!(store.checkpoint_step(&context).unwrap().as_slice(), [CheckpointAction::Verified { .. }]));
+    let worker = store.checkpoint_status(context.now_unix_ms, &[]).unwrap().worker.unwrap();
+    assert_eq!(worker.phase, smallclaims::store::checkpoint_agreement::CheckpointPhase::AwaitVerifications);
+    assert!(worker.error.is_none());
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 6);
     assert_eq!(diagnostics(&store), reasons);
 }

@@ -278,6 +278,34 @@ fn wake_demand_is_shard_aware_and_does_not_hide_mirror_lag() {
 }
 
 #[test]
+fn wake_demand_tracks_empty_lagging_mailboxes_and_pending_receipts() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let incremental = crate::incremental::Incremental::default();
+    let item = "member:agent/cedar";
+    let (empty, reads) = smallclaims::touched::record(|| graph.wake_demand("agent/cedar").unwrap());
+    assert!(empty.oldest.is_none());
+    assert!(reads.contains("mailbox:agent/cedar"));
+    incremental.evaluated(item, reads, None);
+    assert!(!incremental.needs(item, 0));
+    append(&graph, &sent("message/reactive-wake", "agent/cedar", &[]));
+    // observe_stream uses this exact recipient key for a new native-shard send.
+    incremental.touch("mailbox:agent/cedar");
+    assert!(incremental.needs(item, 0));
+    let (lagging, reads) = smallclaims::touched::record(|| graph.wake_demand("agent/cedar").unwrap());
+    assert!(!lagging.frontier.caught_up);
+    assert!(reads.contains("mailbox:agent/cedar"));
+    stream_mirror::mirror(&graph).unwrap();
+    let (ready, reads) = smallclaims::touched::record(|| graph.wake_demand("agent/cedar").unwrap());
+    assert_eq!(ready.oldest.unwrap().subject, "message/reactive-wake");
+    assert!(reads.contains("message/reactive-wake"));
+    incremental.evaluated(item, reads, None);
+    assert!(!incremental.needs(item, 0));
+    incremental.touch("message/reactive-wake");
+    assert!(incremental.needs(item, 0), "a pending message's receipt must invalidate its wake reader");
+}
+
+#[test]
 fn wake_demand_reuses_silent_person_and_reserved_family_classification() {
     let root = tempfile::tempdir().unwrap();
     let graph = graph_with_shard(root.path());

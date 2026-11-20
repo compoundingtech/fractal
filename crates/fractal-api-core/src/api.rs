@@ -498,6 +498,8 @@ impl ApiError {
             | "stale-subject"
             | "stale-fence"
             | "idempotency-conflict"
+            | "resource-request-conflict"
+            | "resource-request-cancelled"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -664,6 +666,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
+        .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
+        .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
+        .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -853,7 +858,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/claims", get(records::list_claims).post(records::post_claim))
         .route("/v1/usage", get(operations::get_usage))
-        .route("/v1/slo", get(operations::get_slo))
+        .route("/v1/slo", get(operations::get_slo).post(operations::ingest_roll))
+        .route("/v1/slo/observe", post(operations::observe_roll))
+        .route("/v1/slo/roll-intent", get(operations::roll_intent))
         .route("/v1/slo/history", get(operations::get_slo_history))
         .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
@@ -873,6 +880,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
@@ -887,6 +895,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/effects/by-key", get(effects::by_key))
         .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
+        .route("/v1/storage/status", get(operations::storage_status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
@@ -7236,6 +7245,8 @@ const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 /// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
 /// publication and refolds only the cards whose claims changed, when it can tell which.
 pub fn start_agent_roster(state: &AppState) {
+    crate::mail_delivery_objectives::start(state);
+    crate::admission_objectives::start(state);
     let Some(wake) = state.store.start_agent_roster_refresher() else {
         return;
     };
@@ -8450,7 +8461,9 @@ pub async fn guard_bound_request(
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
     }
-    if ![
+    let message_path = messages::is_message_path(path);
+    let message_send = matches!(path, "/v1/messages" | "/v1/messages/");
+    if !message_path && ![
         "/v1/intent/apply",
         "/v1/sets/",
         "/v1/agent-queue-moves",
@@ -8480,7 +8493,6 @@ pub async fn guard_bound_request(
         "/v1/subscription-requests/",
         "/v1/reviews/",
         "/v1/claims",
-        "/v1/messages/",
         "/v1/schema/registrations",
         "/v1/custom/reply",
         "/v1/diagnostic",
@@ -8509,10 +8521,16 @@ pub async fn guard_bound_request(
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
         }
-        for key in ["actor", "requester"] {
+        let message_write = message_path
+            || parts.uri.path() == "/v1/claims" && value.get("kind").and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("message."));
+        for key in ["actor", "requester"].into_iter().chain(message_send.then_some("from")) {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
+                if message_write {
+                    return Err(messages::attribution_error());
+                }
                 return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
@@ -8595,8 +8613,17 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"mission_run_follow_head":1},
     });
+    let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
+    health["replication"] = json!({
+        "state": replication,
+        "status": replication.status(),
+        "message": replication.message(),
+    });
+    if replication.status() == "fail" {
+        health["status"] = json!("degraded");
+    }
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;
     }
@@ -9665,6 +9692,15 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
+fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+    let blocking = status.blocking_summary();
+    DoctorCheck {
+        name: "checkpoint".into(),
+        status: if blocking.is_some() { "warn" } else { "pass" }.into(),
+        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+    }
+}
+
 /// Doctor's checks in report order. Store checks run together on up to `doctor_workers`
 /// threads, each under its own deadline from the clock, so a slow check costs its own time and
 /// not the time of the checks after it. A worker past the first reads on a reader it is
@@ -10315,6 +10351,7 @@ fn doctor_report_within(
                 },
             }),
             Ok(replication) => {
+                let operational_health = replication.health;
                 let unavailable = replication
                     .peers
                     .iter()
@@ -10433,6 +10470,7 @@ fn doctor_report_within(
                     || replication.unhealthy_projections != 0
                     || !diverged.is_empty()
                     || first_sync_failed.is_some()
+                    || operational_health.status() == "fail"
                 {
                     "fail"
                 } else if !unavailable.is_empty()
@@ -10440,6 +10478,7 @@ fn doctor_report_within(
                     || unresolved != 0
                     || !catching_up.is_empty()
                     || unmeasured
+                    || operational_health.status() == "warn"
                 {
                     "warn"
                 } else {
@@ -10449,7 +10488,8 @@ fn doctor_report_within(
                     name: "replication".into(),
                     status: status.into(),
                     message: format!(
-                        "{}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        "{}; {}{}{}{}{}{} envelopes; {} unresolved records; {} claims waiting for a newer build; {} unhealthy projections{}; peers {}",
+                        operational_health.message(),
                         removed
                             .map(|notice| format!(
                                 "{}; ",
@@ -10525,6 +10565,13 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
+    if state.fleet_id.is_some() {
+        checks.check("checkpoint", || {
+            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
+                .map_err(ApiError::internal)?;
+            Ok(vec![checkpoint_doctor_check(&status)])
+        });
+    }
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10711,6 +10758,10 @@ mod replication_guard_tests;
 #[path = "api/checkpoint_plan_tests.rs"]
 mod checkpoint_plan_tests;
 
+#[cfg(test)]
+#[path = "api/storage_census_tests.rs"]
+mod storage_census_tests;
+
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
 fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
@@ -10747,6 +10798,7 @@ async fn replication_worker_status(
         state.store.record_replication_worker(&request.peer, worker);
     }
     if let Some(process) = request.process {
+        state.store.record_replication_worker_heartbeat();
         let catching_up = state.store.replication_catching_up();
         let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let cpu = meter.cpu_minutes();
@@ -10775,6 +10827,17 @@ fn replication_peer_names(state: &AppState) -> Vec<String> {
             .filter(|member| member.state == "current")
             .map(|member| member.name.clone()),
     );
+    // Bootstrap membership can be empty: the worker still dials the pinned sponsor route.
+    if let (Some(fleet), Ok(Some(file))) = (
+        state.fleet_id.as_deref(),
+        crate::config::FleetFile::load(&state.state_dir),
+    ) && file.fleet_id == fleet
+        && !file.sponsor_routes.is_empty()
+        && let Some(sponsor) = file.sponsor
+        && view.members.iter().all(|member| member.name != sponsor)
+    {
+        names.insert(sponsor);
+    }
     names.retain(|name| {
         let current = view.current(name);
         let ended = view.members.iter().any(|member| member.name == *name) && current.is_empty();
@@ -10821,6 +10884,9 @@ pub struct FleetStatus {
     pub fabric_protocol: Option<String>,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
+    /// The same live worker/exchange diagnostic used by doctor and operational alerts.
+    #[serde(default)]
+    pub replication_health: smallclaims::replication::ReplicationHealth,
     pub invites: Vec<crate::store::FleetInviteView>,
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11480,6 +11546,9 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
+    state.store.record_idle_unrouted(&subject,
+        crate::store::idle_residency::UnroutedKind::ExplicitResume)
+        .map_err(ApiError::internal)?;
     let (claim, _) = state
         .store
         .append_source_gated(
@@ -11764,8 +11833,10 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
     let now = client_now_ms() as u64;
+    let mut report = request_latency_target_windows();
+    client_observations::attach(store, &mut report, now)?;
     let mut rows = crate::objectives::rows(
-        &request_latency_target_windows(),
+        &report,
         &limits,
         now,
         fresh_ms,
@@ -11779,6 +11850,13 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    rows.insert(budgets, crate::roll_completion::row(store, now));
+    let admission = crate::admission_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, admission));
+    let mail = crate::mail_delivery_objectives::rows(store, now)?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, mail));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     let declared = crate::declared_objectives::rows(store, now, &rows)?;
     drop(rows.splice(budgets..budgets, declared));

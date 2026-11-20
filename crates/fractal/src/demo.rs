@@ -1,4 +1,4 @@
-//! `st demo play FILE`: a seeded, scripted demo of st in the terminal interface, in its own
+//! `fractal demo play FILE`: a seeded, scripted demo of fractal in the terminal interface, in its own
 //! instance, the same every time and without a single model token.
 //!
 //! A demo is one KDL file: a `demo` header, a `seed` (the agents, missions, runs, conversations,
@@ -6,8 +6,8 @@
 //! such as an agent's message arriving, a pane opening, a step moving or an alert appearing,
 //! after a delay or when the presenter presses the advance key. See docs/st3/demos.md.
 //!
-//! The scripted agents are real st agents whose process does nothing. Every beat is the `st`
-//! command a real seat would run (`st ui open`, `st work claim`, `st work ask`, a timeline claim
+//! The scripted agents are real fractal agents whose process does nothing. Every beat is the `fractal`
+//! command a real seat would run (`fractal ui open`, `fractal work claim`, `fractal work ask`, a timeline claim
 //! for what the agent says), run as that agent. Only the presenter's own hands, the advance key
 //! and typing into the message input, reach the interface directly.
 
@@ -37,7 +37,7 @@ pub struct Demo {
     pub machine: String,
     /// The key that moves to the next beat (`f8` unless the file names another).
     pub advance: String,
-    /// The `st apply` publication: `version 2` and the seed's agents, missions and people.
+    /// The `fractal apply` publication: `version 2` and the seed's agents, missions and people.
     pub graph: String,
     /// Every scripted agent, `agent/NAME`.
     pub agents: Vec<String>,
@@ -78,7 +78,7 @@ pub enum StepVerb {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Show an agent, mission or machine, as a seat does with `st ui open`.
+    /// Show an agent, mission or machine, as a seat does with `fractal ui open`.
     Open {
         subject: String,
         place: Place,
@@ -102,7 +102,7 @@ pub enum Action {
         takes: Duration,
         ago: Option<Duration>,
     },
-    /// An st message between agents, or from the person to an agent.
+    /// A Fractal message between agents, or from the person to an agent.
     Send {
         from: String,
         to: String,
@@ -186,7 +186,7 @@ pub fn load(path: &Path) -> Result<Demo> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let demo = parse(&source, &base)
-        .with_context(|| format!("{} is not a demo st can play", path.display()))?;
+        .with_context(|| format!("{} is not a demo fractal can play", path.display()))?;
     // A link beside the demo must not lead elsewhere on the machine either.
     let folder = base
         .canonicalize()
@@ -205,7 +205,7 @@ pub fn load(path: &Path) -> Result<Demo> {
 }
 
 /// What a seed declaration may hold: names and the shape of a mission, and nothing that runs.
-/// st gives each agent its stand-in, and a step moves only when a beat moves it, so a harness,
+/// fractal gives each agent its stand-in, and a step moves only when a beat moves it, so a harness,
 /// command, environment or gate in a demo would only ever run something the demo did not mean.
 /// Each entry is a node, the properties it may have, and the children it may have.
 const DECLARATIONS: &[(&str, &[&str], &[&str])] = &[
@@ -811,7 +811,7 @@ pub fn play(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "a demo plays in the terminal interface: run it in a terminal"
     );
-    let exe = std::env::current_exe().context("cannot find this st executable")?;
+    let exe = std::env::current_exe().context("cannot find this fractal executable")?;
     let config = fractal_daemon::config::Config::default();
     let config_path = fractal_daemon::config::Config::default_path();
     let cache = instance.cache_home().join("st3");
@@ -905,7 +905,7 @@ fn claim_instance(
     fs::create_dir_all(instance.root())?;
     fs::write(
         &marker,
-        "This instance belongs to st demo play, which erases it each time a demo plays.\n",
+        "This instance belongs to fractal demo play, which erases it each time a demo plays.\n",
     )
     .with_context(|| format!("cannot write {}", marker.display()))
 }
@@ -935,7 +935,7 @@ fn reset_state(
 fn write_config(demo: &Demo, path: &Path) -> Result<()> {
     fs::create_dir_all(path.parent().context("the config path has no folder")?)?;
     let config = format!(
-        "# Written by st demo play for {}; each play rewrites it.\nnode = {}\nperson = {}\naccess_mode = \"auto\"\n",
+        "# Written by fractal demo play for {}; each play rewrites it.\nnode = {}\nperson = {}\naccess_mode = \"auto\"\n",
         demo.name,
         toml_string(&demo.machine),
         toml_string(&demo.me),
@@ -994,8 +994,8 @@ impl Daemon {
     }
 }
 
-/// The `pty` the agents run in: beside st, as an install puts it, or on this PATH. Without
-/// either, `st up` looks on the login shell's PATH itself.
+/// The `pty` the agents run in: beside fractal, as an install puts it, or on this PATH. Without
+/// either, `fractal up` looks on the login shell's PATH itself.
 fn pty_beside(exe: &Path) -> Option<PathBuf> {
     let beside = exe.parent().map(|dir| dir.join("pty"));
     beside.into_iter().chain(
@@ -1054,7 +1054,7 @@ fn terminate(pid: u32, state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The st environment a seat leaves in its process: a demo command acts only as the agent or
+/// The fractal environment a seat leaves in its process: a demo command acts only as the agent or
 /// person it names.
 fn scrub(command: &mut Command) {
     for name in [
@@ -1073,7 +1073,7 @@ fn scrub(command: &mut Command) {
     }
 }
 
-/// Runs each action as the `st` command a seat would run.
+/// Runs each action as the `fractal` command a seat would run.
 struct Runner {
     exe: PathBuf,
     me: String,
@@ -1113,8 +1113,8 @@ impl Runner {
         }
     }
 
-    /// Run `st ARGS` as `actor` (an agent, or the person when `None`) and return its output.
-    fn st(&self, actor: Option<&str>, args: &[&str]) -> Result<String> {
+    /// Run `fractal ARGS` as `actor` (an agent, or the person when `None`) and return its output.
+    fn fractal_cli(&self, actor: Option<&str>, args: &[&str]) -> Result<String> {
         let mut command = Command::new(&self.exe);
         command.args(args).stdin(Stdio::null());
         scrub(&mut command);
@@ -1123,13 +1123,13 @@ impl Runner {
         }
         let output = command
             .output()
-            .with_context(|| format!("cannot run st {}", args.join(" ")))?;
+            .with_context(|| format!("cannot run fractal {}", args.join(" ")))?;
         let said = String::from_utf8_lossy(&output.stdout).into_owned();
-        self.note(&format!("st {} → {}", args.join(" "), said.trim()));
+        self.note(&format!("fractal {} → {}", args.join(" "), said.trim()));
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             self.note(&format!("  failed: {}", error.trim()));
-            bail!("st {} failed: {}", args.first().unwrap_or(&""), error.trim());
+            bail!("fractal {} failed: {}", args.first().unwrap_or(&""), error.trim());
         }
         Ok(said)
     }
@@ -1137,8 +1137,8 @@ impl Runner {
     fn json(&self, actor: Option<&str>, args: &[&str]) -> Result<Value> {
         let mut args = args.to_vec();
         args.push("--json");
-        let said = self.st(actor, &args)?;
-        serde_json::from_str(&said).context("st answered with something other than JSON")
+        let said = self.fractal_cli(actor, &args)?;
+        serde_json::from_str(&said).context("fractal answered with something other than JSON")
     }
 
     /// Wait up to a minute for the daemon at `socket` to answer its health check. The agents
@@ -1164,14 +1164,14 @@ impl Runner {
     fn seed(&self, demo: &Demo) -> Result<()> {
         let graph = self.dir.join("seed.kdl");
         fs::write(&graph, self.with_stand_ins(demo)?)?;
-        self.st(
+        self.fractal_cli(
             None,
             &["apply", graph.to_str().context("the state path is not UTF-8")?, "--as", &self.me, "--no-gate-check"],
         )?;
         for agent in &demo.agents {
             self.incarnation(agent, Duration::from_secs(30)).with_context(|| {
                 format!(
-                    "{agent} did not start; `st --instance NAME doctor` says why (st starts agents through your login shell, which must find pty)"
+                    "{agent} did not start; `fractal --instance NAME doctor` says why (fractal starts agents through your login shell, which must find pty)"
                 )
             })?;
             self.harness(agent, "idle")?;
@@ -1193,7 +1193,7 @@ impl Runner {
         let exe = self
             .exe
             .to_str()
-            .context("the st path is not UTF-8")?
+            .context("the fractal path is not UTF-8")?
             .to_owned();
         let player = std::process::id().to_string();
         for node in document.nodes_mut() {
@@ -1201,7 +1201,7 @@ impl Runner {
                 continue;
             }
             let name = first_string(node).unwrap_or_default();
-            // parse() allowed nothing that runs, so st's stand-in is the agent's only process.
+            // parse() allowed nothing that runs, so fractal's stand-in is the agent's only process.
             let body = node.ensure_children();
             let mut workspace = KdlNode::new("workspace");
             workspace.push(
@@ -1243,13 +1243,13 @@ impl Runner {
     }
 
     /// What the agent's harness is doing, as a driver reports it: `idle` or `working`. The
-    /// driver is named `demo`, so st reads the agent's conversation from its timeline.
+    /// driver is named `demo`, so fractal reads the agent's conversation from its timeline.
     fn harness(&self, agent: &str, state: &str) -> Result<()> {
         let incarnation = self.incarnation(agent, Duration::from_secs(5))?;
         let state = format!("state={state}");
         let incarnation = format!("incarnation_id={}", json!(incarnation));
         let at = format!("observed_at_ms={}", now_ms());
-        self.st(
+        self.fractal_cli(
             Some(agent),
             &[
                 "claim", agent, "harness.observed", "--actor", agent, "--field", &state, "--field",
@@ -1339,7 +1339,7 @@ impl Runner {
             args.push(field);
         }
         args.extend(["--idempotency-key", &key]);
-        self.st(Some(agent), &args).map(drop)
+        self.fractal_cli(Some(agent), &args).map(drop)
     }
 
     /// Do one action. `player` is there during the beats, for pacing; the seed has none.
@@ -1369,7 +1369,7 @@ impl Runner {
                 if !focus {
                     args.push("--keep-focus");
                 }
-                self.st(by.as_deref(), &args).map(drop)
+                self.fractal_cli(by.as_deref(), &args).map(drop)
             }
             Action::Say {
                 agent,
@@ -1479,11 +1479,11 @@ impl Runner {
                 for file in &files {
                     args.extend(["--attach", *file]);
                 }
-                self.st(Some(from), &args).map(drop)
+                self.fractal_cli(Some(from), &args).map(drop)
             }
             Action::Run { mission, id } => {
                 let workspace = self.workspace.to_string_lossy().into_owned();
-                self.st(
+                self.fractal_cli(
                     None,
                     &[
                         "missions", "start", mission.as_str(), "--id", id,
@@ -1509,7 +1509,7 @@ impl Runner {
                 };
                 if verb == "claim" {
                     // A step whose dependency just completed becomes ready a moment later.
-                    self.st(
+                    self.fractal_cli(
                         Some(agent),
                         &["trace", "wait", subject.as_str(), "--for", "ready", "--timeout", "30s"],
                     )?;
@@ -1527,7 +1527,7 @@ impl Runner {
                 if verb == "complete" {
                     args.extend(["--evidence", "demo/scripted"]);
                 }
-                self.st(Some(agent), &args)?;
+                self.fractal_cli(Some(agent), &args)?;
                 self.harness(agent, if matches!(verb, "claim" | "progress") { "working" } else { "idle" })
             }
             Action::Ask {
@@ -1570,11 +1570,11 @@ impl Runner {
                     "--as", agent.as_str(),
                 ];
                 args.extend(from.iter().map(String::as_str));
-                self.st(Some(agent), &args).map(drop)
+                self.fractal_cli(Some(agent), &args).map(drop)
             }
             Action::Document { name, file } => {
                 let file = file.to_str().context("a document path is not UTF-8")?;
-                let reference = self.st(None, &["documents", "put", file, "--as", name])?;
+                let reference = self.fractal_cli(None, &["documents", "put", file, "--as", name])?;
                 if let Ok(mut documents) = self.documents.lock() {
                     documents.insert(name.clone(), reference.trim().to_owned());
                 }
@@ -1719,7 +1719,7 @@ fn at_ms(ago: Option<Duration>) -> u64 {
     now_ms().saturating_sub(ago.map_or(0, |ago| ago.as_millis() as u64))
 }
 
-/// `st demo seat`: the process a scripted agent runs. It does nothing and ends with the player.
+/// `fractal demo seat`: the process a scripted agent runs. It does nothing and ends with the player.
 pub fn seat(player: u32) -> Result<()> {
     wait_for_exit(player)
 }
@@ -1951,7 +1951,7 @@ beats {
         };
         assert_eq!(answers[0].outcome, "accept");
         assert_eq!(answers[1].outcome, "decline");
-        // What st apply reads is the publication with each agent's stand-in.
+        // What fractal apply reads is the publication with each agent's stand-in.
         let root = tempfile::tempdir().unwrap();
         fractal_daemon::graph::parse_intent(&test_runner(root.path()).with_stand_ins(&demo).unwrap(), "studio")
             .unwrap();

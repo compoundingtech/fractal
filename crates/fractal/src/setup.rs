@@ -133,7 +133,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
                 .await?;
             }
             // An existing configuration never starts onboarding on its own, whatever its
-            // graph holds; `st setup --onboarding` is the explicit way.
+            // graph holds; `fractal setup --onboarding` is the explicit way.
             Ok(None)
         })
 }
@@ -433,7 +433,7 @@ async fn prepare_harness(
     Ok(Some(chosen))
 }
 
-/// Make sure the st Claude channel is installed for this account; the error is the install
+/// Make sure the fractal Claude channel is installed for this account; the error is the install
 /// command's own stderr, whole.
 pub(crate) fn ensure_claude_channel(executable: &Path) -> std::result::Result<(), String> {
     let environment = fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
@@ -1125,13 +1125,13 @@ fn try_linger() {
         .output()
         .is_ok_and(|o| o.status.success());
     if enabled {
-        say!("Enabled lingering; st can keep running after you log out.");
+        say!("Enabled lingering; fractal can keep running after you log out.");
     } else {
         let quoted = user
             .map(|user| format!(" '{}'", user.replace('\'', "'\\''")))
             .unwrap_or_default();
         say!(
-            "Lingering was not enabled. To keep st running after logout, run:\n  loginctl enable-linger{quoted}"
+            "Lingering was not enabled. To keep fractal running after logout, run:\n  loginctl enable-linger{quoted}"
         );
     }
 }
@@ -1156,7 +1156,7 @@ async fn start_daemon(
             .output();
         match result {
             Ok(output) if output.status.success() => {
-                say!("Installed the st user service; it starts when you log in.");
+                say!("Installed the fractal user service; it starts when you log in.");
                 #[cfg(target_os = "linux")]
                 if linger {
                     try_linger();
@@ -1213,18 +1213,18 @@ async fn start_daemon(
             }
         });
     }
-    let mut child = command.spawn().context("start the detached st daemon")?;
+    let mut child = command.spawn().context("start the detached fractal daemon")?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if daemon_ready(config).await {
             say!(
-                "Started st without a service. It stops when you reboot.\nRun `{program} service install` to keep it running."
+                "Started fractal without a service. It stops when you reboot.\nRun `{program} service install` to keep it running."
             );
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
             anyhow::bail!(
-                "st daemon exited with {status}; read {}",
+                "fractal daemon exited with {status}; read {}",
                 log_path.display()
             );
         }
@@ -1232,7 +1232,7 @@ async fn start_daemon(
             let _ = child.kill();
             let _ = child.wait();
             anyhow::bail!(
-                "st daemon did not become ready; read {}",
+                "fractal daemon did not become ready; read {}",
                 log_path.display()
             );
         }
