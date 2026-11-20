@@ -239,6 +239,7 @@ fn native_usage_source_fence_is_independent_of_optional_views_and_survives_reope
     let initial=identity(&store);
     assert_eq!(initial.1,0);
     let actor="agent/sample/usage-producer";
+    store.set_usage_limits_writers(vec![actor.into()]).unwrap();
     let claim=store.append_claim(&crate::model::ClaimInput{
         subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
         fields:std::collections::BTreeMap::from([("readings".into(),serde_json::json!([]))]),
