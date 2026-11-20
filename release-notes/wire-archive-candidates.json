@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Construct lossless offline 30-day and 14-day wire-archive candidate stores with existing protected checkpoint witnesses and separate measured capacity",
+  "replay": {"status": "none", "detail": "No live graph replay. The offline command only operates on private copies and proves exact wire-evidence restore/re-export before candidate removal."},
+  "schema": {"status": "none", "detail": "No production schema, storage-version, claim-kind or archive-codec change. Candidate reports/manifests are isolated analysis artifacts, not an activated catalogue."},
+  "rules": {"status": "none", "detail": "Reuses the current staged native checkpoint rules and guards without changing their version or granting new drop authority. The 30-day and 14-day hot windows further protect recent admission, repair and signature observations."},
+  "compatibility": {"status": "changed", "detail": "Adds an explicit offline archive-candidates command. Existing daemon, writer, peer and backup defaults remain unchanged. Candidate stores lack default-hot-reader history and must not be opened by a daemon or deployed."},
+  "downtime": {"status": "none", "detail": "No service restart or fleet downtime. An already consistent offline source copy is a prerequisite, not captured by this command."},
+  "manual": {"status": "changed", "detail": "Requires explicit source-copy, output, fixed as-of time and offline acknowledgement. Real-store execution additionally needs reviewed fixture proof, approved isolated disk/admitted heavy work and an OPS-approved offline copy. No live capture or activation is authorized."},
+  "recovery": {"status": "none", "detail": "Original source evidence and live stores remain unchanged. Incomplete private candidate output is not a completed report and must never be treated as a deployment/backup. No production rollback procedure changes."}
+}

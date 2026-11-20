@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retain explicit unknown-exit evidence for vanished one-shot workers and explain retirement on waiting mission steps and runs.",
+  "replay": {"status": "none", "detail": "No replay or recovery trigger changes. New terminal observations retain exit diagnostics; existing historical observations are not rewritten."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations or schema version changes. Additional diagnostic keys use the existing runtime observation fields."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digests or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness schema changes. Existing optional exit-evidence JSON gains observation metadata and an explicit unknown diagnostic. Older readers can ignore those keys; mixed-version execution has not been exercised."},
+  "downtime": {"status": "none", "detail": "No additional interruption beyond the normal binary upgrade; restart-to-API and restart-to-health were not measured."},
+  "manual": {"status": "none", "detail": "No manual migration or recovery steps. One-shot retirement and restart policy are unchanged."},
+  "recovery": {"status": "none", "detail": "No storage migration or new recovery procedure. Swapping back retains existing observation claims, but older binaries do not produce the new unknown-exit diagnostic."}
+}

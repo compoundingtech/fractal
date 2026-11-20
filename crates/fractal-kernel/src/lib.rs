@@ -21,12 +21,12 @@ pub mod conversation_header;
 /// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
 pub mod fabric_gateway;
 pub mod fleet;
-/// Built-in gate kinds: what gates shelled out for most, answered by st itself.
+/// Built-in gate kinds: what gates shelled out for most, answered by Fractal itself.
 pub mod gate_kinds;
-/// What an `st` command run inside an exec gate reports about itself.
+/// What a `fractal` command run inside an exec gate reports about itself.
 pub mod gate_report;
 pub mod harness_events;
-/// The lifecycle hook set st3 publishes beneath its own state directory.
+/// The lifecycle hook set Fractal publishes beneath its own state directory.
 pub mod hooks;
 pub mod instance;
 pub mod lane;
@@ -41,7 +41,7 @@ pub mod rules;
 pub mod seat_queue;
 pub mod step_execution;
 pub use step_execution::{StepExecution, StepExecutionUsage};
-/// The st agent skill bundled in this binary and installed for each harness.
+/// The Fractal agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod publication;
 pub mod terminal_binding;

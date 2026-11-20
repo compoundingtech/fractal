@@ -171,6 +171,16 @@ impl Store {
     /// Read-only: never mirrors or populates the projection. A lagging/absent shard cannot
     /// prove absence. The source cut is sampled first; the graph is then read in one snapshot.
     pub fn wake_demand(&self, seat: &str) -> Result<Demand> {
+        smallclaims::touched::note_read(|| format!("mailbox:{seat}"));
+        let demand = self.wake_demand_untracked(seat)?;
+        if let Some(pending) = &demand.oldest {
+            smallclaims::touched::note_read(|| pending.subject.clone());
+        }
+        Ok(demand)
+    }
+
+    /// Queue ranking must not subscribe a seat's reactive item to other seats' mailboxes.
+    pub(super) fn wake_demand_untracked(&self, seat: &str) -> Result<Demand> {
         let source = messages_shard::shard(self).map(|shard| {
             shard.readers.get().query_row(
                 "SELECT COALESCE((SELECT MAX(store_index) FROM stream_messages),0),

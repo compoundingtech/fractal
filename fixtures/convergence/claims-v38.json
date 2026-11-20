@@ -2863,6 +2863,96 @@
     "projection": "fleet",
     "wakes_reconciler": false
   },
+  "gate.admission.observed": {
+    "kind": "gate.admission.observed",
+    "subjects": [
+      "gate-admission"
+    ],
+    "fields": {
+      "at_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "class": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "gate",
+          "heavy",
+          "eval"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "coverage": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "logical"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "epoch": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "onset_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "outcome": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "accepted",
+          "granted",
+          "failed",
+          "excluded"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "schema": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "gate-slot.admission/v1"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "gate.head-bound": {
     "kind": "gate.head-bound",
     "subjects": [
@@ -8688,6 +8778,164 @@
     "projection": null,
     "wakes_reconciler": false
   },
+  "resource.admission.coverage": {
+    "kind": "resource.admission.coverage",
+    "subjects": [
+      "resource-admission"
+    ],
+    "fields": {
+      "complete": {
+        "value_type": "boolean",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "epoch": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false
+  },
+  "resource.admission.observed": {
+    "kind": "resource.admission.observed",
+    "subjects": [
+      "resource-admission"
+    ],
+    "fields": {
+      "admission_timeout_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "admitted_at": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "class": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "landing",
+          "check",
+          "agent"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "clock_uncertain": {
+        "value_type": "boolean",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "coverage": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "logical",
+          "enforced"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "epoch": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "finite": {
+        "value_type": "boolean",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "owner": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "queued_at": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "refusal": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "admission-expired",
+          "missing-profile",
+          "unsupported-coverage",
+          "impossible",
+          "clock-uncertain",
+          "cancelled",
+          "retired",
+          "retiring",
+          "uncertain",
+          "invalid-state"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "retired_at": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "queued",
+          "admitted",
+          "launched",
+          "refused",
+          "retiring",
+          "retired",
+          "uncertain"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "resource.exec-receipt": {
     "kind": "resource.exec-receipt",
     "subjects": [
@@ -9912,12 +10160,6 @@
         "immutable": false,
         "reference": false
       },
-      "exec_exited_at_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "exit_code": {
         "value_type": "integer",
         "required": false,
@@ -9974,12 +10216,6 @@
       },
       "shutdown_timeout_ms": {
         "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -11194,86 +11430,6 @@
     "write_policy": "system-only",
     "cardinality": "state-transition",
     "projection": "step-runs",
-    "wakes_reconciler": true,
-    "source_kdl": [
-      "step"
-    ]
-  },
-  "step.execution-phase": {
-    "kind": "step.execution-phase",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "at_unix_ms": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "exec": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "host": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "phase": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "dispatched",
-          "received",
-          "admitted",
-          "exec-started",
-          "exec-exited",
-          "result-replicated",
-          "dispatch-stalled",
-          "execution-timeout"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "start_operation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "timeout_extension_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
     "wakes_reconciler": true,
     "source_kdl": [
       "step"

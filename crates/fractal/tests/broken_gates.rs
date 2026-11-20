@@ -4,7 +4,7 @@
 //!
 //! Each step replays a gate that failed a run whose work was done: a cargo gate whose PATH lacked
 //! the linker (twice), a memory threshold that could never pass, a grep of a listing that showed
-//! only its first page, and a listing limit st refuses. A revision of only the gates then passes
+//! only its first page, and a listing limit fractal refuses. A revision of only the gates then passes
 //! every step.
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
@@ -1339,7 +1339,7 @@ mission "orchid/elsewhere" state="ready" {
     );
 
     // A gate that reads an input runs with the value given, and is unchecked without one. A
-    // built-in gate runs its `st gate` command; this host has no GitHub token, so it is broken.
+    // built-in gate runs its `fractal gate` command; this host has no GitHub token, so it is broken.
     let inputs = root.path().join("inputs.kdl");
     std::fs::write(
         &inputs,

@@ -36,6 +36,7 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> FollowOutp
             follow_mission_run_to(
                 &client,
                 run,
+                10,
                 cli.json,
                 false,
                 args.limit,
@@ -69,6 +70,17 @@ fn event(index: u64) -> Value {
     json!({"store_index": index, "kind": "transport.observed", "subject": SUBJECT, "body": {}})
 }
 
+fn mission_events_path(after: u64) -> String {
+    format!("/v1/events/page?after={after}&wait=true&timeout_ms=30000")
+}
+
+fn mission_event_page(index: u64, kind: &str) -> Value {
+    json!({
+        "items": [{"store_index": index, "kind": kind, "subject": RUN, "body": {}}],
+        "next_after": index,
+    })
+}
+
 fn claim(index: u64) -> Value {
     json!({
         "id": format!("claim/{index}"), "store_index": index, "batch_id": "batch/fixture",
@@ -83,6 +95,7 @@ fn run(status: &str, phase: &str) -> Value {
         "generation": "run-generation/fixture", "initial_revision": "fixture", "revision": "fixture",
         "root_revision": "fixture", "root_mission_run": RUN, "workspace": "/tmp/follow-fixture",
         "requester": "person/avery", "mode": "run", "status": status, "phase": phase,
+        "inputs": {},
         "created_at_unix_ms": 0, "updated_at_unix_ms": 0, "steps": [],
     })
 }
@@ -436,6 +449,7 @@ async fn mission_timeout(interrupt_tree: bool) {
     let mut script = vec![
         (RUN_PATH.into(), Reply::Value(before.clone())),
         (TREE_PATH.into(), Reply::Value(tree(before, None))),
+        (mission_events_path(10), Reply::Value(mission_event_page(11, "step-run.state"))),
     ];
     if interrupt_tree {
         script.push((RUN_PATH.into(), Reply::Value(after.clone())));
@@ -446,6 +460,7 @@ async fn mission_timeout(interrupt_tree: bool) {
     }
     script.extend([
         (TREE_PATH.into(), Reply::Value(tree(after, None))),
+        (mission_events_path(11), Reply::Value(mission_event_page(12, "mission-run.state"))),
         (RUN_PATH.into(), Reply::Value(finished.clone())),
         (TREE_PATH.into(), Reply::Value(tree(finished, None))),
     ]);
@@ -472,13 +487,9 @@ async fn mission_timeout(interrupt_tree: bool) {
     );
     assert_eq!(
         output.requests[2].1 - output.requests[1].1,
-        Duration::from_millis(250)
+        Duration::ZERO
     );
-    assert_eq!(
-        output.requests[5].1 - output.requests[4].1,
-        Duration::from_millis(250)
-    );
-    let failed = if interrupt_tree { 3 } else { 2 };
+    let failed = if interrupt_tree { 4 } else { 3 };
     let delay = output.requests[failed + 1].1 - output.requests[failed].1 - Duration::from_secs(15);
     assert!((Duration::from_secs(5)..=Duration::from_secs(15)).contains(&delay));
     assert_eq!(
@@ -501,8 +512,10 @@ async fn mission_follow_honors_page_limit_and_refreshes_when_lookahead_appears()
         vec![
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (tree_path.clone(), Reply::Value(tree(running.clone(), None))),
+            (mission_events_path(10), Reply::Value(mission_event_page(11, "mission-run.created"))),
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (tree_path.clone(), Reply::Value(tree(running, Some("page-child-020")))),
+            (mission_events_path(11), Reply::Value(mission_event_page(12, "mission-run.state"))),
             (RUN_PATH.into(), Reply::Value(finished.clone())),
             (tree_path.clone(), Reply::Value(tree(finished, Some("page-child-020")))),
         ],
@@ -629,4 +642,70 @@ async fn mission_follow_retries_run_timeout_without_repeating_snapshots() {
 #[tokio::test(start_paused = true)]
 async fn mission_follow_retries_tree_timeout_without_repeating_snapshots() {
     mission_timeout(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn mission_follow_waits_for_lifecycle_events_without_snapshot_polling() {
+    let running = run("running", "normal");
+    let finished = run("completed", "normal");
+    let output = scripted_cli(
+        &["missions", "show", RUN, "--follow"],
+        vec![
+            (RUN_PATH.into(), Reply::Value(running.clone())),
+            (TREE_PATH.into(), Reply::Value(tree(running, None))),
+            (
+                mission_events_path(10),
+                Reply::Delayed(json!({"items":[],"next_after":null}), Duration::from_secs(30)),
+            ),
+            (
+                mission_events_path(10),
+                Reply::Value(json!({"items":[event(11)],"next_after":11})),
+            ),
+            (
+                mission_events_path(11),
+                Reply::Delayed(mission_event_page(12, "step-run.state"), Duration::from_secs(7)),
+            ),
+            (RUN_PATH.into(), Reply::Value(finished.clone())),
+            (TREE_PATH.into(), Reply::Value(tree(finished, None))),
+        ],
+    ).await;
+    assert!(output.result.is_ok(), "{}", stderr(&output));
+    assert_eq!(output.requests.len(), 7);
+    assert_eq!(output.requests[3].1 - output.requests[2].1, Duration::from_secs(30));
+    assert_eq!(output.requests[5].1 - output.requests[4].1, Duration::from_secs(7));
+}
+
+#[tokio::test(start_paused = true)]
+async fn mission_follow_reconnects_at_the_same_cursor_after_daemon_restart() {
+    let finished = run("completed", "normal");
+    let output = scripted_cli(
+        &["--json", "missions", "show", RUN, "--follow"],
+        vec![
+            (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            (mission_events_path(10), Reply::Disconnect),
+            (mission_events_path(10), Reply::ConnectError(libc::ECONNREFUSED)),
+            (mission_events_path(10), Reply::Value(mission_event_page(11, "mission-run.state"))),
+            (RUN_PATH.into(), Reply::Value(finished.clone())),
+        ],
+    ).await;
+    assert!(output.result.is_ok(), "{}", stderr(&output));
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), finished);
+    assert!(stderr(&output).contains("follow gap:"));
+    assert!(stderr(&output).contains("follow recovered after"));
+    assert!(output.requests[1..4].iter().all(|(path, _)| path == &mission_events_path(10)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn mission_follow_reports_a_lost_cursor_after_daemon_replacement() {
+    let output = scripted_cli(
+        &["--json", "missions", "show", RUN, "--follow"],
+        vec![
+            (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            (mission_events_path(10), Reply::Disconnect),
+            (mission_events_path(10), Reply::CursorGap { floor: 0, frontier: 2 }),
+        ],
+    ).await;
+    assert!(output.result.is_err());
+    assert!(stderr(&output).contains("Missed transitions were not replayed"));
+    assert!(output.stdout.is_empty());
 }

@@ -33,7 +33,7 @@
 //! cargo test -p fractal --test integration log_diet:: -- --ignored --nocapture
 //! ```
 //!
-//! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
+//! Inside a Fractal harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
 use fractal_daemon::MissionsStore;

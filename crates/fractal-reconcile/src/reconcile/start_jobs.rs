@@ -285,10 +285,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .map(|claim| claim.id);
                 }
                 backend_entered = true;
+                let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
-                    runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, Some(&operation), &guard)?;
                 } else {
-                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                    runtime.start_guarded(&prepared.launch_member, Some(&operation), &guard)?;
                 }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),
@@ -348,7 +349,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let persisted = match store.finish_runtime_start(&id, &result) {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
+                    eprintln!("fractal: failed to persist runtime start completion {id}: {error:#}");
                     false
                 }
             };
@@ -431,7 +432,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     this.apply_start_result(&result.id, &result.subject)
                 }) {
                     None => eprintln!(
-                        "st3: failed to apply runtime start completion {}; see start-completion fault", result.id
+                        "fractal: failed to apply runtime start completion {}; see start-completion fault", result.id
                     ),
                     Some(true) => tracing::info!(
                         operation = %result.id,

@@ -114,7 +114,13 @@ pub async fn doctor(
             ),
         });
     }
-    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
+    let slo_store = reader_store.clone();
+    let slo_report = blocking_store(move || {
+        let mut report = request_latency_windows();
+        super::client_observations::attach(&slo_store, &mut report, client_now_ms() as u64)?;
+        Ok(report)
+    }).await?;
+    for (name, status, message) in crate::slo::doctor_lines(&slo_report) {
         report.checks.push(DoctorCheck {
             name,
             status: status.into(),
@@ -518,6 +524,37 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         body["otel_ui_url"] = Value::String(url);
     }
     Ok(Json(body))
+}
+
+/// Append immutable roll evidence and wake the same projections as other native writes.
+pub async fn ingest_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_completion::ingest(&store, receipt, client_now_ms() as u64)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+pub async fn observe_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_observer::observe(&store, &receipt.claim_id)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct RollIntentQuery { pub run: String }
+
+pub async fn roll_intent(
+    State(state): State<AppState>, Query(query): Query<RollIntentQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    Ok(Json(blocking_store(move || crate::roll_source::intent_context(&store, &query.run)).await?))
 }
 
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.

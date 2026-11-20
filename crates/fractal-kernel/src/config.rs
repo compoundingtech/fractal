@@ -531,7 +531,7 @@ pub struct ReconcileConfig {
     /// wake the seat.
     pub idle_nudge_quiet_watch: String,
     /// Idle-residency threshold: `off` by default, or a duration of at least one minute.
-    /// Currently evaluated for diagnostics only; it does not suspend seats.
+    /// Enables automatic suspension only through the signed fleet writer barrier.
     pub idle_suspend_after: String,
     /// Maximum concurrent idle-residency resumes. Must be positive.
     pub idle_resume_concurrency: usize,
@@ -1202,6 +1202,12 @@ impl Config {
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
+        if let Some(resources) = &self.finite_resources {
+            for (key, seed) in &resources.profiles {
+                fractal_runtime::validate_profile_key(key)?;
+                seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
+            }
+        }
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -1642,6 +1648,52 @@ mod tests {
                 &format!("[agents_request_slo_fault]\n{fields}\n")
             ).is_err(), "{fields}");
         }
+    }
+
+    #[test]
+    fn resource_profile_configuration_is_host_local_strict_and_validated() {
+        let configured: super::Config = toml::from_str(r#"
+            [finite_resources]
+            diskFloorBytes = 85000000000
+            heavyIoSlots = 1
+            [finite_resources.profiles.check-native]
+            cores = 4
+            memory = 8589934592
+            memoryHigh = 6442450944
+            disk = 10000000000
+            io = "heavy"
+            source = "declared-provisional"
+            reason = "Reviewed bootstrap pending complete pilot observations"
+            learningCoverage = "client-only"
+            recoveryCapable = false
+        "#).unwrap();
+        configured.validate().unwrap();
+        let policy = configured.finite_resources.as_ref().unwrap();
+        assert_eq!(policy.disk_floor_bytes, 85_000_000_000);
+        assert_eq!(policy.profiles["check-native"].memory_high, Some(6 << 30));
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.finite_resources, configured.finite_resources);
+        for invalid in [
+            ("memory = 8589934592", "memory = 1"),
+            ("cores = 4", "cores = 0"),
+            ("reason = \"Reviewed bootstrap pending complete pilot observations\"", "reason = \"\""),
+            ("memoryHigh = 6442450944", "memoryHigh = 10000000000"),
+        ] {
+            let text = toml::to_string(&configured).unwrap().replace(invalid.0, invalid.1);
+            let invalid: super::Config = toml::from_str(&text).unwrap();
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
+    #[test]
+    #[ignore = "requires FRACTAL_RENDERED_CONFIG pointing to a rendered host configuration"]
+    fn validate_rendered_resource_profile_configuration() {
+        let path = std::path::PathBuf::from(std::env::var_os("FRACTAL_RENDERED_CONFIG")
+            .expect("FRACTAL_RENDERED_CONFIG is required"));
+        let configured = super::Config::load_unvalidated(Some(&path)).unwrap();
+        configured.validate().unwrap();
+        assert!(!configured.finite_resources.as_ref().expect("finite_resources is required").profiles.is_empty());
     }
 
     #[test]

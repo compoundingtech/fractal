@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/st3-readiness-recovery.XXXXXX")"
+root="$(mktemp -d "${TMPDIR:-/tmp}/fractal-readiness-recovery.XXXXXX")"
 state="$root/state"
 socket="$root/st3.sock"
-pty_root="/tmp/st3-rr.$$.$RANDOM"
+pty_root="/tmp/fractal-rr.$$.$RANDOM"
 mkdir -p "$pty_root"
 daemon=""
 run_id=""

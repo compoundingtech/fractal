@@ -202,6 +202,8 @@ mod tests {
             }
             tx.execute("UPDATE mission_runs SET status='completed' WHERE id='terminal'", []).unwrap();
             tx.execute("UPDATE run_generations SET status='cancelled' WHERE id='generation'", []).unwrap();
+            // A terminal root alone does not cancel an active owner or generation.
+            // Descendant cancellation must be persisted by the cancellation operation.
             tx.execute("UPDATE mission_runs SET root_run_id='terminal' WHERE id='root'", []).unwrap();
             append_claim_record_tx(
                 &tx, "node-a", "effect/unresolved", "effect.unresolved",
@@ -212,7 +214,7 @@ mod tests {
         }
         for (id, expected) in [
             ("expired", "ready"), ("effect", "blocked"),
-            ("terminal", "cancelled"), ("generation", "cancelled"), ("root", "cancelled"),
+            ("terminal", "cancelled"), ("generation", "cancelled"), ("root", "ready"),
         ] {
             let page = store.mission_runs_by_prefix(&format!("roll/{id}"), false, 100).unwrap();
             assert_eq!(page.runs[0].steps[0].state, expected, "{id}");

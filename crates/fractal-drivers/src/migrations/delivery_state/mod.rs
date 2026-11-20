@@ -423,7 +423,7 @@ mod tests {
         let mut ledger = open(&state_dir, Harness::OpenCode);
         assert_eq!(ledger.entries().len(), 1);
         // The recipient archives the message; ownership is released and the entry is gone.
-        ledger.prune(|_| false).unwrap();
+        ledger.prune(None, |_| false).unwrap();
 
         // The legacy record is still on disk, and it is NOT translated a second time: the ledger
         // file's existence is the once-only fence.
