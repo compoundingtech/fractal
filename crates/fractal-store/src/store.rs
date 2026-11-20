@@ -27,6 +27,8 @@ pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+#[cfg(test)]
+mod resource_profile_policy_tests;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
