@@ -26,12 +26,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 
 mod retirement;
+pub mod darwin_slot;
 pub use retirement::{CgroupEnding, ScopeRetirementProof, end_scope_with_proof};
 pub(crate) use retirement::observe_closed_scope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {
     Scope,
+    DarwinSlot { slot: &'static str },
     Detached,
     DegradedDetached,
 }
@@ -39,6 +41,7 @@ pub enum Isolation {
 static MODE: OnceLock<Isolation> = OnceLock::new();
 static SCOPE_EXPANSION_FLAG: OnceLock<bool> = OnceLock::new();
 static WARNED: AtomicBool = AtomicBool::new(false);
+static DARWIN_HELPER_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static SCOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn mode() -> Isolation {
@@ -108,6 +111,14 @@ pub fn warn_if_degraded(product: &str) {
             "{product}: WARN systemd user scopes are unavailable; tasks lack cgroup isolation. A daemon restart can stop them. Enable a user systemd manager with linger."
         );
     }
+    if cfg!(target_os = "macos") && !WARNED.swap(true, Ordering::Relaxed) {
+        let available = *DARWIN_HELPER_AVAILABLE.get_or_init(|| {
+            darwin_slot::Helper::detect_in(&std::env::vars().collect()).is_some()
+        });
+        if !available {
+            eprintln!("{product}: WARN {}", darwin_slot::HELPER_UNAVAILABLE);
+        }
+    }
 }
 
 fn detect() -> Isolation {
@@ -115,6 +126,11 @@ fn detect() -> Isolation {
 }
 
 fn detect_in(environment: &std::collections::BTreeMap<String, String>) -> Isolation {
+    if cfg!(target_os = "macos") {
+        let _ = DARWIN_HELPER_AVAILABLE.set(darwin_slot::Helper::detect_in(environment).is_some());
+        // Capability detection does not claim custody before the finite launch protocol is wired.
+        return Isolation::Detached;
+    }
     if !cfg!(target_os = "linux") {
         return Isolation::Detached;
     }
@@ -240,7 +256,9 @@ fn wrap_for_mode(
             command.arg("--").arg(program).args(arguments);
             command
         }
+        Isolation::DarwinSlot { .. } => unreachable!("Darwin slots require explicit finite authorization"),
         Isolation::Detached | Isolation::DegradedDetached => {
+            // Darwin slots are selected per finite launch, never by ambient `mode()`.
             let mut command = Command::new(program);
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
@@ -445,6 +463,9 @@ pub(crate) fn mark_ended(unit: &str) {
     )
 )]
 pub fn end_scope(unit: &str, grace: Duration) -> Result<bool> {
+    if darwin_slot::slot_for_unit(unit).is_some() {
+        return Ok(end_scope_with_proof(unit, &|| Ok(()))?.is_some());
+    }
     if mode() != Isolation::Scope || !is_work_scope(unit) {
         tracing::debug!(guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope teardown skipped");
         return Ok(false);
@@ -547,6 +568,9 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
     )
 )]
 pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
+    if darwin_slot::slot_for_unit(unit).is_some() {
+        return end_scope(unit, Duration::ZERO);
+    }
     if mode() != Isolation::Scope || !is_work_scope(unit) || has_ended(unit) {
         tracing::debug!(recorded_scope = unit, signal, caller = "signal_scope", guard_decision = "skip", reason = "scope_mode_work_scope_or_ended_guard", "scope signal skipped");
         return Ok(false);
@@ -661,6 +685,12 @@ fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unset_darwin_helper_retains_detached_isolation() {
+        assert_eq!(detect_in(&std::collections::BTreeMap::new()), Isolation::Detached);
+    }
 
     #[test]
     fn scope_version_selects_only_known_argv_semantics() {
@@ -971,6 +1001,7 @@ mod tests {
                     *SCOPE_EXPANSION_FLAG.get().unwrap()
                 );
             }
+            Isolation::DarwinSlot { .. } => panic!("Darwin slots must not become ambient isolation"),
             Isolation::Detached | Isolation::DegradedDetached => {
                 assert_eq!(command.get_program(), OsStr::new("sh"));
                 assert_eq!(arguments, ["-c", "true"]);
