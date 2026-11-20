@@ -70,7 +70,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 #[test]
 fn signature_reference_reader_precedes_the_default_writer_format() {
     assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
-    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 26);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 27);
 }
 
 #[test]
