@@ -1914,7 +1914,11 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   compat-archives-x86_64-unknown-linux-gnu:
     name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 15
     permissions:
       contents: read
