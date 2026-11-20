@@ -4488,6 +4488,12 @@
         "immutable": false,
         "reference": false
       },
+      "message_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "observed_since_ms": {
         "value_type": "integer",
         "required": false,
@@ -9028,6 +9034,12 @@
       "resource"
     ],
     "fields": {
+      "admissionDecision": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "argv": {
         "value_type": "array",
         "required": false,
@@ -9044,6 +9056,7 @@
         "value_type": "string",
         "required": true,
         "values": [
+          "recovery",
           "landing",
           "check",
           "agent"
@@ -9130,8 +9143,37 @@
         "immutable": false,
         "reference": false
       },
+      "ioStat": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "launched": {
         "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "learningCoverage": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "full",
+          "client-only",
+          "unknown"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "learningDecision": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "memoryEvents": {
+        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9151,6 +9193,12 @@
       "owner": {
         "value_type": "object",
         "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "preRetirementPopulated": {
+        "value_type": "boolean",
+        "required": false,
         "immutable": false,
         "reference": false
       },
