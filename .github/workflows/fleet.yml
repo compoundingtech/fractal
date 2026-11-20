@@ -25,7 +25,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')) }}
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 3
@@ -549,7 +549,7 @@ jobs:
     name: evidence-gate-linux-gate
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -622,7 +622,7 @@ jobs:
     name: evidence-gate-linux-clippy
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -695,7 +695,7 @@ jobs:
     name: evidence-gate-linux-fleet-compat
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -768,7 +768,7 @@ jobs:
     name: evidence-gate-typescript-client
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -841,7 +841,7 @@ jobs:
     name: evidence-gate-genie-freshness
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -914,7 +914,7 @@ jobs:
     name: evidence-gate-ci-script-tests
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -988,7 +988,7 @@ jobs:
     needs: [fractal-web-changes]
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -1062,7 +1062,7 @@ jobs:
     name: evidence-gate-rust-tests
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 5
@@ -5384,7 +5384,7 @@ jobs:
     name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 15
