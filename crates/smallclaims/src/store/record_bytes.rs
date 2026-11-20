@@ -140,6 +140,24 @@ pub fn replaced_update_trigger(connection: &Connection, table: &str, name: &str)
     Ok(())
 }
 
+/// Whether the claim `alias` has a record in a state other than valid: a record a repair
+/// replaced, or one marked invalid with its envelope. Such a claim is not an accepted copy.
+pub fn claim_record_not_valid_sql(alias: &str) -> String {
+    format!("EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid')")
+}
+
+/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names its
+/// envelope, and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
+/// what `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked, whether or not
+/// the claim's valid record is stored.
+pub fn admitted_claim_sql(alias: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
+          AND NOT {})",
+        claim_record_not_valid_sql(alias)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,22 +178,4 @@ mod tests {
             .unwrap();
         assert_eq!(plan, ["SEARCH replica_records USING INTEGER PRIMARY KEY (rowid>?)"]);
     }
-}
-
-/// Whether the claim `alias` has a record in a state other than valid: a record a repair
-/// replaced, or one marked invalid with its envelope. Such a claim is not an accepted copy.
-pub fn claim_record_not_valid_sql(alias: &str) -> String {
-    format!("EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid')")
-}
-
-/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names its
-/// envelope, and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
-/// what `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked, whether or not
-/// the claim's valid record is stored.
-pub fn admitted_claim_sql(alias: &str) -> String {
-    format!(
-        "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
-          AND NOT {})",
-        claim_record_not_valid_sql(alias)
-    )
 }
