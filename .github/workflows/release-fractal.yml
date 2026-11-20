@@ -162,7 +162,10 @@ jobs:
   pick-runner:
     name: pick-runner
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 3
     permissions:
       pull-requests: read

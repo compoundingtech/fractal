@@ -1461,7 +1461,10 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   compat-archives-x86_64-unknown-linux-gnu:
     name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
-    runs-on: ubuntu-latest
+    runs-on:
+      [
+        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
+      ]
     timeout-minutes: 15
     permissions:
       contents: read
