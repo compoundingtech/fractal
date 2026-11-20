@@ -285,7 +285,7 @@ impl AttentionListStore for Store {
         if succeeded {
             health.failing_since.store(0, AtomicOrdering::Release);
             if health.withdrawn.swap(false, AtomicOrdering::AcqRel) {
-                eprintln!("st3: the {view} view publishes again; its windows serve it");
+                eprintln!("fractal: the {view} view publishes again; its windows serve it");
                 self.publish_collection_view(view);
             }
             return;
@@ -299,7 +299,7 @@ impl AttentionListStore for Store {
         if now.saturating_sub(since) >= WITHDRAW_AFTER_MS
             && !health.withdrawn.swap(true, AtomicOrdering::AcqRel)
         {
-            eprintln!("st3: WARN the {view} view has failed to refresh for {} s; its windows read for themselves until it publishes again", now.saturating_sub(since) / 1000);
+            eprintln!("fractal: WARN the {view} view has failed to refresh for {} s; its windows read for themselves until it publishes again", now.saturating_sub(since) / 1000);
             self.withdraw_collection_view(view);
         }
     }
@@ -331,7 +331,7 @@ impl AttentionListStore for Store {
         if list.refresher.get().is_none() || list.stopped.swap(true, AtomicOrdering::AcqRel) {
             return;
         }
-        eprintln!("st3: WARN the attention, glasses, arrangements and summary refresher stopped; their windows read for themselves");
+        eprintln!("fractal: WARN the attention, glasses, arrangements and summary refresher stopped; their windows read for themselves");
         for view in PUBLISHED_VIEWS {
             self.withdraw_collection_view(view);
         }

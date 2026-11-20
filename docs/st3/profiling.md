@@ -630,7 +630,7 @@ Rotation discards the old predecessor and keeps complete records in chronologica
 Each append opens the active file under its output lock after any rotation, so concurrent
 slow writers cannot continue writing to a predecessor. On the next append, oversized
 files left by an older version or a reduced cap are removed. A record larger than the
-cap is dropped whole. These drops emit `st3: profile retention dropped ...` on stderr.
+cap is dropped whole. These drops emit `fractal: profile retention dropped ...` on stderr.
 Archive diagnostics before reducing the cap if older records must be kept.
 
 Work on a thread that runs no named operation appears as `(unlabeled THREAD)`.
@@ -1300,7 +1300,7 @@ accepting only after SQLite is ready.
 ### Startup phase durations
 
 Every successful daemon start emits one structured stderr line when both listeners are ready:
-`st3: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
+`fractal: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
 The service journal captures this line without enabling profiling. Durations use a monotonic
 clock and milliseconds; `total_ms` starts at entry to daemon initialization, not process execution.
 Failed starts that never reach listener readiness do not emit this summary.

@@ -1,6 +1,6 @@
 //! Git worktrees that an agent declares with `checkout`.
 //!
-//! `checkout "REPOSITORY" base="origin/main" branch="NAME"` asks st3 to create the agent's
+//! `checkout "REPOSITORY" base="origin/main" branch="NAME"` asks Fractal to create the agent's
 //! workspace as a Git worktree of REPOSITORY before the agent starts. `remove-at-run-end=#true`
 //! removes a clean worktree after the agent's run ends and its runtime stops.
 
@@ -81,7 +81,7 @@ impl Checkout {
 
     /// Create `workspace` as a worktree on the declared branch. A branch that already exists is
     /// checked out as it is; a new branch starts at the base. When the base names a remote
-    /// branch, st3 fetches it first. A failed fetch leaves the local base and returns a warning.
+    /// branch, Fractal fetches it first. A failed fetch leaves the local base and returns a warning.
     pub fn create(&self, workspace: &Path) -> Result<Vec<String>> {
         anyhow::ensure!(
             self.repository.is_absolute(),
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn git_output_longer_than_a_pipe_does_not_stall_the_checkout() {
         // A repository with hundreds of worktrees lists more than the 64 KiB a pipe holds; git
-        // blocked writing it while st3 waited for it to exit, and no seat of that repository
+        // blocked writing it while Fractal waited for it to exit, and no seat of that repository
         // could start (2026-10-07).
         let root = tempfile::tempdir().unwrap();
         let repository = repository(root.path());
