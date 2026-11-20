@@ -384,18 +384,6 @@ mod tests {
             self.0.receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key).await
         }
 
-        async fn checkpoint_manifest(&self, request: &CheckpointManifestRequest) -> Result<CheckpointManifestPage> {
-            self.0.checkpoint_manifest(request).await
-        }
-
-        async fn checkpoint_need(&self) -> Result<Option<crate::store::CheckpointManifestNeed>> {
-            self.0.checkpoint_need().await
-        }
-
-        async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<crate::store::CheckpointAction>> {
-            self.0.adopt_checkpoint(manifest).await
-        }
-
         async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
             self.0.publish_endpoints(mode, endpoints).await
         }

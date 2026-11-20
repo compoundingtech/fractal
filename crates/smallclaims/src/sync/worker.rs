@@ -1,5 +1,5 @@
-//! The sync worker: who it dials and how it backs off, the exchange and checkpoint adoption it
-//! runs with each peer, and the signed routes it answers on.
+//! The sync worker: who it dials and how it backs off, the exchange it runs with each peer, and
+//! the signed routes it answers on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::{
-    ACCEPTED_PEER_API_VERSIONS, Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING,
+    ACCEPTED_PEER_API_VERSIONS, Backend, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING,
     EXCHANGE_PATH, FleetAuth, HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES,
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
@@ -31,9 +31,8 @@ use crate::fleet::transport::{
     parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
-use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
+use crate::replication::{ReplicationExchange, ReplicationInventory};
 use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
-use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 // Leave five seconds for signing, serialization and transport before the caller's deadline.
@@ -652,7 +651,7 @@ impl WorkerConfig {
 }
 
 /// Keep `backend`'s store in step with the fleet until the process ends: dial every listening
-/// member, answer members that dial in, adopt checkpoints, and redeem joins. Bump `wake`
+/// member, answer members that dial in, and redeem joins. Bump `wake`
 /// whenever the store has something new to send. `routes` serve beside the sync routes on the
 /// same listener, with the same state.
 pub async fn run<B: Backend>(
@@ -1613,10 +1612,6 @@ pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>
         .route(
             LEAVE_RECEIPT_PATH,
             post(receive_leave_receipt).layer(DefaultBodyLimit::max(16_384)),
-        )
-        .route(
-            CHECKPOINT_PATH,
-            post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(
             super::ANSWERS_PATH,
@@ -3134,151 +3129,6 @@ fn signed_overload<B>(state: &PeerState<B>, request_digest: &str) -> Response {
     }
 }
 
-/// Answer a member or config peer with one page of a checkpoint's manifest. It is authenticated
-/// exactly like an exchange, and the answer is signed for this path.
-async fn receive_checkpoint_request<B: Backend>(
-    State(state): State<PeerState<B>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let sender =
-        match state
-            .auth
-            .verify_sender(&headers, "POST", CHECKPOINT_PATH, &body, None, None)
-        {
-            Ok(sender) if state.fleet.accept(&sender).is_ok() => sender,
-            _ => return (StatusCode::UNAUTHORIZED, "untrusted checkpoint request").into_response(),
-        };
-    state.fleet.note_activity(&sender.name);
-    let request_digest = FleetAuth::body_digest(&body);
-    let result = async {
-        let request: CheckpointManifestRequest =
-            serde_json::from_slice(&body).context("decode the checkpoint request")?;
-        let page = state.backend.checkpoint_manifest(&request).await?;
-        let response = signed_response_for(&state, CHECKPOINT_PATH, &request_digest, 0, page)?;
-        deflate_response(response, accepts_deflate(&headers)).await
-    }
-    .await;
-    result.unwrap_or_else(|error| {
-        let message = format!("checkpoint request from {} failed: {error:#}", sender.name);
-        signed_error_response_for(
-            &state,
-            CHECKPOINT_PATH,
-            &request_digest,
-            0,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &message,
-        )
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, message).into_response())
-    })
-}
-
-/// Fetch a checkpoint's whole manifest from a peer, page by page. The caller verifies it against
-/// the checkpoint's certificate before storing anything from it.
-pub async fn fetch_checkpoint_manifest(
-    http: &reqwest::Client,
-    peer: &PeerConfig,
-    node: &str,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-    checkpoint: &str,
-    cut_unix_ms: u128,
-) -> Result<CheckpointManifest> {
-    let mut manifest = CheckpointManifest {
-        checkpoint: checkpoint.to_owned(),
-        cut_unix_ms,
-        ..CheckpointManifest::default()
-    };
-    let mut after = None;
-    loop {
-        let request = CheckpointManifestRequest {
-            checkpoint: checkpoint.to_owned(),
-            cut_unix_ms,
-            after,
-        };
-        let page = fetch_checkpoint_manifest_page(http, peer, node, auth, fleet, &request).await?;
-        after = manifest.append(page).map_err(anyhow::Error::msg)?;
-        if after.is_none() {
-            return Ok(manifest);
-        }
-    }
-}
-
-async fn fetch_checkpoint_manifest_page(
-    http: &reqwest::Client,
-    peer: &PeerConfig,
-    node: &str,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-    request: &CheckpointManifestRequest,
-) -> Result<CheckpointManifestPage> {
-    let body = serde_json::to_vec(request)?;
-    let request_digest = FleetAuth::body_digest(&body);
-    let headers = auth.request_headers_for(CHECKPOINT_PATH, node, &body)?;
-    let endpoint = format!("{}{}", peer.url.trim_end_matches('/'), CHECKPOINT_PATH);
-    let response = http
-        .post(&endpoint)
-        .headers(headers)
-        .header("content-type", "application/json")
-        .header("accept-encoding", EXCHANGE_ENCODING)
-        .body(body)
-        .send()
-        .await
-        .map_err(request_route_failure)
-        .with_context(|| format!("checkpoint request to peer {} failed", peer.name))?;
-    let status = response.status();
-    let headers = response.headers().clone();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(response_route_failure)?
-        .to_vec();
-    let bytes = if deflated(&headers) {
-        inflate(
-            &bytes,
-            &format!("the checkpoint manifest page from peer {}", peer.name),
-        )?
-    } else {
-        bytes
-    };
-    let responder = auth.verify_sender(
-        &headers,
-        "RESPONSE",
-        CHECKPOINT_PATH,
-        &bytes,
-        Some(&peer.name),
-        Some(&request_digest),
-    )?;
-    if let Err(refusal) = fleet.accept(&responder) {
-        anyhow::bail!(
-            "peer {} failed member authentication ({}): {}",
-            peer.name,
-            refusal.code,
-            refusal.message
-        );
-    }
-    anyhow::ensure!(
-        status.is_success(),
-        "peer {} returned {status}: {}",
-        peer.name,
-        String::from_utf8_lossy(&bytes)
-    );
-    let response: PeerResponse<CheckpointManifestPage> =
-        serde_json::from_slice(&bytes).context("decode the signed checkpoint page")?;
-    anyhow::ensure!(
-        ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
-        "the peer API version differs"
-    );
-    fleet.note_activity(&peer.name);
-    anyhow::ensure!(
-        response.value.checkpoint == request.checkpoint
-            && response.value.cut_unix_ms == request.cut_unix_ms,
-        "peer {} answered for another checkpoint",
-        peer.name
-    );
-    Ok(response.value)
-}
-
 /// Local adapter boundary. This reuses the ordinary sealed handshake; Fabric policy
 /// remains entirely outside st. The proxy pins this worker's fleet incarnation.
 #[derive(serde::Deserialize)]
@@ -3507,7 +3357,7 @@ pub fn signed_error_response_for<B: Backend>(
 }
 
 /// Run one exchange with `peer`: send this node's summary, take what the peer sends, push what
-/// it lacks, and adopt a checkpoint it advertises. Returns whether envelopes moved either way.
+/// it lacks. Returns whether envelopes moved either way.
 pub async fn exchange<B: Backend>(
     http: &reqwest::Client,
     backend: &B,
@@ -3663,7 +3513,6 @@ async fn exchange_inner<B: Backend>(
         .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
         .exchange;
-    let own_checkpoint = first.inventory.checkpoint.clone();
     let query = ReplicationExchange {
         envelopes: Vec::new(),
         ..first
@@ -3727,27 +3576,7 @@ async fn exchange_inner<B: Backend>(
         telemetry.pull(received.receipt.received);
         pulled_follow_up = received.receipt.received != 0;
     }
-    let adopted = match &remote.inventory.checkpoint {
-        Some(advertised) => {
-            adopt_advertised_checkpoint(
-                http,
-                backend,
-                node,
-                peer,
-                auth,
-                fleet,
-                own_checkpoint.as_ref(),
-                advertised,
-            )
-            .await
-        }
-        None => false,
-    };
-    if adopted {
-        backend.changed().await;
-        refresh_fleet_view(backend, fleet).await;
-    }
-    let mut progressed = pulled || pulled_follow_up || pushed || adopted;
+    let mut progressed = pulled || pulled_follow_up || pushed;
     // Walking differing claim ranges is the lowest-priority sync work: it runs only once
     // envelope transport has nothing left to move.
     if let Some(comparison) = claim_ranges.filter(|comparison| !all_same(comparison) && !progressed) {
@@ -3977,90 +3806,6 @@ async fn walk_claim_ranges<B: Backend>(
     }
     CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
     result.map(|()| fetched)
-}
-
-/// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest
-/// that cannot be adopted is not fetched again after every exchange.
-static ADOPTION_FAILURES: std::sync::LazyLock<
-    std::sync::Mutex<BTreeMap<(String, String), tokio::time::Instant>>,
-> = std::sync::LazyLock::new(Default::default);
-
-/// A peer advertised a checkpoint this node has not applied. If the daemon needs exactly that
-/// checkpoint's manifest, fetch it from this peer and hand it over to adopt. The daemon checks
-/// the whole manifest against the certificate before it stores anything. Returns whether the
-/// node adopted it.
-#[allow(clippy::too_many_arguments)]
-async fn adopt_advertised_checkpoint<B: Backend>(
-    http: &reqwest::Client,
-    backend: &B,
-    node: &str,
-    peer: &PeerConfig,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-    own: Option<&InventoryCheckpoint>,
-    advertised: &InventoryCheckpoint,
-) -> bool {
-    if own.is_some_and(|own| own == advertised || own.cut_unix_ms > advertised.cut_unix_ms) {
-        return false;
-    }
-    let need = match backend.checkpoint_need().await {
-        Ok(Some(need)) => need,
-        Ok(None) => return false,
-        Err(error) => {
-            eprintln!("st3: checkpoint need unavailable: {error:#}");
-            return false;
-        }
-    };
-    if need.checkpoint != advertised.id || need.drop_digest != advertised.drop_digest {
-        return false;
-    }
-    let key = (node.to_owned(), need.drop_digest.clone());
-    let retry_after = worker_interval(Duration::from_secs(10 * 60));
-    if ADOPTION_FAILURES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .is_some_and(|failed| failed.elapsed() < retry_after)
-    {
-        return false;
-    }
-    let adopted = async {
-        let manifest = fetch_checkpoint_manifest(
-            http,
-            peer,
-            node,
-            auth,
-            fleet,
-            &need.checkpoint,
-            need.cut_unix_ms,
-        )
-        .await?;
-        backend.adopt_checkpoint(&manifest).await
-    }
-    .await;
-    match adopted {
-        Ok(actions) => {
-            for action in &actions {
-                eprintln!(
-                    "st3: checkpoint {} (manifest from {})",
-                    serde_json::to_string(action).unwrap_or_default(),
-                    peer.name
-                );
-            }
-            !actions.is_empty()
-        }
-        Err(error) => {
-            eprintln!(
-                "st3: adopting {} from {} failed: {error:#}",
-                need.checkpoint, peer.name
-            );
-            ADOPTION_FAILURES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, tokio::time::Instant::now());
-            false
-        }
-    }
 }
 
 #[derive(Debug)]

@@ -156,6 +156,21 @@ fn local_clock_behind_own_signed_evidence_is_refused() {
         "version":1,"goId":fixture.request.go_id,"operation":"install","result":"example"
     }));
     assert!(fixture.local.claim_has_authenticated_self_writer(&future.id).unwrap());
+    // Only an accepted copy counts: a record of the claim in any state but valid excludes it,
+    // and a valid one need not be stored (`record_bytes`).
+    let record = |state: Option<&str>| {
+        let connection = fixture.local.connection.write();
+        match state {
+            Some(state) => connection.execute(
+                "UPDATE replica_records SET state=?1 WHERE claim_id=?2", rusqlite::params![state, future.id]),
+            None => connection.execute("DELETE FROM replica_records WHERE claim_id=?1", [&future.id]),
+        }
+        .unwrap();
+    };
+    record(Some("invalid"));
+    assert!(!fixture.local.claim_has_authenticated_self_writer(&future.id).unwrap());
+    record(None);
+    assert!(fixture.local.claim_has_authenticated_self_writer(&future.id).unwrap());
     let error = fixture.verify().unwrap_err();
     assert_eq!(error.code, "deploy-clock-untrusted");
     assert_eq!(error.details["reason"], "behind");

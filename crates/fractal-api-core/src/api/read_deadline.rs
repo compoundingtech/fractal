@@ -112,12 +112,7 @@ pub fn deadline(request: &Request<Body>) -> Option<Duration> {
     if let Some(wait_ms) = wait_ms {
         return Some(ORDINARY + Duration::from_millis(wait_ms));
     }
-    if export
-        || path.starts_with("/v1/internal/replication/checkpoint")
-        || path == "/v1/checkpoint/plan"
-        || path == "/v1/checkpoint/status"
-        || path == "/v1/doctor"
-    {
+    if export || path == "/v1/doctor" {
         Some(BULK)
     } else {
         Some(ORDINARY)
