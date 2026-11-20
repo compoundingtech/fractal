@@ -9314,14 +9314,13 @@ pub fn desired_row_at(
     if subject.starts_with("message/") {
         if let Some(row) = current_desired_row(connection, subject)? {
             let unchanged: bool = connection.query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE subject=?1 AND kind='intent.desired' AND store_index>?2)
                  AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                    WHERE subject=?1 AND kind='intent.desired'
                      AND store_index>COALESCE((SELECT last_good_store_index FROM projection_health
                        WHERE aggregate='graph' AND status='healthy'),0)
-                     AND EXISTS(SELECT 1 FROM replica_records
-                       WHERE claim_id=claims.id AND state='valid'))",
+                     AND {})", smallclaims::store::record_bytes::admitted_claim_sql("claims")),
                 params![subject,at_index], |row| row.get(0),
             )?;
             if unchanged { return Ok(Some(row)); }

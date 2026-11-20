@@ -159,3 +159,13 @@ mod tests {
         assert_eq!(plan, ["SEARCH replica_records USING INTEGER PRIMARY KEY (rowid>?)"]);
     }
 }
+
+/// Whether the claim `alias` was sealed or admitted and not repaired: what an
+/// `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked while every valid
+/// claim kept a record. The claim's batch names its envelope, and a repair keeps its record.
+pub fn admitted_claim_sql(alias: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
+          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state='repaired'))"
+    )
+}
