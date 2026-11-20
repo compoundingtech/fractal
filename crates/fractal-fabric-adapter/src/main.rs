@@ -650,6 +650,11 @@ mod tests {
     async fn failed_snapshot_never_withdraws_known_owner() {
         for (status, body, expected) in [
             (
+                "422 Unprocessable Entity",
+                serde_json::json!({"error":"local caller ancestry could not be verified"}),
+                "422",
+            ),
+            (
                 "503 Service Unavailable",
                 serde_json::json!({"error":"worker unavailable"}),
                 "503",
