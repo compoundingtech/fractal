@@ -73,7 +73,11 @@ proptest! {
         reverse in any::<bool>(), nullable in any::<bool>(),
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let target = Store::open(&directory.path().join("store.db"), "cedar").unwrap();
+        // This property controls every publication between cache reads. A deferred
+        // preparation commit would correctly invalidate its native fence independently
+        // of the actual fold being checked.
+        let target = smallclaims::sqlite::without_deferred_maintenance_for_test(||
+            Store::open(&directory.path().join("store.db"), "cedar")).unwrap();
         let old = Store::open_memory("alder").unwrap();
         let new = Store::open_memory("birch").unwrap();
         let old_id = append(&old, SUBJECT, 10, json!({"facts":{"state":"open"},"carried":"kept"}));
@@ -388,7 +392,9 @@ proptest! {
         order.sort_by_key(|&index| (ranks[index], index));
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("store.db");
-        let target = Store::open(&path, "elm").unwrap();
+        // Keep publication ordering under the property's control, including after reopen.
+        let target = smallclaims::sqlite::without_deferred_maintenance_for_test(||
+            Store::open(&path, "elm")).unwrap();
         for chunk in order.chunks(width) {
             let envelopes = chunk.iter().flat_map(|&index|
                 std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
@@ -400,7 +406,8 @@ proptest! {
         }
         prop_assert_eq!(&read(&target).0, tied_actuals_reference());
         drop(target);
-        let target = Store::open(&path, "elm").unwrap();
+        let target = smallclaims::sqlite::without_deferred_maintenance_for_test(||
+            Store::open(&path, "elm")).unwrap();
         prop_assert_eq!(&read(&target).0, tied_actuals_reference());
     }
 }
