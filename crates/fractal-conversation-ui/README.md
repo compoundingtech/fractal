@@ -24,10 +24,17 @@ status events and emit unpaired media refs only at the next message or end of th
 fractal-conversation-ui = { path = "../fractal-conversation-ui" }
 ```
 
-Selections accept strings or any UI line type implementing `SelectionLine`. Its `continuation`
-method describes a visual wrap: `Some(" ")` joins at a space, `Some("")` joins inside a word,
-and `None` preserves a real newline. The same selection algorithm strips message edges,
-code fences and shared indentation for every renderer.
+Selections accept strings or any UI line type implementing `SelectionLine`. Strings are
+undecorated source content: no edges, fences or indentation are guessed from their text.
+Semantic spans distinguish `CopyRole::Content` from `Decoration`; `Line::decoration()`
+marks entire chrome rows to skip, while a real empty line remains a paragraph boundary.
+`Continuation::{Newline, Space, Word}` records source boundaries independently of alignment.
+`Selection::text` copies selected content; `text_with_link_targets` additionally includes full
+targets once per link occurrence. Tables retain source row/cell identity through grid wrapping
+and stacked-record layout, so copied rows are TSV rather than interleaved visual fragments.
+Custom renderers supply `copy_fragments` that omit decoration and mark chrome-only rows with
+`decoration_only`. All styled and wrapped fragments of one link share one target `Arc`;
+separate source link occurrences use separate allocations even when their URL text matches.
 
 ```rust
 use fractal_conversation_ui::Selection;
@@ -37,14 +44,14 @@ let selection = Selection {
     anchor: (0, 0),
     head: (1, 40),
 };
-assert_eq!(selection.text(&["▎ ```sh", "▎   cargo test"]), "cargo test");
+assert_eq!(selection.text(&["```sh", "  cargo test"]), "```sh\n  cargo test");
 ```
 
 Terminal consumers opt into `features = ["ratatui"]`. This adds `Cache`, `Theme`, and the
 `conversation`, `doc`, `text`, `ansi`, and `theme` modules, plus the `SelectionLine`
 implementation for the owned semantic `text::Line`. The Fractal terminal UI and CLI enable this feature explicitly.
 
-`text::{Line, Span}` retain style, display width and continuation alignment through composition.
+`text::{Line, Span}` retain style, display width, copy roles and explicit continuation through composition.
 `Span::link` and `Run::link` carry an optional shared URL/reference target independently of the
 label. `text::link(label, target, style)` creates a labeled run; raw HTTP(S) URLs and document
 references are recognized before wrapping, including in ask prose, so every wrapped segment
