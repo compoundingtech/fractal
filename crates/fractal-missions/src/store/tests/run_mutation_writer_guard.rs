@@ -99,6 +99,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "initialize_native_source_lifecycle installs existing canonical source schema, cut and event identity metadata; it neither reads nor mutates mission-run records and makes no run admission or payload-release decision",
+            counts: [1, 0, 0, 1, 0],
+        },
+        Exception {
             reason: "repair_operation_projection_drift_from_audit and rebuild_claim_projections are internal projection/replay maintenance",
             counts: [2, 0, 0, 2, 0],
         },

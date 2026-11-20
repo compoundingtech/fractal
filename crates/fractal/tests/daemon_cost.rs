@@ -601,6 +601,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
+    ("POST /v1/slo", "verifies signed source authority and durably admits a claim reference; signed admission/replay and spoof refusal are covered by roll_completion_tests; maintained SLO row SQL independence is measured below"),
+    ("POST /v1/slo/observe", "collects actual host profile/readiness evidence and signs it, outside graph-only costs; covered by roll_observer and signed source regressions"),
+    ("GET /v1/slo/roll-intent", "prepares canonical native creation-envelope proof and authenticates pinned resource signatures; immediate proof, forged origin, missing input and deadline-derived clock regressions are covered by roll_source; maintained objective row SQL independence is measured below"),
     ("POST /v1/intent/apply", "applies a planned mission"),
     ("POST /v1/missions/{id}/retire", "retires a mission"),
     ("POST /v1/mission-runs/{run}/revision", "revises a run"),
@@ -1227,6 +1230,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/", "/v1/messages/?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
@@ -1368,6 +1372,15 @@ const PROBES: &[Probe] = &[
     post("POST /v1/messages", "/v1/messages", |fixture, attempt| {
         json!({
             "idempotency_key": format!("cost-message-{attempt}"),
+            "from": fixture.subjects.seats[0],
+            "to": fixture.subjects.seats[1],
+            "title": "An invented status note",
+            "content": "The invented build finished; the invented review can start.",
+        })
+    }),
+    post("POST /v1/messages/", "/v1/messages/", |fixture, attempt| {
+        json!({
+            "idempotency_key": format!("cost-message-slash-{attempt}"),
             "from": fixture.subjects.seats[0],
             "to": fixture.subjects.seats[1],
             "title": "An invented status note",
@@ -2813,6 +2826,57 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     }
 }
 
+/// The roll source maintains signed graph receipt references; SLO reads must not scan history.
+#[test]
+fn slo_roll_source_reads_do_no_sql_independently_of_receipt_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("cost-node").unwrap();
+    fractal_daemon::roll_completion::install(&store, root.path()).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key)).unwrap();
+    let source = r#"version 2
+agent "roll-authority" {
+  command "true"
+  host "cost-node"
+  resource "roll-authority" subject="resource/fleet/roll-completion" reason="Measure signed roll sources"
+}
+"#;
+    let intent = fractal_daemon::parse_intent(source, "cost-node").unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    store.ensure_principal_key("agent/roll-authority").unwrap();
+    let target = json!({
+        "dotfiles_revision": "1111111111111111111111111111111111111111",
+        "daemon_revision": "3333333333333333333333333333333333333333",
+    });
+    for index in 0..1000 {
+        let receipt = json!({
+            "version": 1, "kind": "roll-declared", "roll_id": format!("roll-{index}"),
+            "declared_at_ms": 1000, "targets": {"host-a": target},
+        });
+        let claim = store.append_claim(&ClaimInput {
+            subject: format!("resource/fleet/roll-completion/roll-{index}/declaration"),
+            kind: "resource.observed".into(), actor: Some("agent/roll-authority".into()),
+            fields: serde_json::from_value(json!({"kind":"custom.fractal.fleet-roll-receipt","state":"declared","facts":receipt})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
+        fractal_daemon::roll_completion::ingest(&store,
+            fractal_daemon::roll_completion::SignedReceipt { claim_id: claim.id }, 1000).unwrap();
+        if matches!(index, 99 | 999) {
+            let scope = work::SqliteWorkScope::start();
+            let row = fractal_daemon::roll_completion::row(&store, 2000);
+            let spent = scope.finish();
+            assert_eq!(row["measurement"]["accepted_declarations"], index + 1);
+            assert_eq!(spent.statements, 0, "native source reads must not query SQLite");
+            assert_eq!(spent.vm_steps, 0);
+        }
+    }
+}
+
 #[test]
 fn v2_arrangement_renames_are_bounded_with_hidden_and_absent_membership_history() {
     let mut measurements = Vec::new();
@@ -3684,6 +3748,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     };
+    std::fs::create_dir_all(&state.state_dir).unwrap();
+    fractal_daemon::roll_completion::install(&store, &state.state_dir).unwrap();
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),
     ));
