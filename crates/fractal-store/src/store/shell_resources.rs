@@ -104,28 +104,117 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 
 /// Keep the completion marker separate from the scrub: a crash or busy checkpoint
 /// before physical erasure must repeat the rewrite on the next open.
+///
+/// The work is bounded by this table and the free list, not the whole store. A full VACUUM
+/// at open took over 51 minutes on a 57 GB member and needed the store's size again in free
+/// disk, with the daemon unable to serve meanwhile:
+/// - Pages freed before secure_delete was on may still hold old bytes on the free list. A
+///   store with incremental auto-vacuum (every store created since, or converted) first gives
+///   the whole free list back to the filesystem, so nothing below reuses those pages.
+/// - The table is copied with every environment emptied, into fresh pages, and the old copy
+///   dropped under secure_delete, which zeroes each page it frees: rows, overflow pages and
+///   free space. Those zeroed pages go back to the filesystem too.
+/// - Other stores consume their old free list with page-sized zero rows before the copy,
+///   then drop that scratch table under secure_delete. No startup path runs VACUUM.
+///
+/// What this can't reach, and a full VACUUM can: bytes in pages that other tables reused
+/// before secure_delete was on, in the unused part of those pages.
 fn scrub_historical_environments(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3c3043b9f6fc owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS shell_environment_scrub_v1 (complete INTEGER PRIMARY KEY CHECK(complete=1));")?;
     let complete: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0))?;
     if complete { return Ok(()); }
+    // 2 is INCREMENTAL.
+    let incremental = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))? == 2;
+    if incremental {
+        give_back_free_list(connection)?;
+    } else {
+        erase_free_list(connection)?;
+    }
     // Historical JSON bodies remain unbounded; scrubbing preserves their other fields.
-    connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h9abbf1dff207 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", [])?;
+    // One transaction, rolled back on any error, so a failed rebuild leaves the table as it was.
+    let rebuild = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    rebuild.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fe95fd4aec7 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_resources_scrub_v1;
+        CREATE TABLE shell_resources_scrub_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL);
+        INSERT INTO shell_resources_scrub_v1(id, host, state, body)
+            SELECT id, host, state, json_set(body,'$.command.environment',json('{}')) FROM shell_resources_v1;
+        DROP TABLE shell_resources_v1;
+        ALTER TABLE shell_resources_scrub_v1 RENAME TO shell_resources_v1;
+        CREATE INDEX shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    rebuild.commit()?;
     checkpoint_shell_scrub(connection)?;
-    // Physical reclamation still processes the whole database, not bounded units.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h017f6a53ca41 owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ "VACUUM")?;
+    if incremental {
+        give_back_free_list(connection)?;
+    }
     checkpoint_shell_scrub(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-haceef5fded64 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_scrub_v1(complete) VALUES(1)", [])?;
     Ok(())
 }
 
+/// Every free page back to the filesystem. Each row the pragma steps gives one back, so it
+/// runs to its end.
+fn give_back_free_list(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA incremental_vacuum")?;
+    let mut steps = statement.query([])?;
+    while steps.next()?.is_some() {}
+    Ok(())
+}
+
+/// Overwrite pages freed before secure_delete was enabled, before the table copy can
+/// reuse them. One near-page-sized row needs at least one leaf page; allocating the
+/// initial free-page count therefore consumes the entire old free list. B-tree
+/// bookkeeping can grow the file slightly, but never copies the rest of the store.
+/// A crash leaves only zero rows; the next attempt drops them securely and repeats.
+fn erase_free_list(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4929ecffa855 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_environment_free_scrub_v1;
+        CREATE TABLE shell_environment_free_scrub_v1 (body BLOB NOT NULL);")?;
+    let free: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let mut remaining = free;
+    while remaining > 0 {
+        let batch = remaining.min(128);
+        let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut insert = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hac7744f65d12 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_free_scrub_v1(body) VALUES(zeroblob(?1))")?;
+            for _ in 0..batch {
+                insert.execute(/* sqlite-large-value: allow-for-now lv-ha3413afc70ae owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ [page_size - 100])?;
+            }
+        }
+        transaction.commit()?;
+        checkpoint_shell_scrub(connection)?;
+        remaining -= batch;
+    }
+    let left: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    anyhow::ensure!(left == 0, "shell environment scrub did not overwrite the free list");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7eba39ebc70f owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE shell_environment_free_scrub_v1;")?;
+    checkpoint_shell_scrub(connection)?;
+    Ok(())
+}
+
+/// How often the scrub tries its checkpoint before it refuses to open the store, and how long
+/// each try waits for readers: about 30 s in all, so a reader that a replication worker or a
+/// CLI holds at startup ends first, rather than the daemon restarting over and over.
+const CHECKPOINT_TRIES: u32 = 5;
+const CHECKPOINT_WAIT: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(20) } else { std::time::Duration::from_secs(6) };
+
 fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
-    let busy: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    // TRUNCATE waits for readers as long as the busy timeout; give each try its own wait.
+    let previous: u64 = connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+    connection.busy_timeout(CHECKPOINT_WAIT)?;
+    let mut busy = 1;
+    for _ in 0..CHECKPOINT_TRIES {
+        busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))?;
+        if busy == 0 {
+            break;
+        }
+    }
+    connection.busy_timeout(std::time::Duration::from_millis(previous))?;
     anyhow::ensure!(busy == 0, "shell environment scrub checkpoint busy; refusing to open store");
     Ok(())
 }
+
 pub fn submission_digest(command: &Command) -> Result<String> {
     use sha2::Digest as _;
     // Ambient environment values are transport-only, never replay identity or audit data.
@@ -590,6 +679,75 @@ mod tests {
         assert_no_environment_bytes(&path);
         let secure: i64 = store.connection.write().query_row("PRAGMA secure_delete", [], |row| row.get(0)).unwrap();
         assert_eq!(secure, 1);
+    }
+
+    /// A store whose free list holds a secret from before secure_delete, as an old member's
+    /// does: `auto_vacuum` is the store's mode, and the scrub must leave no byte of it.
+    fn scrub_erases_a_freed_secret(auto_vacuum: &str) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.submit_shell_resource(command("history"), 10).unwrap();
+        }
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(&format!("PRAGMA auto_vacuum={auto_vacuum}; VACUUM; PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=0; PRAGMA secure_delete=OFF; DELETE FROM shell_environment_scrub_v1;")).unwrap();
+        legacy.execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment.SECRET',?1)",
+            [ENV_SENTINEL.repeat(256)]).unwrap();
+        // Rewriting the row again frees the pages that held the secret, without zeroing them.
+        legacy.execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", []).unwrap();
+        legacy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let pages: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        let free_before: u64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+        assert!(free_before > 0);
+        // SQLite implements VACUUM using ATTACH; deny it for the entire scrub.
+        legacy.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(context.action, rusqlite::hooks::AuthAction::Attach { .. }) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        }));
+        scrub_historical_environments(&legacy).unwrap();
+        assert_no_environment_bytes(&path);
+        let pages_after: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        assert!(pages_after <= pages + free_before + 16, "scrub grew beyond its free-list budget");
+        if auto_vacuum == "INCREMENTAL" {
+            let free: i64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+            assert_eq!(free, 0, "the free list that held the secret is gone");
+        }
+    }
+
+    #[test]
+    fn historical_scrub_gives_back_a_free_list_that_held_a_secret() {
+        scrub_erases_a_freed_secret("INCREMENTAL");
+    }
+
+    #[test]
+    fn historical_scrub_without_incremental_vacuum_erases_without_vacuum() {
+        scrub_erases_a_freed_secret("NONE");
+    }
+
+    #[test]
+    fn a_reader_that_ends_while_the_scrub_retries_lets_it_finish() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+        create_schema(&writer).unwrap();
+        writer.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT * FROM shell_resources_v1;").unwrap();
+        // The reader ends after the first try, before the scrub runs out of them.
+        let ending = std::thread::spawn(move || {
+            std::thread::sleep(CHECKPOINT_WAIT / 2);
+            reader.execute_batch("ROLLBACK").unwrap();
+        });
+        scrub_historical_environments(&writer).unwrap();
+        ending.join().unwrap();
+        let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();
+        assert!(complete);
     }
 
     #[test]
