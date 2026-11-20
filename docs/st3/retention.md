@@ -30,7 +30,10 @@ its `message.*` claims are deleted and their IDs join the retired set
 and any thread another claim cites are kept forever. The rule reads only the claims, so every such
 member retires the same threads without coordination, and a retired ID is never sent back. A
 thread whose closed claim arrived before its sent claim waits on a short list and is judged again
-once the sent claim is there. On by default for such members (Factory, 2026-11-20); retired mail
+once the sent claim is there. A citation that reaches one member before it judges a thread and
+another only after it retired it leaves the two apart: the first keeps its copy until set exchange
+applies a peer's retired set to it (the retired set wins there; today the claim range comparison
+only shows the difference). On by default for such members (Factory, 2026-11-20); retired mail
 does not come back on a rollback. Each
 writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
 Mail in the messages shard is not touched.

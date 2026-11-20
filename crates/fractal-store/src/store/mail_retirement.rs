@@ -6,7 +6,11 @@
 //! anything cited stay for good. The rule reads only the claims, so every member that applies it
 //! to the same claims retires the same threads, with no coordination: each deleted ID enters
 //! `retired_claim_ids` in the deleting transaction, peers compare the retired set beside the
-//! retained one, and admission refuses a retired ID, so no peer sends it back.
+//! retained one, and admission refuses a retired ID, so no peer sends it back. A thread judged
+//! before its sent claim arrived is judged again later (`DEFERRED`). A citation that reaches one
+//! member before it judges a thread and another after it retired it leaves them apart: the first
+//! keeps its copy until set exchange applies a peer's retired set to it (the retired set wins
+//! there; today the claim range comparison only shows the difference).
 //!
 //! Only a member whose retired ledger is the authority (`[trim] local`) retires, and only while
 //! `[trim] mail` is on (the default there). It deletes through the trim's own path, one claim at
