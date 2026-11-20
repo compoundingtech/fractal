@@ -1054,6 +1054,38 @@ impl AuthorityVerb {
     }
 }
 
+/// Ordered soft metadata; milestones have no execution or delivery effect.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MissionMilestone {
+    pub id: String,
+    pub at: String,
+}
+
+/// Normalize the explicit-offset RFC3339 profile to fixed-width UTC milliseconds.
+pub fn mission_target_instant(value: &str) -> Result<String, FractalError> {
+    let invalid = || FractalError::new("invalid-mission-instant", "mission dates need an explicit known offset, valid RFC3339 calendar date and at most millisecond precision");
+    let bytes = value.as_bytes();
+    if !value.is_ascii() || bytes.len() < 20
+        || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T') || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':') || value.get(17..19) == Some("60")
+        || !bytes[..4].iter().all(u8::is_ascii_digit) || value.ends_with("-00:00")
+    {
+        return Err(invalid());
+    }
+    let offset_length = if value.ends_with('Z') { 1 } else { 6 };
+    let fraction = value.get(19..value.len() - offset_length).ok_or_else(invalid)?;
+    if !fraction.is_empty() && !(fraction.starts_with('.') && (2..=4).contains(&fraction.len())
+        && fraction.as_bytes()[1..].iter().all(u8::is_ascii_digit)) {
+        return Err(invalid());
+    }
+    let instant = chrono::DateTime::parse_from_rfc3339(value).map_err(|_| invalid())?;
+    if !(0..=9999).contains(&chrono::Datelike::year(&instant.with_timezone(&chrono::Utc))) {
+        return Err(invalid());
+    }
+    Ok(instant.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
@@ -1076,6 +1108,11 @@ pub struct MissionSpec {
     pub max_active_runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Soft date metadata only. Absence preserves pre-date persisted bytes and revision hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<MissionMilestone>,
     /// The agent told when a run fails, is cancelled or stalls; none unless the mission asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_to: Option<String>,
