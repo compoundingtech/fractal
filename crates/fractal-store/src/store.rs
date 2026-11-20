@@ -27,6 +27,7 @@ pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+pub mod resource_profile_learner;
 #[cfg(test)]
 mod resource_profile_policy_tests;
 mod device_renewal;
