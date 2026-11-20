@@ -43,7 +43,7 @@ fn member_edit() -> (Edits, SidebarTree, SidebarTree) {
 #[test]
 fn member_move_is_visible_next_frame_without_mutating_observation() {
     let (edits, observed, expected) = member_edit();
-    assert_eq!(edits.status, Status::AwaitingPersistence);
+    assert_eq!(edits.status(), Status::AwaitingPersistence);
     assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
     assert!(observed.nodes["folder:folder-a"].children.is_empty());
     assert_eq!((&expected.nodes["folder:folder-a"].children, &expected.roots), (&vec![subject("member-a")], &vec![folder("folder-a"), folder("folder-b"), subject("member-b")]));
@@ -80,7 +80,7 @@ fn compound_plan_displays_only_staged_folder_step_until_fresh_membership_plan() 
     assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b"), subject("member-a")]);
     // Refusing step two rolls back only its rows, never the completed folder step.
     edits.reduce(Event::Persisted(identity(2))); edits.reduce(Event::Refused(identity(2), Refusal::Unauthorized));
-    assert_eq!(edits.status, Status::PartiallyApplied);
+    assert_eq!(edits.status(), Status::PartiallyApplied);
     assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
 }
 #[test]
