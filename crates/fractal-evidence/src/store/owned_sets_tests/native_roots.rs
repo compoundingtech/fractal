@@ -48,7 +48,7 @@ fn native_roots_create_update_prune_reintroduce_and_replay() {
     for subject in SUBJECTS {
         assert_ne!(initial.receipt.members[subject].revision, updated.receipt.members[subject].revision);
     }
-    let empty = parse_intent("version 2\n", "amber").unwrap();
+    let empty = fractal_attention::graph::parse_owned_set_intent("version 2\n", "amber").unwrap();
     let mut opts = options(&amber, 12);
     opts.allow_empty = true;
     let preview = amber.owned_set_preview(&empty, &opts).unwrap();
