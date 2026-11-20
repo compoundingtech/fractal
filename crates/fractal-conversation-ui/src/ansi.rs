@@ -2,7 +2,7 @@
 //! CLI): ANSI colour escapes when asked, plain text otherwise.
 
 use ratatui::style::{Color, Modifier};
-use ratatui::text::Line;
+use crate::text::Line;
 
 /// One rendered line, with its colours and weight as ANSI escapes when `color`.
 pub fn line(line: &Line<'_>, color: bool) -> String {
@@ -43,7 +43,7 @@ pub fn line(line: &Line<'_>, color: bool) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Style;
-    use ratatui::text::Span;
+    use crate::text::Span;
 
     #[test]
     fn colour_is_escaped_only_when_asked() {

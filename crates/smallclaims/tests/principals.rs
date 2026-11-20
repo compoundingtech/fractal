@@ -1960,27 +1960,20 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
         .collect::<Vec<_>>();
     seal(&store);
     store.judge_claims(true).unwrap();
-    let mut saved_bytes = 0_u64;
     for claim in &after {
         assert_eq!(verdict(&store, claim), Verdict::Verified);
-        let connection = store.readers.get();
-        let (cursor, roots, complete, dirty, blocked): (String, String, bool, bool, bool) =
-            connection.query_row(
-                "SELECT last_signature,roots_digest,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1",
+        // A settled small fold keeps no judging row at all, not even a cold one.
+        let rows: u64 = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claim_signature_judging WHERE claim_id=?1",
                 [&claim.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            ).unwrap();
-        assert!(cursor.is_empty() && roots.is_empty(), "completed result must be cold");
-        assert!(complete && !dirty && !blocked);
-        saved_bytes += connection.query_row(
-            "SELECT length(CAST(MAX(signature) AS BLOB))+(SELECT length(content_digest) FROM claim_signature_judging WHERE claim_id=?1) FROM claim_signature_candidates WHERE claim_id=?1",
-            [&claim.id], |row| row.get::<_, u64>(0),
-        ).unwrap();
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a settled judgment keeps no row");
     }
-    eprintln!(
-        "cold judging fixture: {} completed delegated claims; {saved_bytes} logical bytes saved; {} bytes/claim; at fixture rate {}/day: {saved_bytes} bytes/day",
-        after.len(), saved_bytes / after.len() as u64, after.len(),
-    );
     {
         let connection = store.connection.write();
         assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 20);
@@ -2038,7 +2031,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
         reopened.set_node_key(anchor.clone()).unwrap();
         for claim in &after {
             assert_eq!(verdict(&reopened, claim), Verdict::Verified, "reopening must read compact-only cold authority");
-            assert!(reopened.readers.get().query_row("SELECT complete=1 AND dirty=0 AND blocked=0 AND last_signature='' AND roots_digest='' FROM claim_signature_judging WHERE claim_id=?1", [&claim.id], |row| row.get::<_, bool>(0)).unwrap());
+            assert_eq!(reopened.readers.get().query_row("SELECT count(*) FROM claim_signature_judging WHERE claim_id=?1", [&claim.id], |row| row.get::<_, u64>(0)).unwrap(), 0, "reopening must not bring back a settled judging row");
         }
         reopened
     } else {
@@ -2777,7 +2770,7 @@ fn remove_candidate_schema(connection: &rusqlite::Connection) {
     inline_signature_facade_for_old_fixture(connection);
     connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
-    connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
+    connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
         CREATE INDEX claim_verdict_links_claim_index ON claim_verdict_links(claim_id);

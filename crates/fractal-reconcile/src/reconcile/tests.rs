@@ -1588,10 +1588,11 @@ mission "shell-owner" state="ready" {{
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+            profile: None, profile_estimate: None, disk_path: None,
         };
         let now = u64::try_from(now_ms()).unwrap();
         let mut execution = store.submit_shell_resource(Command {
-            id: "outcome".into(), lane: lane.clone(), argv: vec!["true".into()],
+            id: "outcome".into(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
             cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
         }, now).unwrap();
         let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };

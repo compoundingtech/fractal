@@ -218,6 +218,18 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
     ),
     (
+        "GET /v1/internal/resources/by-request/{request_id}",
+        "requires an owner-scoped host-local submission identity, absent from generated claim-history cost stores; api::resources::tests::request_lookup_submit_retry_conflict_and_terminal_lookup_share_authenticated_scope covers authenticated lookup and terminal replay; local request-row and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/by-request/{request_id}/cancel",
+        "writes an owner-scoped host-local cancellation tombstone even before submission, outside generated claim-history cost stores; api::resources::tests::absent_request_cancel_returns_confirmed_owner_scoped_tombstone covers nonlaunch confirmation and owner isolation; retained tombstone growth is not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}/member-scope",
+        "requires a live enforced native member cgroup and authenticated execution, absent from generated cost stores; api::resources::tests::nested_member_scope_keeps_current_generation_separate_from_verified_root covers generation/root separation; live kernel placement and host-local membership growth are not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
@@ -1278,6 +1290,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.to_string())
     }),
     get("GET /v1/doctor", "/v1/doctor"),
+    get("GET /v1/storage/status", "/v1/storage/status"),
     get("GET /v1/repair", "/v1/repair"),
     get("GET /v1/replication/status", "/v1/replication/status"),
     get("GET /v1/replication/records", "/v1/replication/records"),

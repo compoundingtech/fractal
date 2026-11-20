@@ -2606,13 +2606,16 @@ enum TraceCommand {
 #[derive(Args)]
 struct DoctorArgs {
     /// Inspect local source-build tools instead of daemon health; does not compile or contact GitHub.
-    #[arg(long, conflicts_with = "performance")]
+    #[arg(long, conflicts_with_all = ["performance", "storage"])]
     developer: bool,
     #[arg(long)]
     strict: bool,
     /// Show only the slowest requests and queries over the last five minutes.
     #[arg(long)]
     performance: bool,
+    /// Show cached storage write/trim counters and metadata-only SQLite file sizes.
+    #[arg(long, conflicts_with_all = ["developer", "performance"])]
+    storage: bool,
 }
 
 #[derive(Subcommand)]
@@ -5763,6 +5766,16 @@ fn cli_main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Membership inspection is offline: no telemetry runtime, identity lookup or daemon client.
+    if let Command::Resources { command: resources_cli::ResourcesCommand::InMember { owner_uid } } = &cli.command {
+        return match resources_cli::in_member(*owner_uid, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                stderr_message("fractal", format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
         return match run_validate(args, cli.json) {
@@ -6646,7 +6659,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
-        Command::Resources { command } => resources_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::Resources { command } => {
+            let client = if let Some(actor) = command.actor() {
+                execution_client(&endpoint, actor.to_owned())?
+            } else { client };
+            resources_cli::run(&client, config.person.as_deref(), command, cli.json).await
+        },
         Command::ResourcePayload { .. } => unreachable!("resource payload is dispatched before daemon connection"),
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
@@ -6773,8 +6791,7 @@ fn guard_mutating_cli_actor(
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
-        Command::Resources { command: resources_cli::ResourcesCommand::Hold { actor, .. }
-            | resources_cli::ResourcesCommand::Release { actor, .. } } => actor.as_deref(),
+        Command::Resources { command } => command.actor(),
         Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
@@ -7835,6 +7852,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    store.storage_census.checkpoint_enabled.set(config.checkpoint.enabled)
+        .map_err(|_| anyhow::anyhow!("storage checkpoint census already configured"))?;
     if let Some(claims) = config.trim.daily_claims {
         store.trim_locally_at_most(claims);
     }
@@ -7954,6 +7973,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
+                    "resource_profile_keys": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 2,
@@ -13328,6 +13348,11 @@ async fn run_doctor(
         return Ok(());
     }
     let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
+    if args.storage {
+        let report: Value =
+            doctor_request(client, "/v1/storage/status", readiness.as_ref(), json_output).await?;
+        return print_value(&report, true);
+    }
 
     if args.performance {
         let mut report: Value =
@@ -22215,6 +22240,22 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                         if judged >= SIGNATURE_BACKLOG_REPORTED || drain_started.elapsed() >= Duration::from_secs(5) {
                             stderr_message("fractal", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
                         }
+                    }
+                    // Earlier releases kept a judging row for every settled verdict. Drop them a
+                    // short page at a time; the hourly pass gives the freed pages back.
+                    let prune_started = std::time::Instant::now();
+                    let (mut pruned, mut longest) = (0, Duration::ZERO);
+                    loop {
+                        let page_started = std::time::Instant::now();
+                        let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_judging_prune", || worker.prune_settled_signature_judgments())?;
+                        let page_elapsed = page_started.elapsed();
+                        longest = longest.max(page_elapsed);
+                        pruned += page.deleted;
+                        if page.finished || page.examined == 0 { break; }
+                        std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    if pruned != 0 {
+                        stderr_message("fractal", format_args!("settled signature judgments pruned: {pruned} rows in {:.0}s, longest page {} ms", prune_started.elapsed().as_secs_f64(), longest.as_millis()));
                     }
                     return Ok(None);
                 }
