@@ -70,7 +70,7 @@ export const lower = (
     return options.resolveAgent(value)
   })
   const mission = Schema.decodeUnknownSync(MissionSchema)(wire)
-  for (const key of ['finally', 'completion', 'gates', 'constraints', 'lanes', 'reportStalls', 'reportCompleted', 'observers', 'subscriptions'] as const) {
+  for (const key of ['finally', 'completion', 'gates', 'constraints', 'lanes', 'reportStalls', 'reportCompleted', 'observers', 'subscriptions', 'targetAt', 'milestones'] as const) {
     if (mission[key] !== undefined) refuse(options.id, key)
   }
   const steps = mission.steps.map((step) => {
