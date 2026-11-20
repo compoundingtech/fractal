@@ -18,9 +18,12 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
 #[derive(Clone)]
 pub struct LocalWebStatus(pub DoctorCheck);
 
-/// Each step outside the store checks waits at most this long, so the report answers inside
-/// the client's 120 s request limit even when every step is slow.
+/// Default bound for steps outside the store checks, keeping the report within the client's
+/// 120 s request limit even when every step is slow.
 const DOCTOR_STEP: Duration = Duration::from_secs(10);
+/// Allow both the login-shell snapshot and `gh auth token` ten seconds, plus scheduling margin,
+/// so their typed diagnostic is not masked by the doctor's outer deadline.
+const DOCTOR_AUTH_STEP: Duration = Duration::from_secs(21);
 
 pub async fn doctor(
     State(state): State<AppState>,
@@ -47,7 +50,8 @@ pub async fn doctor(
             .unwrap_or_default();
         fractal_runtime::priority_report(&observations)
     });
-    let token = tokio::time::timeout(DOCTOR_STEP, crate::resource::github_auth()).await;
+    // Resolve the current credential source without changing observer token-cache/backoff state.
+    let token = tokio::time::timeout(DOCTOR_AUTH_STEP, crate::github_http::diagnose_github_auth()).await;
     // Doctor reads what is sealed: claims in batches not sealed yet count as unsealed. Sealing
     // or judging here would take the writer to answer a read-only question.
     let mut report = crate::api::read_deadline::spawn_blocking(move || doctor_report(&state))
@@ -87,15 +91,8 @@ pub async fn doctor(
         Err(_) => doctor_timeout("priority", DOCTOR_STEP),
     });
     report.checks.push(match token {
-        Ok(token) => DoctorCheck {
-            name: "github-observer-auth".into(),
-            status: if token.is_ok() { "pass" } else { "warn" }.into(),
-            message: match token {
-                Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
-                Err(error) => error.to_string(),
-            },
-        },
-        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_STEP),
+        Ok(token) => github_auth_check(token),
+        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_AUTH_STEP),
     });
     // Request samples are live operational telemetry. Keep them on /v1/doctor,
     // outside the store-index-fenced operation projection built by doctor_report.
@@ -153,6 +150,17 @@ pub async fn doctor(
     ));
     report.status = doctor_status(&report.checks).into();
     Ok(Json(report))
+}
+
+fn github_auth_check(auth: anyhow::Result<crate::github_http::GithubAuth>) -> DoctorCheck {
+    DoctorCheck {
+        name: "github-observer-auth".into(),
+        status: if auth.is_ok() { "pass" } else { "fail" }.into(),
+        message: match auth {
+            Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
+            Err(error) => error.to_string(),
+        },
+    }
 }
 
 fn descriptor_check() -> DoctorCheck {
@@ -939,6 +947,54 @@ pub async fn events(
             )
                 .into_response());
         }
+    }
+}
+
+#[cfg(test)]
+mod github_auth_diagnostic_tests {
+    use super::*;
+    use crate::github_http::{GithubAuth, GithubAuthError, GithubAuthStep};
+
+    #[test]
+    fn doctor_auth_json_reports_failed_step_and_remedy_without_source_secrets() {
+        for step in [
+            GithubAuthStep::TokenAbsent,
+            GithubAuthStep::GhNotFound,
+            GithubAuthStep::GhFailed,
+            GithubAuthStep::EmptyToken,
+            GithubAuthStep::SnapshotUnavailable,
+            GithubAuthStep::SnapshotStale,
+        ] {
+            let diagnostic = GithubAuthError::new(step);
+            let expected = diagnostic.to_string();
+            // Even if a lower-level failure contains credentials, only the safe diagnostic
+            // is displayed, never the anyhow chain or its Debug representation.
+            let failure = anyhow::anyhow!("ghp-doctor-secret from command stderr")
+                .context(diagnostic);
+            let value = serde_json::to_value(github_auth_check(Err(failure))).unwrap();
+            assert_eq!(value, json!({
+                "name": "github-observer-auth",
+                "status": "fail",
+                "message": expected,
+            }));
+            let message = value["message"].as_str().unwrap();
+            assert!(message.contains(step.step()));
+            assert!(message.contains("gh auth login"));
+            assert!(!value.to_string().contains("ghp-doctor-secret"));
+        }
+    }
+
+    #[test]
+    fn doctor_auth_json_reports_success_without_credential_value() {
+        let value = serde_json::to_value(github_auth_check(Ok(
+            GithubAuth::test("ghp-doctor-success-secret"),
+        ))).unwrap();
+        assert_eq!(value, json!({
+            "name": "github-observer-auth",
+            "status": "pass",
+            "message": "GitHub observers have a credential source; credential values are not displayed",
+        }));
+        assert!(!value.to_string().contains("ghp-doctor-success-secret"));
     }
 }
 

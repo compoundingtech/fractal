@@ -91,7 +91,15 @@ fn deadline_at(until: Option<&str>, now: u128) -> Result<Option<u128>, ApiError>
 /// What GitHub says of a thread now: its title, link and state. A thread that does not exist,
 /// or that this daemon's token cannot read, cannot be watched.
 async fn read_thread(thread: &ThreadRef) -> Result<Value, ApiError> {
-    let token = crate::resource::github_auth().await.map_err(|error| {
+    read_thread_with_auth(thread, crate::resource::github_auth().await).await
+}
+
+async fn read_thread_with_auth(
+    thread: &ThreadRef,
+    auth: anyhow::Result<GithubAuth>,
+) -> Result<Value, ApiError> {
+    // Keep the safe auth diagnostic's step and remedy, not the underlying error chain.
+    let token = auth.map_err(|error| {
         bad(
             "github-unauthenticated",
             error.to_string(),
@@ -516,6 +524,44 @@ pub async fn watches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn watch_422_preserves_auth_diagnostic_and_redacts_source_secrets() {
+        use crate::github_http::{GithubAuthError, GithubAuthStep};
+
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        for step in [
+            GithubAuthStep::TokenAbsent,
+            GithubAuthStep::GhNotFound,
+            GithubAuthStep::GhFailed,
+            GithubAuthStep::EmptyToken,
+            GithubAuthStep::SnapshotUnavailable,
+            GithubAuthStep::SnapshotStale,
+        ] {
+            let diagnostic = GithubAuthError::new(step);
+            let expected = diagnostic.to_string();
+            let failure = anyhow::anyhow!("ghp-watch-secret from command stderr")
+                .context(diagnostic);
+            // Exercise watch registration's auth boundary with a fake failure: no token
+            // lookup, cache mutation, database work or GitHub request is performed.
+            let response = read_thread_with_auth(&thread, Err(failure))
+                .await
+                .unwrap_err()
+                .into_response();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value, json!({
+                "code": "github-unauthenticated",
+                "message": expected,
+                "details": {},
+            }));
+            let message = value["message"].as_str().unwrap();
+            assert!(message.contains(step.step()));
+            assert!(message.contains("gh auth login"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("ghp-watch-secret"));
+        }
+    }
 
     #[test]
     fn watch_deadline_alias_distinguishes_omitted_finite_and_none() {
