@@ -135,7 +135,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn native_exec_wait(&self, view: &StepRunView, started: u128, end: u128) -> Result<(u128, Option<u128>)> {
         let claims = self.store.claims_for(&view.subject, Some("work.progress"))?;
-        Ok(fractal_store::store::native_execution_wait(claims.iter().map(|claim|
+        Ok(fractal_kernel::step_execution::execution_wait(claims.iter().map(|claim|
             (claim.kind.as_str(), &claim.body, claim.accepted_at_unix_ms)), view.attempt, started, end))
     }
 

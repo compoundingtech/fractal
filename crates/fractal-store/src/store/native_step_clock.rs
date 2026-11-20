@@ -1,47 +1,9 @@
 //! Fold native execution intervals without charging dispatch, admission or result delivery.
 //! Attempt-scoped terminal events settle missing exits without charging later terminal idle time.
 use super::StepTiming;
+use fractal_kernel::step_execution::execution_wait;
 use serde_json::Value;
 use std::collections::BTreeMap;
-
-/// Declared waits clipped to one physical execution interval. A wait automatically ends
-/// at its declared deadline, so a missing resume cannot stop execution accounting forever.
-pub fn execution_wait<'a>(
-    events: impl Iterator<Item = (&'a str, &'a Value, u128)>,
-    attempt: u32,
-    start: u128,
-    end: u128,
-) -> (u128, Option<u128>) {
-    let mut paused: Option<(u128, u128)> = None;
-    let mut waited = 0_u128;
-    for (kind, body, at) in events {
-        if at > end { continue; }
-        let fields = body.get("fields").unwrap_or(body);
-        if fields["attempt"].as_u64() != Some(u64::from(attempt)) { continue; }
-        if let Some((began, deadline)) = paused
-            && at >= deadline
-        {
-            waited = waited.saturating_add(deadline.saturating_sub(began.max(start)));
-            paused = None;
-        }
-        let clock = (kind == "work.progress").then(|| fields["clock"].as_str()).flatten();
-        let closes = matches!(kind, "work.claimed" | "work.submitted" | "work.failed" | "work.released")
-            || clock == Some("running") || clock == Some("paused");
-        if closes && let Some((began, deadline)) = paused.take() {
-            waited = waited.saturating_add(at.min(deadline).saturating_sub(began.max(start)));
-        }
-        if clock == Some("paused")
-            && let Some(deadline) = fields["wait_until_unix_ms"].as_u64().map(u128::from)
-            && deadline > at
-        {
-            paused = Some((at, deadline));
-        }
-    }
-    if let Some((began, deadline)) = paused {
-        waited = waited.saturating_add(end.min(deadline).saturating_sub(began.max(start)));
-    }
-    (waited, paused.filter(|(_, deadline)| *deadline > end).map(|(_, deadline)| deadline))
-}
 
 pub(super) fn fold(events: &[(String, Value, u128)], attempt: u32, snapshot: u128,
     active: bool) -> Option<StepTiming> {

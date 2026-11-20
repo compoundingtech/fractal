@@ -575,3 +575,7 @@ regression compares both specs with the registry and validates a generated phase
 The prior `[2, 34, 179]` trim characterization is retained for hosted characterization,
 not claimed as a measured v41 result. Exact per-seed equality, old-build-excusal
 continuation, the three-seed cap and majority trim coverage remain enforced.
+
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.

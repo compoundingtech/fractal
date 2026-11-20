@@ -37,7 +37,6 @@ pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
 mod native_step_clock;
-pub use native_step_clock::execution_wait as native_execution_wait;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
