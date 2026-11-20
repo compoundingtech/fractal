@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Work wakes (\"A mission step is ready\") for a seat on the member that sends them go to the messages stream instead of the claims graph. They were the bulk of the daemon's own mail. The reconciler counts, reads and closes them in the messages shard, and step views and the wake-exhausted fault read them from either store.",
+  "replay": {
+    "status": "changed",
+    "detail": "A work wake for a seat on this member becomes a stream item, so the graph stops growing by it. A wake for a seat on another member stays a graph claim, as before, since that member's build may read wakes from the graph alone. The wake-exhausted diagnostic cites the graph wakes as evidence, as before, and names the latest stream wake in its existing message_id field."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Two local triggers on local_stream_sent keep local_work_wake_tags for stream wakes; their first install fills it from the mirror once. Both are member-local and outside every digest. No claim kind, field or replicated table changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Same wake decisions: retries, the readiness grace and exhaustion count stream wakes exactly as graph wakes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed versions: only this member's own reconciler and step views read its stream wakes, and every peer replicates the stream as it already does since 4c-2b. An older peer's step view of this member's seat counts its graph wakes only."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration beyond the one-time fill at the first open, a single pass over the stream mirror."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Rolling back keeps working, and the triggers stay in place. The previous release reads wakes from the graph alone, so for each step that is still ready it wakes the seat once more, through the graph. Upgraded again, this build counts both wakes."
+  }
+}
