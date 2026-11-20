@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair the required Clippy and mixed-version work-wake checks without changing runtime behavior.",
+  "replay": {"status": "none", "detail": "No runtime changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "The rollback test now follows the existing shared-subject rule: a graph wake shadows a stream wake with the same deterministic subject. It checks each expected wake is listed exactly once and the original stream records survive the second upgrade."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

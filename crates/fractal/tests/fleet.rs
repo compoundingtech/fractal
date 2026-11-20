@@ -10264,7 +10264,7 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
 /// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
 /// release, which replicates the stream as it already does. Rolled back, the member's release
 /// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
-/// again, this build reads the step's wakes from both stores. Replication stays whole.
+/// again, this build reads both stores, with the graph winning for a shared subject.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
@@ -10377,21 +10377,32 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
         wakes(&a).await.iter().any(|(_, stream)| !stream)
     })
     .await;
+    // The release can reuse the first attempt's deterministic subject: it cannot see the
+    // stream attempt, and the harness incarnation can survive the daemon restart. Such a
+    // message is listed once, as the graph's, rather than once from each store.
+    let mut expected: BTreeMap<_, _> = first.iter().cloned().collect();
+    expected.extend(wakes(&a).await.into_iter().filter(|(_, stream)| !stream));
     for (subject, _) in &first {
         assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
     }
 
-    // Upgraded again, this build opens the store the release wrote and reads both kinds.
+    // Upgraded again, retain every wake, applying the shared-subject graph precedence.
     a.stop();
     a.binary = PathBuf::from(st3());
     a.start().await;
-    wait_until("the upgraded member shows the step's wakes from both stores", 90, || async {
+    wait_until("the upgraded member shows every wake with graph precedence", 90, || async {
         let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+        let visible = wakes(&a).await;
         shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1
-            && wakes(&a).await.iter().any(|(_, stream)| *stream)
-            && wakes(&a).await.iter().any(|(_, stream)| !stream)
+            && expected.iter().all(|(subject, stream)| {
+                visible.iter().filter(|(candidate, _)| candidate == subject).count() == 1
+                    && visible.iter().any(|(candidate, stored_in_stream)| candidate == subject && stored_in_stream == stream)
+            })
     })
     .await;
+    for (subject, _) in &first {
+        assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+    }
     for node in [&a, &o] {
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
