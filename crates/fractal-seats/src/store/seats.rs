@@ -19,6 +19,13 @@ mod harness_ready_tests;
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 
+/// Bound dependency classification as well as card folding. Overflow invalidates the
+/// diff source: chunked assembly rebuilds selected cards at the new cut instead.
+pub const AGENT_ROSTER_DELTA_ROWS: usize = 4096;
+
+pub static AGENT_ROSTER_SUBJECT_PAGE_SQL: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{RANGE_SUBJECTS} LIMIT ?4"));
+
 fn record_roster_counts(changed: usize, covered: usize, refolded: usize) {
     crate::otel::roster_attribute("st.roster.changed", changed as i64);
     crate::otel::roster_attribute("st.roster.covered", covered as i64);
@@ -87,11 +94,11 @@ const SEAT_QUEUE_MOVE_HISTORY_LIMIT: usize = 20;
 pub trait SeatsStore {
     /// Classify the bounded claim interval by the dependencies that cards actually read.
     /// Unknown or structural claims still cold-build; queue changes are diffed separately.
-    fn changed_agent_resources(
+    fn changed_agent_resources<'a>(
             &self,
             after: u64,
             through: u64,
-            previous: &[Value],
+            previous: impl IntoIterator<Item = &'a Value> + Clone,
         ) -> Result<AgentResourcesChange>;
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
@@ -439,28 +446,35 @@ pub trait SeatsStore {
 
 impl SeatsStore for Store {
 
-    fn changed_agent_resources(
+    fn changed_agent_resources<'a>(
             &self,
             after: u64,
             through: u64,
-            previous: &[Value],
+            previous: impl IntoIterator<Item = &'a Value> + Clone,
         ) -> Result<AgentResourcesChange> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
-            "SELECT subject, kind, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
+            "SELECT subject, kind, actor FROM claims WHERE store_index>?1 AND store_index<=?2
+             ORDER BY store_index LIMIT ?3",
         )?;
-        let mut delta = AgentResourcesDelta::default();
-        let mut owners = BTreeSet::new();
-        for row in statement.query_map(params![after, through], |row| {
+        let rows = statement.query_map(params![after, through, AGENT_ROSTER_DELTA_ROWS + 1], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?))
-        })? {
-            let (subject, kind, actor) = row?;
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.len() > AGENT_ROSTER_DELTA_ROWS {
+            return Ok(AgentResourcesChange::Invalidated {
+                reason: "delta_overflow", detail: "claim delta exceeds row budget".to_owned(),
+            });
+        }
+        let mut delta = AgentResourcesDelta::default();
+        let mut owners = BTreeSet::new();
+        for (subject, kind, actor) in rows {
+            smallclaims::read_budget::check()?;
             // Memberless agent cards reduce their currently declared exec/pty children.
             // Match the previous root too: a removed child's declaration has no live tag.
             if subject.starts_with("exec/") || subject.starts_with("pty/") {
                 let suffix = subject.split_once('/').map_or("", |(_, suffix)| suffix);
-                delta.subjects.extend(previous.iter().filter_map(|card| {
+                delta.subjects.extend(previous.clone().into_iter().filter_map(|card| {
                     let agent = card["id"].as_str()?;
                     let root = agent.strip_prefix("agent/")?;
                     suffix.strip_prefix(root)?.starts_with('/').then(|| agent.to_owned())
@@ -504,7 +518,12 @@ impl SeatsStore for Store {
             let other = !owner && !step && ["mission-run/", "run-generation/", "step-run/"]
                 .iter().any(|prefix| subject.starts_with(prefix));
             if owner || step || other {
-                delta.queues = true;
+                // Queue rows are keyed by assignee/claimant. Progress and renewal mutate
+                // only those agents' inputs, not fleet ordering or membership. Their cards
+                // refold queue/visibility too; reserve the fleet diff for structural changes.
+                let local_step = step && matches!(kind.as_str(), "work.progress" | "work.renewed");
+                delta.queues |= !local_step;
+                delta.subject_queues |= local_step;
                 delta.membership |= owner || other;
                 owners.insert(subject.clone());
                 if step || (other && subject.starts_with("step-run/")) {
@@ -518,8 +537,9 @@ impl SeatsStore for Store {
                         delta.subjects.extend(assignee.into_iter().chain(claimant)
                             .filter(|agent| agent.starts_with("agent/")));
                     }
-                    // Progress/submission activity is keyed by actor, not the current assignee.
-                    if matches!(kind.as_str(), "work.progress" | "work.submitted") {
+                    // Activity and renewals also affect their author, including an earlier
+                    // claimant no longer present in the current step projection.
+                    if matches!(kind.as_str(), "work.progress" | "work.submitted" | "work.renewed") {
                         delta.subjects.extend(actor.filter(|actor| actor.starts_with("agent/")));
                     }
                 }
@@ -548,7 +568,7 @@ impl SeatsStore for Store {
         if !owners.is_empty() {
             // Existing cards carry their historical ownership; current declarations also
             // find agents newly made visible by an owner transition.
-            delta.subjects.extend(previous.iter().filter(|item| {
+            delta.subjects.extend(previous.into_iter().filter(|item| {
                 item["owner_run_id"].as_str().is_some_and(|owner| owners.contains(owner))
                     || item["operational"]["owner_generation"].as_str().is_some_and(|owner| owners.contains(owner))
             }).filter_map(|item| item["id"].as_str().map(str::to_owned)));
@@ -716,7 +736,7 @@ impl SeatsStore for Store {
         let (changed, membership) = match &previous {
             None => (0, true),
             Some(previous) if previous.index == index => (self.agent_roster_fault_retries(history).len(), false),
-            Some(previous) => match self.changed_agent_resources(previous.index, index, &previous.items)? {
+            Some(previous) => match self.changed_agent_resources(previous.index, index, previous.items.iter())? {
                 AgentResourcesChange::Delta(mut delta) => {
                     delta.subjects.extend(self.agent_roster_fault_retries(history));
                     (delta.subjects.len(), delta.membership)
@@ -729,9 +749,12 @@ impl SeatsStore for Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0a36171e464 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
-            .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+        let names = connection.prepare_cached(&AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+            .query_map(params![index, "agent/", "agent0", bound + 1], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if names.len() > bound {
+            return Ok(Some("membership requires assembly".to_owned()));
+        }
         let names = if history { names } else {
             self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };
@@ -808,7 +831,7 @@ impl SeatsStore for Store {
             if cut == through {
                 return Ok(true);
             }
-            Ok(match self.changed_agent_resources(cut, through, cards)? {
+            Ok(match self.changed_agent_resources(cut, through, cards.iter())? {
                 AgentResourcesChange::Delta(delta) => {
                     delta.subjects.is_empty() && !delta.queues && !delta.membership
                 }
@@ -1043,7 +1066,7 @@ impl SeatsStore for Store {
         || -> Result<runtime::AgentResourcesEntry> {
         let (previous, invalidation) = match previous {
             Some(entry) if entry.index == index => (Some((entry, AgentResourcesDelta::default())), "safe_delta"),
-            Some(entry) => match self.changed_agent_resources(entry.index, index, &entry.items)? {
+            Some(entry) => match self.changed_agent_resources(entry.index, index, entry.items.iter())? {
                 AgentResourcesChange::Delta(delta) => (Some((entry, delta)), "safe_delta"),
                 AgentResourcesChange::Invalidated { reason, .. } => (None, reason),
             },
@@ -1116,13 +1139,15 @@ impl SeatsStore for Store {
                         None
                     }
                 }) })?;
-                let refresh_queues = delta.queues
-                    || previous.valid_until_unix_ms.is_some_and(|expiry| now >= expiry)
+                let queue_expired = previous.valid_until_unix_ms.is_some_and(|expiry| now >= expiry);
+                let refresh_queues = delta.queues || delta.subject_queues || queue_expired
                     || changed.iter().any(|name| !previous.items.iter().any(|item| item["id"].as_str() == Some(name.as_str())));
                 let mut queue_metadata = None;
                 let valid_until_unix_ms = if refresh_queues {
-                    let names = previous.items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned))
-                        .chain(changed.iter().cloned()).collect::<BTreeSet<_>>();
+                    let names = if delta.queues || queue_expired {
+                        previous.items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned))
+                            .chain(changed.iter().cloned()).collect::<BTreeSet<_>>()
+                    } else { changed.clone() };
                     let metadata = crate::performance::task("roster/queue-diff",
                         || agent_queue_values::agent_queue_metadata(self, &names))?;
                     let by_id = metadata.iter().map(|item| (item["id"].as_str().unwrap_or_default(), item))
@@ -1210,6 +1235,8 @@ impl SeatsStore for Store {
             }
         }
         })?;
+        // An expired background fold must not replace a complete cache publication.
+        smallclaims::read_budget::check()?;
         let mut cache = resources.lock().expect("agent resources cache poisoned");
         // All endpoint callers hold admission. Direct internal readers may still race; never
         // replace a complete published projection with a partial one.

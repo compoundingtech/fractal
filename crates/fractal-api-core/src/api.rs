@@ -30,6 +30,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
+mod roster_assembly;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -3293,9 +3294,8 @@ pub fn client_agent_resources_cached(
     }))
 }
 
-/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
-/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
-/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+/// Run a roster fold not enclosed by a request or snapshot in a snapshot of its own.
+/// Background refreshes supply a wall budget; direct folds retain the card CPU budget.
 fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
         return fold();
@@ -6485,39 +6485,49 @@ fn agent_roster_cut_not_ready(wanted: u64) -> ApiError {
 /// How many agents one short snapshot reduces while the refresher warms the roster.
 const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 
+/// Scheduling and I/O waits count too: card CPU limits alone do not release a WAL reader.
+const AGENT_ROSTER_SNAPSHOT_BUDGET: Duration = Duration::from_secs(2);
+
+fn agent_roster_snapshot<T>(
+    store: &Store,
+    fold: impl FnOnce(u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new("roster/refresh", AGENT_ROSTER_SNAPSHOT_BUDGET),
+        |parent| parent.child(AGENT_ROSTER_SNAPSHOT_BUDGET),
+    );
+    smallclaims::read_budget::with(Some(budget), || store.read_snapshot(|index| {
+        smallclaims::read_budget::check()?;
+        let result = fold(index)?;
+        smallclaims::read_budget::check()?;
+        Ok(result)
+    }))
+}
+
 /// Reduce every agent's current-view and card status in short snapshots of at most
 /// [`AGENT_ROSTER_WARM_CHUNK`] agents. These per-agent reductions stay cached until a claim
 /// they depend on arrives, so the folds that follow at one cut read them instead of the log.
 fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
-    let subjects = store.read_snapshot(|index| {
-        let connection = store.readers.get();
-        crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
-            Ok(connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2154055540e0 owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
-                .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?)
-        })
-    })?;
-    for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
-        let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
-        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
-        }))?;
+    let mut lower = "agent/".to_owned();
+    loop {
+        let names = agent_roster_snapshot(store, |index| {
+            let connection = store.readers.get();
+            let names = connection.prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+                .query_map(rusqlite::params![index, lower, "agent0", AGENT_ROSTER_WARM_CHUNK],
+                    |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false)?;
+            Ok(names)
+        })?;
+        let Some(last) = names.last() else { break; };
+        lower = format!("{last}\0");
+        if names.len() < AGENT_ROSTER_WARM_CHUNK { break; }
     }
     Ok(())
 }
 
-/// How many times a refresh folds the roster in chunks before it gives up on a roster that
-/// keeps changing in ways it cannot follow card by card.
-const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
-
-/// Publish the complete roster at a new cut, never folding more than
-/// [`AGENT_ROSTER_WARM_CHUNK`] cards in one snapshot. A snapshot completes the roster only once
-/// the newest rows say which cards changed and at most that many are changed or missing.
-/// Otherwise the cards fold in chunks, each at its own cut, refolding the already folded cards
-/// whose claims changed, and completion is tried again. Readers keep the previous complete
-/// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
-/// refresh fails and is tried again on the next request.
+/// Publish a complete roster, retaining completed keyset/delta pages across cancellation.
+/// Each short snapshot has its own deadline; the pass budget bounds total background work.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
     let generation = store.agents_publication_build()?;
     let Some(CapturedPresentedAgents { source, subagents, now }) =
@@ -6548,46 +6558,39 @@ fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<Capture
 fn refresh_agent_roster_source(
     store: &Store, history: bool,
 ) -> anyhow::Result<Option<CapturedPresentedAgents>> {
-    store.begin_agent_roster_fault_retries(history);
-    let (current, captured) = store.read_snapshot(|index| {
-        let current = store.agent_roster_current(index, history)?;
-        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
-        Ok((current, captured))
-    })?;
-    if current { return Ok(captured); }
-    let complete = |store: &Store| store.read_snapshot(|index| {
-        if let Some(reason) =
-            store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
-        {
-            return Ok((Some(reason), None));
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new_quiet("roster/refresh-pass", Duration::from_secs(10)),
+        |parent| parent.child(Duration::from_secs(10)),
+    );
+    smallclaims::read_budget::with(Some(budget), || {
+        if roster_assembly::active(store, history) {
+            return roster_assembly::resume(store, history);
         }
-        client_agent_resources_cached(store, history, index)?;
-        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
-        Ok((None, captured))
-    });
-    for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let (reason, captured) = complete(store)?;
-        let Some(reason) = reason else {
-            return Ok(captured);
-        };
-        store.note_agent_roster_chunked(&reason);
-        let order = store.read_snapshot(|index| {
-            Ok(client_agent_page_refs(store, history, index)?.iter()
-                .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>())
-        })?;
-        for chunk in order.chunks(AGENT_ROSTER_WARM_CHUNK) {
-            let chunk = chunk.iter().cloned().collect::<BTreeSet<_>>();
-            store.read_snapshot(|index| {
-                client_agent_cards_selected(store, history, index, &chunk, true).map(drop)
-            })?;
+        store.begin_agent_roster_fault_retries(history);
+        let complete = agent_roster_snapshot(store, |index| {
+            if store.agent_roster_current(index, history)? {
+                return Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }));
+            }
+            if let Some(reason) = store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)? {
+                return Ok((Some(reason), None));
+            }
+            client_agent_resources_cached(store, history, index)?;
+            Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }))
+        });
+        match complete {
+            Ok((None, captured)) => Ok(captured),
+            Ok((Some(reason), _)) => {
+                store.note_agent_roster_chunked(&reason);
+                roster_assembly::start(store, history);
+                roster_assembly::resume(store, history)
+            }
+            Err(error) => {
+                // Do not keep retrying an indivisible membership/completion scan.
+                roster_assembly::start(store, history);
+                Err(error)
+            }
         }
-    }
-    let (reason, captured) = complete(store)?;
-    if reason.is_none() {
-        return Ok(captured);
-    }
-    anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
+    })
 }
 
 /// Every current agent's refs, and the cards of as many as the largest window or page shows.
@@ -7395,7 +7398,7 @@ async fn refresh_agent_roster_admitted(
                     // Queue the complete follow-on before publishing the head: a projection
                     // reset after that publication must be able to cancel this old demand.
                     reader.fractal.request_roster_refresh();
-                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                    agent_roster_snapshot(&reader, |index| client_agent_roster_head(&reader, index))
                 })
             } else {
                 let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
