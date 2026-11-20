@@ -239,19 +239,6 @@ def supervised(command, **env):
                           env=environment, capture_output=True, text=True, timeout=30)
 
 
-def namespace_holders(namespace):
-    """Live processes, seen from here, in the given PID namespace."""
-    holders = []
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            try:
-                if os.readlink(entry / "ns/pid") == namespace:
-                    holders.append(int(entry.name))
-            except OSError:
-                pass
-    return holders
-
-
 class NamespaceTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(HERE))
@@ -283,7 +270,9 @@ if os.fork() == 0:
         result = supervised([sys.executable, "-c", leftover])
         self.assertEqual(result.returncode, 0, result.stderr)
         namespace = result.stdout.split()[0]
-        self.assertEqual(namespace_holders(namespace), [])
+        from fractal_test_process import namespace_holders
+        # Exiting processes leave /proc a moment after the supervisor reports.
+        wait_for(lambda: not namespace_holders(namespace), f"processes outlived {namespace}", timeout=2)
 
     def test_the_exit_status_passes_through(self):
         self.assertEqual(supervised(["sh", "-c", "exit 7"]).returncode, 7)

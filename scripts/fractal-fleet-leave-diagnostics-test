@@ -10,18 +10,8 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 
-
-def namespace_holders(namespace):
-    """Live processes, seen from here, in the given PID namespace."""
-    holders = []
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            try:
-                if os.readlink(entry / "ns/pid") == namespace:
-                    holders.append(int(entry.name))
-            except OSError:
-                pass
-    return holders
+sys.path.insert(0, str(HERE))
+from fractal_test_process import namespace_holders
 
 
 @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux guardian proof")

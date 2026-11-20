@@ -177,6 +177,19 @@ def namespace_init(run_guardian, result):
         pass
 
 
+def namespace_holders(namespace):
+    """Live processes, seen from here, in the given PID namespace (as /proc/PID/ns/pid reads)."""
+    holders = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                if os.readlink(entry / "ns/pid") == namespace:
+                    holders.append(int(entry.name))
+            except OSError:
+                pass
+    return holders
+
+
 def set_child_subreaper():
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:
