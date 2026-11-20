@@ -69,7 +69,7 @@ pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
         let subjects = tx.prepare_cached("SELECT DISTINCT subject FROM claims WHERE kind='mission-run.created'")?
             .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         for subject in subjects { register_run(tx, &subject)?; }
-        tx.execute("INSERT INTO meta(key,value) VALUES('local_escalation_registration_v1','ready')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc79245b566e4 owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_escalation_registration_v1','ready')", [])?;
     }
     Ok(())
 }
@@ -114,12 +114,12 @@ fn register_run(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let Some(id) = subject.strip_prefix("mission-run/") else { return Ok(()); };
     // The creation receipt, not the writer of a later transition, owns the run.
     let origin: Option<String> = tx.query_row(
-        &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created'
+        /* sqlite-large-value: allow-for-now lv-h1bb6598fab35 owner=fractal_store::store::escalation TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created'
          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
         [subject], |row| row.get(0)).optional()?;
     if let Some(origin) = origin {
-        tx.execute("INSERT INTO local_escalation_runs_v1(run_id,origin) VALUES(?1,?2)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h799cf224d6de owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_escalation_runs_v1(run_id,origin) VALUES(?1,?2)
             ON CONFLICT(run_id) DO UPDATE SET origin=excluded.origin", params![id, origin])?;
     }
     Ok(())
