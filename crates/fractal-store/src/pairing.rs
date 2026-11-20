@@ -71,7 +71,8 @@ pub fn operation_is_trusted(
         let receipt: String = row.get(0)?;
         if row.get::<_, String>(1)? != expected { continue; }
         let quarantined: bool = connection.query_row(
-            // The claim's batch names its envelopes: a valid claim keeps no record of its own.
+            // The claim's batch names its envelopes, whether or not its valid record is stored
+            // (`record_bytes`).
             "SELECT EXISTS(SELECT 1 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
                  JOIN replica_restore_quarantine AS quarantine ON quarantine.writer=envelopes.writer
                      AND quarantine.sequence=envelopes.sequence AND quarantine.envelope_hash=envelopes.envelope_hash
@@ -90,7 +91,7 @@ pub fn operation_is_trusted(
                  JOIN replica_envelope_signatures AS signatures ON signatures.writer=envelopes.writer
                      AND signatures.sequence=envelopes.sequence AND signatures.envelope_hash=envelopes.envelope_hash
                  WHERE claims.id=?1 AND envelopes.writer=?2
-                   AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')",
+                   AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state<>'valid')",
         )?;
         let mut signers = signatures.query(params![receipt, origin])?;
         while let Some(signer) = signers.next()? {

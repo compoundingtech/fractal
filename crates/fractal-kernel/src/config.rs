@@ -359,8 +359,9 @@ impl CheckpointConfig {
 }
 
 /// `[trim]`: every member trims on its own, with no agreement with any other member: it plans
-/// each day's cut with the audited rules, deletes what they drop, and its retired claim IDs
-/// travel to its peers, which delete their copies too. `local = false` turns trimming off on
+/// each day's cut with the audited rules and deletes what they drop. Its retired claim IDs
+/// travel to the peers that trim too, which then never admit, ask for or serve those claims; a
+/// copy a peer already holds stays until its own trim drops it. `local = false` turns trimming off on
 /// this member; it is on by default. `notify` names the agent that receives a fault when the
 /// daily answers check finds this member and a peer answering differently; without it the
 /// fleet's fault agent does. `daily_claims` is the most claims a trim deletes in a day (100,000

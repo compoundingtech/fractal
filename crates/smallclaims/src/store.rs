@@ -3065,8 +3065,9 @@ impl Store {
         };
         let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
-            // The claim's own batch names its envelopes; a valid claim keeps no record of its
-            // own (`record_bytes`), and a repaired one is not an accepted copy.
+            // The claim's own batch names its envelopes, whether or not its valid record is
+            // stored (`record_bytes`); a claim with a record in any other state, such as one a
+            // repair replaced, is not an accepted copy.
             "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
              FROM claims
              JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
@@ -3075,7 +3076,7 @@ impl Store {
                   AND signatures.envelope_hash=envelopes.envelope_hash
              WHERE claims.id=?1
                AND NOT EXISTS (SELECT 1 FROM replica_records
-                               WHERE claim_id=claims.id AND state='repaired')
+                               WHERE claim_id=claims.id AND state<>'valid')
                AND envelopes.receipt_state='validated'
                AND envelopes.writer=?2 AND signatures.member_key=?3",
         )?;
@@ -10665,15 +10666,7 @@ impl Store {
             projection_digests: snapshot.projection_digests.clone(),
             received_envelopes: snapshot.envelope_rows as u64,
             pending_records: count("pending")?,
-            // A valid claim keeps no record of its own (`record_bytes`): count the claims, less
-            // those a repair replaced.
-            valid_records: connection.query_row(
-                "SELECT (SELECT COUNT(*) FROM claims)
-                    - (SELECT COUNT(DISTINCT claim_id) FROM replica_records
-                       WHERE state='repaired' AND claim_id IN (SELECT id FROM claims))",
-                [],
-                |row| row.get(0),
-            )?,
+            valid_records: count("valid")?,
             unknown_records: waiting_claims,
             waiting_claims,
             invalid_records: count("invalid")?,
