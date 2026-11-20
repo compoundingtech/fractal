@@ -558,8 +558,21 @@ cap and majority trim coverage remain enforced; the v38 observations above are u
 future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
 remain frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
-The simulation and audit reports select v40. Publication still withholds unsupported
+The v40 simulation and audit reports selected it. Publication still withholds unsupported
 classes and fences recovery refusal observations on signed support from every active
 reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
 mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
+
+`claims-v41.json` adds the optional bounded `usage.limits.observed` source frontiers,
+reset-period observations and explicit unsupported account gaps to the combined
+current registry. Versions 1 through 40 remain frozen; main's published v40
+admission corpus is unchanged. Generate v41 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`.
+The current simulation loader and audit report select v41. Existing producers may
+omit the new optional fields, but omission cannot assert source completeness.
+The existing usage draw deliberately exercises that legacy-compatible shape;
+authenticated source chains, reordered replay, native owner bindings and period
+bounds have dedicated regressions. No claim kind or historical-kind exclusion is
+added. Exact per-seed equality, mandatory post-excusal trimming, the three-seed cap
+and majority coverage remain enforced; no new seed characterization is assumed.

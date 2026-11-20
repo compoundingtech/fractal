@@ -154,7 +154,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `harness-question.resolved` | `harness-question` | `system-only` | `append` | `durable` | `answers!:object`, `receipt:object`, `revision!:string`, `status!:string` |  |
 | `harness.context-clear.requested` | `agent` | `authorized-requester` | `append` | `durable` | `context_epoch:string`, `incarnation_id:string`, `operation_status:string`, `runtime_id:string` |  |
 | `harness.context-clear.result` | `agent` | `system-only` | `once` | `durable` | `context_epoch:string`, `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string` |  |
-| `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `acted_for:subject-reference(person)`, `attempt:integer`, `auth_attention_key:string`, `code:string`, `delegation:object`, `driver:string`, `incarnation_id:string`, `invocation_id:string`, `matched_line:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `producer_version:string`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
+| `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `acted_for:subject-reference(person)`, `attempt:integer`, `auth_attention_key:string`, `code:string`, `delegation:object`, `driver:string`, `incarnation_id:string`, `invocation_id:string`, `matched_line:string`, `message_id:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `producer_version:string`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
 | `harness.inventory.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `commands!:array`, `dynamic_commands!:string`, `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `session_id!:string` |  |
 | `harness.invocation` | `agent` | `system-only` | `append` | `durable` | `agent!:subject-reference(agent)`, `error:any`, `event_key:any`, `evidence:any`, `fallback:any`, `freshness:object`, `harness:any`, `harness_version:any`, `incarnation:any`, `invocation_id!:string`, `launch_input_digest:any`, `operation_id!:string`, `owner_attempt:any`, `owner_run:any`, `owner_step:any`, `parent_invocation_id:any`, `phase!:string`, `prompt_digest:any`, `provider_binary_digest:any`, `requested_model:any`, `trace_context:any`, `transcript_ref:any` |  |
 | `harness.invocation-artifact` | `agent` | `system-only` | `append` | `durable` | `artifact:object`, `deleted_at_unix_ms:integer`, `invocation_id!:string`, `kind:string`, `reason:string`, `sha256:string`, `status:string` |  |
@@ -291,7 +291,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
-| `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `readings!:array` |  |
+| `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `gaps:array`, `period_readings:array`, `readings!:array`, `source_frontier:object` |  |
 | `vcs.item.state` | `resource` | `system-only` | `append` | `durable` | `checks_state:string`, `draft:boolean`, `head_sha:string`, `item_kind!:string`, `merge_queue:object`, `merged:boolean`, `observer!:subject-reference(observer)`, `required_checks:object`, `review_decision:string`, `state!:string`, `version!:integer` |  |
 | `work.claimed` | `step-run` | `authorized-participant` | `state-transition` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.extended` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -340,6 +340,39 @@ Each credit represents one window-equivalent. Disposition is exactly
 `at` is nullable and `evidence_ref` is nullable nonblank text.
 Every nonnull timestamp is RFC3339; `measured_at` is required provider time.
 Unknown, missing and stale evidence never implies successful use or disposition.
+
+Optional `source_frontier` is a closed object with `producer_incarnation`, `host`,
+`sequence` (unsigned integer), nullable `previous_claim` (the actual accepted predecessor
+claim ID), `accounts` (sorted distinct `{provider, account}` objects), `observed_at`,
+`covered_from`, `covered_through` (RFC3339), and `complete` (boolean). Sequence zero
+requires null predecessor; later deltas require one. The host must equal the original
+claim origin, and each reading must belong to the fixed account roster. A new journal,
+roster or continuity gap requires a new incarnation. Publication time is not coverage.
+Each delta contains at most 128 quota and credit facts combined. Intermediate chunks
+are incomplete; only a complete, contiguous source/mirror chain certifies its interval.
+Collectors retain the accepted claim ID before sealing the next immutable request.
+Older observations without a frontier remain readable evidence, never completeness.
+
+Optional `period_readings` contains governing, comparable quota-period closures:
+`{period_id, account, provider, window, closed_at, measured_at, unused_fraction,
+close_kind, coverage, source, host, last_sample_at, max_gap_seconds}`. Text identities
+are nonblank, timestamps RFC3339, source is `omp-usage`, close_kind is
+`natural_rollover` or `early_reset`, max_gap_seconds is finite and nonnegative.
+Coverage uses the same enum; reported unused_fraction is 0–1, otherwise null.
+Unused fraction is an observed UPPER bound from the last pre-reset sample, never
+an exact terminal forfeiture. It is reported only for monotone usage in one stable,
+governing provider period; incomparable scoped windows cannot be added. Early resets
+are not natural loss. Bounds crossing the configured budget remain indeterminate.
+All account-bearing objects (quota, credit, period and roster entries) also permit
+optional nullable `provider_plan`, populated from the authoritative account registry.
+Missing plans remain readable historical evidence, but cannot prove plan-scoped loss
+coverage. Changing the plan changes the fixed source roster and requires a new incarnation.
+Optional bounded `gaps` records are closed `{provider, account_ref, provider_plan,
+source, host, reason, measured_at}` objects, with nullable provider_plan, RFC3339
+measured_at from the actual source observation, and nonblank text otherwise.
+They expose unsupported or unresolved account identities outside the certified source
+roster without inventing account digests. Gaps count toward the 128-fact delta limit;
+they never certify empty provider populations.
 
 The complete claim is durable: checkpoints must not prune credit history by keeping
 only the newest quota snapshot. Older members retain this unknown kind as retryable
