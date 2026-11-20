@@ -300,7 +300,10 @@ pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<Bo
     let caller = CallerOwner::resolve(&state, bound, run)?;
     let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
     authorize_execution(caller.as_ref(), &execution)?;
-    require_exec_platform(cfg!(target_os = "macos"))?;
+    if !cfg!(target_os = "linux") {
+        return Err(ApiError::bad(FractalError::new("unsupported-platform",
+            "member-scope requires Linux kernel containment")));
+    }
     let scope = (|| -> anyhow::Result<_> {
         anyhow::ensure!(execution.command.lane.host == state.node, "execution does not belong to this host");
         anyhow::ensure!(execution.started_at.is_some() && execution.ended_at.is_none() && !execution.cancel,
