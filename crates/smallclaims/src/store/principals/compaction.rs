@@ -206,7 +206,8 @@ mod tests {
         // (the candidate's delete trigger takes the source with it).
         tx.execute("DELETE FROM claim_signature_candidates WHERE claim_id=?1", [&claim.id]).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM claim_signature_sources WHERE claim_id=?1", [&claim.id], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,1)", [&claim.id]).unwrap();
+        // INSERT OR IGNORE: a build with the compaction writer already compacted it on settling.
+        tx.execute("INSERT OR IGNORE INTO claim_signature_counts(claim_id,candidates) VALUES (?1,1)", [&claim.id]).unwrap();
         assert!(facade(&tx, &claim.id).unwrap().is_some());
 
         forget_claim_tx(&tx, &claim.id).unwrap();
