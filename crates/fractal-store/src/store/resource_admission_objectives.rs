@@ -5,6 +5,19 @@ use super::resource_membership::Membership;
 pub const KIND: &str = "resource.admission.observed";
 pub const COVERAGE_KIND: &str = "resource.admission.coverage";
 
+const RECOVERY_FEATURE: super::declared_admission::FleetFeature = super::declared_admission::FleetFeature {
+    keys: &["resource_recovery_observations"],
+    code: "resource-recovery-feature-barrier",
+    carries: "recovery-class admission observations",
+};
+
+pub(super) fn validate_publication(connection: &Connection, host: &str, class: &fractal_runtime::RequestClass) -> Result<(), FractalError> {
+    if *class == fractal_runtime::RequestClass::Recovery {
+        super::declared_admission::validate_fleet(connection, host, &RECOVERY_FEATURE)?;
+    }
+    Ok(())
+}
+
 /// Process-local authority acquisition proof; a persisted cut alone cannot prove a live producer.
 #[derive(Default)]
 pub struct Coverage(pub std::sync::atomic::AtomicBool);
@@ -12,6 +25,10 @@ pub struct Coverage(pub std::sync::atomic::AtomicBool);
 pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
     if let Err(error) = member.request.class.ensure_supported() {
         tracing::warn!(membership = %member.request.id, %error, "skipping unsupported-class admission observation; authoritative custody retained");
+        return Ok(false);
+    }
+    if let Err(error) = validate_publication(tx, &member.request.host, &member.request.class) {
+        tracing::warn!(membership = %member.request.id, %error, "deferring recovery observation until every active fleet reader supports it");
         return Ok(false);
     }
     // Child/inherited contexts never create memberships and therefore never add samples.

@@ -594,6 +594,7 @@ impl Store {
         anyhow::ensure!(!request.owner.run.is_empty() && !request.owner.step.is_empty() && request.owner.attempt > 0, "resource execution owner required");
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
+        super::resource_admission_objectives::validate_publication(&transaction, &request.host, &request.class)?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
             let expected = InstalledPolicy::for_request(request);

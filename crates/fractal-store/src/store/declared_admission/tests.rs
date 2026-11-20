@@ -54,6 +54,52 @@ fn peer(store: &Store, anchor: &MemberKey) -> (Store, Arc<MemberKey>) {
 }
 
 #[test]
+fn recovery_observations_require_every_signed_fleet_reader() {
+    use crate::store::resource_membership::{Admission, Coverage, DiskFit, Fit, LaneRequest, Owner};
+    use fractal_runtime::{Capacity, RequestClass};
+    let (store, anchor) = enabled();
+    started(&store, json!({"resource_recovery_observations":1}));
+    store.replication_snapshot().unwrap();
+    let (peer, _) = peer(&store, &anchor);
+    store.start_resource_authority("alder", "epoch").unwrap();
+    let request = LaneRequest {
+        id: "recovery".into(), name: "recovery".into(), host: "alder".into(),
+        max_members: 1, capacity: Some(Capacity { cores: 1, memory: 1024 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None,
+        class: RequestClass::Recovery, disk: None, io: None,
+        profile: None, profile_estimate: None, disk_path: None,
+        owner: Owner { run: "mission-run/recovery".into(), step: "step-run/recovery".into(),
+            attempt: 1, invocation: None },
+    };
+    let fit = Fit { room: request.capacity, recovery_capable: true,
+        disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..Fit::default() };
+    for advertisement in [json!({}), json!({"resource_recovery_observations":0})] {
+        started(&peer, advertisement);
+        sync(&peer, &store);
+        let before = store.index().unwrap();
+        let error = store.request_resource_membership(&request, fit.clone(), 1).unwrap_err();
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code,
+            "resource-recovery-feature-barrier");
+        assert_eq!(store.index().unwrap(), before, "no observation or membership may be written");
+    }
+    started(&peer, json!({"resource_recovery_observations":1}));
+    sync(&peer, &store);
+    assert!(matches!(store.request_resource_membership(&request, fit.clone(), 2).unwrap(),
+        Admission::Admitted(_)));
+    let mut refused = request.clone();
+    refused.id = "refused-recovery".into();
+    refused.name = refused.id.clone();
+    assert!(matches!(store.request_resource_membership(&refused,
+        Fit { recovery_capable: false, ..fit }, 3).unwrap(), Admission::Refused { .. }));
+    started(&peer, json!({"resource_recovery_observations":0}));
+    sync(&peer, &store);
+    // Recovery must defer existing observations too, rather than aborting startup.
+    store.start_resource_authority("alder", "next-epoch").unwrap();
+    assert!(!store.fractal.extensions.get::<crate::store::resource_admission_objectives::Coverage>().0
+        .load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
 fn absent_declarations_do_not_require_a_feature_barrier() {
     publish(&Store::open_memory("alder").unwrap(), PLAIN, "plain").unwrap();
 }

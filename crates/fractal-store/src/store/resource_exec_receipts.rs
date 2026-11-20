@@ -177,6 +177,11 @@ mod tests {
         let path = directory.path().join("claims.db");
         {
             let store = Store::open(&path, "host-a").unwrap();
+            use crate::store::directive_notes::tests_shared_delivery::{claim, enable};
+            enable(&store);
+            claim(&store, "daemon/host-a", "daemon.started", None,
+                json!({"status":"running","features":{"resource_recovery_observations":1}}));
+            store.replication_snapshot().unwrap();
             store.start_resource_authority("host-a", "epoch").unwrap();
             let mut request = command("recovery");
             request.lane.class = RequestClass::Recovery;

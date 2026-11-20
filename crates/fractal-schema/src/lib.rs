@@ -3506,7 +3506,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "resource.admission.observed" => &[
             ("id", required_string()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            ("class", required_enum(&["recovery", "landing", "check", "agent"])),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("epoch", required_string()),
             ("owner", required_object()),
@@ -3515,7 +3515,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_at", integer()),
             ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
             ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
-                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state", "recovery-not-allowed"])),
             ("finite", required_boolean()),
             ("admission_timeout_ms", integer()),
             ("clock_uncertain", required_boolean()),
