@@ -157,10 +157,10 @@ fn native_root_stops_are_root_only_and_other_kinds_still_refused() {
     }
     let store = Store::open_memory("amber").unwrap();
     for kdl in [
-        "version 2\nperson \"operator\" {}\n",
+        "version 2\nperson \"operator\"\n",
         "version 2\nexec \"standalone\" { command \"true\" }\n",
     ] {
-        let input = parse_intent(kdl, "amber").unwrap();
+        let input = fractal_attention::graph::parse_internal_intent(kdl, "amber").unwrap();
         assert_eq!(store.owned_set_preview(&input, &options(&store, 10)).unwrap_err().code, "unsupported-set-member");
     }
     assert_eq!(parse_intent("version 2\nstop \"person/operator\"", "amber").unwrap_err().code, "invalid-stop-subject");
