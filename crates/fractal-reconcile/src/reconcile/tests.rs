@@ -24728,6 +24728,90 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(comment_event(5), 1);
     }
 
+    #[tokio::test]
+    async fn unavailable_recovery_clears_the_reason_in_merged_stored_item_facts() {
+        use crate::resource::test_github::{FakeGithub, age_pull_request_check, observe};
+        use serde_json::json;
+
+        for mode in ["rest", "graphql", "refresh", "webhook"] {
+            let (github, base) = FakeGithub::start().await;
+            let store = Store::open_memory("node").unwrap();
+            apply_source(&store, r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "pull_requests"
+}"#, "unavailable-recovery");
+            let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+            let listing = json!([
+                {"number": 1, "node_id": "I_unavailable", "state": "open", "state_reason": "reopened",
+                    "html_url": "https://github.com/acme/garden/issues/1", "updated_at": "2026-09-10T00:00:00Z"},
+                {"number": 2, "node_id": "PR_unavailable", "state": "open", "pull_request": {},
+                    "html_url": "https://github.com/acme/garden/pull/2", "updated_at": "2026-09-10T00:00:00Z"},
+            ]);
+            github.route("/repos/acme/garden", json!({"id": 7}));
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", listing.clone());
+            *github.graphql_pulls.lock() = Some((vec![], 100));
+            *github.graphql.lock() = json!({
+                "data": {"nodes": [null, null]},
+                "errors": [
+                    {"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Unavailable issue"},
+                    {"type": "NOT_FOUND", "path": ["nodes", 1], "message": "Unavailable pull request"},
+                ],
+            }).to_string();
+            let mut request = ObservationRequest {
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
+                cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
+                webhook_covered: false, workflow_runs: None, github_capture: None,
+            };
+            let unavailable = observe(request.clone(), &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                unavailable.cursor.as_deref(), &unavailable.facts, 1, &[], None).unwrap();
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "closed", "{mode}: {stored}");
+                assert_eq!(stored["facts"]["state_reason"], "not_found", "{mode}: {stored}");
+            }
+
+            let cursor: Value = serde_json::from_str(unavailable.cursor.as_deref().unwrap()).unwrap();
+            // These fixture times are whole seconds, and discovery includes the prior second.
+            assert_eq!(cursor["items_since"], "2026-09-10T00:00:00Z");
+            github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+                if mode == "rest" { listing } else { json!([]) });
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
+            *github.graphql.lock() = json!({"data": {"nodes": [
+                {"id": "I_unavailable", "number": 1, "state": "OPEN", "stateReason": "REOPENED",
+                    "url": "https://github.com/acme/garden/issues/1"},
+                {"id": "PR_unavailable", "number": 2, "state": "OPEN",
+                    "url": "https://github.com/acme/garden/pull/2"},
+            ]}}).to_string();
+            if mode == "graphql" {
+                *github.graphql_pulls.lock() = Some((vec![json!({
+                    "id": "PR_unavailable", "number": 2, "url": "https://github.com/acme/garden/pull/2",
+                })], 100));
+                age_pull_request_check(&base, Duration::from_secs(3600));
+            }
+            request.cursor = unavailable.cursor;
+            request.previous_facts = Some(unavailable.facts);
+            request.refresh = matches!(mode, "refresh" | "webhook");
+            request.webhook_covered = mode == "webhook";
+            let recovery = observe(request, &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                recovery.cursor.as_deref(), &recovery.facts, 2, &[], None).unwrap();
+
+            // Assert the store's real partial-fact overlay, not just the provider's open state.
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                if mode == "graphql" && subject.ends_with("/issue/1") {
+                    continue; // The open-PR discovery query cannot rediscover issues.
+                }
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "open", "{mode}: {stored}");
+                assert!(stored["facts"].get("state_reason").is_none(), "{mode}: {stored}");
+            }
+        }
+    }
+
     /// Polling moves to a member without the plugin database, between two polls by the real
     /// repository provider. The issue closed and the comment written in the gap are each
     /// delivered once, and the comment from before the gap is not delivered again: the new

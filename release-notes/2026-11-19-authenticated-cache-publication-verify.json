@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "CI only: the main-branch native publication step verified its own upload with an unauthenticated recursive path-info query against the private cache, which returned HTTP 401 once the cache stopped serving anonymous reads. The verification now authenticates with the same cache-scoped write token through a job-temporary, owner-only netrc containing only the named cache host; only that explicit remote-store command receives the netrc path and an exit trap removes the file on success or failure.",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change; the closure manifest output is unchanged."},
+  "rules": {"status": "none", "detail": "CI only; no runtime or admission rules change."},
+  "compatibility": {"status": "none", "detail": "CI only; the published closure and receipt are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart or migration."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the workflow and docs change."}
+}
