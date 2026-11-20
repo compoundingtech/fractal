@@ -10938,7 +10938,7 @@ async fn a_start_between_emptying_and_giving_pages_back_finishes_giving_them_bac
             let connection = store.connection.write();
             for n in 0..200 {
                 connection.execute(
-                    "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw, state, updated_at_unix_ms)
+                    /* sqlite-large-value: allow-for-now lv-hbac708a02bc1 owner=fractal::main_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw, state, updated_at_unix_ms)
                      VALUES (?1, 'birch', ?2, 'envelope', 0, randomblob(9000), 'valid', '0')",
                     rusqlite::params![format!("record/sample-{n}"), n],
                 ).unwrap();
