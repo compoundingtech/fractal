@@ -3255,6 +3255,58 @@ mod sequence_page_tests {
     }
 }
 
+#[cfg(test)]
+mod replication_admission_wake_tests {
+    use super::*;
+
+    #[test]
+    fn generation_is_visible_only_after_commit_and_survives_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("wake.sqlite");
+        let mut writer = Connection::open(&path)?;
+        writer.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+        let reader = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 1);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&writer)?, 0);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        transaction.commit()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "UPDATE meta SET value='2' WHERE key='replication_admission_wake_generation'",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 2);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        drop(reader);
+        drop(writer);
+        let reopened = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reopened)?, 1);
+        Ok(())
+    }
+}
+
 pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> {
     Ok(connection
         .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
@@ -8747,6 +8799,20 @@ impl Store {
             snapshot.legacy_graph_digest.clone(),
             snapshot.projection_digests.clone(),
         ))
+    }
+
+    /// Durable notification generation for runtime holds made eligible for admission again.
+    /// Read through the caller's connection so commit observers see exactly the committed
+    /// transaction; stores predating the first notification have generation zero.
+    pub fn replication_admission_wake_generation(connection: &Connection) -> Result<u64> {
+        Ok(connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_admission_wake_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {

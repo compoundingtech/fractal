@@ -564,6 +564,10 @@ All claims in a held envelope wait together, including unrelated subjects in tha
 other envelopes and peers remain eligible. Later envelopes touching the capped subject
 also wait for the prioritized rebuild, without a handler-error retry backoff.
 The cap clears only on complete publication, and emits one diagnostic per episode.
+Publication advances a persisted admission-wake generation in the same commit. A local
+commit observer schedules admission, repair and projection after the writer returns;
+held envelopes therefore resume even in a quiet fleet with no new receive or resend.
+The local worker also checks at startup, covering an interruption between publication and wake.
 Query-only readers
 use the canonical snapshot fold until publication; writer-context reads report
 `resource-preparation-not-caught-up` rather than doing that unbounded fallback.
