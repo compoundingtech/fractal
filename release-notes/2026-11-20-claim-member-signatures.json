@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta keys claim_member_signature_cursor (signing pass) and claim_member_signature_pending_cursor (settling waiting signatures). No storage version change."
+    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta keys claim_member_signature_cursor (signing pass) and claim_member_signature_pending_cursor (settling waiting signatures). No storage version change. Only an authenticated fleet peer can add waiting rows, and only with signatures that verify; the 30-day expiry is what bounds them, so a peer sending signatures for claims that never arrive costs at most a month of rows."
   },
   "rules": {
     "status": "none",
