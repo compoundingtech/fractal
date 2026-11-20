@@ -2644,12 +2644,28 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st slo ingest-roll",
+      "description": "Admit one existing signed graph roll receipt claim",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
+    },
+    {
       "command": "st slo ls",
       "description": "List every objective and budget: target, current value, window and what is left",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo roll-intent",
+      "description": "Resolve immutable native creation time and pinned revision for one enrolled roll intent",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
     },
     {
       "command": "st setup",

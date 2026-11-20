@@ -190,6 +190,19 @@ mod tests {
     }
 
     #[test]
+    fn native_roll_commands_do_not_substitute_cli_actors_for_signed_authority() {
+        let value = generate(super::super::command_graph());
+        for path in ["st slo ingest-roll", "st slo roll-intent"] {
+            let command = &value["contract"]["commands"][path];
+            assert_eq!(command["actor"], "none", "{path}");
+            assert_eq!(command["accepts_person"], false, "{path}");
+            assert_eq!(command["can_carry_person"], false, "{path}");
+            assert_eq!(command["as_role"], "none", "{path}");
+            assert!(command["actor_environment"].is_null(), "{path}");
+        }
+    }
+
+    #[test]
     fn actor_contract_records_real_command_aliases() {
         let value = generate(super::super::command_graph());
         assert_eq!(value["contract"]["aliases"]["st alerts"], json!(["attention"]));
