@@ -194,7 +194,7 @@ pub async fn run<S: ObservationSource>(store: Arc<S>, exporter: OtlpExporter) {
                 backoff = Duration::from_secs(1);
                 if outcome.skipped > 0 {
                     eprintln!(
-                        "st3: {} local observations were trimmed before OpenTelemetry export",
+                        "fractal: {} local observations were trimmed before OpenTelemetry export",
                         outcome.skipped
                     );
                 }
@@ -203,7 +203,7 @@ pub async fn run<S: ObservationSource>(store: Arc<S>, exporter: OtlpExporter) {
                 }
             }
             Err(error) => {
-                eprintln!("st3: OpenTelemetry export failed: {error:#}");
+                eprintln!("fractal: OpenTelemetry export failed: {error:#}");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }

@@ -73,9 +73,9 @@ use super::*;
         }
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
-        self.start_guarded(member, &|| Ok(()))
+        self.start_guarded(member, None, &|| Ok(()))
     }
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_guarded(&self, member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         if member.runtime_id == "example.worker"
             || member.runtime_id == "example-worker.main"
             || member.runtime_id.starts_with("example.held")
@@ -1795,7 +1795,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             Arc::new(Notify::new()),
         );
         // Exercise NativeRuntime's producer boundary directly through the durable jobs.
-        // The ordinary exec member preparation wraps its command in the st3 driver;
+        // The ordinary exec member preparation wraps its command in the Fractal driver;
         // a missing command inside that wrapper is a later readiness failure.
         let dispatch = |desired: &DesiredSubject| {
             let member = desired.member.as_ref().unwrap().clone();
@@ -2034,7 +2034,7 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guard_called = AtomicBool::new(false);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guard_called.store(true, Ordering::Release);
             anyhow::bail!("declaration changed before launch")
         })
@@ -2093,7 +2093,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guards = std::sync::atomic::AtomicUsize::new(0);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guards.fetch_add(1, Ordering::Relaxed);
             anyhow::ensure!(
                 !called.exists(),
@@ -2160,7 +2160,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();
         let runtime = NativeRuntime::new(&state, None, &pty);
-        let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
+        let error = runtime.start_guarded(&member, Some(&fractal_runtime::LaunchOperation("pty-operation".into())), &|| Ok(())).unwrap_err();
         assert_eq!(
             error.downcast_ref::<fractal_runtime::StartRejected>().is_some(),
             rejected,

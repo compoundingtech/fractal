@@ -34,7 +34,7 @@ done
 
 while read -r name kind; do
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name" --json \
+  fractal subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name" --json \
     | jq -e --arg kind "$kind" '.status.subjects[0].actual | (.fields // .) | .kind == $kind and .state == "published"' >/dev/null
 done <<'PRODUCTS'
 license-brief custom.st3.message-receipt

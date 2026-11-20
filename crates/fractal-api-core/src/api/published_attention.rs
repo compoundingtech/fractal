@@ -76,7 +76,7 @@ pub fn start_attention_list(state: &AppState) {
                 // A pairing completed or revoked since the last pass changes which windows a
                 // session may hold; their windows reread to recheck it, as before.
                 if let Err(error) = reader.recheck_pairings() {
-                    eprintln!("st3: pairing recheck for published views failed: {error:#}");
+                    eprintln!("fractal: pairing recheck for published views failed: {error:#}");
                 }
                 let mut results = Vec::new();
                 let waiting = |results: &mut Vec<_>, starting: bool| {
@@ -137,7 +137,7 @@ pub fn start_attention_list(state: &AppState) {
                     }
                     for (view, result) in results {
                         if let Err(error) = &result {
-                            eprintln!("st3: {view} view refresh failed: {error:#}");
+                            eprintln!("fractal: {view} view refresh failed: {error:#}");
                         }
                         store.note_view_refreshed(view, result.is_ok());
                     }
@@ -147,7 +147,7 @@ pub fn start_attention_list(state: &AppState) {
                     if prompts_changed {
                         watching(&prompts).keep_changed();
                     }
-                    eprintln!("st3: published view refresh stopped: {error}");
+                    eprintln!("fractal: published view refresh stopped: {error}");
                     for view in crate::store::attention_list::PUBLISHED_VIEWS {
                         store.note_view_refreshed(view, false);
                     }
@@ -183,12 +183,12 @@ pub fn start_attention_list(state: &AppState) {
                     Ok(None) => {}
                     Ok(Some(result)) => {
                         if let Err(error) = &result {
-                            eprintln!("st3: summary view refresh failed: {error:#}");
+                            eprintln!("fractal: summary view refresh failed: {error:#}");
                         }
                         store.note_view_refreshed("summary", result.is_ok());
                     }
                     Err(error) => {
-                        eprintln!("st3: summary view refresh stopped: {error}");
+                        eprintln!("fractal: summary view refresh stopped: {error}");
                         store.note_view_refreshed("summary", false);
                     }
                 }
@@ -505,7 +505,7 @@ fn present_rows(
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("st3: WARN attention cannot read the path of {step}: {error:#}")
+                eprintln!("fractal: WARN attention cannot read the path of {step}: {error:#}")
             }
         }
     }
@@ -525,7 +525,7 @@ fn present_rows(
                         Ok(Some(revision)) => presentation["revision"] = revision,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} names no revision changes: {error:#}",
+                            "fractal: WARN attention {} names no revision changes: {error:#}",
                             row["id"]
                         ),
                     }
@@ -538,7 +538,7 @@ fn present_rows(
                         Ok(Some(launch)) => presentation["launch"] = launch,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} has no launch preview: {error:#}",
+                            "fractal: WARN attention {} has no launch preview: {error:#}",
                             row["id"]
                         ),
                     }
@@ -546,7 +546,7 @@ fn present_rows(
                 row["presentation"] = presentation;
             }
             Err(error) => eprintln!(
-                "st3: WARN attention {} has no presentation: {error}",
+                "fractal: WARN attention {} has no presentation: {error}",
                 row["id"]
             ),
         }

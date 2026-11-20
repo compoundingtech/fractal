@@ -713,8 +713,8 @@ sys.exit({exit_code})
         (bin_dir / 'curl').write_text(f'#!/bin/sh\nfor a; do url=$a; done\necho "$url" >> {str(self.f.root / "curl.urls")!r}\ncat {str(pulls)!r}\n')
         (bin_dir / 'curl').chmod(0o755)
         stored = self.f.root / 'stored'
-        (bin_dir / 'st').write_text(f'#!/bin/sh\ncp "$3" {str(stored)!r}-$(ls {str(self.f.root)!r} | grep -c stored)\necho "$5" >> {str(stored)!r}.names\n')
-        (bin_dir / 'st').chmod(0o755)
+        (bin_dir / 'fractal').write_text(f'#!/bin/sh\ncp "$3" {str(stored)!r}-$(ls {str(self.f.root)!r} | grep -c stored)\necho "$5" >> {str(stored)!r}.names\n')
+        (bin_dir / 'fractal').chmod(0o755)
         state = self.f.root / 'state'
         env = dict({k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, PATH=f'{bin_dir}:{os.environ["PATH"]}',
                    EVIDENCE_GC_STATE=str(state), EVIDENCE_GC_REMOTE=str(bare), EVIDENCE_GC_API='https://api.example.invalid',

@@ -2503,7 +2503,7 @@ fn crash_loop_parks(store: &Store) -> Vec<Value> {
         .collect()
 }
 
-// Per-PR contract for the boot canary `restart` scenario: `st agents restart --now` relaunches
+// Per-PR contract for the boot canary `restart` scenario: `fractal agents restart --now` relaunches
 // the seat as a new incarnation that continues the native session its harness last bound.
 #[test]
 fn restart_launch_continues_the_recorded_native_session() {

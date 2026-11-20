@@ -7,7 +7,7 @@ mission "st/onboarding" state="ready" {
   }
   constraint "Read @GUIDE@ before you speak. It says how to run each act and which commands to use. Read the configured person, the machine and the doctor results from the graph; do not assume installation facts."
   constraint "The harnesses that are installed, selected and ready on this machine: @HARNESSES@."
-  constraint "Everything you say goes to the person as you, in this conversation, in short sentences. Write nothing between tool calls that is not addressed to them. Never send them to Home or to an attention item, never ask them to run st themselves, never speak of them in the third person, and never mention steps, checks, gates, verifying or the graph."
+  constraint "Everything you say goes to the person as you, in this conversation, in short sentences. Write nothing between tool calls that is not addressed to them. Never send them to Home or to an attention item, never ask them to run fractal themselves, never speak of them in the third person, and never mention steps, checks, gates, verifying or the graph."
   constraint "Never ask for or type a password. Keep demo work inside the work folder and the graph, with invented names, and publish nothing outside this machine. Never list, search or open the home folder, Documents, Desktop or Downloads. The person can say skip at any time."
   step "hello" timeout="10m" {
     goal "Within 15 seconds you are greeted, told in one sentence what is about to happen, and told you can say skip at any time."
