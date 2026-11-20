@@ -996,6 +996,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     for table in [
         "claim_signatures",
         "claim_signature_candidates",
+        // A compacted claim (version 24) has no candidate row whose trigger would drop it.
+        "claim_signature_counts",
         "claim_signature_nonce_uses",
         "claim_signature_judging",
         "claim_verdicts",

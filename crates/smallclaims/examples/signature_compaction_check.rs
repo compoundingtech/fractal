@@ -1,7 +1,8 @@
 //! Check the version 24 readers on a compacted copy of a real member's database: every key grant
 //! and revocation, plus a sample of other signed claims, is judged afresh through the compacted
 //! facade, and each verdict and served signature must equal what the member had before.
-//! Usage: signature_compaction_check COPY ORIGIN [SAMPLE]. Run it on a copy only: it writes.
+//! Usage: signature_compaction_check --copy COPY ORIGIN [SAMPLE]. It writes, so it refuses to
+//! run without `--copy`, which says the path is a copy and not a member's live store.
 use smallclaims::Store;
 use smallclaims::principal::{KEY_GRANTED, KEY_REVOKED};
 use smallclaims::store::runtime::Plain;
@@ -11,6 +12,7 @@ use std::time::Instant;
 
 fn main() {
     let mut args = std::env::args().skip(1);
+    assert_eq!(args.next().as_deref(), Some("--copy"), "usage: signature_compaction_check --copy COPY ORIGIN [SAMPLE]");
     let path = args.next().expect("COPY");
     let origin = args.next().expect("ORIGIN");
     let sample: i64 = args.next().map_or(20_000, |value| value.parse().unwrap());
