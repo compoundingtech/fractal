@@ -526,7 +526,11 @@ impl Store {
             (comparison, retired)
         };
         if let Some(retired) = retired {
-            self.retire_learned_claims(peer, &retired.missing)?;
+            // A retired claim never held here is asked for, as a missing one is, so its
+            // tombstone is made from the claim.
+            let unheld = self.retire_learned_claims(peer, &retired.missing)?;
+            let room = CLAIM_RANGE_QUERY_CLAIMS.saturating_sub(comparison.missing.len());
+            comparison.missing.extend(unheld.into_iter().take(room));
             comparison.retired = Some(Box::new(retired));
         }
         Ok(Some(comparison))
@@ -535,10 +539,11 @@ impl Store {
     /// Record claim IDs a peer retired as retired here too, while this member trims locally. One
     /// this member holds waits for its own trim's path to delete it, or is kept
     /// (`retirement_wins`).
-    fn retire_learned_claims(&self, peer: &str, ids: &[String]) -> Result<()> {
+    fn retire_learned_claims(&self, peer: &str, ids: &[String]) -> Result<Vec<String>> {
         if ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut unheld = Vec::new();
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         if retired::authoritative(&transaction)? {
@@ -550,26 +555,44 @@ impl Store {
                 insert.execute(/* sqlite-large-value: allow-for-now lv-hf13d52544a0d owner=smallclaims::store::claim_ranges TODO=trace-statement-and-value-representation */ [id])?;
             }
             drop(insert);
-            super::retirement_wins::note_learned_retirements_tx(&transaction, peer, ids)?;
+            unheld = super::retirement_wins::note_learned_retirements_tx(&transaction, peer, ids, self.retirement_wins())?;
         }
         transaction.commit()?;
-        Ok(())
+        Ok(unheld)
     }
 
     /// The envelopes that carry these claims, for a peer that found it lacks them; at most
-    /// `CLAIM_RANGE_QUERY_CLAIMS` claims are looked up.
+    /// `CLAIM_RANGE_QUERY_CLAIMS` claims are looked up. Stored and released envelopes alike: an
+    /// exchange sends a released one as a signed envelope (`signed_claims`).
     pub fn envelopes_carrying_claims(&self, claims: &[String]) -> Result<Vec<ReplicaEnvelopeId>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
              FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+             WHERE claims.id=?1
+             UNION
+             SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+             FROM claims JOIN released_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              WHERE claims.id=?1",
         )?;
-        // A claim this member retired is not served, even while a copy is still held.
+        // The envelope of a claim this member trimmed, while its payload is still held for its
+        // other claims.
+        let mut trimmed = connection.prepare_cached(
+            "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+             FROM checkpoint_claims AS tombstone JOIN replica_envelopes AS envelopes
+               ON envelopes.writer=tombstone.writer AND envelopes.sequence=tombstone.sequence
+                 AND envelopes.envelope_hash=tombstone.envelope_hash
+             WHERE tombstone.id=?1",
+        )?;
+        // A claim this member retired is not served, even while a copy is still held, unless a
+        // retirement wins: a peer that asks for one learned the retirement and makes its own
+        // tombstone from the claim (`retirement_wins`).
         let authoritative = retired::authoritative(&connection)?;
+        let serve_retired = self.retirement_wins();
         let mut found = BTreeSet::new();
         for id in claims.iter().take(CLAIM_RANGE_QUERY_CLAIMS) {
-            if authoritative && retired::claim_retired(&connection, id)? {
+            let retired_here = authoritative && retired::claim_retired(&connection, id)?;
+            if retired_here && !serve_retired {
                 continue;
             }
             let rows = statement.query_map([id], |row| {
@@ -577,6 +600,14 @@ impl Store {
             })?;
             for row in rows {
                 found.insert(row?);
+            }
+            if retired_here {
+                let rows = trimmed.query_map([id], |row| {
+                    Ok(ReplicaEnvelopeId { writer: row.get(0)?, sequence: row.get(1)?, hash: row.get(2)? })
+                })?;
+                for row in rows {
+                    found.insert(row?);
+                }
             }
         }
         Ok(found.into_iter().collect())
@@ -666,7 +697,9 @@ fn compare(read: &Connection, namespace: i64, remote: &ClaimRangeSummary) -> Res
             examined += 1;
             if leaf(id) == group.leaf
                 && !local.contains(id)
-                && (namespace == RETIRED || !retired::claim_retired(read, id)?)
+                && (namespace == RETIRED
+                    || !retired::claim_retired(read, id)?
+                    || super::retirement_wins::retired_unheld(read, id)?)
             {
                 comparison.missing.push(id.clone());
             }

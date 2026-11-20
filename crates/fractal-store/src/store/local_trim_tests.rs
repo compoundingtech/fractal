@@ -506,6 +506,76 @@ fn a_guard_refusal_keeps_what_a_peer_retired() {
     assert_eq!(claims_of(&birch, "observer.observed"), 20);
 }
 
+/// Every claim each of `stores` holds, at every other.
+fn sync_all(stores: &[&Store]) {
+    for _ in 0..4 {
+        for from in stores {
+            for to in stores {
+                if from.origin != to.origin {
+                    let exchange = from.export_replication_exchange(TEST_FLEET, &to.replication_inventory().unwrap()).unwrap();
+                    to.receive_replication_exchange(&from.origin, TEST_FLEET, &exchange).unwrap();
+                    to.validate_replication_backlog().unwrap();
+                    to.project_replication_backlog().unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// alder trims 19 of 20 observations it wrote, with their payloads; oak, an older build that
+/// never trims, received them first, and birch, which trims, never did.
+fn unheld_retirements(scratch: &std::path::Path) -> (Store, Store, Store, CheckpointContext) {
+    let alder = declared(Store::open_memory("alder").unwrap(), true);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    let oak = declared(Store::open_memory("oak").unwrap(), false);
+    sync_all(&[&alder, &birch, &oak]);
+    for n in 0..20 {
+        apply(&alder, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    sync_all(&[&alder, &oak]);
+    assert_eq!(kinds(&step(&alder, &context(scratch, 0))), ["trimmed"]);
+    birch.set_retirement_wins(true);
+    let quiet = CheckpointContext { now_unix_ms: now_ms(), scratch: scratch.to_path_buf() };
+    (alder, birch, oak, quiet)
+}
+
+/// A retired claim a member never held is fetched from a peer that still has it, admitted and
+/// retired by its own trim, so its tombstone and every digest match the member that retired it.
+#[test]
+fn a_retired_claim_never_held_is_fetched_from_a_peer_and_retired_with_its_tombstone() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, oak, quiet) = unheld_retirements(scratch.path());
+    learn_retirements(&birch, &alder);
+    let unheld = || birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_unheld;
+    assert_eq!(unheld(), 19, "alder deleted their payloads, so it cannot supply them");
+    learn_retirements(&birch, &oak);
+    assert_eq!(claims_of(&birch, "observer.observed"), 20, "oak supplied them");
+    step(&birch, &quiet);
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(unheld(), 0);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    let (a, b) = (alder.replication_snapshot().unwrap(), birch.replication_snapshot().unwrap());
+    assert_eq!(b.projection_digests, a.projection_digests, "claim_sources and operations included");
+    assert_eq!(b.graph_digest, a.graph_digest);
+}
+
+/// When no peer holds a retired claim this member never held, the gap stays and is counted.
+#[test]
+fn a_retired_claim_no_peer_holds_is_counted_unheld() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (alder, birch, _oak, quiet) = unheld_retirements(scratch.path());
+    learn_retirements(&birch, &alder);
+    step(&birch, &quiet);
+    assert_eq!(birch.replication_status(true, Some(TEST_FLEET), &[]).unwrap().peer_retired_unheld, 19);
+    assert_eq!(claims_of(&birch, "observer.observed"), 1);
+    assert_eq!(retired_ids(&birch), retired_ids(&alder));
+    assert_ne!(
+        birch.replication_snapshot().unwrap().projection_digests.get("claim_sources"),
+        alder.replication_snapshot().unwrap().projection_digests.get("claim_sources"),
+        "it lacks those claims' tombstones"
+    );
+}
+
 /// A local cut that deletes in many chunks leaves the roster's generation alone until its run
 /// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
 /// roster's fold before it could publish, all through a run.

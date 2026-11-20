@@ -1,21 +1,21 @@
 {
   "version": 1,
-  "summary": "A retirement wins (#6878): a claim ID a peer that trims locally retired deletes the copy this member holds, through this member's own guarded trim path, so members that trim converge on the same retained claims and retired IDs. Only claims of a kind local trim drops (LOCAL_TRIM_KINDS) that no person wrote are deleted on a peer's word; any other is kept and counted. The deletion ships switched off (RETIREMENT_WINS)",
+  "summary": "A retirement wins (#6878): a claim ID a peer that trims locally retired deletes the copy this member holds, through this member's own guarded trim path, so members that trim converge on the same retained claims and retired IDs. Only claims of a kind local trim drops (LOCAL_TRIM_KINDS) that no person wrote are deleted on a peer's word; any other is kept and counted. A retired claim a member never held is asked for and admitted from a peer that still has it, then retired the same way, so its tombstone is made from the claim; when no peer has it the gap is counted. The deletion ships switched off (RETIREMENT_WINS)",
   "replay": {
     "status": "none",
     "detail": "No replay. A deletion runs as a local cut's does: the claims' tombstones are recorded under a cut of their own (checkpoint/retired-by-peers/TIME, cut time 0, so this member's own daily cut is never moved by it), then deleted in paced chunks under the day's cap, each checking the projection digests. A held claim that is still the newest of its subject and kind here waits until the newer one arrives."
   },
   "schema": {
     "status": "changed",
-    "detail": "New table peer_retired_claims (claim ID, the peer that taught its retirement, pending or kept, when). No storage version change. Nothing is deleted while the switch is off; learned retirements of held claims are still noted."
+    "detail": "New table peer_retired_claims (claim ID, the peer that taught its retirement, and pending, kept or unheld, when). No storage version change. Nothing is deleted or fetched while the switch is off; learned retirements of held claims are still noted."
   },
   "rules": {
     "status": "changed",
-    "detail": "A retired ID learned in the claim-range walk from an authenticated peer whose exchange this member admits, of a held claim of a kind in LOCAL_TRIM_KINDS whose actor is not a person, is deleted and stays in this member's retired set. A person's claim or a claim of another kind is kept, counted as peer_retired_kept in the replication status, and never deleted on a peer's word. A chunk that would change the graph stops the trim, keeps the claim and raises local-trim-stopped, and trimming waits until resumed, as for a local cut."
+    "detail": "A retired ID learned in the claim-range walk from an authenticated peer whose exchange this member admits, of a held claim of a kind in LOCAL_TRIM_KINDS whose actor is not a person, is deleted and stays in this member's retired set. A person's claim or a claim of another kind is kept, counted as peer_retired_kept in the replication status, and never deleted on a peer's word. A chunk that would change the graph stops the trim, keeps the claim and raises local-trim-stopped, and trimming waits until resumed, as for a local cut. A retired ID learned for a claim this member never held, and has no tombstone of, is asked for in the claim-range walk's missing-claim request (at most 512 a query); a peer answers with the envelope that carries it, from its tombstone while the payload is held, or as a signed envelope when released. Admission takes such a claim although it is retired here, and the guarded trim then deletes it. One no peer can supply is counted as peer_retired_unheld."
   },
   "compatibility": {
     "status": "none",
-    "detail": "No wire or API change: retired IDs already travel in the claim-range walk's retired namespace. An older peer sends and keeps retired IDs as before; a member that learns a retired ID it never held still lacks that claim's tombstone facts, as before."
+    "detail": "No wire or API change: retired IDs already travel in the claim-range walk's retired namespace, and a retired claim is asked for as a missing one is. With the switch on, a member answers a request for a claim it retired with the envelope that still carries it; with it off, as before, it serves none. An older peer sends and keeps retired IDs as before."
   },
   "downtime": {
     "status": "none",

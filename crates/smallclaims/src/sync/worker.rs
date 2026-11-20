@@ -4270,7 +4270,11 @@ pub fn walk_claim_ranges_in_process(
     fleet_id: &str,
     round_trips: usize,
 ) -> Result<bool> {
+    // Each side folds what changed into its range digests before every round, as the daemon's
+    // folding job keeps doing: recording a retired ID changes the walker's own.
     let exchange = |inventory: &crate::replication::ReplicationInventory| -> Result<crate::replication::ReplicationReceipt> {
+        node.fold_claim_ranges_paced(|_| {})?;
+        peer.fold_claim_ranges_paced(|_| {})?;
         let answer = peer.export_replication_exchange(fleet_id, inventory)?;
         let receipt = node
             .receive_replication_exchange(peer.origin(), fleet_id, &answer)
@@ -4279,8 +4283,6 @@ pub fn walk_claim_ranges_in_process(
         node.project_replication_backlog()?;
         Ok(receipt)
     };
-    node.fold_claim_ranges_paced(|_| {})?;
-    peer.fold_claim_ranges_paced(|_| {})?;
     let summary = node.export_replication_summary(fleet_id)?;
     let first = exchange(&summary.inventory)?;
     let mut fetched = first.received != 0;

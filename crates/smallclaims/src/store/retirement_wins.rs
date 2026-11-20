@@ -23,11 +23,11 @@ use super::checkpoint_agreement::CheckpointAction;
 /// trims is proven on running members; it does not depend on releasing envelopes.
 pub const RETIREMENT_WINS: bool = false;
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb0997a2870aa owner=smallclaims::store::retirement_wins TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd0a8c2a3ba86 owner=smallclaims::store::retirement_wins TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS peer_retired_claims (
     id TEXT PRIMARY KEY,
     peer TEXT NOT NULL,
-    state TEXT NOT NULL CHECK(state IN ('pending','kept')),
+    state TEXT NOT NULL CHECK(state IN ('pending','kept','unheld')),
     learned_at_unix_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS peer_retired_claims_state ON peer_retired_claims(state, id);
@@ -36,8 +36,10 @@ CREATE INDEX IF NOT EXISTS peer_retired_claims_state ON peer_retired_claims(stat
 /// The most learned retirements one step deletes.
 const STEP_CLAIMS: usize = 10_000;
 
-/// The held claims a peer's retirement names, of `ids`, each `pending` deletion or `kept`.
-pub(crate) fn note_learned_retirements_tx(connection: &Connection, peer: &str, ids: &[String]) -> Result<()> {
+/// The claims a peer's retirement names, of `ids`: a held one `pending` deletion or `kept`, and
+/// with `fetch`, one never held here `unheld`, to be asked for so that it is admitted and then
+/// retired with its tombstone, as a holder's is. Returns the unheld ones.
+pub(crate) fn note_learned_retirements_tx(connection: &Connection, peer: &str, ids: &[String], fetch: bool) -> Result<Vec<String>> {
     let mut held = connection.prepare_cached(
         "SELECT kind, actor FROM claims WHERE id=?1",
     )?;
@@ -45,17 +47,29 @@ pub(crate) fn note_learned_retirements_tx(connection: &Connection, peer: &str, i
         /* sqlite-large-value: allow-for-now lv-h509d9a962117 owner=smallclaims::store::retirement_wins TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO peer_retired_claims(id, peer, state, learned_at_unix_ms) VALUES (?1, ?2, ?3, ?4)",
     )?;
     let now = i64::try_from(now_ms())?;
+    let mut unheld = Vec::new();
     for id in ids {
         let Some((kind, actor)) = held
             .query_row(/* sqlite-large-value: allow-for-now lv-h555a785f81b8 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
             .optional()?
         else {
+            if fetch && !checkpoint::claim_tombstoned(connection, id)? && insert.execute(/* sqlite-large-value: allow-for-now lv-h81a19713ee79 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ params![id, peer, "unheld", now])? > 0 {
+                unheld.push(id.clone());
+            }
             continue;
         };
         let state = if deletable_on_a_peers_word(&kind, actor.as_deref()) { "pending" } else { "kept" };
         insert.execute(/* sqlite-large-value: allow-for-now lv-hc898072723cb owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ params![id, peer, state, now])?;
     }
-    Ok(())
+    Ok(unheld)
+}
+
+/// Whether claim `id` is retired here only on a peer's word and never held: admission takes it
+/// when a peer supplies it, so this member's trim makes its tombstone.
+pub fn retired_unheld(connection: &Connection, id: &str) -> Result<bool> {
+    Ok(connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM peer_retired_claims WHERE id=?1 AND state='unheld')")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h2b1ccaa542b2 owner=smallclaims::store::retirement_wins TODO=trace-statement-and-value-representation */ [id], |row| row.get(0))?)
 }
 
 /// Whether a peer's retirement may delete a held claim of `kind` written by `actor`: one local
@@ -85,6 +99,16 @@ impl Store {
         self.retirement_wins.store(on, Ordering::Relaxed);
     }
 
+    /// How many claims peers retired that this member never held and no peer has supplied: it
+    /// lacks their tombstones.
+    pub fn peer_retired_claims_unheld(&self) -> Result<u64> {
+        Ok(self.readers.get().query_row(
+            "SELECT COUNT(*) FROM peer_retired_claims WHERE state='unheld'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// How many held claims a peer retired that this member keeps: a person's, or of a kind its
     /// own trim keeps.
     pub fn peer_retired_claims_kept(&self) -> Result<u64> {
@@ -101,6 +125,30 @@ impl Store {
     pub(crate) fn trim_peer_retired(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
         if !self.retirement_wins() || self.checkpoint_halted()? {
             return Ok(());
+        }
+        // A claim a peer supplied after its retirement was learned is held now: it waits for
+        // deletion, or is kept, as one held all along. One this member trimmed itself since is
+        // done.
+        {
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            let supplied = transaction
+                .prepare_cached(
+                    "SELECT learned.id, claims.kind, claims.actor FROM peer_retired_claims AS learned
+                     JOIN claims ON claims.id=learned.id WHERE learned.state='unheld'",
+                )?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, kind, actor) in supplied {
+                let state = if deletable_on_a_peers_word(&kind, actor.as_deref()) { "pending" } else { "kept" };
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h2e9891a08bde owner=smallclaims::store::retirement_wins TODO=bound-or-reference-values-and-reclamation */ "UPDATE peer_retired_claims SET state=?2 WHERE id=?1", params![id, state])?;
+            }
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h7f55b523e25e owner=smallclaims::store::retirement_wins TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM peer_retired_claims WHERE state='unheld'
+                   AND EXISTS(SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=peer_retired_claims.id)",
+                [],
+            )?;
+            transaction.commit()?;
         }
         let trimming: bool = self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE state='trimming')",

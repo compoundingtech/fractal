@@ -449,6 +449,10 @@ pub struct ReplicationStatus {
     /// keeps (`store::retirement_wins`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub peer_retired_kept: u64,
+    /// Claims a peer retired that this node never held and no peer it walked could supply: it
+    /// lacks their tombstones, and so the facts `claim_sources` and `operations` keep of them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub peer_retired_unheld: u64,
 }
 
 /// Operational evidence expires even when the stored claim history is nonempty.

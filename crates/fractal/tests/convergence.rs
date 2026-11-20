@@ -1753,10 +1753,11 @@ impl World {
                 }
             }
             // The claim-range walk the worker runs after a summary exchange, which carries each
-            // peer's retired claim IDs to the trimming nodes that lack them.
+            // peer's retired claim IDs to the trimming nodes that lack them, and fetches a claim
+            // one retired that this node never held from any peer that still has it.
             for from in 0..count {
                 for to in 0..count {
-                    if from != to && !self.nodes[from].old_build && !self.nodes[to].old_build {
+                    if from != to && !self.nodes[to].old_build {
                         let before = retired_claims(&self.nodes[to].store);
                         moved |= self.walk(from, to);
                         moved |= retired_claims(&self.nodes[to].store) != before;
@@ -1819,12 +1820,11 @@ impl World {
             // 3 and 4. A node lacks only claims of a kind local trim drops, never a person's,
             // and only claims it retired. A node may lack one some node retired before it ever
             // received it: an old build, which learns no retired ID, or a trimming node that
-            // learned the ID from a peer's claim ranges. Neither holds the dropped claim's facts
-            // (its tombstone), so the tables that keep them (`claim_sources`, `operations`, and
-            // so the graph digest) are not compared for it.
-            //
-            // TODO(#6878, retired facts): the retired-ID walk carries IDs only; carrying a
-            // retired claim's tombstone facts, authenticated, would let these compare too.
+            // learned the ID and found no peer still holding the claim to supply it
+            // (`peer_retired_unheld`). Neither holds the dropped claim's facts (its tombstone),
+            // so the tables that keep them (`claim_sources`, `operations`, and so the graph
+            // digest) are not compared for it. A trimming node that lacks such facts for any
+            // other reason fails.
             let mut learned_late = 0;
             for (id, claim) in &oracle_claims {
                 let droppable = LOCAL_TRIM_KINDS.contains(&claim.kind.as_str())
@@ -1848,6 +1848,11 @@ impl World {
                     // tombstone of it, and so not the facts the oracle keeps of it.
                     None if retired.contains(id) && !node.old_build => {
                         if !tombstoned(store, id) {
+                            if own.peer_retired_unheld == 0 {
+                                failures.push(format!(
+                                    "{name}: lacks {id} and its tombstone, yet counts no unheld retirement"
+                                ));
+                            }
                             learned_late += 1;
                         }
                     }

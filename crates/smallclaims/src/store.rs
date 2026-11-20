@@ -7863,11 +7863,25 @@ impl Store {
                 .iter()
                 .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
                 .collect();
-            let wanted = self
+            let wanted: Vec<ReplicaEnvelopeId> = self
                 .envelopes_carrying_claims(&query.claims)?
                 .into_iter()
                 .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
                 .collect();
+            // One this member released goes as a signed envelope, to a peer that takes them.
+            if remote.can(crate::replication::SIGNED_CLAIMS) {
+                let signed: BTreeSet<(String, u64, String)> = exchange
+                    .signed_envelopes
+                    .iter()
+                    .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
+                    .collect();
+                let released: Vec<ReplicaEnvelopeId> = wanted
+                    .iter()
+                    .filter(|id| !signed.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
+                    .cloned()
+                    .collect();
+                exchange.signed_envelopes.extend(self.signed_envelopes(&released)?);
+            }
             exchange.envelopes.extend(self.replica_envelopes(wanted)?);
         }
         {
@@ -10784,8 +10798,10 @@ impl Store {
         }
         let (unservable_released, refused_signed_envelopes) = self.signed_claim_tally()?;
         let peer_retired_kept = self.peer_retired_claims_kept()?;
+        let peer_retired_unheld = self.peer_retired_claims_unheld()?;
         Ok(ReplicationStatus {
             peer_retired_kept,
+            peer_retired_unheld,
             unservable_released,
             refused_signed_envelopes,
             configured,

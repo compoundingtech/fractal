@@ -149,10 +149,14 @@ pub fn authoritative(connection: &Connection) -> Result<bool> {
 }
 
 /// Whether admission refuses this claim here: a checkpoint dropped it, or, where the ledger is
-/// the authority, it was ever deleted here or on a member this one learned it from.
+/// the authority, it was ever deleted here or on a member this one learned it from. A claim
+/// retired here only on a peer's word and never held is taken when a peer supplies it, so this
+/// member's own trim makes its tombstone (`retirement_wins`).
 pub fn claim_refused(connection: &Connection, id: &str) -> Result<bool> {
     Ok(checkpoint::claim_tombstoned(connection, id)?
-        || (authoritative(connection)? && claim_retired(connection, id)?))
+        || (authoritative(connection)?
+            && claim_retired(connection, id)?
+            && !super::retirement_wins::retired_unheld(connection, id)?))
 }
 
 /// Whether admission refuses this envelope here, by the same rule as `claim_refused`, or because
