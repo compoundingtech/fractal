@@ -31,17 +31,22 @@ pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
     Ok(())
 }
 
-/// Replay the authoritative membership table once at authority acquisition, then certify
-/// the complete local source cut. Existing authoritative bytes are not discarded.
-pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<()> {
+/// Replay every authoritative membership without granting newer classes authority.
+/// A retained unsupported class leaves the local source cut uncertified.
+pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<bool> {
     let mut statement = tx.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1 ORDER BY id")?;
     let members = statement.query_map([host], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for body in members { observe(tx, &serde_json::from_str(&body)?)?; }
+    let mut complete = true;
+    for body in members {
+        let member: Membership = serde_json::from_str(&body)?;
+        complete &= member.request.class.ensure_supported().is_ok();
+        observe(tx, &member)?;
+    }
     append_claim_tx(tx, host, &format!("resource-admission/{host}"), COVERAGE_KIND, None,
-        &json!({"fields": {"host": host, "epoch": epoch, "complete": true}, "evidence": []}), &[], None)?;
-    Ok(())
+        &json!({"fields": {"host": host, "epoch": epoch, "complete": complete}, "evidence": []}), &[], None)?;
+    Ok(complete)
 }
 
 #[cfg(test)]

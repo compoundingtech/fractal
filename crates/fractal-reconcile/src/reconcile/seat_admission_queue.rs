@@ -258,7 +258,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let finite = self.store.resource_memberships_for_host(&self.host)?;
         for record in finite.iter().filter(|record| record.state == "queued") {
             self.seat_admission.status.lane_wait_class(&record.request.id,
-                record.reason.clone(), true, now, record.request.class);
+                record.reason.clone(), true, now, record.request.class.clone());
         }
         let mut gone = BTreeSet::new();
         for wait in waits {

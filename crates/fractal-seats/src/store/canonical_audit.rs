@@ -224,6 +224,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_lane_policies_v1",
         "resource_memberships_v1",
         "shell_resources_v1",
+        // Owner-scoped cancellation tombstones govern only this host's runtime requests.
+        "shell_resource_request_cancellations_v1",
         // Host-local physical-erasure completion, not replicated or rebuildable from claims.
         "shell_environment_scrub_v1",
         // Settled teardown receipts belong only to this host's runtime cleanup.
