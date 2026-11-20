@@ -1328,7 +1328,7 @@ mod tests {
             Admission::Refused { code: RefusalCode::UnsupportedCoverage, .. }));
         let logical = request("logical");
         assert!(matches!(store.request_resource_membership(&logical, test_fit(), 2).unwrap(), Admission::Admitted(_)));
-        let policy: String = store.connection.read().query_row(
+        let policy: String = store.connection.write().query_row(
             "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
             rusqlite::params![logical.host,logical.name], |row| row.get(0)).unwrap();
         assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&logical));
@@ -1347,7 +1347,7 @@ mod tests {
                 rusqlite::params![state,enforced.id]).unwrap();
             let error = store.request_resource_membership(&request("logical"), test_fit(), 2).unwrap_err();
             assert!(error.to_string().contains("coverage enforced -> logical"), "{state}: {error}");
-            let policy: String = store.connection.read().query_row(
+            let policy: String = store.connection.write().query_row(
                 "SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                 rusqlite::params![enforced.host,enforced.name], |row| row.get(0)).unwrap();
             assert_eq!(serde_json::from_str::<InstalledPolicy>(&policy).unwrap(), InstalledPolicy::for_request(&enforced));
