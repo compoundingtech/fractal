@@ -110,12 +110,12 @@ impl Writer {
         }
     }
 
-    fn prune(&mut self, now: u64) {
-        self.periods.retain(|fact| at(&fact.value, "closed_at").is_none_or(|closed| closed.saturating_add(2 * HORIZON) >= now));
-        // Keep early dispositions until their credit's entire entry cohort has aged out.
+    fn prune(&mut self, cut: u64) {
+        self.periods.retain(|fact| at(&fact.value, "closed_at").is_none_or(|closed| closed.saturating_add(2 * HORIZON) >= cut));
+        // Retention follows the shared accounting cut, not a faster producer or local clock.
         self.credits.retain(|fact| at(&fact.value, "expires_at").is_none_or(|expiry|
-            expiry.saturating_add(2 * HORIZON) >= now));
-        let floor = now.saturating_sub(HORIZON + DAY);
+            expiry.saturating_add(2 * HORIZON) >= cut));
+        let floor = cut.saturating_sub(HORIZON + DAY);
         let mut boundary: BTreeMap<(&str, &str, &str), u64> = BTreeMap::new();
         for fact in &self.quotas {
             let value = &fact.value;
@@ -141,11 +141,11 @@ struct Mirror {
     cursor: u64,
     sources: BTreeMap<(String, String), Writer>,
     active: BTreeMap<String, (u128, String)>,
-    cached: Option<(u64, u64, u64, Vec<Value>)>,
+    cached: Option<(u64, u64, u64, bool, Vec<Value>)>,
     gaps: BTreeMap<(String, String, String), Fact>,
 }
 impl Mirror {
-    fn observe(&mut self, claim: ClaimRecord, now: u64) {
+    fn observe(&mut self, claim: ClaimRecord) {
         let Some(actor) = claim.actor.as_deref() else { return };
         if !self.writers.contains(actor) || claim.subject != actor { return; }
         let actor = actor.to_owned();
@@ -176,7 +176,6 @@ impl Mirror {
                 }
             }
         }
-        source.prune(now);
         if source.enrolled_at > 0 {
             let selection = (source.enrolled_at, incarnation);
             if self.active.get(&actor).is_none_or(|previous| previous < &selection) {
@@ -187,6 +186,16 @@ impl Mirror {
             // Native enrollment fences replaced journals, not their later heartbeat clocks.
             self.sources.retain(|(owner, incarnation), source| owner != &actor || incarnation == active
                 || (source.enrolled_at == 0 && source.latest_accept >= *enrolled));
+        }
+    }
+
+    fn prune_at_common_cut(&mut self, now: u64) {
+        let (count, cut) = self.sources.iter().filter(|((actor, incarnation), _)|
+            self.active.get(actor).is_some_and(|(_, active)| active == incarnation))
+            .fold((0, now), |(count, cut), (_, source)| (count + 1, cut.min(source.through)));
+        // An unenrolled expected writer has no lower frontier yet: retain pending history.
+        if count == self.writers.len() && count > 0 && cut > 0 {
+            for source in self.sources.values_mut() { source.prune(cut); }
         }
     }
 }
@@ -236,14 +245,22 @@ pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>
         *mirror = Mirror { identity: Some(identity), writers: configured, ..Mirror::default() };
     }
     if page.claims.is_empty()
-        && let Some((freshness, rendered_at, until, cached)) = &mirror.cached
+        && let Some((freshness, rendered_at, until, complete, cached)) = &mirror.cached
         && *freshness == fresh_ms && now >= *rendered_at && now < *until
-    { return Ok(cached.clone()); }
+    {
+        let mut rows = cached.clone();
+        if !complete {
+            retain_open_children(store, &mut rows)?;
+        }
+        return Ok(rows);
+    }
     let catching_up = page.next_cursor.is_some();
+    let replayed = !page.claims.is_empty();
     for claim in page.claims {
         mirror.cursor = claim.store_index;
-        mirror.observe(claim, now);
+        mirror.observe(claim);
     }
+    if replayed { mirror.prune_at_common_cut(now); }
     let sources: Vec<_> = mirror.writers.iter().filter_map(|actor| {
         let (_, incarnation) = mirror.active.get(actor)?;
         mirror.sources.get(&(actor.clone(), incarnation.clone())).map(|source| (actor.as_str(), incarnation.as_str(), source))
@@ -252,12 +269,29 @@ pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>
         && !mirror.sources.values().any(|source| source.enrolled_at == 0);
     let mut rendered = render(&sources, now, fresh_ms, complete);
     append_gap_rows(&mut rendered, &mirror.gaps);
+    if !complete { retain_open_children(store, &mut rendered)?; }
     let until = sources.iter().flat_map(|(_, _, source)| [
         source.observed, source.observed.saturating_add(fresh_ms).saturating_add(1),
         source.through, source.through.saturating_add(fresh_ms).saturating_add(1),
     ]).filter(|boundary| *boundary > now).min().unwrap_or(u64::MAX);
-    mirror.cached = Some((fresh_ms, now, until, rendered.clone()));
+    mirror.cached = Some((fresh_ms, now, until, complete, rendered.clone()));
     Ok(rendered)
+}
+
+/// Persisted episodes outlive the disposable mirror, including restart and epoch replay.
+/// Their children are still judged (unknown), not retired, until source closure is known.
+fn retain_open_children(store: &Store, rows: &mut Vec<Value>) -> anyhow::Result<()> {
+    let prefix = crate::objective_faults::episode(store.origin(), "");
+    for fault in store.operational_failures()? {
+        let Some(id) = fault.subject.strip_prefix(&prefix).filter(|id| id.starts_with("spend/")) else { continue; };
+        if fault.status == "resolved" || rows.iter().any(|row| row["id"] == id) { continue; }
+        rows.push(json!({"id":id,"kind":"objective","about":"Previously judged spend objective",
+            "target":"awaiting complete source replay","current":"source scope not yet reconstructed",
+            "status":"no-data","window":"30d","remaining_percent":null,
+            "source":{"kind":"usage-source-mirror","coverage_known":false},
+            "explain":"An existing native owner episode retains its child while configured source replay is incomplete. Missing scope is unknown, never operational recovery."}));
+    }
+    Ok(())
 }
 
 fn state_class(state: &str) -> u8 {
@@ -369,8 +403,7 @@ fn render(sources: &[(&str, &str, &Writer)], now: u64, fresh_ms: u64, mirrored: 
         for plan in plans { rows.push(loss_row(provider, plan, sources, cut, from, known)); }
     }
     for ((provider, account), facts) in &accounts {
-        let mut windows = account_intervals(facts, cut, 3_600_000);
-        for interval in &mut windows { interval.ready = Some(interval.ready.is_some()); }
+        let windows = account_coverage_intervals(facts, cut, 3_600_000);
         let mut row = duration_row(&format!("spend/coverage/{account}"), "Fresh supported account quota evidence", cut, from, &windows, 0.05, known);
         row["provider"] = json!(provider);
         rows.push(row);
@@ -518,9 +551,9 @@ fn loss_gauge(id: &str, about: &str, cut: u64, from: u64, losses: &[LossEvent], 
     row
 }
 
-// State is ready, drained, or unknown. An exhausted account is fine while another serves.
+// Freshness is the intersection of all observed windows, independent of spare capacity.
 struct Interval { from: u64, to: u64, ready: Option<bool> }
-fn account_intervals(facts: &[&Fact], cut: u64, fresh: u64) -> Vec<Interval> {
+fn account_coverage_intervals(facts: &[&Fact], cut: u64, fresh: u64) -> Vec<Interval> {
     let mut boundaries = BTreeSet::from([cut.saturating_sub(HORIZON), cut]);
     let mut windows: BTreeMap<&str, Vec<&Fact>> = BTreeMap::new();
     for fact in facts {
@@ -532,18 +565,16 @@ fn account_intervals(facts: &[&Fact], cut: u64, fresh: u64) -> Vec<Interval> {
     let boundaries: Vec<_> = boundaries.into_iter().filter(|at| *at >= cut.saturating_sub(HORIZON) && *at <= cut).collect();
     boundaries.windows(2).map(|pair| {
         let mut unknown = windows.is_empty();
-        let mut drained = false;
         for facts in windows.values() {
             let latest = facts.iter().filter(|fact| at(&fact.value,"measured_at").is_some_and(|at|at<=pair[0]))
                 .max_by_key(|fact|(at(&fact.value,"measured_at"), &fact.claim_id));
             match latest {
-                Some(fact) if fact.value["coverage"]=="reported" && at(&fact.value,"measured_at").is_some_and(|at|at.saturating_add(fresh)>=pair[1]) => {
-                    if let Some(used) = fact.value["used_percent"].as_f64() { drained |= used >= 100.0; } else { unknown = true; }
-                }
+                Some(fact) if fact.value["coverage"]=="reported" && fact.value["used_percent"].as_f64().is_some()
+                    && at(&fact.value,"measured_at").is_some_and(|at|at.saturating_add(fresh)>=pair[1]) => {}
                 _ => unknown = true,
             }
         }
-        Interval { from:pair[0],to:pair[1],ready:if drained {Some(false)} else if unknown {None} else {Some(true)} }
+        Interval { from:pair[0],to:pair[1],ready:Some(!unknown) }
     }).collect()
 }
 fn duration_row(id: &str, about: &str, cut: u64, from: u64, intervals: &[Interval], allowance: f64, known: bool) -> Value {

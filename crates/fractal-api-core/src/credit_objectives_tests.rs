@@ -308,10 +308,10 @@ fn uncertain_loss_intervals_do_not_wash_confirmed_bad_time() {
     assert_eq!(row["evidence"]["bad"],(29*DAY) as f64);
 }
 
-fn append_delta(store:&Store,mut delta:Delta)->ClaimRecord {
+fn append_delta(store:&Store,actor:&str,mut delta:Delta)->ClaimRecord {
     delta.claim.body["fields"]["source_frontier"]["previous_claim"]=json!(delta.frontier.previous_claim);
-    store.append_claim(&crate::model::ClaimInput{subject:ACTOR.into(),kind:"usage.limits.observed".into(),
-        actor:Some(ACTOR.into()),fields:serde_json::from_value(delta.claim.body["fields"].clone()).unwrap(),
+    store.append_claim(&crate::model::ClaimInput{subject:actor.into(),kind:"usage.limits.observed".into(),
+        actor:Some(actor.into()),fields:serde_json::from_value(delta.claim.body["fields"].clone()).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap()
 }
 
@@ -320,11 +320,11 @@ fn native_accepted_clock_advances_a_real_source_chain_and_quiet_reads_keep_bound
     let store=Store::open_memory("node").unwrap();
     store.set_usage_limits_writers(vec![ACTOR.into()]).unwrap();
     store.set_write_clock_at(u128::from(NOW-60*DAY)).unwrap();
-    let enrollment=append_delta(&store,delta("unused",0,None,NOW-60*DAY,vec![]));
+    let enrollment=append_delta(&store,ACTOR,delta("unused",0,None,NOW-60*DAY,vec![]));
     assert_eq!(cam(&rows(&store,NOW-60*DAY,DAY).unwrap(),"cam-r01")["status"],"no-data");
     store.set_write_clock_at(u128::from(NOW)).unwrap();
     let credits=(0..6).map(|id|credit(&format!("credit-{id}"),"forfeited",NOW-2*DAY)).collect();
-    let successor=append_delta(&store,delta("unused",1,Some(&enrollment.id),NOW,credits));
+    let successor=append_delta(&store,ACTOR,delta("unused",1,Some(&enrollment.id),NOW,credits));
     let native=rows(&store,NOW,DAY).unwrap();
     assert_eq!(cam(&native,"cam-r01")["status"],"exhausted");
     assert_eq!(cam(&native,"cam-r01")["evidence"]["current_loss_lower"],6.0);
@@ -356,4 +356,115 @@ fn unsupported_account_gap_is_visible_without_fabricated_digest_or_supported_suc
     assert_eq!(row(&rows,"spend/coverage/unresolved/unsupported-example/account/example")["status"],"no-data");
     assert_eq!(row(&rows,"spend/forfeited/unsupported-example/basic")["status"],"no-data");
     assert_eq!(cam(&rows,"cam-r01")["status"],"met");
+}
+
+#[test]
+fn drained_window_does_not_mask_a_stale_unreported_or_missing_second_window() {
+    let mut missing=quota(NOW-1,20.0);
+    missing["used_percent"]=Value::Null;
+    let mut unreported=quota(NOW-1,20.0);
+    unreported["coverage"]=json!("unreported");
+    for mut second in [quota(NOW-3_600_001,20.0),unreported,missing] {
+        second["window"]=json!("five_hour");
+        let mut source=writer(vec![]);
+        source.quotas=vec![Fact{claim_id:"drained".into(),value:quota(NOW-1,100.0)},
+            Fact{claim_id:"second".into(),value:second}];
+        let rows=rendered(&source);
+        assert_eq!(row(&rows,"spend/coverage/digest")["evidence"]["fast"]["short"]["bad"],300_000.0,
+            "a drained but fresh window cannot certify another window's evidence");
+    }
+}
+
+#[test]
+fn retention_uses_the_common_cut_even_for_a_small_fresh_producer_lag() {
+    let cut=NOW-60_000;
+    let expiry=cut-2*HORIZON+30_000;
+    let mut credits:Vec<_>=(0..6).map(|id| {
+        let mut reading=credit(&format!("boundary-{id}"),"forfeited",expiry);
+        reading["measured_at"]=json!(time(cut));
+        reading
+    }).collect();
+    credits.push(credit("obsolete","forfeited",NOW-90*DAY));
+    let mut fast=writer(credits);
+    let mut closure=period("boundary-period",1.0);
+    closure["closed_at"]=json!(time(expiry));
+    closure["last_sample_at"]=json!(time(expiry-1));
+    closure["measured_at"]=json!(time(cut));
+    fast.periods.push(Fact{claim_id:"period".into(),value:closure});
+    let mut slow=writer(vec![]);
+    slow.observed=cut;
+    slow.through=cut;
+    let lagging="agent/sample/lagging";
+    let mut mirror=Mirror {
+        writers:BTreeSet::from([ACTOR.into(),lagging.into(),"agent/sample/unenrolled".into()]),
+        active:BTreeMap::from([(ACTOR.into(),(fast.enrolled_at,"incarnation".into())),
+            (lagging.into(),(slow.enrolled_at,"incarnation".into()))]),
+        sources:BTreeMap::from([((ACTOR.into(),"incarnation".into()),fast),
+            ((lagging.into(),"incarnation".into()),slow)]),
+        ..Mirror::default()
+    };
+    mirror.prune_at_common_cut(NOW);
+    assert_eq!(mirror.sources[&(ACTOR.into(),"incarnation".into())].credits.len(),7,
+        "an expected writer without a frontier cannot establish any retention floor");
+    mirror.writers.remove("agent/sample/unenrolled");
+    mirror.prune_at_common_cut(NOW);
+    let fast=&mirror.sources[&(ACTOR.into(),"incarnation".into())];
+    let slow=&mirror.sources[&(lagging.into(),"incarnation".into())];
+    assert_eq!(fast.credits.len(),6);
+    assert_eq!(fast.periods.len(),1);
+    let rows=render(&[(ACTOR,"incarnation",fast),(lagging,"incarnation",slow)],NOW,DAY,true);
+    assert_eq!(cam(&rows,"cam-r01")["evidence"]["bad"],30_000.0,
+        "near-boundary losses still contribute historical bad time at the shared cut");
+}
+
+#[test]
+fn restart_replay_keeps_a_late_child_unknown_without_recovering_its_owner_episode() {
+    use crate::objective_faults::{ObjectiveResponse,check_with_response,end_unjudged,episode};
+    const LATE:&str="agent/sample/late-usage-producer";
+    const CHILD:&str="spend/coverage/late-digest";
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("replay.db");
+    let store=Store::open(&path,"node").unwrap();
+    store.set_usage_limits_writers(vec![ACTOR.into(),LATE.into()]).unwrap();
+    store.set_write_clock_at(u128::from(NOW-60*DAY)).unwrap();
+    let mut first=append_delta(&store,ACTOR,delta("unused",0,None,NOW-60*DAY,vec![]));
+    for sequence in 1..=PAGE as u64 {
+        first=append_delta(&store,ACTOR,delta("unused",sequence,Some(&first.id),NOW-60*DAY,vec![]));
+    }
+    let late_delta=|sequence,previous,through| {
+        let mut delta=delta("unused",sequence,previous,through,vec![]);
+        delta.claim.body["fields"]["source_frontier"]["accounts"][0]["account"]=json!("late-digest");
+        delta
+    };
+    let enrollment=append_delta(&store,LATE,late_delta(0,None,NOW-60*DAY));
+    store.set_write_clock_at(u128::from(NOW)).unwrap();
+    append_delta(&store,ACTOR,delta("unused",PAGE as u64+1,Some(&first.id),NOW,vec![]));
+    let mut latest=late_delta(1,Some(&enrollment.id),NOW);
+    let mut quota=quota(NOW,100.0);
+    quota["account"]=json!("late-digest");
+    latest.claim.body["fields"]["readings"]=json!([quota]);
+    append_delta(&store,LATE,latest);
+    let owner="version 2\nagent \"node.ops\" { command \"true\"; handles-faults }\n";
+    let intent=crate::graph::parse_intent(owner,"node").unwrap();
+    let preview=store.mission(&intent,crate::model::IntentInput{kdl:owner.into(),source_name:None}).unwrap();
+    store.apply(&intent,&preview.subject_tokens,"spend-replay-owner").unwrap();
+    rows(&store,NOW,DAY).unwrap();
+    let closed=rows(&store,NOW,DAY).unwrap();
+    assert_eq!(row(&closed,CHILD)["status"],"exhausted");
+    let objectives=BTreeSet::from([CHILD.to_owned()]);
+    let response=||ObjectiveResponse{reviewer:"agent/node.ops",condition:"spend-budget-missed",title:"Spend coverage"};
+    assert_eq!(check_with_response(&store,&closed,&objectives,response()).unwrap().opened,1);
+    drop(store);
+    let store=Store::open(&path,"node").unwrap();
+    store.set_usage_limits_writers(vec![ACTOR.into(),LATE.into()]).unwrap();
+    let replaying=rows(&store,NOW,DAY).unwrap();
+    assert_eq!(row(&replaying,CHILD)["status"],"no-data");
+    assert!(row(&replaying,CHILD)["remaining_percent"].is_null());
+    let judged=replaying.iter().filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
+    assert_eq!(end_unjudged(&store,|id|id.starts_with("spend/"),&judged).unwrap(),0);
+    assert!(store.claims_for("daemon/node",Some("operational.recovered")).unwrap().is_empty());
+    assert_eq!(store.operational_failure(&episode("node",CHILD)).unwrap().unwrap().status,"pending");
+    let closed=rows(&store,NOW,DAY).unwrap();
+    assert_eq!(row(&closed,CHILD)["status"],"exhausted");
+    assert_eq!(check_with_response(&store,&closed,&objectives,response()).unwrap().recovered,0);
 }

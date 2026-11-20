@@ -434,6 +434,8 @@ the ordinary native owner binding can route exhausted/burning episodes:
   metadata is unknown scope, never silently replaced by a provider aggregate.
 - `spend/coverage/ACCOUNT`: supported quota readings no older than one hour for 95% of
   expected covered time. A drained account is still fresh evidence, not a coverage failure.
+  Every observed window must have a fresh reported numeric reading: a drained window
+  does not mask a stale, unreported or missing reading in another window.
 
 All measured rows use the native 30d budget classifier and paired burns
 14.4x (1h+5m), 6x (6h+30m), not horizon-fraction dashboard math or raw-count status aliases.
@@ -465,6 +467,12 @@ the maximum coverage start; newer facts wait for that common cut. A read never r
 heartbeat. Empty configuration executes no source SQL. Quiet reads reuse derived rows until
 an actual source or freshness boundary, without rescanning retained evidence. Quota history
 keeps one pre-horizon boundary; loss/decision history retains the 60d gauge lookback.
+
+Persisted open spend episodes retain no-data child rows during incomplete replay,
+including restart and source-epoch/configuration reset; missing scope cannot end an
+owner episode as recovered. History is pruned relative to the common certified cut,
+never wall-clock time or a faster producer's frontier. No pruning occurs before
+every expected writer has a positive frontier.
 
 The source fence is always installed in local `meta`, independent of optional IVM
 view adapters. A per-database nonce and mutation epoch survive reopen. Ordinary
