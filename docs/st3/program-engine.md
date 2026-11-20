@@ -696,6 +696,25 @@ mission budget, authority, timeout, stall threshold, resources and pinned docs r
 native mission declarations. The returned `graph` projection preserves the original ids,
 edges and gates for inspection.
 
+Mission `constraints` are ordered policy text, not executable predicates. The graph
+runtime inherits them into each step's work context (`flatten_run_steps` in
+`crates/fractal-store/src/store.rs`); the work CLI surfaces each as `Constraint:`.
+Lowering preserves every entry verbatim, including multiline text, under a
+`Constraints:` section in the native mission goal and in **every** worker's
+instruction input. Input/run references expand there just as they do in step goals;
+graph escapes such as `$${input.example}` produce literal `${input.example}`, even
+when no such input is declared. An absent or empty constraint list adds no section.
+This preserves instruction
+delivery; it does not claim mechanical enforcement of arbitrary authority, safety,
+review or admission prose. No natural-language interpretation creates new gates,
+resource limits or approvals.
+
+Mission `resources` remain owned resource declarations, not host admission limits.
+Completed `dependsOn` edges supply DAG ordering. Graph `lanes` describe ordered
+entries and optional person approval; they are not `Fractal.resources.lane` command
+admission and remain unsupported. Similar words in policy text do not make these
+contracts interchangeable.
+
 Assigned steps use native worker turns with their original graph step ids as journal
 keys. `input.text` is a required string input. Run-scoped `product.resource` values are
 decoded from the child run's **full resource subject**, including when a worker declares
@@ -718,12 +737,19 @@ This is an explicit W1 subset, not the whole design table above. `GraphCompileRe
 names `step`, `construct` and `reason` before execution for unsupported constructs:
 `waitFor`/`usesMission`, watch/observer/subscription dispatch, `Timing`, `Review`,
 `waitUntil`, loops, non-completed dependency states, retries, compensation/finally,
-custom completion, mission gates/constraints/lanes/report flags, step-owned declarations,
+custom completion, mission gates/lanes/report flags, step-owned declarations,
 direct exec/program steps, resource inputs, external product subjects, non-resource
 products, feedback-mode human gates, exec time limits and remote exec hosts. Other gate
 kinds (including merged/document/exists) are also refused. Nothing is silently dropped.
 Existing published graph missions stay on their current runtime until explicitly
 republished from a supported lowered definition.
+
+Invalid authoring data raises `GraphCompileRefusal` with construct `authoring boundary`
+and the original schema diagnostic, including its field path. This includes handles
+that were copied or imported through a different SDK module instance, but does not
+assume every validation failure is an SDK identity problem. Keep intact authoring
+handles and resolve the graph and compiler through one SDK instance. Other typed
+refusals and unexpected defects are not reclassified as schema failures.
 
 
 ### 10. Priority

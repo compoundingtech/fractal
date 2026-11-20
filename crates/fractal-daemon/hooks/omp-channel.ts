@@ -1103,7 +1103,7 @@ export default function (pi: ExtensionAPI) {
 
   // An idle send's promise owns the entire run. Its matching user message_start is
   // the earlier, truthful admission receipt; never serialize that run behind itself.
-  let pendingAdmission: { content: string; accept: () => void } | undefined;
+  let pendingAdmission: { content: string; accept: () => void; mismatched?: boolean } | undefined;
 
   // omp injects one queued steer per boundary (its default steering mode is `one-at-a-time`). A
   // second steer released at the same boundary waited through the next model turn and then
@@ -1131,17 +1131,31 @@ export default function (pi: ExtensionAPI) {
       if (first.ctx.isIdle()) {
         let accept!: () => void;
         const started = new Promise<void>((resolve) => { accept = resolve; });
-        const pending = { content, accept };
+        let correlated = false;
+        let reported = false;
+        const pending = { content, accept: () => { correlated = true; accept(); }, mismatched: false };
+        const reportFallback = (reason: "content-mismatch" | "no-message-start" | "timeout") => {
+          if (correlated || reported) return;
+          reported = true;
+          first.reply({ type: "admission_fallback", reason, meta: first.meta });
+        };
+        // Observation only: this never releases admission or changes the run/watchdog timeout.
+        const correlationTimer = setTimeout(() => reportFallback("timeout"), 30_000);
+        correlationTimer.unref?.();
         pendingAdmission = pending;
         try {
           // Content transformed by OMP cannot match our event; in that case admission
           // retains the old await-run behavior rather than inventing a receipt.
-          const run = Promise.resolve(pi.sendUserMessage(content)).catch((error: unknown) => {
+          const run = Promise.resolve(pi.sendUserMessage(content)).then(() => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
+          }).catch((error: unknown) => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
             console.error("OMP mailbox run failed:", error);
             throw error;
           });
           await Promise.race([run, started]);
         } finally {
+          clearTimeout(correlationTimer);
           if (pendingAdmission === pending) pendingAdmission = undefined;
         }
       } else {
@@ -1544,6 +1558,7 @@ export default function (pi: ExtensionAPI) {
         part && typeof part === "object" && "type" in part && part.type === "text" &&
         "text" in part && typeof part.text === "string" ? [part.text] : []).join("\n") : undefined;
     if (text === pendingAdmission.content) pendingAdmission.accept();
+    else pendingAdmission.mismatched = true;
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this

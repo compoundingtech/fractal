@@ -18,6 +18,11 @@ export const releaseMacosRunnerProfile = `namespace-profile-macos-arm64;job.prio
 export const releaseLinuxRunner = "${{ fromJSON(needs['pick-runner'].outputs.ci1 || '[\"ci1-priority\"]') }}"
 export const macosRunnerProfile = 'namespace-profile-macos-arm64'
 export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
+/** Required gates and tiny controls use existing owned capacity only after trusted queue admission.
+ * Every PR (including same-repository PRs), manual run and non-main push stays hosted.
+ * Never use this for the picker or watchdog: both must remain independent of that pool.
+ */
+export const controlLinuxRunner = "${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '[\"ci1-priority\"]' || '[\"ubuntu-latest\"]') }}"
 /**
  * The Linux gate's stage jobs. On 2026-10-03 the shape label `nscloud-ubuntu-24.04-amd64-16x32`
  * stopped getting runners at about 12:10Z, and the profile allows only about five runners at
@@ -600,7 +605,7 @@ const signingCore = (
       ...soft,
       name: 'Take the evidence signer from the base commit',
       id: 'evidence-base',
-      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
 git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
 git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
@@ -634,7 +639,7 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       env: {
         ...facts.env,
         GATE_SKIP: gateSkipExpression(name),
-        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}',
+        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}',
       },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
@@ -696,7 +701,7 @@ export const nixEvidenceSteps = (name: string): unknown[] => {
     {
       name: 'Take the evidence signer from the base commit',
       id: 'evidence-base',
-      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
 git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
 git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
@@ -734,7 +739,7 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       ...soft,
       name: `Sign the nix record for ${name}`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
-      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${record}
 home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
@@ -936,14 +941,14 @@ export const fractalWebNoteEnv = {
 } as const
 
 /**
- * The path-sensitive fractal-web gate always runs on GitHub-hosted capacity. Detection
- * needs no checkout; the gate checks out only to aggregate sharded kit receipts. Execution
- * runs after generated files are fresh. Workflow path filters would leave checks pending.
+ * Path-sensitive web control jobs use owned capacity only for trusted queue/main
+ * events; every PR stays hosted. Neither control depends on the runner picker.
+ * Execution retains its hosted performance environment.
  */
 export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
-    'runs-on': 'ubuntu-latest',
+    'runs-on': controlLinuxRunner,
     // The job budget includes runner setup and teardown, not just the detection steps.
     'timeout-minutes': 3,
     permissions: { contents: 'read' },
@@ -1053,7 +1058,7 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     // Explicit trusted evidence covers PR and merge-group trees; all other relevant runs
     // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
-    'runs-on': 'ubuntu-latest',
+    'runs-on': controlLinuxRunner,
     // The job budget includes runner setup and teardown, not just the gate steps.
     'timeout-minutes': 3,
     permissions: { contents: 'read' },
@@ -1085,6 +1090,12 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
         if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'",
         // Include older attempts only from this exact run/head, for rerun-failed-jobs.
         with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
+      },
+      {
+        // Hosted Ubuntu has Node; owned controls must not assume its preinstalled tools.
+        uses: 'actions/setup-node@v4',
+        if: "runner.environment == 'self-hosted' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'",
+        with: { 'node-version': '24.18.0' },
       },
       {
         name: 'Publish web lane costs as a public check annotation',

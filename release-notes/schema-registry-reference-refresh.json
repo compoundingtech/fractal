@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh the generated schema reference for diagnostic message correlation",
+  "replay": {"status": "none", "detail": "Documentation regeneration only; claim replay is unchanged."},
+  "schema": {"status": "none", "detail": "Regenerate the checked-in registry reference to include the existing optional harness.diagnostic message_id field. No registry, storage version or migration changes."},
+  "rules": {"status": "none", "detail": "Admission and diagnostic behavior are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire or reader compatibility changes."},
+  "downtime": {"status": "none", "detail": "No restart or migration is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Documentation-only change; no recovery procedure changes."}
+}
