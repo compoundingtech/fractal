@@ -22216,6 +22216,22 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                             stderr_message("fractal", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
                         }
                     }
+                    // Earlier releases kept a judging row for every settled verdict. Drop them a
+                    // short page at a time; the hourly pass gives the freed pages back.
+                    let prune_started = std::time::Instant::now();
+                    let (mut pruned, mut longest) = (0, Duration::ZERO);
+                    loop {
+                        let page_started = std::time::Instant::now();
+                        let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_judging_prune", || worker.prune_settled_signature_judgments())?;
+                        let page_elapsed = page_started.elapsed();
+                        longest = longest.max(page_elapsed);
+                        pruned += page.deleted;
+                        if page.finished || page.examined == 0 { break; }
+                        std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    if pruned != 0 {
+                        stderr_message("fractal", format_args!("settled signature judgments pruned: {pruned} rows in {:.0}s, longest page {} ms", prune_started.elapsed().as_secs_f64(), longest.as_millis()));
+                    }
                     return Ok(None);
                 }
             }
