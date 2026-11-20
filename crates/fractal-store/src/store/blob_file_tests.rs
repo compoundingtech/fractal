@@ -287,3 +287,32 @@ fn a_store_at_26_opens_and_reads_its_moved_blob_bytes() {
     assert_eq!(store.get_document("doc/example/later", &other).unwrap().as_deref(), Some(&more[..]));
     assert_eq!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION, 26);
 }
+
+/// Storage versions only rise: a store at the valid-record version (27, above the blob file's 25)
+/// keeps it through a blob move and a whole restore, whichever came first.
+#[test]
+fn a_store_past_the_blob_fence_keeps_its_version_through_a_move_and_a_restore() {
+    let gone = smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION;
+    assert!(gone > STORAGE_VERSION);
+    let set = |store: &Store, version: u32| store.connection.write().pragma_update(None, "user_version", version).unwrap();
+    // At 27 before any blob moves.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
+    document(&store, "doc/sample-a", b"bytes that move to the blob file");
+    set(&store, gone);
+    let started = start_window(&store);
+    assert!(move_all(&store, started + WINDOW_MS).0 > 0);
+    assert_eq!(user_version(&store), gone, "a move never lowers a store past its fence");
+    restore_all(&store, started + WINDOW_MS);
+    assert_eq!(user_version(&store), gone, "a restore never lowers a store past its fence");
+    // At 25 from a move, then 27 from the first valid-record deletion, then restored.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
+    document(&store, "doc/sample-b", b"bytes that move to the blob file");
+    let started = start_window(&store);
+    move_all(&store, started + WINDOW_MS);
+    assert_eq!(user_version(&store), STORAGE_VERSION);
+    set(&store, gone);
+    restore_all(&store, started + WINDOW_MS);
+    assert_eq!(user_version(&store), gone);
+}
