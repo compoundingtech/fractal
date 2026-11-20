@@ -152,9 +152,10 @@ export default api => {
 };
 ''')
             with (root / 'provider.log').open('wb') as log:
+                # Reads the provider's PIDs from this namespace, so its guardian stays here.
                 launcher = subprocess.Popen([sys.executable, str(HERE.parent / 'fractal_test_process.py'),
                     '--', 'node', str(HERE / 'provider.mjs'), '-e', str(extension)],
-                    cwd=root, stdout=log, stderr=log)
+                    cwd=root, stdout=log, stderr=log, env={**os.environ, 'FRACTAL_TEST_PID_NAMESPACE': 'off'})
                 try:
                     def ready():
                         receipts = root / 'receipts.jsonl'
@@ -190,6 +191,8 @@ export default api => {
                 env = dict(os.environ)
                 for key in ('ST_AGENT', 'ST3_SUBJECT', 'ST3_MESSAGING_ROOT', 'ST3_MESSAGING_SCRATCH'):
                     env.pop(key, None)
+                # Walks the guardian's PIDs from this namespace, so the guardian stays here.
+                env['FRACTAL_TEST_PID_NAMESPACE'] = 'off'
                 command = [sys.executable, str(HERE / 'run'), binary, str(evidence),
                            '--old-binary', binary, '--scratch', str(scratch), '--cases', 'baseline']
                 if keep:
