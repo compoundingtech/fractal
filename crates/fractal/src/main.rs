@@ -8144,6 +8144,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.clone(),
         config.observations.clone(),
     )));
+    if config.trim.retires_mail() {
+        tokio::spawn(fractal_daemon::task_cpu::account("mail.retire", retire_closed_mail(store.clone())));
+    }
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     // The shipped CI objectives are retired: end any fault one left open, once per start.
@@ -22885,6 +22888,82 @@ fn first_observation_trim_delay() -> Duration {
     Duration::from_secs(10 * 60) + Duration::from_secs(5 * 60).mul_f64(share)
 }
 
+/// Give every free page back to the filesystem, one short write at a time so other writes run
+/// between them, and return how many went.
+async fn release_free_pages_paced(store: &Arc<Store>) -> u64 {
+    let mut released = 0;
+    loop {
+        let vacuum_store = store.clone();
+        match vacuum_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(pages)) => released += pages,
+            Ok(Err(error)) => {
+                stderr_message("fractal", format_args!("giving free pages back failed: {error:#}"));
+                break;
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("giving free pages back stopped: {error}"));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    released
+}
+
+/// Retire closed graph mail on a member that trims locally (`mail_retirement.rs`), hourly. Each
+/// step is one writer hold of at most `HOLD_BUDGET` and is followed by a rest of four times the
+/// hold, at least 100 ms, as the trim rests; what it frees goes back to the filesystem as it goes.
+async fn retire_closed_mail(store: Arc<Store>) {
+    const PASS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    // Claims deleted between giving free pages back, so a long first pass shrinks the file early.
+    const RELEASE_EVERY_CLAIMS: usize = 2_000;
+    tokio::time::sleep(first_observation_trim_delay()).await;
+    loop {
+        let pass_started = Instant::now();
+        let (mut threads, mut claims, mut unreleased, mut released) = (0, 0, 0, 0);
+        let mut longest = Duration::ZERO;
+        loop {
+            let step_store = store.clone();
+            let step = match store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("mail.retire", || {
+                    step_store.retire_closed_mail_step(u64::try_from(now_ms()).unwrap_or(u64::MAX))
+                })
+            }).await {
+                Ok(Ok(step)) => step,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("closed mail retirement failed: {error:#}"));
+                    break;
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("closed mail retirement stopped: {error}"));
+                    break;
+                }
+            };
+            threads += step.threads;
+            claims += step.claims;
+            unreleased += step.claims;
+            longest = longest.max(step.hold);
+            if unreleased >= RELEASE_EVERY_CLAIMS || (!step.more && unreleased > 0) {
+                released += release_free_pages_paced(&store).await;
+                unreleased = 0;
+            }
+            if !step.more {
+                break;
+            }
+            tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+        }
+        if claims > 0 {
+            stderr_message("fractal", format_args!(
+                "closed mail retired: {threads} threads, {claims} claims, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+                longest.as_millis(),
+                pass_started.elapsed().as_secs(),
+            ));
+        }
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
 async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon::config::ObservationsConfig) {
     const LOCAL_OBSERVATION_TRIM_INTERVAL: Duration = Duration::from_secs(60 * 60);
     // Rows one writer statement deletes: a short hold even with every index and trigger it touches.
@@ -22963,25 +23042,8 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 None
             }
         };
-        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
-        // one short write at a time so other writes run between them.
-        let mut released = 0;
-        loop {
-            let vacuum_store = store.clone();
-            match vacuum_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(pages)) => released += pages,
-                Ok(Err(error)) => {
-                    stderr_message("fractal", format_args!("giving free pages back failed: {error:#}"));
-                    break;
-                }
-                Err(error) => {
-                    stderr_message("fractal", format_args!("giving free pages back stopped: {error}"));
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem.
+        let released = release_free_pages_paced(&store).await;
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("fractal", format_args!(
