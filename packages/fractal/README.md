@@ -255,12 +255,51 @@ export default Fractal.mission(
 | `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `resource/<child run>/<product>`, decoded with `success`, is the value |
 | `Fractal.ask({ id, for, title, request, deadline?, default? })` | a `DurableDeferred` | a native person ask on the program step, answered `AskAnswer` or failed `AskCancelled` |
 | `Fractal.run(mission, input, { id? })` | a `DurableDeferred` | a linked child run, `ChildRun` or `ChildFailed` |
+| `Fractal.turn({ id, agent, instructions, context, products?, freshContext? })` | a `DurableDeferred` over native `agent.turn` | a real assigned finite work episode; returns `WorkerReport`, refuses with `ResourceError`, or ends with `ChildFailed` |
 | `Fractal.review({ id, subject, rubric, reviewer, authors? })` | a `Worker.layer` child run, followed by live verification | adopts the same independent reviewer on replay; moved heads and edited comments invalidate its result |
 | `Fractal.command(argv, { env?, cwd?, priority? })` | — | not journaled: run it inside a step; the host runs it as a process group it ends on cancel |
 
 Every `input` field must be required and encode to a string, since each one is a native `input "name" kind="text"`; a payload that does not decode refuses the run with `InvalidInput`. Without `error`, a step or program journals any tagged error as `_tag` plus its fields and the step fails with that plain object (typed `Journaled<E>`), live and on replay, so `catchTag` matches; an untagged error is a defect. With `error`, the schema rebuilds the error as its class, which a program's `error` class needs. Only one fiber may use a step id: concurrent branches would take `id#n` keys in completion order, which replay does not reproduce, so a second branch using the id is a defect. A journal entry the daemon refuses ends the attempt with a defect that the body cannot catch.
 
 A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
+
+### Standard native seat turns
+
+Publish a normal `mission.ts` at `fractal/seat-turn/mission.ts` in your subject tree:
+
+```ts
+import { Fractal } from 'fractal/effect'
+import owner from '../../owner/agent.ts'
+
+export default Fractal.seatTurn({ meta: import.meta, reportTo: owner })
+```
+
+The complete example is `fixtures/programs/fractal/seat-turn/mission.ts`. Tree loading,
+bundling and publication work exactly as for any program mission; the SDK does not
+silently install a published mission. An explicit `id` supports a different tree path.
+The three required text inputs are `agent` (full `agent/<id>`), `instructions`, and
+`context`. Context is JSON `{ inputs: Record<string,string>, products: [{ path, kind,
+fields }], freshContext?: boolean }`. Product paths are run-relative and fields are
+scalar constraints. Inputs remain inert context text, not shell arguments or environment.
+Fresh context is opt-in, not the default.
+
+`Fractal.lower(graph, { id, host })` routes each assigned agent to the published
+`fractal/seat-turn` by default. It sends the expanded step goal and ordered constraints
+as `instructions`, the actual assignee as `agent`, and **all** original inputs plus
+expanded required product specs inside context JSON. Graph inputs named `agent`,
+`instructions`, `context` or `goal` therefore cannot replace the routing protocol.
+`workers` remains an optional per-agent override; set `strictWorkers: true` to require
+explicit bindings. Overrides can map `goalInput`, `contextInput`, `agentInput` and
+`report`; legacy `goalInput`-only overrides retain their spread-input/resource protocol
+and refuse instruction-key collisions.
+
+`WorkerReport` contains actual `run`, `step`, `summary`, `evidence`, relative-path
+`products`, and optional claim-backed `executions`. A native child's `ChildRun.result`
+is its actual completed program output, independent of declared child resources.
+`Worker.layer({ mission, input, product, report: true })` explicitly decodes that result
+as `WorkerReport` and selects the requested relative product paths. `execution: true`
+uses the report's actual episode receipts, never the wrapper program's accounting.
+Without report mode, existing full-subject child resource selection is unchanged.
 
 ### Independent review as a program step
 
