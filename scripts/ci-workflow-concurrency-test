@@ -50,7 +50,7 @@ def policy(workflow, event, run_id, pr=None, ref='refs/heads/main', action='sync
     return fields['group'], fields['cancel-in-progress']
 
 
-for workflow in ['fleet.yml', 'perf.yml', 'public-repo.yml']:
+for workflow in ['fleet.yml', 'perf.yml', 'public-repo.yml', 'public-repo-history.yml']:
     first = policy(workflow, 'pull_request', 100, 42)
     newer_head = policy(workflow, 'pull_request', 101, 42)
     assert first == newer_head and first[1], (workflow, 'PR heads must replace each other')
@@ -60,12 +60,13 @@ for workflow in ['fleet.yml', 'perf.yml', 'public-repo.yml']:
 # Preserve the established PR groups so old workflow revisions share the same cancellation key.
 assert policy('fleet.yml', 'pull_request', 100, 42)[0] == 'workspace-42-pull_request'
 assert policy('perf.yml', 'pull_request', 100, 42)[0] == 'perf-42'
+assert policy('public-repo.yml', 'pull_request', 100, 42)[0] == 'public-repo-42'
 
-for workflow in ['public-repo.yml']:
+for workflow in ['public-repo.yml', 'public-repo-history.yml']:
     old = policy(workflow, 'push', 100)
     latest = policy(workflow, 'push', 101)
-    assert old == latest and latest[1], (workflow, 'main pushes must replace obsolete work')
-    print('passed:', workflow, 'only latest main push remains')
+    assert old[0] != latest[0] and not old[1] and not latest[1], (workflow, 'main pushes must remain independent')
+    print('passed:', workflow, 'main pushes never cancel or coalesce')
 
 # Every landed tree may require hosted proof: neither active nor pending upkeep runs may coalesce.
 old, latest = policy('main-upkeep.yml', 'push', 100), policy('main-upkeep.yml', 'push', 101)
@@ -79,7 +80,7 @@ assert re.search(r'^on:\n  workflow_dispatch: \{\}\n\n', performance, re.M), 'Pe
 assert policy('perf.yml', 'push', 100) != policy('perf.yml', 'push', 101) and not policy('perf.yml', 'push', 100)[1]
 print('passed: perf.yml runs only by dispatch and never cancels another run')
 
-for workflow in ['fleet.yml', 'main-upkeep.yml', 'perf.yml', 'public-repo.yml']:
+for workflow in ['fleet.yml', 'main-upkeep.yml', 'perf.yml', 'public-repo.yml', 'public-repo-history.yml']:
     for event in ['workflow_dispatch', 'schedule', 'merge_group']:
         first, second = policy(workflow, event, 100), policy(workflow, event, 101)
         assert not first[1] and not second[1] and first[0] != second[0], (workflow, event)
