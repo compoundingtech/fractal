@@ -2706,6 +2706,13 @@ enum StoreCommand {
         #[arg(long)]
         store: PathBuf,
     },
+    /// Copy every blob byte back from the store's blob file into the store, so the previous
+    /// release can open it; stop the daemon first.
+    RestoreBlobBytes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -6377,6 +6384,11 @@ async fn run(cli: Cli) -> Result<()> {
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
+    if let Command::Store {
+        command: StoreCommand::RestoreBlobBytes { ref store },
+    } = cli.command {
+        return fractal_daemon::blob_restore::restore(store, &mut cli_output::stdout());
+    }
     // Archive construction uses only explicit offline paths, before config or client discovery.
     if let Command::Replication {
         command: ReplicationCommand::ArchiveCandidates(args),
@@ -6606,6 +6618,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Store {
             command: StoreCommand::PrepareIndexes { store },
         } => fractal_daemon::owner_indexes::prepare(&store, &mut cli_output::stdout()),
+        Command::Store {
+            command: StoreCommand::RestoreBlobBytes { store },
+        } => fractal_daemon::blob_restore::restore(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -8148,6 +8163,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if config.trim.retires_mail() {
         tokio::spawn(fractal_daemon::task_cpu::account("mail.retire", retire_closed_mail(store.clone())));
     }
+    let blob_move_after_ms = config.store.blob_move_after_ms().expect("the daemon validated its store config");
+    tokio::spawn(fractal_daemon::task_cpu::account("blobs.move", move_blob_bytes(store.clone(), blob_move_after_ms)));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     // The shipped CI objectives are retired: end any fault one left open, once per start.
@@ -23115,6 +23132,61 @@ async fn retire_closed_mail(store: Arc<Store>) {
         if claims > 0 {
             stderr_message("fractal", format_args!(
                 "closed mail retired: {threads} threads, {claims} claims, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+                longest.as_millis(),
+                pass_started.elapsed().as_secs(),
+            ));
+        }
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// Move blob bytes into the store's blob file (`smallclaims::store::blob_file`), hourly, once
+/// `[store] blob_move_after` has passed since this member first ran the build. Each step is two
+/// short writer holds and is followed by a rest of four times the longer, at least 100 ms; the
+/// emptied pages go back to the filesystem as it goes.
+async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
+    const PASS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    const HOLD_BUDGET: Duration = Duration::from_millis(40);
+    // Bytes moved between giving free pages back, so a long first pass shrinks the file early.
+    const RELEASE_EVERY_BYTES: u64 = 64 << 20;
+    tokio::time::sleep(first_observation_trim_delay()).await;
+    loop {
+        let pass_started = Instant::now();
+        let (mut rows, mut bytes, mut unreleased, mut released) = (0, 0, 0, 0);
+        let mut longest = Duration::ZERO;
+        loop {
+            let step_store = store.clone();
+            let step = match store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("blobs.move", || {
+                    step_store.move_blob_bytes_step(u64::try_from(now_ms()).unwrap_or(u64::MAX), move_after_ms, HOLD_BUDGET)
+                })
+            }).await {
+                Ok(Ok(step)) => step,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("moving blob bytes failed: {error:#}"));
+                    break;
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("moving blob bytes stopped: {error}"));
+                    break;
+                }
+            };
+            rows += step.rows;
+            bytes += step.bytes;
+            unreleased += step.bytes;
+            longest = longest.max(step.hold);
+            if unreleased >= RELEASE_EVERY_BYTES || (!step.more && unreleased > 0) {
+                released += release_free_pages_paced(&store).await;
+                unreleased = 0;
+            }
+            if !step.more {
+                break;
+            }
+            tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+        }
+        if rows > 0 {
+            stderr_message("fractal", format_args!(
+                "blob bytes moved to the blob file: {rows} blobs, {bytes} bytes, gave {released} free pages back, longest writer hold {} ms, pass {} s",
                 longest.as_millis(),
                 pass_started.elapsed().as_secs(),
             ));
