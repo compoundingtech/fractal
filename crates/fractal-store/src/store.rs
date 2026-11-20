@@ -22191,7 +22191,7 @@ pub fn enrich_step_definition_cached(
 ) -> rusqlite::Result<()> {
     if view.run.starts_with("mission-run/native-turn/") {
         let fresh: Option<bool> = connection.query_row(
-            &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
+            /* sqlite-large-value: allow-for-now lv-hcf0f7f13c0e5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
                 FROM claims WHERE subject=?1 AND kind='mission-run.created'
                 ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
             [&view.run], |row| row.get(0),
