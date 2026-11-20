@@ -361,6 +361,50 @@ impl CheckpointConfig {
     }
 }
 
+/// `[store]`: `blob_move_after` is how long after this member first runs a build that keeps blob
+/// bytes in their own file it starts moving them there, as a number followed by `s`, `m`, `h` or
+/// `d` (`3d` unless set). Until then a rollback to the previous release finds every byte where it
+/// looks; the first move takes the store to a storage version that release refuses until
+/// `fractal store restore-blob-bytes` copies them back, so lengthen it to keep that rollback open
+/// longer.
+/// `valid_record_delete_after` is the same for deleting the valid replica records this member
+/// holds once it runs a build that keeps none (`3d` unless set): until then a rollback finds every
+/// record it reads, and the first deletion moves the store to a storage version that release
+/// refuses.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_move_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_record_delete_after: Option<String>,
+}
+
+impl StoreConfig {
+    pub const DEFAULT_BLOB_MOVE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+    pub const DEFAULT_VALID_RECORD_DELETE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// How long after this member first runs the build it starts moving blob bytes.
+    pub fn blob_move_after_ms(&self) -> Result<u64> {
+        self.blob_move_after.as_deref().map_or(
+            Ok(Self::DEFAULT_BLOB_MOVE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.blob_move_after"),
+        )
+    }
+
+    /// How long after this member first runs the build it starts deleting valid records.
+    pub fn valid_record_delete_after_ms(&self) -> Result<u64> {
+        self.valid_record_delete_after.as_deref().map_or(
+            Ok(Self::DEFAULT_VALID_RECORD_DELETE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.valid_record_delete_after"),
+        )
+    }
+}
+
 /// `[trim]`: every member trims on its own, with no agreement with any other member: it plans
 /// each day's cut with the audited rules and deletes what they drop. Its retired claim IDs
 /// travel to the peers that trim too, which then never admit, ask for or serve those claims; a
@@ -368,7 +412,14 @@ impl CheckpointConfig {
 /// this member; it is on by default. `notify` names the agent that receives a fault when the
 /// daily answers check finds this member and a peer answering differently; without it the
 /// fleet's fault agent does. `daily_claims` is the most claims a trim deletes in a day (100,000
-/// unless set): a cut that drops more goes on the next day where it stopped.
+/// unless set): a cut that drops more goes on the next day where it stopped. With `mail = true`, a
+/// member that trims also retires closed agent and daemon graph mail a week after it closes, at
+/// its own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default (Factory's decision of
+/// 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person mail where it
+/// is on). `replay_safe_receipts` is how long a replay-safe response receipt (a lease renewal,
+/// which a retry simply repeats) is kept: `1h` unless set, and `0` keeps them for the seven days
+/// every other receipt is kept. It applies to every member, trimming or not.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -377,11 +428,15 @@ pub struct TrimConfig {
     pub notify: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_claims: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe_receipts: Option<String>,
 }
 
 impl Default for TrimConfig {
     fn default() -> Self {
-        Self { local: true, notify: None, daily_claims: None }
+        Self { local: true, notify: None, daily_claims: None, mail: None, replay_safe_receipts: None }
     }
 }
 
@@ -390,7 +445,24 @@ impl TrimConfig {
         self == &Self::default()
     }
 
+    /// Whether this member retires closed graph mail: only one that trims locally and sets
+    /// `mail = true`.
+    pub fn retires_mail(&self) -> bool {
+        self.local && self.mail == Some(true)
+    }
+
+    /// How long replay-safe receipts are kept, in milliseconds; 0 when they are kept as long as
+    /// every other receipt.
+    pub fn replay_safe_receipt_window_ms(&self) -> Result<u64> {
+        match self.replay_safe_receipts.as_deref().map(str::trim) {
+            None => Ok(60 * 60 * 1_000),
+            Some("0") => Ok(0),
+            Some(value) => parse_duration_ms(value, "trim.replay_safe_receipts"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.replay_safe_receipt_window_ms()?;
         anyhow::ensure!(
             self.notify.as_deref().is_none_or(|agent| {
                 agent.starts_with("agent/")
@@ -401,34 +473,6 @@ impl TrimConfig {
         );
         anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
-    }
-}
-
-/// `[store]`: `valid_record_delete_after` is how long after this member first runs a build that
-/// keeps no valid replica record it starts deleting the ones it holds, as a number followed by
-/// `s`, `m`, `h` or `d` (`3d` unless set). Until then a rollback to the previous release finds
-/// every record it reads; the first deletion moves the store to a storage version that release
-/// refuses, so lengthen it to keep that rollback open longer.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StoreConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub valid_record_delete_after: Option<String>,
-}
-
-impl StoreConfig {
-    pub const DEFAULT_VALID_RECORD_DELETE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
-
-    pub fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-
-    /// How long after this member first runs the build it starts deleting valid records.
-    pub fn valid_record_delete_after_ms(&self) -> Result<u64> {
-        self.valid_record_delete_after.as_deref().map_or(
-            Ok(Self::DEFAULT_VALID_RECORD_DELETE_AFTER_MS),
-            |value| parse_duration_ms(value, "store.valid_record_delete_after"),
-        )
     }
 }
 
@@ -1240,6 +1284,12 @@ impl Config {
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
+        if let Some(resources) = &self.finite_resources {
+            for (key, seed) in &resources.profiles {
+                fractal_runtime::validate_profile_key(key)?;
+                seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
+            }
+        }
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -1324,6 +1374,7 @@ impl Config {
         self.limits.validate()?;
         self.trim.validate()?;
         self.store.valid_record_delete_after_ms()?;
+        self.store.blob_move_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -1681,6 +1732,52 @@ mod tests {
                 &format!("[agents_request_slo_fault]\n{fields}\n")
             ).is_err(), "{fields}");
         }
+    }
+
+    #[test]
+    fn resource_profile_configuration_is_host_local_strict_and_validated() {
+        let configured: super::Config = toml::from_str(r#"
+            [finite_resources]
+            diskFloorBytes = 85000000000
+            heavyIoSlots = 1
+            [finite_resources.profiles.check-native]
+            cores = 4
+            memory = 8589934592
+            memoryHigh = 6442450944
+            disk = 10000000000
+            io = "heavy"
+            source = "declared-provisional"
+            reason = "Reviewed bootstrap pending complete pilot observations"
+            learningCoverage = "client-only"
+            recoveryCapable = false
+        "#).unwrap();
+        configured.validate().unwrap();
+        let policy = configured.finite_resources.as_ref().unwrap();
+        assert_eq!(policy.disk_floor_bytes, 85_000_000_000);
+        assert_eq!(policy.profiles["check-native"].memory_high, Some(6 << 30));
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.finite_resources, configured.finite_resources);
+        for invalid in [
+            ("memory = 8589934592", "memory = 1"),
+            ("cores = 4", "cores = 0"),
+            ("reason = \"Reviewed bootstrap pending complete pilot observations\"", "reason = \"\""),
+            ("memoryHigh = 6442450944", "memoryHigh = 10000000000"),
+        ] {
+            let text = toml::to_string(&configured).unwrap().replace(invalid.0, invalid.1);
+            let invalid: super::Config = toml::from_str(&text).unwrap();
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
+    #[test]
+    #[ignore = "requires FRACTAL_RENDERED_CONFIG pointing to a rendered host configuration"]
+    fn validate_rendered_resource_profile_configuration() {
+        let path = std::path::PathBuf::from(std::env::var_os("FRACTAL_RENDERED_CONFIG")
+            .expect("FRACTAL_RENDERED_CONFIG is required"));
+        let configured = super::Config::load_unvalidated(Some(&path)).unwrap();
+        configured.validate().unwrap();
+        assert!(!configured.finite_resources.as_ref().expect("finite_resources is required").profiles.is_empty());
     }
 
     #[test]
@@ -2407,6 +2504,33 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
+    fn replay_safe_receipts_last_an_hour_unless_set_and_zero_keeps_them_a_week() {
+        let config = Config::default();
+        assert_eq!(config.trim.replay_safe_receipt_window_ms().unwrap(), 3_600_000);
+        // The default is not written, so an older build reading this config never meets the key.
+        assert!(!toml::to_string(&config).unwrap().contains("replay_safe_receipts"));
+        let set: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"6h\"\n").unwrap();
+        assert_eq!(set.trim.replay_safe_receipt_window_ms().unwrap(), 6 * 3_600_000);
+        let off: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"0\"\n").unwrap();
+        assert_eq!(off.trim.replay_safe_receipt_window_ms().unwrap(), 0);
+        let bad = TrimConfig { replay_safe_receipts: Some("soon".into()), ..TrimConfig::default() };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn blob_bytes_move_three_days_after_upgrading_unless_set() {
+        let config = Config::default();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 3 * 24 * 60 * 60 * 1000);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[store]"));
+        let config: Config = toml::from_str("[store]\nblob_move_after = \"12h\"\n").unwrap();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 12 * 60 * 60 * 1000);
+        assert!(toml::to_string(&config).unwrap().contains("[store]"));
+        let wrong: Config = toml::from_str("[store]\nblob_move_after = \"soon\"\n").unwrap();
+        assert!(wrong.validate().is_err());
+    }
+
+    #[test]
     fn trim_is_on_unless_turned_off_and_absent_from_a_written_default_config() {
         let config = Config::default();
         assert!(config.trim.local);
@@ -2420,6 +2544,12 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(!config.trim.retires_mail(), "retiring closed mail is off unless set");
+        let retiring: Config = toml::from_str("[trim]\nlocal = true\nmail = true\n").unwrap();
+        assert!(retiring.trim.retires_mail());
+        let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
+        assert!(!kept.trim.retires_mail());
+        assert!(!TrimConfig { local: false, mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

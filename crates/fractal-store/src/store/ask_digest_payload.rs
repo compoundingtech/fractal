@@ -118,7 +118,7 @@ pub(super) fn read_page(connection: &Connection, source: &Value, cursor: Option<
         let (name, hash) = reference.rsplit_once('@').context("invalid digest document reference")?;
         anyhow::ensure!(name == format!("doc/ask-digest/{hash}"), "invalid digest document name");
         let bytes: Vec<u8> = connection.query_row(
-            "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+            concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
             params![name, hash], |row| row.get(0),
         )?;
         anyhow::ensure!(bytes.len() < 64 * 1024 && hex::encode(Sha256::digest(&bytes)) == hash,
@@ -218,7 +218,7 @@ mod tests {
             // A large person's payload does not prevent the next person's emission.
             let small = write(tx, &store.origin, [Ok(expected[0].clone())])?;
             assert_eq!(read_all(tx, &small)?, vec![expected[0].clone()]);
-            let largest: u64 = tx.query_row("SELECT max(length(bytes)) FROM blobs WHERE hash IN (SELECT hash FROM documents WHERE name LIKE 'doc/ask-digest/%')", [], |row| row.get(0))?;
+            let largest: u64 = tx.query_row("SELECT max(size) FROM blobs WHERE hash IN (SELECT hash FROM documents WHERE name LIKE 'doc/ask-digest/%')", [], |row| row.get(0))?;
             assert!(largest < 64 * 1024);
             Ok(())
         }).unwrap().unwrap();

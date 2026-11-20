@@ -55,6 +55,14 @@ impl PreparedEnvelope<'_> {
         self.content.as_ref().is_ok_and(|content| content.payload.batch.claims.iter()
             .any(|claim| self.runtime.requires_keyed_envelope(&claim.kind)))
     }
+
+    /// Runtime backpressure is checked before blobs, batches or claims can be admitted.
+    pub fn admission_deferred(&self, connection: &Connection) -> Result<bool> {
+        match &self.content {
+            Ok(content) => self.runtime.defer_replicated_batch(connection, &content.payload.batch),
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 struct EnvelopeKey {
@@ -144,6 +152,7 @@ fn prepare_payload(
             )
         })?;
     let batch = &payload.batch;
+    crate::receive_metrics::envelope_size(batch.claims.len(), payload_bytes.len());
     if batch.origin != envelope.writer
         || batch.replica_sequence != envelope.sequence
         || batch.previous_hash != envelope.previous_hash

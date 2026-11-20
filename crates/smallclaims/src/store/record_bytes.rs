@@ -332,11 +332,12 @@ pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[
 /// The storage version from which a store keeps no valid record at all: it commits with the
 /// first deletion of one (`release_valid_records`). Below it, admission and sealing still store
 /// a valid record (without bytes), so a member rolled back before then finds a record for every
-/// claim; from it, a build that reads only up to version 22 refuses the store.
-pub const VALID_RECORDS_GONE_VERSION: u32 = 23;
+/// claim; from it, a build that reads only up to version 26 refuses the store. (23 and 24 are retired, 25 and
+/// 26 belong to the blob file and signature compaction.)
+pub const VALID_RECORDS_GONE_VERSION: u32 = 27;
 
 /// Whether the daemon deletes valid records. Off until the signature-reference writer turns on by
-/// its own flag rather than at storage version 21 and above (#6765): committing version 23 would
+/// its own flag rather than at storage version 21 and above (#6765): committing version 27 would
 /// otherwise switch that writer on too.
 pub const VALID_RECORD_DELETION: bool = false;
 

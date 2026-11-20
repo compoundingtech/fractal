@@ -518,3 +518,171 @@ async fn traced_unchanged_proof_reports_work_for_each_churn_interval() {
         }
     }
 }
+
+#[test]
+fn roster_large_delta_reassembles_bounded_chunks_without_losing_late_membership() {
+    use crate::store::seats::AGENT_ROSTER_DELTA_ROWS;
+
+    for history in [false, true] {
+        let (_root, state) = fixture();
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let count = AGENT_ROSTER_WARM_CHUNK * 2 + 1;
+        for n in 0..count {
+            roster_resilience_runtime(store, &format!("agent/delta-{n:04}"), "old");
+        }
+        refresh_agent_roster(store, history).unwrap();
+        let (old_cut, old_cards, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        for n in 0..=AGENT_ROSTER_DELTA_ROWS {
+            unrelated(store, &format!("overflow-{n}"));
+        }
+        // Both a changed card and a newly visible agent lie beyond the row ceiling.
+        roster_resilience_runtime(store, "agent/delta-0000", "new");
+        roster_resilience_runtime(store, "agent/delta-late", "new");
+        let cut = store.index().unwrap();
+        let reason = store.read_snapshot(|index| {
+            store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)
+        }).unwrap();
+        assert_eq!(reason.as_deref(), Some("claim delta exceeds row budget"));
+        assert_eq!(store.published_agent_roster(cut, history).unwrap().0, old_cut);
+        let before = store.agent_resources_refolded_cards_for_test();
+        refresh_agent_roster(store, history).unwrap();
+        let (published, cards, _) = store.published_agent_roster(cut, history).unwrap();
+        assert_eq!((published, cards.len()), (cut, old_cards.len() + 1));
+        assert!(store.agent_resources_refolded_cards_for_test() - before >= count);
+        assert!(store.agent_resources_largest_fold_for_test() <= AGENT_ROSTER_WARM_CHUNK);
+        assert_eq!(store.agent_roster_chunked_assemblies()["claim delta exceeds row budget"], 1);
+        let mut expected = store.read_snapshot(|index| {
+            let mut rows = client_agent_resources_uncached(store, history, index)?;
+            add_agent_todos(store, &mut rows, index)?;
+            Ok(rows)
+        }).unwrap();
+        expected.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+        assert_eq!(*cards, expected, "overflow must rebuild all dependencies, not truncate the delta");
+    }
+}
+
+#[test]
+fn roster_expired_snapshot_releases_reader_and_preserves_complete_publication() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for history in [false, true] {
+        for phase in ["sql", "cache"] {
+            let (_root, state) = fixture();
+            let store = &state.store;
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            refresh_agent_roster(store, history).unwrap();
+            let before = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            unrelated(store, "deadline");
+            update_card(store);
+            let expired = Arc::new(AtomicBool::new(false));
+            let clock_expired = Arc::clone(&expired);
+            let start = Instant::now();
+            let budget = smallclaims::read_budget::ReadBudget::with_clock_for_test(
+                "roster/refresh", Duration::from_secs(1), Arc::new(move || {
+                    start + if clock_expired.load(Ordering::SeqCst) {
+                        Duration::from_secs(2)
+                    } else { Duration::ZERO }
+                }),
+            );
+            let result = smallclaims::read_budget::with(Some(budget), || {
+                agent_roster_snapshot(store, |index| {
+                    assert!(store.readers.has_pinned_reader());
+                    if phase == "sql" {
+                        expired.store(true, Ordering::SeqCst);
+                        // Exercise the real reader progress handler, not just a Rust check.
+                        store.readers.get().query_row(
+                            /* sqlite-large-value: allow-for-now lv-ha365a159e859 owner=fractal_api_core::api::tests::roster_fresh TODO=trace-statement-and-value-representation */ "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                             SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0),
+                        )?;
+                    } else {
+                        store.cached_agent_resources(index, history, |_| {
+                            expired.store(true, Ordering::SeqCst);
+                            Ok(Vec::new())
+                        })?;
+                    }
+                    Ok(())
+                })
+            });
+            assert!(result.is_err(), "{phase} must observe wall expiry");
+            assert!(!store.readers.has_pinned_reader(), "expiry must end the snapshot");
+            let after = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            assert_eq!((after.0, after.2), (before.0, before.2));
+            assert!(Arc::ptr_eq(&after.1, &before.1));
+            // The released connection remains usable and the next pass can complete.
+            refresh_agent_roster(store, history).unwrap();
+            assert_eq!(store.published_agent_roster(store.index().unwrap(), history).unwrap().0,
+                store.index().unwrap());
+        }
+    }
+}
+
+#[test]
+fn roster_short_attempts_resume_membership_and_reconcile_interleaved_changes() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    for history in [false, true] {
+        let (_root, state) = fixture();
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        refresh_agent_roster(store, history).unwrap();
+        let previous = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        for n in 0..(AGENT_ROSTER_WARM_CHUNK * 2 + 1) {
+            roster_resilience_runtime(store, &format!("agent/resume-{n:04}"), "old");
+        }
+        let mut completed = false;
+        let mut failures = 0;
+        for attempt in 0..32 {
+            let clock_store = Arc::clone(store);
+            let pinned = AtomicBool::new(false);
+            let snapshots = AtomicU64::new(0);
+            let start = Instant::now();
+            // Spend one second only when a pinned snapshot has been released. Every
+            // attempt can finish a page but cannot finish the whole roster. No sleeps.
+            let budget = smallclaims::read_budget::ReadBudget::with_clock_for_test(
+                "roster/resume-test", Duration::from_secs(2), Arc::new(move || {
+                    if clock_store.readers.has_pinned_reader() {
+                        pinned.store(true, Ordering::SeqCst);
+                    } else if pinned.swap(false, Ordering::SeqCst) {
+                        snapshots.fetch_add(1, Ordering::SeqCst);
+                    }
+                    start + Duration::from_secs(snapshots.load(Ordering::SeqCst))
+                }),
+            );
+            let result = smallclaims::read_budget::with(Some(budget), || refresh_agent_roster(store, history));
+            assert!(!store.readers.has_pinned_reader());
+            if result.is_ok() {
+                assert!(attempt > 0, "one short attempt cannot scan this roster");
+                completed = true;
+                break;
+            }
+            failures += 1;
+            let retained = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            assert_eq!(retained.0, previous.0);
+            assert!(Arc::ptr_eq(&retained.1, &previous.1));
+            if attempt == 0 {
+                // Changes behind and ahead of the saved subject cursor. A paged claim
+                // backlog also exceeds the fast-path delta ceiling between attempts.
+                roster_resilience_runtime(store, "agent/aaa-behind-cursor", "new");
+                roster_resilience_runtime(store, "agent/zzz-ahead-of-cursor", "new");
+                roster_resilience_runtime(store, "agent/resume-0000", "changed");
+                for n in 0..=crate::store::seats::AGENT_ROSTER_DELTA_ROWS {
+                    unrelated(store, &format!("resume-backlog-{n}"));
+                }
+            }
+        }
+        assert!(completed, "saved pages must converge despite repeated wall expiry");
+        assert!(failures >= 2, "exercise expiry at several assembly phases");
+        let (cut, cards, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        assert_eq!(cut, store.index().unwrap());
+        let mut expected = store.read_snapshot(|index| {
+            let mut rows = client_agent_resources_uncached(store, history, index)?;
+            add_agent_todos(store, &mut rows, index)?;
+            Ok(rows)
+        }).unwrap();
+        expected.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+        assert_eq!(*cards, expected);
+        assert!(store.agent_resources_largest_fold_for_test() <= AGENT_ROSTER_WARM_CHUNK);
+    }
+}

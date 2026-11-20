@@ -3516,7 +3516,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "resource.admission.observed" => &[
             ("id", required_string()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            // Evidence retains newer class names; membership admission owns the authority fence.
+            ("class", required_string()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("epoch", required_string()),
             ("owner", required_object()),
@@ -3525,7 +3526,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_at", integer()),
             ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
             ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
-                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state"])),
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state", "recovery-not-allowed"])),
             ("finite", required_boolean()),
             ("admission_timeout_ms", integer()),
             ("clock_uncertain", required_boolean()),
@@ -3549,8 +3550,23 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "resource.exec-receipt" => &[
             ("exec_id", required_string()),
+            ("argv", array()),
+            ("argv_sha256", string()),
+            ("launched", boolean()),
+            ("timed_out", boolean()),
+            ("refusal_code", string()),
+            ("request_id", string()),
+            ("profile_key", string()),
+            ("profile_estimate", object()),
+            ("disk_path", string()),
+            ("admissionDecision", object()),
+            ("learningDecision", object()),
+            ("preRetirementPopulated", boolean()),
+            ("learningCoverage", enumeration(&["full", "client-only", "unknown"])),
+            ("memoryEvents", object()),
+            ("ioStat", array()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            ("class", required_enum(&["recovery", "landing", "check", "agent"])),
             ("owner", required_object()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("state", required_enum(&["completed", "refused", "cancelled"])),
@@ -4628,6 +4644,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("message_id", string()),
             ("session_id", string()),
             ("selector_scope", string()),
             ("ownership_sequence", integer()),
@@ -5662,7 +5679,7 @@ mod tests {
             current.claims.remove(kind).unwrap();
         }
         current.subjects.remove("effect").unwrap();
-        for field in ["producer_version", "invocation_id"] {
+        for field in ["producer_version", "invocation_id", "message_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
@@ -6382,6 +6399,12 @@ mod tests {
                 "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
                 "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "queued",
                 "refusal": null, "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host/newer-request", "resource.admission.observed", serde_json::json!({
+                "id": "newer-request", "host": "example-host", "class": "future-class", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "refused",
+                "refusal": "recovery-not-allowed", "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
             })),
             ("resource-admission/example-host", "resource.admission.coverage", serde_json::json!({
                 "host": "example-host", "epoch": "epoch-one", "complete": true

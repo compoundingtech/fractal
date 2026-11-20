@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Graph lowering preserves ordered policy constraints in the native mission description and every worker instruction. Invalid authoring data produces a typed compile refusal with its original schema diagnostic rather than leaking a schema exception.",
+  "replay": {"status": "none", "detail": "No journal conversion or automatic adoption of graph-run evidence."},
+  "schema": {"status": "none", "detail": "No daemon or persisted wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Opt-in Fractal.lower now accepts prose mission constraints as inherited worker instructions, matching graph behavior. Publication approval lanes and other unsupported constructs still refuse. Authoring handles must come from the same physical SDK module instance as the compiler; foreign handles are not reconstructed."},
+  "downtime": {"status": "none", "detail": "No startup work or automatic publication."},
+  "manual": {"status": "none", "detail": "No mandatory manual step. Lowering still requires explicit published worker mission bindings and ordinary publication."},
+  "recovery": {"status": "none", "detail": "Existing mission publication and recovery procedures apply."}
+}

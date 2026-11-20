@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use crate::store::Store;
 use crate::lifecycle_objectives::{LifecycleSample, LifecycleTerminal, ratio_row};
-use crate::store::resource_admission_objectives::{Coverage, KIND};
+use crate::store::resource_admission_objectives::{Coverage, COVERAGE_KIND, KIND};
 
 const DEADLINE_MS: u64 = 2 * 60 * 60 * 1000;
 #[derive(Deserialize)]
@@ -46,6 +46,7 @@ impl GateSample {
 struct Projection {
     cursor: u64, members: BTreeMap<String, Evidence>, unreadable: bool,
     gates: BTreeMap<(String, String, String), GateSample>,
+    complete: BTreeMap<String, bool>,
 }
 #[derive(Default)]
 struct Cache(Mutex<Projection>);
@@ -133,9 +134,19 @@ pub(crate) fn start(state: &crate::api::AppState) {
 
 fn catch_up(store: &Store, projection: &mut Projection) -> anyhow::Result<()> {
     loop {
-        let page = store.claims_by_kinds_after(&[KIND, "gate.admission.observed"], None, projection.cursor, 1000)?;
+        let page = store.claims_by_kinds_after(&[KIND, COVERAGE_KIND, "gate.admission.observed"], None, projection.cursor, 1000)?;
         for claim in &page.claims {
             projection.cursor = projection.cursor.max(claim.store_index);
+            if claim.kind == COVERAGE_KIND {
+                let fields = &claim.body["fields"];
+                match (fields["host"].as_str(), fields["complete"].as_bool()) {
+                    (Some(host), Some(complete)) if host == claim.origin => {
+                        projection.complete.insert(host.to_owned(), complete);
+                    }
+                    _ => projection.unreadable = true,
+                }
+                continue;
+            }
             if claim.kind == "gate.admission.observed" {
                 match claim.body.get("fields").cloned().and_then(|value| serde_json::from_value::<GateEvidence>(value).ok()) {
                     Some(event) if event.host == claim.origin => {
@@ -224,7 +235,8 @@ pub(crate) fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
     }
     let active = store.fractal.extensions.get::<Coverage>().0.load(Ordering::Acquire);
     Ok(groups.into_iter().map(|((host, class), (samples, uncertain, coverages))| {
-        let known = active && host == store.origin() && !projection.unreadable && !uncertain;
+        let known = active && host == store.origin() && projection.complete.get(&host) == Some(&true)
+            && !projection.unreadable && !uncertain;
         let id = format!("build/admission/{host}/{class}");
         let mut row = ratio_row(&id, "Accepted finite requests granted capacity within two hours", now,
             DEADLINE_MS, 0.10, &samples, known);
@@ -255,6 +267,30 @@ mod tests {
     }
     fn check(store: &Store, now: u64) -> Value {
         rows(store, now).unwrap().into_iter().find(|row| row["id"] == "build/admission/example-host/check").unwrap()
+    }
+
+    #[test]
+    fn withheld_live_evidence_revokes_certification_until_full_replay() {
+        let store = Store::open_memory("example-host").unwrap();
+        store.start_resource_authority("example-host", "epoch").unwrap();
+        let request = request("queued");
+        store.request_resource_membership(&request, fit(true), 1000).unwrap();
+        assert_eq!(check(&store, 2000)["source"]["local_authority"], true);
+        store.append_claim(&smallclaims::claim::ClaimInput {
+            subject: "resource-admission/example-host".into(), kind: COVERAGE_KIND.into(),
+            actor: None,
+            fields: serde_json::from_value(json!({"host":"example-host","epoch":"epoch","complete":false})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(store.fractal.extensions.get::<Coverage>().0.load(Ordering::Acquire));
+        assert_eq!(check(&store, 2000)["source"]["local_authority"], false);
+        // Custody traffic cannot restore coverage; only the bounded authority tick can.
+        store.withdraw_resource_membership(&request.id, &request.owner, 3000).unwrap();
+        assert_eq!(check(&store, 4000)["source"]["local_authority"], false);
+        assert!(!store.replay_resource_admission_observations().unwrap());
+        let row = check(&store, 4000);
+        assert_eq!(row["source"]["local_authority"], true);
+        assert_eq!(row["evidence"]["bad"].as_f64(), Some(1.0));
     }
 
     #[test]

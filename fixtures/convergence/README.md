@@ -554,10 +554,20 @@ and adding the two measured changes. This run does not establish a full dense-se
 characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
 cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
 
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
+The simulation and audit reports select v40. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
+
 ## Local trim (2026-11-20)
 
 Shared checkpoint agreement is removed: members no longer seal, verify, excuse or adopt, and
-each trims its own cuts. The suite keeps the v39 corpus and its seeds, and the scheduler keeps
+each trims its own cuts. The suite keeps the v40 corpus and its seeds, and the scheduler keeps
 partitions, offline days, clock skew, crashes at trim boundaries, restarts, new empty nodes and
 an old build, which is now a node with `[trim] local = false`. Each modern node's step is its
 own trim (`checkpoint_step` with trim on); the former excusal slot is another trim step, and

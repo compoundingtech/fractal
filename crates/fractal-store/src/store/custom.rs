@@ -385,7 +385,7 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
             let Ok((name, hash)) = split_document_ref(reference) else {
                 continue;
             };
-            let bytes:Option<Vec<u8>>=tx.query_row("SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",params![name,hash],|r|r.get(0)).optional()?;
+            let bytes:Option<Vec<u8>>=tx.query_row(concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),params![name,hash],|r|r.get(0)).optional()?;
             let Some(bytes) = bytes else { continue };
             if bytes.len() > schema::MAX_BYTES || hex::encode(Sha256::digest(&bytes)) != hash {
                 continue;

@@ -70,7 +70,7 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 #[test]
 fn signature_reference_reader_precedes_the_default_writer_format() {
     assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
-    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 23);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 27);
 }
 
 #[test]
@@ -95,9 +95,27 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     }
     assert!(!store.signature_migration().unwrap().references_pending);
     drop(store);
-    // A later writer release activates v21. This earlier reader must preserve that
-    // marker, convert the old text losslessly and continue reading/writing authority.
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+    {
+        // A reader fence alone (here 22, as a later format would set) leaves the writer off.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.pragma_update(None, "user_version", 22).unwrap();
+        drop(connection);
+        let fenced = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+        assert!(!fenced.signature_migration().unwrap().references_pending);
+        fenced.set_node_key(member.clone()).unwrap();
+        let text = note(&fenced, None, "fence without the writer flag");
+        seal(&fenced);
+        let connection = fenced.connection.write();
+        assert_eq!(connection.query_row("SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1", [&text.id], |row| row.get::<_,String>(0)).unwrap(), "text");
+        assert_eq!(connection.query_row("SELECT count(*) FROM claim_signature_originals", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+    // The writer release activates v21: the fence and its own flag. This earlier reader must
+    // preserve that marker, convert the old text losslessly and continue reading/writing.
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('claim_signature_reference_writer','1')", []).unwrap();
+        connection.pragma_update(None, "user_version", 21).unwrap();
+    }
     let reader = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while reader.signature_migration().unwrap().references_pending {
@@ -121,7 +139,9 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
     assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
     drop(reopened);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
+    // A version past the ceiling is refused. (A fixed 23 opened once the ceiling passed it.)
+    rusqlite::Connection::open(&path).unwrap()
+        .pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 
@@ -1942,27 +1962,20 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
         .collect::<Vec<_>>();
     seal(&store);
     store.judge_claims(true).unwrap();
-    let mut saved_bytes = 0_u64;
     for claim in &after {
         assert_eq!(verdict(&store, claim), Verdict::Verified);
-        let connection = store.readers.get();
-        let (cursor, roots, complete, dirty, blocked): (String, String, bool, bool, bool) =
-            connection.query_row(
-                "SELECT last_signature,roots_digest,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1",
+        // A settled small fold keeps no judging row at all, not even a cold one.
+        let rows: u64 = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claim_signature_judging WHERE claim_id=?1",
                 [&claim.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            ).unwrap();
-        assert!(cursor.is_empty() && roots.is_empty(), "completed result must be cold");
-        assert!(complete && !dirty && !blocked);
-        saved_bytes += connection.query_row(
-            "SELECT length(CAST(MAX(signature) AS BLOB))+(SELECT length(content_digest) FROM claim_signature_judging WHERE claim_id=?1) FROM claim_signature_candidates WHERE claim_id=?1",
-            [&claim.id], |row| row.get::<_, u64>(0),
-        ).unwrap();
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a settled judgment keeps no row");
     }
-    eprintln!(
-        "cold judging fixture: {} completed delegated claims; {saved_bytes} logical bytes saved; {} bytes/claim; at fixture rate {}/day: {saved_bytes} bytes/day",
-        after.len(), saved_bytes / after.len() as u64, after.len(),
-    );
     {
         let connection = store.connection.write();
         assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 20);
@@ -2020,7 +2033,7 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
         reopened.set_node_key(anchor.clone()).unwrap();
         for claim in &after {
             assert_eq!(verdict(&reopened, claim), Verdict::Verified, "reopening must read compact-only cold authority");
-            assert!(reopened.readers.get().query_row("SELECT complete=1 AND dirty=0 AND blocked=0 AND last_signature='' AND roots_digest='' FROM claim_signature_judging WHERE claim_id=?1", [&claim.id], |row| row.get::<_, bool>(0)).unwrap());
+            assert_eq!(reopened.readers.get().query_row("SELECT count(*) FROM claim_signature_judging WHERE claim_id=?1", [&claim.id], |row| row.get::<_, u64>(0)).unwrap(), 0, "reopening must not bring back a settled judging row");
         }
         reopened
     } else {
@@ -2759,7 +2772,7 @@ fn remove_candidate_schema(connection: &rusqlite::Connection) {
     inline_signature_facade_for_old_fixture(connection);
     connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
     connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
-    connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
+    connection.execute_batch("DROP TRIGGER claim_verdict_queue_marks_pruned; DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);
         CREATE INDEX claim_verdict_links_claim_index ON claim_verdict_links(claim_id);

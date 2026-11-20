@@ -65,6 +65,7 @@ pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
+mod escalation;
 pub mod start_spacing;
 pub mod program;
 mod program_faults;
@@ -73,7 +74,9 @@ pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
+mod program_turn;
 mod shell_resources;
+mod resource_profiles;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -606,8 +609,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
         anyhow::bail!("runtime does not support generation-fenced payload cancellation")
     }
-    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
-        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
+        anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
@@ -1051,21 +1054,17 @@ impl RuntimeControl for NativeRuntime {
     fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
         self.exec.signal_if(id, Some(generation), libc::SIGTERM)
     }
-    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+    fn resource_exec_cgroup(&self, id: &str, generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         let current = match self.exec.observe(id)? {
             Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
                 if current.generation_id == generation => current,
             _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
         };
-        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let Some(unit) = current.scope_unit else { return Ok(Default::default()); };
         let snapshot = fractal_runtime::systemd::snapshot()?;
-        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(Default::default()); };
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
-        match fs::read_to_string(group.join("memory.peak")) {
-            Ok(value) => Ok(Some(value.trim().parse()?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        crate::store::resource_profile_learner::cgroup::read(group)
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
@@ -1335,14 +1334,13 @@ impl NativeRuntime {
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
                     anyhow::bail!("finite execution membership is not admitted");
                 };
-                let aggregate = request.capacity.map(|capacity| -> Result<fractal_runtime::Capacity> {
-                    Ok(fractal_runtime::Capacity {
-                        cores: capacity.cores.checked_mul(request.max_members).context("aggregate lane cores overflow")?,
-                        memory: capacity.memory.checked_mul(u64::from(request.max_members)).context("aggregate lane memory overflow")?,
-                    })
-                }).transpose()?;
+                // Every live snapshot contributes once, including generations retiring under an
+                // older estimate. A new estimate can never shrink another generation's envelope.
+                let aggregate = store.resource_lane_aggregate(&request.host, &request.name)?;
                 let lane = fractal_runtime::FiniteLane {
-                    name: request.name.clone(), capacity: aggregate,
+                    name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
+                    memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
+                    class: request.class.clone(),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
@@ -1639,6 +1637,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
+    resource_admission_maintenance: Mutex<Option<u128>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1873,6 +1872,7 @@ impl Reconciler<NativeRuntime> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -2109,6 +2109,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -3141,6 +3142,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         };
         [
+            read("deadline/resource-admission-maintenance", &|| {
+                self.resource_admission_maintenance_deadline()
+            }),
             read("deadline/missions", &|| {
                 self.store.next_active_mission_deadline(&self.host)
             }),
@@ -3299,6 +3303,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(deadline)
     }
 
+    fn resource_admission_maintenance_deadline(&self) -> Result<Option<u128>> {
+        let pending = self.resource_authority.get().is_some_and(|authority| authority.is_ok())
+            && self.store.has_pending_resource_admission_observations()?;
+        let mut deadline = self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending {
+            Ok(Some(*deadline.get_or_insert_with(|| now_ms().saturating_add(5_000))))
+        } else {
+            *deadline = None;
+            Ok(None)
+        }
+    }
+
+    fn maintain_resource_admission_observations(&self) -> Result<()> {
+        let now = now_ms();
+        if self.resource_admission_maintenance_deadline()?.is_none_or(|due| due > now) {
+            return Ok(());
+        }
+        let result = self.store.replay_resource_admission_observations();
+        *self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner) =
+            if matches!(&result, Ok(false)) { None } else { Some(now.saturating_add(5_000)) };
+        result.map(|_| ())
+    }
+
     pub fn reconcile_once(&self) -> Result<()> {
         self.reconcile_once_with_cause(crate::reconcile_telemetry::WakeCause::Other)
     }
@@ -3308,6 +3335,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _entered = telemetry.span.enter();
         let result = self.recording_writes(|| self.reconcile_pass());
         if result.is_err() { telemetry.error(); }
+        // Mail the pass queued from inside its transactions leaves now, as the daemon's drain would
+        // after the commit: no wait for that task, and a pass alone delivers what it caused.
+        if let Err(error) = crate::store::message_outbox::drain_fresh(&self.store) {
+            tracing::warn!(error = %format!("{error:#}"), "message outbox drain after a reconcile pass failed");
+        }
         result
     }
 
@@ -3380,6 +3412,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             hook();
         }
         self.reconcile_shell_resources()?;
+        if let Err(error) = self.maintain_resource_admission_observations() {
+            tracing::warn!(%error, "resource admission observation replay deferred");
+        }
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -4799,7 +4834,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let work_context = step
                 .map(|step| format!(" Continue the claimed work `{step}`."))
                 .unwrap_or_default();
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: message_subject,
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -5141,7 +5176,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(key.clone()),
             })?;
             let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: format!("message/{message_id}"),
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -6368,6 +6403,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(true);
         }
+        // A native request owns a work episode, not the standing harness's unrelated turn.
+        // Even an unclaimed busy turn must finish before an opt-in context replacement.
+        if step.run.starts_with("mission-run/native-turn/")
+            && self.store.current_harness(agent)?.is_some_and(|harness| harness.state == "working")
+        {
+            return Ok(false);
+        }
         let operation = crate::model::fresh_context_operation(step);
         let matches_operation = |claim: &crate::model::ClaimRecord| {
             claim.body.pointer("/fields/action").and_then(Value::as_str) == Some("fresh-context")
@@ -6627,6 +6669,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ) {
                     return Ok(());
                 }
+                // A stream wake's read and close are this member's shard records, not claims.
+                if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+                    let status = |status: &str| BTreeMap::from([("status".into(), Value::String(status.into()))]);
+                    if message.status == "delivered" {
+                        crate::store::messages_shard::record_lifecycle(
+                            &self.store, &message.subject, "message.read", Some(agent), &status("read"),
+                        )?;
+                    }
+                    if message.status == "sent" && turn_acknowledged {
+                        return Ok(());
+                    }
+                    let actor = if matches!(message.status.as_str(), "sent" | "staged") { "daemon/runtime" } else { agent };
+                    crate::store::messages_shard::record_lifecycle(
+                        &self.store, &message.subject, "message.closed", Some(actor), &status("closed"),
+                    )?;
+                    self.signal_changed();
+                    return Ok(());
+                }
                 if message.status == "delivered" {
                     self.store.append_claim(&ClaimInput {
                         subject: message.subject.clone(),
@@ -6805,13 +6865,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let diagnostic_key =
                         format!("work-wake-exhausted:{agent}:{tag_value}:{attempt_count}");
                     if self.store.operation_claim(&diagnostic_key)?.is_none() {
-                        let mut evidence = work_wake_attempt_evidence(&self.store, &attempts)?;
+                        let (mut evidence, stream_wakes) = work_wake_attempt_evidence(&self.store, &attempts)?;
                         if let Some(failure) = &claim_failure { evidence.push(failure.id.clone()); }
                         self.store.append_claim(&ClaimInput {
                             subject: agent.into(),
                             kind: "harness.diagnostic".into(),
                             actor: None,
-                            fields: BTreeMap::from([
+                            fields: [
                                 ("severity".into(), Value::String("error".into())),
                                 ("status".into(), Value::String("failed".into())),
                                 ("code".into(), Value::String("work-wake-exhausted".into())),
@@ -6821,7 +6881,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 ("wake_attempts".into(), Value::from(attempt_count)),
                                 ("attempt".into(), Value::from(step.attempt)),
                                 ("readiness_epoch".into(), Value::from(step.readiness_epoch)),
-                            ]),
+                            ].into_iter().chain(stream_wakes.last().map(|latest| {
+                                ("message_id".into(), Value::String(latest.clone()))
+                            })).collect::<BTreeMap<String, Value>>(),
                             evidence,
                             expected_subject: None,
                             idempotency_key: Some(diagnostic_key.clone()),
@@ -11440,7 +11502,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .flatten()
                 .map(|observation| observation.status)
         });
-        let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        let mut ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        for id in self.store.escalation_run_ids(&self.host)? {
+            if !ids.contains(&id) { ids.push(id); }
+        }
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -11543,8 +11608,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
-    /// the last pass listed the active runs.
+    /// Evaluate one run and remember what it read. `active_only` leaves terminal execution
+    /// alone, but still evaluates escalation deadlines committed with its transition.
     fn evaluate_one_mission_run(
         &self,
         id: &str,
@@ -11561,7 +11626,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
                     smallclaims::touched::note_read(|| subject.clone());
-                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    let (run, mut mission) = self.store.mission_run_for_evaluation(id)?;
                     // Eager cancellation (§6): a program step that left its attempt in this run's
                     // latest transition stops now, with its child runs and asks, before an
                     // inactive run returns below. Then what the run's programs wait on is started
@@ -11571,16 +11636,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                         engine.release_left(&run)?;
                         settled = self.settle_program_waits(engine, &run)?;
                     }
-                    if active_only
-                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
-                    {
-                        return Ok(false);
-                    }
                     active_generations.insert(run.generation.clone());
                     active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
                     // From the view the evaluation started with: a write it makes changes subjects
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
+                    if mission.is_none() && run.steps.is_empty() {
+                        let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
+                        mission = self.store.mission_spec(mission_id, Some(&run.revision))?;
+                    }
+                    if let Some(definition) = mission.as_ref() {
+                        match self.escalate_run(&run, definition, now_ms()) {
+                            Ok(escalation_due) => {
+                                due = [due, escalation_due].into_iter().flatten().min();
+                                self.close_fault(&run.subject, "escalation", "all due stages delivered")?;
+                            }
+                            Err(error) => self.record_fault(&run.subject, "escalation", Err(error))?,
+                        }
+                    }
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
                     // Telling a run's reporter never holds the run back or fails it.
                     match self.report_choice(&run.subject).and_then(|choice| match choice {
                         run_report::ReportChoice::Named(report) => {
@@ -11740,14 +11818,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
         if !unseen.is_empty() {
-            // Another host's run, or one that already ended, is not this host's to evaluate.
-            let active = self
-                .store
-                .active_mission_run_ids_for_origin(&self.host)?
-                .into_iter()
+            // Terminal runs with pending escalation discovery belong to this host too.
+            let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
+            eligible.extend(self.store.escalation_run_ids(&self.host)?);
+            let eligible = eligible.into_iter()
                 .map(|id| format!("mission-run/{id}"))
                 .collect::<BTreeSet<_>>();
-            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+            changed_runs.extend(unseen.into_iter().filter(|subject| eligible.contains(subject)));
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
@@ -11886,6 +11963,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         mission: Option<MissionSpec>,
     ) -> Result<bool> {
+        if run.subject.starts_with("mission-run/native-turn/") {
+            return self.evaluate_native_turn(run);
+        }
         if matches!(run.phase.as_str(), "normal" | "supersession-waiting")
             && self.store.supersede_current_mission_run(run)?
         {
@@ -12406,25 +12486,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ) {
                         return Ok(changed);
                     }
-                    if view.status == "orphaned" {
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "ready",
-                            Some("the prior worker incarnation ended"),
-                        )?;
-                        return Ok(changed);
-                    }
-                    if matches!(
-                        view.status.as_str(),
-                        "claimed" | "working" | "verifying" | "blocked"
-                    ) && self.store.work_claim_is_orphaned(view)?
-                    {
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "orphaned",
-                            Some("the exact worker incarnation ended"),
-                        )?;
-                        return Ok(changed);
+                    if let Some(lease_changed) = self.reconcile_worker_lease(view)? {
+                        return Ok(changed | lease_changed);
                     }
                     if view.status == "ready"
                         && view.blocked_reason.as_deref() == Some("the worker lease expired")
@@ -12433,20 +12496,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             changed |= self.expire_step_timeout(view, &step)?;
                             return Ok(changed);
                         }
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "ready",
-                            Some("the worker lease expired"),
-                        )?;
-                        return Ok(changed);
-                    }
-                    if let Some(expiry) = view.claim_expires_at_unix_ms
-                        && expiry <= now_ms()
-                        && matches!(
-                            view.status.as_str(),
-                            "claimed" | "working" | "verifying" | "blocked"
-                        )
-                    {
                         changed |= self.store.set_step_state(
                             &view.subject,
                             "ready",
@@ -15922,6 +15971,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             if !products.is_empty() {
                 value["products"] = Value::Object(products);
             }
+            if let Some(result) = self.program_child_result(&view)? {
+                value["result"] = result;
+            }
             return Ok(serde_json::json!({"_tag": "Success", "value": value}));
         }
         let reason = self
@@ -15935,6 +15987,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
             .unwrap_or_else(|| format!("the child run is {status}"));
         Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason, "executions": executions}}))
+    }
+    /// Only a single native program has an unambiguous run return value. Resource products
+    /// remain separate: `$result` is the program's journaled output, never a resource claim.
+    fn program_child_result(&self, child: &MissionRunView) -> Result<Option<Value>> {
+        let Some(spec) = self.store.mission_spec(&child.mission, Some(&child.revision))? else {
+            return Ok(None);
+        };
+        let steps = flatten_mission_steps(&spec);
+        let [step] = steps.as_slice() else { return Ok(None); };
+        let Some(program) = &step.spec.program else { return Ok(None); };
+        let Some(view) = child.steps.iter().find(|view|
+            view.step == step.spec.path && view.status == "completed") else { return Ok(None); };
+        program::completed_result(&self.store, &view.subject, view.attempt, &program.bundle_hash)
     }
 
     fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
@@ -22131,6 +22196,11 @@ fn work_wake_acknowledged(
         }) && attempts.iter().any(|(_, message)| message.status == "staged")
 }
 
+/// The subject of the work wake sent under `idempotency_key`, in either store.
+pub fn work_wake_subject(idempotency_key: &str) -> String {
+    format!("message/{}", &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn append_work_wake_message(
     store: &Store,
@@ -22144,8 +22214,7 @@ pub fn append_work_wake_message(
     idempotency_key: String,
 ) -> Result<MessageView> {
     let incarnation_key = harness_incarnation_key(incarnation);
-    let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
-    let message_subject = format!("message/{message_id}");
+    let message_subject = work_wake_subject(&idempotency_key);
     let invocation_id = store.record_work_turn_wake(step, agent, incarnation, &message_subject)?;
     let queue = step
         .queue
@@ -22168,7 +22237,8 @@ pub fn append_work_wake_message(
         "{}@{}@{}@{}",
         step.subject, step.attempt, step.readiness_epoch, incarnation_key
     );
-    store.append_claim(&ClaimInput {
+    // A wake for a seat on this member goes to the stream; its readers here read both stores.
+    let sent = crate::store::message_routing::send_work_wake(store, &ClaimInput {
         subject: message_subject.clone(),
         kind: "message.sent".into(),
         actor: Some("daemon/runtime".into()),
@@ -22201,6 +22271,10 @@ pub fn append_work_wake_message(
         expected_subject: None,
         idempotency_key: Some(idempotency_key),
     })?;
+    let created_index = match store.latest_claim(&message_subject, Some("message.sent"))? {
+        Some(claim) => claim.store_index,
+        None => crate::store::messages_shard::STREAM_INDEX_BASE + sent.store_index,
+    };
     Ok(MessageView {
         subject: message_subject,
         from: "daemon/runtime".into(),
@@ -22225,10 +22299,7 @@ pub fn append_work_wake_message(
         body_origin: None,
         sender_class: None,
         assistant_grant_id: None,
-        created_index: store
-            .latest_claim(&format!("message/{message_id}"), Some("message.sent"))?
-            .map(|claim| claim.store_index)
-            .unwrap_or_default(),
+        created_index,
             attachments: Vec::new(),
         status_from: None,
     })
@@ -22293,24 +22364,38 @@ pub fn append_fault_message(
 }
 
 fn message_sent_at(store: &Store, message: &MessageView) -> Option<u128> {
+    if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return crate::store::messages_shard::mailbox_reads::sent_claim(store, &message.subject)
+            .ok()?
+            .map(|claim| claim.accepted_at_unix_ms);
+    }
     store
         .oldest_claim_where(&message.subject, "message.sent", |_| true)
         .ok()?
         .map(|claim| claim.accepted_at_unix_ms)
 }
 
+/// The attempts' graph `message.sent` claims, as evidence, and the subjects of those that are
+/// stream items, oldest first. Graph evidence names graph claims only, so the fault names the
+/// latest stream wake in its `message_id`; its tags name the step, attempt and epoch the others
+/// share.
 fn work_wake_attempt_evidence(
     store: &Store,
     attempts: &[(u128, &MessageView)],
-) -> Result<Vec<String>> {
-    Ok(attempts
+) -> Result<(Vec<String>, Vec<String>)> {
+    let (stream, graph): (Vec<_>, Vec<_>) = attempts
         .iter()
-        .map(|(_, message)| store.latest_claim(&message.subject, Some("message.sent")))
+        .map(|(_, message)| *message)
+        .partition(|message| crate::store::messages_shard::mailbox_reads::is_stream_item(message));
+    let evidence = graph
+        .iter()
+        .map(|message| store.latest_claim(&message.subject, Some("message.sent")))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
         .map(|claim| claim.id)
-        .collect())
+        .collect();
+    Ok((evidence, stream.into_iter().map(|message| message.subject.clone()).collect()))
 }
 
 fn work_wake_deadline(

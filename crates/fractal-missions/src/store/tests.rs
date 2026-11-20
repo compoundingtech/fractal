@@ -11493,6 +11493,8 @@ version 2
             .status,
         "pending"
     );
+    // The notice leaves through the outbox, which the daemon drains after the commit.
+    fractal_store::store::message_outbox::drain(&store).unwrap();
     let cancellation_message = store
         .messages(None, true)
         .unwrap()

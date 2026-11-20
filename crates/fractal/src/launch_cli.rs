@@ -689,7 +689,7 @@ pub(super) async fn run_mission_view(
                     .context("missing run in mission summary")?
                     .to_owned();
             }
-            let run = client
+            let mut run = client
                 .get::<MissionRunView>(&format!(
                     "/v1/mission-runs/{}",
                     urlencoding::encode(&selected)
@@ -701,12 +701,15 @@ pub(super) async fn run_mission_view(
             if json_output {
                 return print_value(&run, true);
             }
+            load_run_source_provenance(client, &mut run).await?;
             let page = load_mission_run_tree(client, &run, args.cursor.as_deref(), args.limit).await?;
             let now = current_unix_ms()?;
             print!(
                 "{}",
                 render_mission_run_page(&run, &page.runs, OutputStyle::stdout(), now)
             );
+            let publication = load_run_publication(client, &run).await?;
+            print!("{}", mission_publication_note(publication.as_ref()));
             print_mission_tree_continuation(&run, &page, args.limit);
             // A daemon without lanes answers 404; the run itself is still shown.
             if let Ok(lanes) = client

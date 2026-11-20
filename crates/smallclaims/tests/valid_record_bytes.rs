@@ -39,8 +39,14 @@ fn sync(source: &Store, peer: &Store) {
     }
 }
 
+/// A record as readers see it, without its bytes: its ref, state, position and claim.
+type RecordRow = (String, String, i64, Option<String>);
+/// What readers and peers see of a store: its authority and graph digests, every record and
+/// every claim position.
+type Observable = (String, String, Vec<RecordRow>, Vec<(String, i64)>);
+
 /// What readers and peers see of a store: its digests and every record but its bytes.
-fn observable(store: &Store) -> (String, String, Vec<(String, String, i64, Option<String>)>, Vec<(String, i64)>) {
+fn observable(store: &Store) -> Observable {
     let status = store.replication_status(true, Some(FLEET), &[]).unwrap();
     let connection = store.connection.write();
     let records = connection

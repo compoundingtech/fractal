@@ -189,10 +189,33 @@ for job in ("linux-clippy", "linux-fleet-compat"):
 # The VM tests and the mail redelivery canaries run once a day (daily-long.yml), never per pull request or in the merge queue.
 for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
     assert job not in blocks, (job, 'daily only')
-for job in ('genie-freshness', 'ci-script-tests', 'typescript-client'):
-    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
-    assert 'namespace-profile-' not in blocks[job] and 'namespace-features:' not in blocks[job] and 'cargo-cache' not in blocks[job], job
+dispatch_jobs = ('upgrade-impact', 'linux-gate', 'fractal-web-changes', 'fractal-web',
+                 'genie-freshness', 'typescript-client',
+                 *(job for job in blocks if job.startswith('evidence-gate-')))
+assert len(dispatch_jobs) == 14, 'four required gates and their controls avoid hosted merge dispatch'
+for job in dispatch_jobs:
+    labels = blocks[job].split('    runs-on:', 1)[1].split('    timeout-minutes:', 1)[0]
+    assert 'needs.' not in labels and 'namespace-' not in labels, (job, 'no picker dependency or new metered capacity')
+    expression = labels.split('fromJSON(', 1)[1].rsplit(')', 1)[0]
+    for event, ref, expected in [
+        ('merge_group', 'refs/heads/gh-readonly-queue/main/example', ['ci1-priority']),
+        ('push', 'refs/heads/main', ['ci1-priority']),
+        ('push', 'refs/heads/feature', ['ubuntu-latest']),
+        ('pull_request', 'refs/pull/1/merge', ['ubuntu-latest']),
+        ('pull_request_target', 'refs/heads/main', ['ubuntu-latest']),
+        ('workflow_dispatch', 'refs/heads/main', ['ubuntu-latest']),
+    ]:
+        evaluated = expression.replace('github.event_name', repr(event)).replace('github.ref', repr(ref))
+        evaluated = evaluated.replace('&&', ' and ').replace('||', ' or ')
+        assert json.loads(eval(evaluated, {'__builtins__': {}})) == expected, (job, event, ref)
+for job in ('pick-runner', 'namespace-capacity'):
+    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'bootstrap and watchdogs stay independent of workload pools')
+for job in ('ci-script-tests',):
+    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'unchanged real-work placement')
+    assert 'cargo-cache' not in blocks[job], job
     assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
+for job in ('genie-freshness', 'typescript-client'):
+    assert 'cargo-cache' not in blocks[job] and 'build-snapshot' not in blocks[job], job
 for job, output in [('linux-tests-shard-2', 'ci1_secondary')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert "github.event_name != 'merge_group' && needs.pick-runner.outputs." + output in blocks[job], (job, 'PR extras must use their own distinct slot')
@@ -290,6 +313,9 @@ def gate(event,base,extra,skip=None,flags=COVERED_FLAGS):
 assert gate('merge_group',['success']*6,['success']*2) == 0
 assert gate('pull_request',['success']*6,['skipped']*2) == 0
 assert gate('workflow_dispatch',['success']*6,['skipped']*2) == 0
+assert gate('push', ['success'] * 6, ['success'] * 2) == 0
+assert gate('push', ['success'] * 6, ['skipped'] * 2) != 0
+assert gate('push', ['success'] * 6, ['success', 'failure']) != 0
 for i in range(8):
     for bad in ('failure','cancelled','skipped'):
         results=['success']*8;results[i]=bad

@@ -11,6 +11,30 @@ an audited build. The rules render the rules description, whose hash is the `rul
 member trims its own copy with its own build's rules. See
 [Checkpoints and trimming](checkpoints.md) for the rules, the checks and the trim.
 
+## Inactive lossless claim archive readers
+
+`smallclaims::Store::write_claim_archive` exports explicitly named claims only when the native
+staged checkpoint planner permits their replacement and they precede a 14-day or 30-day hot
+window. The staging cut must match the observation time, and capture uses the checkpoint epoch
+guard. Protected latest-state/field-carrier witnesses, authority, membership, open lifecycle
+episodes and referenced evidence remain subject to all existing planner guards. The operation
+never removes a hot row or changes checkpoint policy.
+
+Segments preserve original claim-column texts, including JSON spelling, predecessor ordering,
+textual acceptance time, actor nullability and local arrival index. They are bounded to 512
+claims and 64 MiB, published without replacing existing files, and verified against an external
+SHA-256 seal before reads. `ClaimArchive::evidence` returns the exact stored evidence;
+`claim_by_id_with_archive` provides explicit historical point reads and refuses contradictory
+hot/cold or duplicate-cold evidence. A missing ID is absent only from the supplied segment set,
+not a globally proven catalogue miss. Ordinary readers stay hot-only.
+
+This is a new standalone evidence format, not a SQLite storage-version change, production
+archiver, complete backup, canonical-order range reader or admission authority. Before any hot
+retirement, ship catalogue coverage, archive-aware historical range/export readers, ordering
+and ledger restore proofs, protected-witness closure and capable N/N-1 readers. Measure both
+window candidates offline to choose the hot GB objective; do not infer capacity savings from
+the exported claim count. Nonces, signatures and idempotency remain authoritative evidence.
+
 ## Classes
 
 | Class | What it holds | How it is kept |
@@ -21,6 +45,27 @@ member trims its own copy with its own build's rules. See
 | `otel` | observation series: usage samples, latency, readings over time | history goes to OpenTelemetry through `[observations.otlp]`; the graph keeps the latest of each slot |
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.
+
+Graph mail is the exception to `durable` on a member that trims locally and opts in (`[trim] local`
+and `[trim] mail = true`). There, a closed agent or daemon thread retires a week after it closes: all
+its `message.*` claims are deleted and their IDs join the retired set
+(`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
+and any thread another claim cites are kept forever. The rule reads only the claims, so every such
+member retires the same threads without coordination, and a retired ID is never sent back. A
+thread whose closed claim arrived before its sent claim waits on a short list and is judged again
+once the sent claim is there. A citation that reaches one member before it judges a thread and
+another only after it retired it leaves the two apart: the first keeps its copy until set exchange
+applies a peer's retired set to it (the retired set wins there; today the claim range comparison
+only shows the difference). Off unless `[trim] mail = true`, until the owner decides whether it becomes the default for such members; retired mail
+does not come back on a rollback. Each
+writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
+Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint inside the commit,
+and put both back afterwards, on error too: on a busy host the fsync took most of a hold, and a
+crash before the writer's next ordinary commit loses only steps the next pass redoes. Before each
+hold a reader reads the signature and replica rows the hold will delete, so it finds them cached.
+Escalation notifications tagged `mission-escalation-v1` also stay: their native delivery receipts
+are permanent episode-stage deduplication authority, including after later ladder deadlines or restarts.
+Mail in the messages shard is not touched.
 
 ## Where writes go
 
@@ -128,7 +173,7 @@ UNKNOWN conflict states. Ordinary mission and active fix history retain their ow
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
 store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
-pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+pages 128 at a time (512 KiB), one short write each, so other writes run between them. A new store
 is made that way.
 
 A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One
