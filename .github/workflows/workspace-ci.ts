@@ -37,9 +37,9 @@ export const linuxStageRunner = [
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
 
-/** Prerequisites use the same provisioned ephemeral shape as required PR stages, without picker output. */
+/** Tiny prerequisites need no build capacity: use 2x4 instead of competing for 8x16 slots. */
 export const prerequisiteLinuxRunner = [
-  `${linuxStageShape};job.priority=\${{ github.event_name == 'merge_group' && 1 || 2 }}`,
+  "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
 // Optional load benchmarks follow required PR checks, merge groups and releases.

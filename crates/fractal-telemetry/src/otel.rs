@@ -914,6 +914,23 @@ pub fn record_mailbox_fence_check(caller: MailboxFenceCaller, elapsed: Duration)
     MAILBOX_FENCE_DURATION.record(elapsed.as_secs_f64(), &attributes);
 }
 
+static MESSAGE_OUTBOX_DELAY: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.messages")
+            .f64_histogram("st.messages.outbox.delay")
+            .with_unit("s")
+            .with_description("Time from a message entering the outbox to its delivery, by where it went")
+            .build()
+    });
+
+/// Record how long a message waited in the outbox before the stream or the graph took it.
+pub fn record_message_outbox_delay(to: &'static str, waited: Duration) {
+    if !metrics_enabled() {
+        return;
+    }
+    MESSAGE_OUTBOX_DELAY.record(waited.as_secs_f64(), &[KeyValue::new("to", to)]);
+}
+
 static STREAM_APPEND_FALLBACKS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
     std::sync::LazyLock::new(|| {
         opentelemetry::global::meter("st3.messages")

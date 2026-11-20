@@ -340,9 +340,9 @@ pub fn validate_token_file_metadata(metadata: &fs::Metadata, effective_uid: u32)
     Ok(())
 }
 
-/// Whether this node takes part in checkpoints. A node that does not never seals, and every
-/// participant must seal, so turning it off anywhere stops trimming for the whole fleet: the
-/// kill switch while checkpoints roll out.
+/// `[checkpoint]`, from builds that trimmed by fleet checkpoint agreement. Members no longer agree
+/// on checkpoints: each trims on its own (`[trim]`). The section still loads, so a config written
+/// for an older build starts this one, and the daemon says once at start that it is ignored.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CheckpointConfig {
@@ -390,20 +390,22 @@ impl StoreConfig {
     }
 }
 
-/// `[trim]`: `local = true` makes this member trim on its own, without checkpoint agreement. It
-/// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
-/// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
-/// other members until a person excuses this one. Off by default; nothing changes unless a
-/// member opts in. `notify` names the agent that receives a fault when the daily answers check
-/// finds this member and a peer answering differently; without it the fleet's fault agent does.
-/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped. With `mail = true`, a member that
-/// trims locally also retires closed agent and daemon graph mail a week after it closes, at its
-/// own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
-/// set, until the owner decides whether it becomes the default for such members (Factory's
-/// decision of 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person
-/// mail where it is on).
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// `[trim]`: every member trims on its own, with no agreement with any other member: it plans
+/// each day's cut with the audited rules and deletes what they drop. Its retired claim IDs
+/// travel to the peers that trim too, which then never admit, ask for or serve those claims; a
+/// copy a peer already holds stays until its own trim drops it. `local = false` turns trimming off on
+/// this member; it is on by default. `notify` names the agent that receives a fault when the
+/// daily answers check finds this member and a peer answering differently; without it the
+/// fleet's fault agent does. `daily_claims` is the most claims a trim deletes in a day (100,000
+/// unless set): a cut that drops more goes on the next day where it stopped. With `mail = true`, a
+/// member that trims also retires closed agent and daemon graph mail a week after it closes, at
+/// its own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default (Factory's decision of
+/// 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person mail where it
+/// is on). `replay_safe_receipts` is how long a replay-safe response receipt (a lease renewal,
+/// which a retry simply repeats) is kept: `1h` unless set, and `0` keeps them for the seven days
+/// every other receipt is kept. It applies to every member, trimming or not.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
@@ -413,6 +415,14 @@ pub struct TrimConfig {
     pub daily_claims: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mail: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe_receipts: Option<String>,
+}
+
+impl Default for TrimConfig {
+    fn default() -> Self {
+        Self { local: true, notify: None, daily_claims: None, mail: None, replay_safe_receipts: None }
+    }
 }
 
 impl TrimConfig {
@@ -426,7 +436,18 @@ impl TrimConfig {
         self.local && self.mail == Some(true)
     }
 
+    /// How long replay-safe receipts are kept, in milliseconds; 0 when they are kept as long as
+    /// every other receipt.
+    pub fn replay_safe_receipt_window_ms(&self) -> Result<u64> {
+        match self.replay_safe_receipts.as_deref().map(str::trim) {
+            None => Ok(60 * 60 * 1_000),
+            Some("0") => Ok(0),
+            Some(value) => parse_duration_ms(value, "trim.replay_safe_receipts"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.replay_safe_receipt_window_ms()?;
         anyhow::ensure!(
             self.notify.as_deref().is_none_or(|agent| {
                 agent.starts_with("agent/")
@@ -2457,17 +2478,27 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
-    fn checkpoints_are_on_unless_disabled_and_absent_from_a_written_default_config() {
+    fn an_older_builds_checkpoint_section_still_loads_and_a_default_config_never_names_it() {
         let config = Config::default();
-        assert!(config.checkpoint.enabled);
         // An older build refuses unknown sections, so a default config never names it.
         assert!(!toml::to_string(&config).unwrap().contains("checkpoint"));
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.checkpoint.enabled);
         let config: Config = toml::from_str("[checkpoint]\nenabled = false\n").unwrap();
         assert!(!config.checkpoint.enabled);
-        assert!(toml::to_string(&config).unwrap().contains("[checkpoint]"));
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
+    }
+
+    #[test]
+    fn replay_safe_receipts_last_an_hour_unless_set_and_zero_keeps_them_a_week() {
+        let config = Config::default();
+        assert_eq!(config.trim.replay_safe_receipt_window_ms().unwrap(), 3_600_000);
+        // The default is not written, so an older build reading this config never meets the key.
+        assert!(!toml::to_string(&config).unwrap().contains("replay_safe_receipts"));
+        let set: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"6h\"\n").unwrap();
+        assert_eq!(set.trim.replay_safe_receipt_window_ms().unwrap(), 6 * 3_600_000);
+        let off: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"0\"\n").unwrap();
+        assert_eq!(off.trim.replay_safe_receipt_window_ms().unwrap(), 0);
+        let bad = TrimConfig { replay_safe_receipts: Some("soon".into()), ..TrimConfig::default() };
+        assert!(bad.validate().is_err());
     }
 
     #[test]
@@ -2484,14 +2515,16 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
-    fn local_trim_is_off_unless_chosen_and_absent_from_a_written_default_config() {
+    fn trim_is_on_unless_turned_off_and_absent_from_a_written_default_config() {
         let config = Config::default();
-        assert!(!config.trim.local);
+        assert!(config.trim.local);
         // An older build refuses unknown sections, so a default config never names it.
         assert!(!toml::to_string(&config).unwrap().contains("[trim]"));
+        let config: Config = toml::from_str("[trim]\nlocal = false\n").unwrap();
+        assert!(!config.trim.local);
+        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         let config: Config = toml::from_str("[trim]\nlocal = true\n").unwrap();
         assert!(config.trim.local);
-        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
@@ -2500,7 +2533,7 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(retiring.trim.retires_mail());
         let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
         assert!(!kept.trim.retires_mail());
-        assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
+        assert!(!TrimConfig { local: false, mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

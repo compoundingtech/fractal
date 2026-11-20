@@ -209,6 +209,32 @@ fn a_seat_polling_its_own_mail_finds_mail_routed_to_the_stream() {
     assert_eq!(subjects, [legacy.subject.as_str(), routed.subject.as_str()]);
 }
 
+#[test]
+fn a_work_wake_goes_to_the_stream_only_for_a_seat_on_this_member() {
+    let Fleet { alder, .. } = &fleet();
+    let wake = |subject: &str, name: &str| {
+        let mut input = message(subject, &seat(alder, name));
+        input.actor = Some("daemon/runtime".into());
+        input.fields.insert("from".into(), json!("daemon/runtime"));
+        input.fields.insert("tags".into(), json!([format!("st3-work:step-run/r/s@1@1@{name}")]));
+        input
+    };
+    let here = wake("message/wake-here", "here");
+    let claim = message_routing::send_work_wake(alder, &here).unwrap();
+    assert_eq!((shard_items(alder, "message/wake-here"), graph_items(alder, "message/wake-here")), (1, 0));
+    // The mirror takes it at once, so the step views and the wake deadline see it.
+    assert!(alder.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_work_wake_tags WHERE claim_id='message/wake-here')", [], |row| row.get::<_, bool>(0),
+    ).unwrap());
+    assert_eq!(message_routing::send_work_wake(alder, &here).unwrap().id, claim.id, "a retry replays it");
+    // Another member's seat keeps a graph wake, even where its host reads stream mail: that
+    // member's build may read wakes from the graph alone.
+    for (subject, name) in [("message/wake-inbox", "inbox"), ("message/wake-plain", "plain")] {
+        message_routing::send_work_wake(alder, &wake(subject, name)).unwrap();
+        assert_eq!((shard_items(alder, subject), graph_items(alder, subject)), (0, 1), "{name}");
+    }
+}
+
 /// Refuse every append to `store`'s shard, as a broken stream path would.
 fn break_shard(store: &Store) {
     messages_shard::shard(store)

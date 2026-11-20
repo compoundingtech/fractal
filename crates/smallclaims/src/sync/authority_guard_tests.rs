@@ -4,7 +4,6 @@ use super::*;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::Runtime as _;
-use crate::store::{CheckpointAction, CheckpointManifestNeed};
 use crate::sync::Local;
 use std::sync::{
     Mutex,
@@ -99,21 +98,6 @@ impl Backend for GuardBackend {
         _carrier: crate::replication::ReplicationCarrier,
         _authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
-        unreachable!()
-    }
-    async fn checkpoint_manifest(
-        &self,
-        _request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        unreachable!()
-    }
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        unreachable!()
-    }
-    async fn adopt_checkpoint(
-        &self,
-        _manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
         unreachable!()
     }
     async fn publish_endpoints(&self, _mode: &str, _endpoints: &[Value]) -> Result<()> {

@@ -292,6 +292,18 @@ impl Runtime for FractalRuntime {
         // A document a run binds is decided by its run authority, as its claims are.
         super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
+    fn replay_safe_response_pinned(&self, _connection: &Connection, response: &str) -> Result<bool> {
+        // Only a lease renewal's receipt is shortened. A renewal writes a replay-safe step view,
+        // and a retry after the receipt is gone renews again, so its live run does not keep it.
+        // Every other replay-safe receipt (a run, revision or owned-set apply, a digest) stays
+        // for the ordinary 7-day cleanup and its in-use rule.
+        let renewal = serde_json::from_str::<Value>(response).is_ok_and(|view| {
+            view.get("mission_run").is_none()
+                && view.get("subject").and_then(Value::as_str).is_some_and(|subject| subject.starts_with("step-run/"))
+        });
+        Ok(!renewal)
+    }
+
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
         let Ok(value) = serde_json::from_str::<Value>(response) else {
@@ -794,15 +806,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::plan_staged(planner)
     }
 
-    fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::clear_projections(transaction)
-    }
-
-    fn replay_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
-        checkpoint_rules::replay_from_nothing(transaction)?;
-        Ok(())
-    }
-
     fn checkpoint_subject_answers(
         &self,
         connection: &Connection,
@@ -812,18 +815,6 @@ impl Runtime for FractalRuntime {
         checkpoint_rules::subject_answers(connection, subject, cut)
     }
 
-    fn checkpoint_global_answers(&self, transaction: &Transaction<'_>) -> Result<Option<Value>> {
-        checkpoint_rules::global_answers(transaction).map(Some)
-    }
-
-    fn checkpoint_subject_answers_with_sources(
-        &self,
-        connection: &Connection,
-        subject: &str,
-        cut: u128,
-    ) -> Result<(Value, smallclaims::store::checkpoint::CheckpointAnswerSources)> {
-        checkpoint_rules::subject_answers_with_sources(connection, subject, cut)
-    }
 }
 
 /// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose
