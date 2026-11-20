@@ -23,6 +23,7 @@ export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run
  * Never use this for the picker or watchdog: both must remain independent of that pool.
  */
 export const controlLinuxRunner = "${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '[\"ci1-priority\"]' || '[\"ubuntu-latest\"]') }}"
+
 /**
  * The Linux gate's stage jobs. On 2026-10-03 the shape label `nscloud-ubuntu-24.04-amd64-16x32`
  * stopped getting runners at about 12:10Z, and the profile allows only about five runners at
@@ -33,6 +34,12 @@ const linuxStageShape = 'nscloud-ubuntu-24.04-amd64-8x16-with-features'
 /** All non-merge Linux work retains one class; merge groups have the first queue class. */
 export const linuxStageRunner = [
   `${linuxStageShape};job.priority=${linuxJobPriority}`,
+  'namespace-features:github.run-id=${{ github.run_id }}',
+] as const
+
+/** Tiny prerequisites need no build capacity: use 2x4 instead of competing for 8x16 slots. */
+export const prerequisiteLinuxRunner = [
+  "nscloud-ubuntu-24.04-amd64-2x4-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
 // Optional load benchmarks follow required PR checks, merge groups and releases.
@@ -58,8 +65,8 @@ const ci1MinIdle = 1
 export const pickRunnerJob = {
   name: pickRunnerJobId,
   if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')",
-  // GitHub-hosted, so the choice never waits for either pool it chooses between.
-  'runs-on': 'ubuntu-latest',
+  // Independent ephemeral capacity: never wait for GitHub-hosted or an owned pool being selected.
+  'runs-on': prerequisiteLinuxRunner,
   'timeout-minutes': 3,
   permissions: { 'pull-requests': 'read', actions: 'read' },
   outputs: {

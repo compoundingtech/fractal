@@ -333,6 +333,8 @@ pub mod mail_retirement;
 #[cfg(test)]
 mod mail_retirement_tests;
 #[cfg(test)]
+mod blob_file_tests;
+#[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
@@ -9795,7 +9797,7 @@ fn validate_documents(
         let (name, hash) = split_document_ref(reference)?;
         let bytes: Option<Vec<u8>> = transaction
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -19861,6 +19863,9 @@ pub fn project_mission_run_created(
             format!("claim `{}` has an invalid mission run subject", claim.id),
         )
     })?;
+    if fields.get("native_turn").is_some() {
+        return adhoc_work::project_native_turn(transaction, claim);
+    }
     if fields.get("ad_hoc_title").is_some() {
         return adhoc_work::project_start(transaction, claim);
     }
@@ -22184,6 +22189,16 @@ pub fn enrich_step_definition_cached(
     view: &mut StepRunView,
     definitions: &mut PinnedDefinitions,
 ) -> rusqlite::Result<()> {
+    if view.run.starts_with("mission-run/native-turn/") {
+        let fresh: Option<bool> = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-hcf0f7f13c0e5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT coalesce(json_extract(body,'$.fields.native_turn.freshContext'),0)
+                FROM claims WHERE subject=?1 AND kind='mission-run.created'
+                ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+            [&view.run], |row| row.get(0),
+        ).optional()?;
+        view.fresh_context = fresh.unwrap_or(false);
+        return Ok(());
+    }
     if let Some(mission) = definitions.of(connection, &view.generation)? {
         apply_step_definition(view, mission);
     }
@@ -22304,6 +22319,25 @@ pub(super) fn work_wake_history_query(complete: bool) -> String {
     ))
 }
 
+/// [`work_wake_history_query`]'s rows for wakes that are stream items, from their mirror rows.
+/// The mirror keeps no time for a lifecycle step, so a snapshot sees the steps recorded so far.
+const STREAM_WORK_WAKE_HISTORY: &str = "SELECT item.fields, CAST(item.sent_ms AS TEXT), item.subject,
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind IN ('message.read','message.closed')),
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind='message.delivered'),
+        EXISTS(SELECT 1 FROM local_stream_lifecycle step
+               WHERE step.subject=item.subject AND step.kind='message.staged')
+     FROM (
+         SELECT DISTINCT claim_id FROM local_work_wake_tags
+         WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5 AND claim_id LIKE 'message/%'
+     ) AS wake_candidates
+     CROSS JOIN local_stream_sent item ON item.subject=wake_candidates.claim_id
+     WHERE item.sent_ms<=CAST(?1 AS INTEGER)
+       AND json_extract(item.fields, '$.to') IN (?3, ?4)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE claims.subject=item.subject AND claims.kind='message.sent')
+     ORDER BY item.stream_index";
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -22384,28 +22418,39 @@ fn enrich_step_wake_with(
     let mut upper = wake_tag_prefix.clone();
     upper.pop();
     upper.push('A'); // The exclusive lexicographic successor of the final '@'.
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?;
-    let rows = statement.query_map(
-        params![
-            snapshot_unix_ms.to_string(),
-            wake_tag_prefix,
-            assignee,
-            bare_assignee,
-            upper
-        ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, bool>(5)?,
-            ))
-        },
-    )?;
-    for row in rows {
-        let (body, accepted, message, consumed, delivered, staged) = row?;
+    let snapshot = snapshot_unix_ms.to_string();
+    let wake_params = params![
+        snapshot,
+        wake_tag_prefix,
+        assignee,
+        bare_assignee,
+        upper
+    ];
+    let history_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+            row.get::<_, bool>(4)?,
+            row.get::<_, bool>(5)?,
+        ))
+    };
+    let mut rows = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?
+        .query_map(wake_params, history_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let stream = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf8968ee53382 owner=fractal_store::store TODO=trace-statement-and-value-representation */ STREAM_WORK_WAKE_HISTORY)?
+        .query_map(wake_params, history_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // A seat's wakes moved to the stream on this build, so its graph wakes come first; the sort
+    // only interleaves a history written across a rollback and a second upgrade.
+    if !stream.is_empty() {
+        rows.extend(stream);
+        rows.sort_by_key(|(_, accepted, ..)| accepted.parse::<u128>().unwrap_or(0));
+    }
+    for (body, accepted, message, consumed, delivered, staged) in rows {
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         if fields
@@ -23697,26 +23742,26 @@ pub fn cancel_mission_run_tx(
             now,
         )?);
     }
-    let revision: String = transaction
-        .query_row(
-            "SELECT revision FROM run_generations WHERE id=?1",
-            [&generation_id],
-            |row| row.get(0),
-        )
-        .map_err(internal)?;
-    let mission: MissionSpec = transaction
-        .query_row(
+    // A native finite episode has no graph revision or finally section. Its authoritative
+    // creation metadata owns one leaf; use the same cancellation/cleanup transitions below.
+    let native_turn = run_id.starts_with("native-turn/") && transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='mission-run.created'
+            AND json_type(body,'$.fields.native_turn')='object')",
+        [format!("mission-run/{run_id}")], |row| row.get::<_, bool>(0),
+    ).map_err(internal)?;
+    let final_paths = if native_turn {
+        BTreeSet::new()
+    } else {
+        let revision: String = transaction.query_row(
+            "SELECT revision FROM run_generations WHERE id=?1", [&generation_id], |row| row.get(0),
+        ).map_err(internal)?;
+        let mission: MissionSpec = transaction.query_row(
             "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-            params![mission_id, revision],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(internal)
-        .and_then(|body| serde_json::from_str(&body).map_err(internal))?;
-    let final_paths = flatten_mission_step_specs(&mission)
-        .into_iter()
-        .filter(|step| step.finally)
-        .map(|step| step.path.clone())
-        .collect::<BTreeSet<_>>();
+            params![mission_id, revision], |row| row.get::<_, String>(0),
+        ).map_err(internal).and_then(|body| serde_json::from_str(&body).map_err(internal))?;
+        flatten_mission_step_specs(&mission).into_iter().filter(|step| step.finally)
+            .map(|step| step.path.clone()).collect::<BTreeSet<_>>()
+    };
     let mut statement = transaction
         .prepare(
             "SELECT subject, step_path, lease_owner FROM step_runs
@@ -23743,24 +23788,24 @@ pub fn cancel_mission_run_tx(
         if let Some(claimant) = claimant {
             let stable = canonical_hash(&(run_id, &generation_id, &subject, "cancelled"))
                 .map_err(internal)?;
-            append_claim_tx(
-                transaction,
-                origin,
-                &format!("message/mission-cancelled-{}", &stable[..20]),
-                "message.sent",
-                None,
-                &json!({"fields": {
+            // The notice goes through the outbox: its route can't be read inside this batch.
+            message_routing::queue_tx(transaction, &ClaimInput {
+                subject: format!("message/mission-cancelled-{}", &stable[..20]),
+                kind: "message.sent".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
                     "from": "daemon/runtime",
                     "to": claimant,
                     "title": "Mission work cancelled",
                     "content": format!("Mission run mission-run/{run_id} cancelled step {subject}. Stop this work. Reason: {reason}"),
                     "status": "sent",
                     "tags": [format!("mission-run:mission-run/{run_id}"), format!("step-run:{subject}")],
-                }}),
-                &[],
-                forced_batch,
-            )
-            .map_err(internal)?;
+                }))
+                .map_err(internal)?,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
         }
         transaction
             .execute(
@@ -25583,7 +25628,6 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),

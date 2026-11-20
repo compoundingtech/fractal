@@ -11063,6 +11063,19 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
 }
 
 #[test]
+fn replication_status_names_stream_fallbacks_since_start_by_code() {
+    assert_eq!(render_stream_fallbacks(&BTreeMap::new()), "none since start");
+    let counts = BTreeMap::from([("internal".to_owned(), 1), ("graph-closed".to_owned(), 2)]);
+    assert_eq!(render_stream_fallbacks(&counts), "graph-closed=2 internal=1 since start");
+    // A daemon from before the count sends no field, which reads as unknown, not as none.
+    let earlier: ReplicationStatus = serde_json::from_value(serde_json::to_value(ReplicationStatus::default()).unwrap()).unwrap();
+    assert_eq!(earlier.stream_fallbacks, None);
+    let current = ReplicationStatus { stream_fallbacks: Some(BTreeMap::new()), ..ReplicationStatus::default() };
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(value["stream_fallbacks"], serde_json::json!({}));
+}
+
+#[test]
 fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
     for family in ["agents", "missions"] {
         let cli = Cli::try_parse_from([
@@ -11096,4 +11109,68 @@ fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
         }
         assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
     }
+}
+
+/// A start after the last page of valid records' bytes was emptied, but before the pages they
+/// held went back, still gives them back.
+#[tokio::test]
+async fn a_start_between_emptying_and_giving_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, false).await;
+}
+
+#[tokio::test]
+async fn a_start_during_giving_record_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(true, false).await;
+}
+
+#[tokio::test]
+async fn a_start_after_a_record_page_reclamation_error_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, true).await;
+}
+
+async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_reclamation: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    {
+        let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+        // Records an older build kept with their bytes, emptied by this build's pass before a
+        // restart.
+        {
+            let connection = store.connection.write();
+            for n in 0..200 {
+                connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-hbac708a02bc1 owner=fractal::main_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw, state, updated_at_unix_ms)
+                     VALUES (?1, 'birch', ?2, 'envelope', 0, randomblob(9000), 'valid', '0')",
+                    rusqlite::params![format!("record/sample-{n}"), n],
+                ).unwrap();
+            }
+        }
+        while !store.release_valid_record_bytes().unwrap().done {}
+        if reclaim_a_chunk {
+            let released = store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .unwrap();
+            assert!(released > 0);
+            assert!(released <= smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE);
+        }
+        if fail_reclamation {
+            // A real SQLite write error, not a replacement reclamation implementation.
+            store.connection.write().execute_batch("PRAGMA query_only=ON").unwrap();
+            assert!(store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .is_err());
+            store.connection.write().execute_batch("PRAGMA query_only=OFF").unwrap();
+        }
+    }
+    let free = |path: &std::path::Path| -> u64 {
+        rusqlite::Connection::open(path).unwrap().query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap()
+    };
+    assert!(free(&path) > 0, "the emptied bytes left free pages");
+    let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+    let page = store.release_valid_record_bytes().unwrap();
+    assert!(page.done);
+    assert_eq!(page.emptied, 0, "a restart must reclaim even without newly emptied records");
+    super::release_valid_record_bytes(store.clone()).await;
+    drop(store);
+    assert_eq!(free(&path), 0, "the next start gave them back");
 }

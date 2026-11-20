@@ -2706,6 +2706,13 @@ enum StoreCommand {
         #[arg(long)]
         store: PathBuf,
     },
+    /// Copy every blob byte back from the store's blob file into the store, so the previous
+    /// release can open it; stop the daemon first.
+    RestoreBlobBytes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -6377,6 +6384,11 @@ async fn run(cli: Cli) -> Result<()> {
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
+    if let Command::Store {
+        command: StoreCommand::RestoreBlobBytes { ref store },
+    } = cli.command {
+        return fractal_daemon::blob_restore::restore(store, &mut cli_output::stdout());
+    }
     // Archive construction uses only explicit offline paths, before config or client discovery.
     if let Command::Replication {
         command: ReplicationCommand::ArchiveCandidates(args),
@@ -6606,6 +6618,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Store {
             command: StoreCommand::PrepareIndexes { store },
         } => fractal_daemon::owner_indexes::prepare(&store, &mut cli_output::stdout()),
+        Command::Store {
+            command: StoreCommand::RestoreBlobBytes { store },
+        } => fractal_daemon::blob_restore::restore(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -7971,7 +7986,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission-escalation-v1": 1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
@@ -8121,6 +8136,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -8136,7 +8152,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ) {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
-    spawn_response_expiry(store.clone());
+    spawn_response_expiry_with(store.clone(), config.trim.replay_safe_receipt_window_ms()?.min(i64::MAX as u64) as i64);
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
     fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
@@ -8148,6 +8164,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if config.trim.retires_mail() {
         tokio::spawn(fractal_daemon::task_cpu::account("mail.retire", retire_closed_mail(store.clone())));
     }
+    let blob_move_after_ms = config.store.blob_move_after_ms().expect("the daemon validated its store config");
+    tokio::spawn(fractal_daemon::task_cpu::account("blobs.move", move_blob_bytes(store.clone(), blob_move_after_ms)));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     // The shipped CI objectives are retired: end any fault one left open, once per start.
@@ -13709,6 +13727,15 @@ fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue
             fenced.join(", ")
         )
     })
+}
+
+/// The messages routed to the stream that went to the graph since the daemon started, by code.
+fn render_stream_fallbacks(fallbacks: &BTreeMap<String, u64>) -> String {
+    if fallbacks.is_empty() {
+        return "none since start".into();
+    }
+    let counts = fallbacks.iter().map(|(code, count)| format!("{code}={count}")).collect::<Vec<_>>();
+    format!("{} since start", counts.join(" "))
 }
 
 /// This node's first sync in one line.
@@ -22532,6 +22559,48 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
     }
 }
 
+/// Valid records' bytes empty after startup, a page per writer batch, each committing its
+/// cursor; then the pages they held go back to the filesystem, one short write at a time
+/// (`record_bytes`). A failed page retries, including after a daemon restart.
+async fn release_valid_record_bytes(store: Arc<Store>) {
+    let (mut emptied, mut bytes) = (0, 0);
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || page_store.release_valid_record_bytes())).await;
+        match result {
+            Ok(Ok(report)) if report.done => break,
+            Ok(Ok(report)) => {
+                emptied += report.emptied;
+                bytes += report.bytes;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            error => {
+                stderr_message("fractal", format_args!("emptying valid record bytes failed: {error:?}"));
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+    // Every start gives free pages back, whether or not this start emptied anything: a start
+    // after the last page of bytes was emptied, but before its pages went back, finishes that.
+    // A store with no free page answers at once.
+    let mut released = 0;
+    loop {
+        let vacuum_store = store.clone();
+        match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || vacuum_store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE))).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(pages)) => released += pages,
+            error => {
+                stderr_message("fractal", format_args!("giving valid record pages back stopped: {error:?}"));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if emptied > 0 || released > 0 {
+        stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    }
+}
+
 /// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
 /// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
 async fn backfill_envelope_signatures(store: Arc<Store>) {
@@ -22860,7 +22929,14 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
 /// Register before the first rowid deadline read. The callback performs no SQL and never
 /// takes the writer: it only coalesces committed-write notifications. Deadline reads run on a
 /// pooled reader, so unrelated commits add no expiry SQL to the writer path.
+#[cfg(test)]
 fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
+    spawn_response_expiry_with(store, smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS)
+}
+
+/// `replay_safe_window_ms` is `[trim] replay_safe_receipts`: replay-safe receipts older than it
+/// go too, in their own paced chunks.
+fn spawn_response_expiry_with(store: Arc<Store>, replay_safe_window_ms: i64) -> tokio::task::JoinHandle<()> {
     let (changed, receiver) = tokio::sync::watch::channel(());
     let observer = store.observe_commits(move |connection| {
         if connection.is_autocommit() {
@@ -22869,13 +22945,14 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
     });
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
-        expire_completed_responses(store, receiver).await;
+        expire_completed_responses(store, receiver, replay_safe_window_ms).await;
     }))
 }
 
 async fn expire_completed_responses(
     store: Arc<Store>,
     mut changed: tokio::sync::watch::Receiver<()>,
+    replay_safe_window_ms: i64,
 ) {
     let mut clock_deferred = false;
     let mut retry = Duration::from_millis(200);
@@ -22885,7 +22962,11 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || {
+                let ordinary = read_store.next_idempotency_expiry()?;
+                let replay_safe = read_store.next_replay_safe_expiry(replay_safe_window_ms)?;
+                Ok::<_, anyhow::Error>(ordinary.into_iter().chain(replay_safe).min())
+            })).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("fractal", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -22951,7 +23032,9 @@ async fn expire_completed_responses(
         let clean_store = store.clone();
         match clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
-                clean_store.cleanup_idempotency(now)
+                // Two short writer transactions, never one long one.
+                clean_store.cleanup_idempotency(now)?;
+                clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
         .await
@@ -23106,6 +23189,61 @@ async fn retire_closed_mail(store: Arc<Store>) {
         if claims > 0 {
             stderr_message("fractal", format_args!(
                 "closed mail retired: {threads} threads, {claims} claims, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+                longest.as_millis(),
+                pass_started.elapsed().as_secs(),
+            ));
+        }
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// Move blob bytes into the store's blob file (`smallclaims::store::blob_file`), hourly, once
+/// `[store] blob_move_after` has passed since this member first ran the build. Each step is two
+/// short writer holds and is followed by a rest of four times the longer, at least 100 ms; the
+/// emptied pages go back to the filesystem as it goes.
+async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
+    const PASS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    const HOLD_BUDGET: Duration = Duration::from_millis(40);
+    // Bytes moved between giving free pages back, so a long first pass shrinks the file early.
+    const RELEASE_EVERY_BYTES: u64 = 64 << 20;
+    tokio::time::sleep(first_observation_trim_delay()).await;
+    loop {
+        let pass_started = Instant::now();
+        let (mut rows, mut bytes, mut unreleased, mut released) = (0, 0, 0, 0);
+        let mut longest = Duration::ZERO;
+        loop {
+            let step_store = store.clone();
+            let step = match store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("blobs.move", || {
+                    step_store.move_blob_bytes_step(u64::try_from(now_ms()).unwrap_or(u64::MAX), move_after_ms, HOLD_BUDGET)
+                })
+            }).await {
+                Ok(Ok(step)) => step,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("moving blob bytes failed: {error:#}"));
+                    break;
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("moving blob bytes stopped: {error}"));
+                    break;
+                }
+            };
+            rows += step.rows;
+            bytes += step.bytes;
+            unreleased += step.bytes;
+            longest = longest.max(step.hold);
+            if unreleased >= RELEASE_EVERY_BYTES || (!step.more && unreleased > 0) {
+                released += release_free_pages_paced(&store).await;
+                unreleased = 0;
+            }
+            if !step.more {
+                break;
+            }
+            tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+        }
+        if rows > 0 {
+            stderr_message("fractal", format_args!(
+                "blob bytes moved to the blob file: {rows} blobs, {bytes} bytes, gave {released} free pages back, longest writer hold {} ms, pass {} s",
                 longest.as_millis(),
                 pass_started.elapsed().as_secs(),
             ));

@@ -55,6 +55,11 @@ struct Fixture {
     _root: tempfile::TempDir,
     base: PathBuf,
     socket: PathBuf,
+    /// The sandbox's temporary directory: private to this fixture, so no sandboxed command is
+    /// handed the host's shared /tmp as its TMPDIR.
+    tmp: PathBuf,
+    /// Whether /tmp/.git already existed, so the fixture only blames itself for one it left.
+    slash_tmp_git_before: bool,
     _listener: UnixListener,
 }
 
@@ -63,18 +68,33 @@ impl Fixture {
         let base = outside_root()?;
         let root = tempfile::Builder::new().prefix("st-sb-").tempdir_in(&base).unwrap();
         let path = fs::canonicalize(root.path()).unwrap();
+        let tmp = path.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
         // A short path: a socket path has a hard length limit.
         let socket = std::env::temp_dir().join(format!("st-sb-{}.sock", std::process::id()));
         let _ = fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
-        Some(Self { _root: root, base: path, socket, _listener: listener })
+        let slash_tmp_git_before = Path::new("/tmp/.git").exists();
+        Some(Self { _root: root, base: path, socket, tmp, slash_tmp_git_before, _listener: listener })
     }
 }
 
-/// Run `script` under the managed profile exactly as the driver builds it for `workspace`.
-fn sandboxed(workspace: &Path, socket: &Path, script: &str, args: &[&str]) -> Output {
-    let profile = codex_profile(socket, workspace).unwrap();
+impl Drop for Fixture {
+    // A sandbox once left an empty /tmp/.git mount point behind. Every concurrent test that uses /tmp
+    // as a mission workspace then failed with mission-workspace-in-worktree.
+    fn drop(&mut self) {
+        if !std::thread::panicking() && !self.slash_tmp_git_before {
+            assert!(!Path::new("/tmp/.git").exists(), "a sandboxed command left /tmp/.git behind");
+        }
+    }
+}
+
+/// Run `script` under the managed profile exactly as the driver builds it for `workspace`, with
+/// the fixture's own temporary directory as TMPDIR.
+fn sandboxed(fixture: &Fixture, workspace: &Path, script: &str, args: &[&str]) -> Output {
+    let profile = codex_profile(&fixture.socket, workspace).unwrap();
     Command::new("codex")
+        .env("TMPDIR", &fixture.tmp)
         .args(["sandbox", "-C"])
         .arg(workspace)
         .args(["-P", CODEX_PROFILE, "-c"])
@@ -115,19 +135,19 @@ fn the_profile_writes_the_workspace_and_temp_and_refuses_everything_else() {
     let elsewhere = fixture.base.join("elsewhere");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&elsewhere).unwrap();
-    let temp = std::env::temp_dir().join(format!("st-sb-temp-{}", std::process::id()));
+    let temp = fixture.tmp.join(format!("st-sb-temp-{}", std::process::id()));
     let _ = fs::remove_file(&temp);
 
-    let written = sandboxed(&workspace, &fixture.socket, "echo ok > \"$1/inside.txt\" && echo wrote", &[workspace.to_str().unwrap()]);
+    let written = sandboxed(&fixture, &workspace, "echo ok > \"$1/inside.txt\" && echo wrote", &[workspace.to_str().unwrap()]);
     assert!(says(&written, "wrote"), "workspace write: {}", report(&written));
     assert!(workspace.join("inside.txt").exists());
 
-    let temp_write = sandboxed(&workspace, &fixture.socket, "echo ok > \"$1\" && echo wrote", &[temp.to_str().unwrap()]);
+    let temp_write = sandboxed(&fixture, &workspace, "echo ok > \"$1\" && echo wrote", &[temp.to_str().unwrap()]);
     assert!(says(&temp_write, "wrote"), "temp write: {}", report(&temp_write));
     let _ = fs::remove_file(&temp);
 
     let outside = elsewhere.join("outside.txt");
-    let refused = sandboxed(&workspace, &fixture.socket, "echo no > \"$1\" && echo wrote", &[outside.to_str().unwrap()]);
+    let refused = sandboxed(&fixture, &workspace, "echo no > \"$1\" && echo wrote", &[outside.to_str().unwrap()]);
     assert!(!says(&refused, "wrote") && !outside.exists(), "outside write: {}", report(&refused));
     // bubblewrap mounts the rest read-only; macOS's Seatbelt denies the write outright.
     let refusal = if cfg!(target_os = "macos") { "Operation not permitted" } else { "Read-only file system" };
@@ -135,7 +155,7 @@ fn the_profile_writes_the_workspace_and_temp_and_refuses_everything_else() {
     // The home directory is the other place a seat must not write.
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.starts_with("/home") || home.starts_with("/Users")) {
         let marker = home.join(format!(".st-sandbox-control-{}", std::process::id()));
-        let refused = sandboxed(&workspace, &fixture.socket, "echo no > \"$1\" && echo wrote", &[marker.to_str().unwrap()]);
+        let refused = sandboxed(&fixture, &workspace, "echo no > \"$1\" && echo wrote", &[marker.to_str().unwrap()]);
         assert!(!says(&refused, "wrote") && !marker.exists(), "home write: {}", report(&refused));
     }
 }
@@ -151,14 +171,12 @@ fn the_profile_reaches_the_fractal_socket_and_the_network() {
     let workspace = fixture.base.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    let connected = sandboxed(&workspace, &fixture.socket, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[fixture.socket.to_str().unwrap()]);
+    let connected = sandboxed(&fixture, &workspace, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[fixture.socket.to_str().unwrap()]);
     assert!(says(&connected, "connected"), "st socket: {}", report(&connected));
 
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tcp.local_addr().unwrap().port().to_string();
-    let reached = sandboxed(
-        &workspace,
-        &fixture.socket,
+    let reached = sandboxed(&fixture, &workspace,
         "python3 -c \"import socket,sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 5); print('reached')\" \"$1\"",
         &[&port],
     );
@@ -182,7 +200,7 @@ fn the_known_limit_other_local_sockets_stay_reachable() {
     let other = std::env::temp_dir().join(format!("st-sb-other-{}.sock", std::process::id()));
     let _ = fs::remove_file(&other);
     let _listener = UnixListener::bind(&other).unwrap();
-    let reached = sandboxed(&workspace, &fixture.socket, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[other.to_str().unwrap()]);
+    let reached = sandboxed(&fixture, &workspace, &format!("python3 -c \"{CONNECT}\" \"$1\""), &[other.to_str().unwrap()]);
     let _ = fs::remove_file(&other);
     assert!(
         says(&reached, "connected"),
