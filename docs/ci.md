@@ -1557,10 +1557,25 @@ Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 `FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
 Only the main publication step receives the write token; PRs never execute it.
 The producer uploads the complete output closure, including already-cached references,
-then queries the remote store recursively and retains the exact source/output/cache
-receipt and closure manifest as `fractal-native-publication`. Consumers must configure
+then queries the remote store recursively using the same cache-scoped write token
+through a job-temporary, owner-only netrc containing only the named cache host.
+Only that remote-store command receives the netrc path; an exit trap removes the
+file on success or failure. The exact source/output/cache receipt and closure
+manifest are retained as `fractal-native-publication`. Consumers must configure
 read access and trust for that same cache through their fleet cache-client declarations;
 no consumer should substitute an unrelated installed binary when this output is absent.
+
+Each publication has a commit-keyed job concurrency group with cancellation disabled;
+there is no workflow-wide group that can replace another commit's pending publisher.
+For backfills, dispatch `nix.yml` on `main` with the required `sha` input set to a full
+40-character commit SHA. Checkout uses that exact SHA at depth one; the guard fetches
+the remaining main history explicitly with `--no-tags --unshallow`, avoiding evidence
+tags. Before Nix
+setup or any token-bearing step, the guard checks the SHA syntax, verifies checkout
+identity, fetches current `origin/main`, and requires the SHA to be its ancestor.
+The build and receipt use this validated SHA, not the dispatch event's main-tip SHA.
+Dispatches from other branches, scheduled events, and PRs cannot publish. This lane
+does not add a required check or merge-queue job.
 
 | Workflow | What it runs |
 | --- | --- |

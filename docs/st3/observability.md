@@ -1365,7 +1365,7 @@ are opt-in. Observation adds no reclamation calls or changes to checkpoint clean
 Proof: the completion-scope unit test checks production totals increase. Source
 review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
 integration test captures all five closed states with a common collection timestamp
-and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("fractal")`;
 the timestamp proves a common SDK collection, not the number of native calls.
 A fresh-test-process proof initializes real daemon telemetry with traces enabled and
 metrics disabled, asserting no meter provider is created; it does not infer absence
@@ -1398,7 +1398,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 `st.parent.sampled=true`.
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
-bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
+bridge dependencies, not an exporter or SDK initializer. `fractal` enables the feature;
 `fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from

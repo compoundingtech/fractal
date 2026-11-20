@@ -29,16 +29,16 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 // These paths carry a configured person without an --as actor argument. Keep this
 // small semantic supplement next to the generated syntax, not in an operator wrapper.
 // Call-site map (review these handlers when their identity handling changes):
-// - st setup: setup::run reads config.person to select default_person, then records
+// - fractal setup: setup::run reads config.person to select default_person, then records
 //   the selected person in config.person (crates/fractal/src/setup.rs).
-// - st ui: main::run_terminal_ui calls fractal_tui::run, which falls back to
+// - fractal ui: main::run_terminal_ui calls fractal_tui::run, which falls back to
 //   configured_person() and passes that actor to Client::unix_as (crates/fractal-tui/src/lib.rs).
-// - st ui open: fractal_tui::open_in_terminal_ui resolves configured_person() before
+// - fractal ui open: fractal_tui::open_in_terminal_ui resolves configured_person() before
 //   queueing a request in that person's terminal UI request directory.
-// - st note and st availability with their subcommands: main's Command::Note and
+// - fractal note and fractal availability with their subcommands: main's Command::Note and
 //   Command::Availability pass config.person to directive_note::run and
 //   availability::run, which resolve it with configured_actor before dispatch.
-// - st changes sync: main's Command::Changes resolves config.person with
+// - fractal changes sync: main's Command::Changes resolves config.person with
 //   configured_actor before constructing the named execution client.
 // A parser-only test cannot prove these runtime fallbacks; keep their source
 // anchors explicit rather than asserting source text or requiring live setup/UI.
@@ -353,14 +353,14 @@ mod tests {
         let path = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/st3/actor-contract.json");
         let published: Value = serde_json::from_slice(
-            &std::fs::read(path).expect("regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json"),
+            &std::fs::read(path).expect("regenerate with: fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json"),
         )
         .unwrap();
         assert!(published.get("contract_sha256").is_none());
         assert_eq!(
             value["contract"],
             published["contract"],
-            "the CLI actor surface changed; review every changed command and regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json; resolve rebase conflicts by regenerating, never by hand-merging"
+            "the CLI actor surface changed; review every changed command and regenerate with: fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json; resolve rebase conflicts by regenerating, never by hand-merging"
         );
     }
 

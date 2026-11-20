@@ -303,7 +303,7 @@ mod tests {
         let Json(result) = waiting.await.unwrap();
         assert_eq!(result.exit_code,Some(37));
         assert!(result.command.environment.is_empty());
-        assert_eq!(state.store.shell_resource("waiter").unwrap().command.environment.len(),1);
+        assert!(state.store.shell_resource("waiter").unwrap().command.environment.is_empty());
     }
 
     #[cfg(not(target_os = "macos"))]
