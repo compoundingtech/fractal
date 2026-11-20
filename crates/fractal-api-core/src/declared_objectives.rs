@@ -291,10 +291,12 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 ),
             );
             let mut produced = Vec::new();
+            let mut incomplete_scope = false;
             for source_row in native_rows {
                 if source_row["kind"] != "objective" { continue; }
                 let Some(id) = source_row["id"].as_str() else { continue };
                 if !native_owns(source, id) { continue; }
+                incomplete_scope |= source_row["source"]["scope_complete"] == false;
                 let mut row = source_row.clone();
                 row["id"] = Value::String(format!("{}{}", objective.name, &id[source.len()..]));
                 row["about"] = Value::String(objective.about.clone());
@@ -304,17 +306,19 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 ));
                 produced.push(row);
             }
-            if produced.is_empty() {
-                // A wholly missing source is unknown, not proof its previously burning children ended.
+            if produced.is_empty() || incomplete_scope {
+                // Partial source populations are unknown too. Retain mapped child identities
+                // from this declaration, never raw native prefixes or another owner's subtree.
                 let mut ids = entry.ids.clone();
                 ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
-                if ids.is_empty() { ids.insert(objective.name.clone()); }
+                if ids.is_empty() && produced.is_empty() { ids.insert(objective.name.clone()); }
                 for id in ids {
+                    if produced.iter().any(|row| row["id"] == id) { continue; }
                     produced.push(json!({
                         "id": id, "kind": "objective", "about": objective.about,
-                        "target": "native objective", "current": "native source unavailable", "window": "now",
+                        "target": "native objective", "current": "native source scope unavailable", "window": "now",
                         "remaining_percent": null, "status": "no-data",
-                        "explain": format!("Native objective {source} has no source row on this member. {response}"),
+                        "explain": format!("Native objective {source} has no complete source scope for this child on this member. {response}"),
                     }));
                 }
             }
