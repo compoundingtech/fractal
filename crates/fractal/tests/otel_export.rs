@@ -1258,8 +1258,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
     assert!(post_write_count > 0, "write must export a subsequent reconcile pass:\n{traces}");
     let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-    let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass"))
-        .filter(|span| timestamp(span, "startTimeUnixNano") >= write_started).collect();
+    let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
     for name in [
         "st.reconcile.changes", "st.reconcile.gate-runners", "st.reconcile.desired",
         "st.reconcile.pty-snapshot", "st.reconcile.render", "st.reconcile.members",
