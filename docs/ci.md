@@ -1568,7 +1568,9 @@ no consumer should substitute an unrelated installed binary when this output is 
 Each publication has a commit-keyed job concurrency group with cancellation disabled;
 there is no workflow-wide group that can replace another commit's pending publisher.
 For backfills, dispatch `nix.yml` on `main` with the required `sha` input set to a full
-40-character commit SHA. Checkout uses that exact SHA with full history. Before Nix
+40-character commit SHA. Checkout uses that exact SHA at depth one; the guard fetches
+the remaining main history explicitly with `--no-tags --unshallow`, avoiding evidence
+tags. Before Nix
 setup or any token-bearing step, the guard checks the SHA syntax, verifies checkout
 identity, fetches current `origin/main`, and requires the SHA to be its ancestor.
 The build and receipt use this validated SHA, not the dispatch event's main-tip SHA.
