@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "Same guarantee as #6747: no environment bytes in the database file or the WAL after the scrub. Not reached, where a VACUUM would reach: the unused part of pages that other tables reused before secure_delete was on."
+    "detail": "The shell-table and free-list scrub removes environment bytes from those pages and the WAL. Bytes in unused portions of pages that other tables reused before this version are not reached; an operator-scheduled offline VACUUM gives full database-file and WAL erasure. secure_delete is enabled only for incomplete scrub work and its previous OFF, ON or FAST setting is restored on success or failure; completed stores leave the setting untouched."
   },
   "compatibility": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Old free-list pages are scrubbed, not necessarily returned to the filesystem. Bytes in unused portions of pages that other tables reused before secure_delete was enabled remain outside this scrub. An operator-scheduled offline VACUUM can reclaim that space; startup never runs it."
+    "detail": "Old free-list pages are scrubbed, not necessarily returned to the filesystem. Bytes in unused portions of pages that other tables reused before secure_delete was enabled remain outside this scrub. Schedule an offline VACUUM for full erasure of those historical bytes and space reclamation; startup never runs it."
   },
   "recovery": {
     "status": "none",

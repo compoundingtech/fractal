@@ -132,7 +132,7 @@ obligations from canonical signed inputs.
 The `fractal_store::store::shell_resources` maintainer owns the scrub exceptions
 reviewed in [#6747](https://github.com/compoundingtech/fractal/pull/6747):
 
-- `lv-h3c3043b9f6fc` declares the local completion table; its only key is the
+- `lv-hb88f17cedac9` declares the local completion table; its only key is the
   checked integer `complete=1`. The conservative catalog still makes no size proof.
 - `lv-h3fe95fd4aec7` copies historical `shell_resources_v1.body` JSON without
   environments, preserving all other command/result fields. Those bodies and
