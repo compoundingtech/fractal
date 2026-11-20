@@ -1,13 +1,13 @@
-//! Fractal's checkpoint rules: which of its claims a stable checkpoint may drop, what a
-//! checkpoint proof compares about each subject, and the attention a stalled checkpoint asks
-//! for. The graph runs checkpoints (`smallclaims::store::checkpoint`) and asks the runtime for
-//! these through `smallclaims::store::Runtime`.
+//! Fractal's checkpoint rules: which of its claims a member's own trim may drop, and what the
+//! answers check compares about each subject. The graph runs the trim
+//! (`smallclaims::store::checkpoint_trim`) and asks the runtime for these through
+//! `smallclaims::store::Runtime`.
 //!
-//! `doc/fleet/smalltalk/checkpoint-design` is the design. Each rule keeps, within a slot, the
-//! claims a reader's answer depends on. It drops a claim only when a later kept claim of the same
-//! slot replaces it for every fold that reads the kind (the claim's witness). The planner is a
-//! pure function of the claims before the cut, in canonical order, so every node that holds the
-//! same claims drops the same ones.
+//! `docs/st3/checkpoints.md` describes the rules. Each rule keeps, within a slot, the claims a
+//! reader's answer depends on. It drops a claim only when a later kept claim of the same slot
+//! replaces it for every fold that reads the kind (the claim's witness). The planner is a pure
+//! function of the claims before the cut, in canonical order, so every node that holds the same
+//! claims drops the same ones.
 
 use super::*;
 use smallclaims::store::checkpoint::DAY_MS;
@@ -1120,8 +1120,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
         sealed_envelopes: sealed.envelopes.len(),
         sealed_claims: first.len(),
         sealed_digest: sealed_digest(sealed),
-        // Cumulative: every tombstone before the cut, from earlier checkpoints and this one. A
-        // node that adopts the checkpoint checks the whole manifest against it.
+        // Cumulative: every tombstone before the cut, from earlier checkpoints and this one.
         drop_digest: drop_digest(
             &[sealed.envelope_tombstones.as_slice(), envelopes.as_slice()].concat(),
             &[sealed.claim_tombstones.as_slice(), tombstones.as_slice()].concat(),

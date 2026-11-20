@@ -285,8 +285,8 @@ impl Store {
                 None => super::checkpoint_space::SpaceGuard::admit(&self.path, dir)?,
             })
         };
-        // The startup checkpoint pass sweeps only proof scratch that has lost its owner lock.
-        // A dry-run captures in `scratch/plan`, while the proof files live in `scratch`.
+        // Sweep what an older build's checkpoint proof left in the scratch directory, under its
+        // lock. A capture in `scratch/plan` locks `scratch`, where those files lived.
         let proof_root = if dir.file_name().is_some_and(|name| name == std::ffi::OsStr::new("plan")) {
             dir.parent().unwrap_or(dir)
         } else {

@@ -69,8 +69,6 @@ pub fn checkpoint_build() -> String {
         .to_owned()
 }
 
-/// One admitted `checkpoint.*` claim. Lists of them are in canonical order.
-
 /// What one pass of checkpoint work needs from outside the store.
 #[derive(Clone, Debug)]
 pub struct CheckpointContext {
@@ -203,10 +201,6 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
     DIGEST.as_ref().map(String::as_str)
         .map_err(|error| anyhow::anyhow!("checkpoint executable identity unavailable: {error}"))
 }
-
-/// Envelope identities cover immutable claim content, but not admission state or the
-/// materialized tombstones left by earlier trims. Include that closure and canonical claim
-/// order as well as the plan. A build change may fix reader/projection semantics without
 
 impl Store {
     /// One pass of checkpoint work: finish a trim a crash or the daily cap left, then trim this

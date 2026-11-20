@@ -785,7 +785,7 @@ fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
         .unwrap();
         transaction
             .execute(
-                "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h21d91b86073e owner=fractal_store::store::tombstones_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms)
                  VALUES (?1, ?2, 'trimming', ?3, 0)",
                 rusqlite::params![CHECKPOINT, i64::try_from(cut).unwrap(), plan.drop_digest],
             )

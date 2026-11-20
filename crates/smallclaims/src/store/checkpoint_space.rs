@@ -136,8 +136,8 @@ fn remove_if_present(path: &Path, failures: &mut Vec<String>) {
     }
 }
 
-/// Another proof holds the directory lock. It is released when that proof finishes, so a caller
-/// that can wait, such as a dry-run plan, may try again.
+/// Another capture holds the directory lock. It is released when that capture finishes, so a
+/// caller that can wait may try again.
 #[derive(Debug)]
 pub struct CheckpointProofBusy {
     pub dir: PathBuf,
@@ -145,15 +145,15 @@ pub struct CheckpointProofBusy {
 
 impl std::fmt::Display for CheckpointProofBusy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "another checkpoint proof owns {}", self.dir.display())
+        write!(formatter, "another checkpoint capture owns {}", self.dir.display())
     }
 }
 
 impl std::error::Error for CheckpointProofBusy {}
 
-/// One proof owns the directory lock until its copy and every sidecar have been removed. A
-/// surviving `.owner` file names an orphan; a following process may sweep it only while holding
-/// the lock. An unmarked legacy proof file is refused rather than assumed to be abandoned.
+/// One capture owns the scratch directory lock while it runs. A surviving `.owner` file names a
+/// proof copy an older build left behind; the owner of the lock sweeps it. An unmarked legacy
+/// proof file is refused rather than assumed to be abandoned.
 pub(super) struct ProofOwnership {
     dir: PathBuf,
     _lock: File,
@@ -174,7 +174,7 @@ impl ProofOwnership {
                 return Err(CheckpointProofBusy { dir: dir.to_owned() }.into());
             }
             return Err(error)
-                .with_context(|| format!("another checkpoint proof owns {}", dir.display()));
+                .with_context(|| format!("another checkpoint capture owns {}", dir.display()));
         }
         let ownership = Self {
             dir: dir.to_owned(),
@@ -259,8 +259,8 @@ fn live_size(path: &Path) -> Result<(u128, u128, u128)> {
 
 fn empty_schema_bytes(page_size: u128) -> Result<u128> {
     let connection = Connection::open_in_memory()?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfbcc0086d0e1 owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ &format!("PRAGMA page_size={page_size};"))?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb33a5a9775c2 owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ super::checkpoint_staging::SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h121eaf6ba3cf owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ &format!("PRAGMA page_size={page_size};"))?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5154c31b5d2f owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ super::checkpoint_staging::SCHEMA)?;
     let pages: u128 =
         u128::try_from(connection.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)?;
     pages
@@ -597,16 +597,24 @@ mod tests {
         assert!(page_size * page_count > 1024 * 1024);
     }
 
+    /// A store whose image is a terabyte of pages, sparse so it takes no disk: its header's page
+    /// count is made stale, so SQLite counts pages from the file's length.
+    fn sparse_terabyte_store(live: &Path) {
+        use std::os::unix::fs::FileExt as _;
+        Connection::open(live)
+            .unwrap()
+            .execute_batch("CREATE TABLE valid(x);")
+            .unwrap();
+        let file = File::options().write(true).open(live).unwrap();
+        file.set_len(1024 * 1024 * 1024 * 1024).unwrap();
+        file.write_all_at(&[0xff; 4], 92).unwrap();
+    }
+
     #[test]
     fn a_refused_capture_preserves_an_existing_staging_file() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
-        Connection::open(&live)
-            .unwrap()
-            .execute_batch("CREATE TABLE valid(x);")
-            .unwrap();
-        let file = File::options().write(true).open(&live).unwrap();
-        file.set_len(1024 * 1024 * 1024 * 1024).unwrap();
+        sparse_terabyte_store(&live);
         let staging = dir.path().join("checkpoint");
         fs::create_dir(&staging).unwrap();
         let capture = staging.join("capture-existing.sqlite3");
@@ -634,12 +642,7 @@ mod tests {
     fn refuses_before_allocation_with_actionable_headroom() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
-        Connection::open(&live)
-            .unwrap()
-            .execute_batch("CREATE TABLE valid(x);")
-            .unwrap();
-        let file = File::options().write(true).open(&live).unwrap();
-        file.set_len(1024 * 1024 * 1024 * 1024).unwrap(); // sparse: no large disk use
+        sparse_terabyte_store(&live);
         let scratch = dir.path().join("scratch");
         let error = SpaceGuard::admit(&live, &scratch)
             .err()

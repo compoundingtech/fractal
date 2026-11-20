@@ -254,7 +254,7 @@ pub(crate) fn keep_only_tombstones_tx(
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     transaction.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h41059b0e7a62 owner=smallclaims::store::checkpoint_trim TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE IF NOT EXISTS adopted_envelopes(
+        "CREATE TEMP TABLE IF NOT EXISTS adopted_envelopes(
              writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
              PRIMARY KEY (writer, sequence, envelope_hash));
          CREATE TEMP TABLE IF NOT EXISTS adopted_claims(id TEXT PRIMARY KEY);
@@ -263,24 +263,24 @@ pub(crate) fn keep_only_tombstones_tx(
     )?;
     {
         let mut insert = transaction.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h606a2ea2c17e owner=smallclaims::store::checkpoint_trim TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO temp.adopted_envelopes(writer, sequence, envelope_hash)
+            "INSERT OR IGNORE INTO temp.adopted_envelopes(writer, sequence, envelope_hash)
              VALUES (?1, ?2, ?3)",
         )?;
         for envelope in envelopes {
-            insert.execute(/* sqlite-large-value: allow-for-now lv-h602112ce8703 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![
+            insert.execute(params![
                 envelope.writer,
                 envelope.sequence,
                 envelope.envelope_hash
             ])?;
         }
         let mut insert = transaction
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf56d2d99513a owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO temp.adopted_claims(id) VALUES (?1)")?;
+            .prepare_cached("INSERT OR IGNORE INTO temp.adopted_claims(id) VALUES (?1)")?;
         for claim in claims {
-            insert.execute(/* sqlite-large-value: allow-for-now lv-ha5bb9a6450df owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            insert.execute([&claim.id])?;
         }
     }
     transaction.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hb829e6623715 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_envelopes WHERE NOT EXISTS (
+        "DELETE FROM checkpoint_envelopes WHERE NOT EXISTS (
              SELECT 1 FROM temp.adopted_envelopes AS adopted
              WHERE adopted.writer=checkpoint_envelopes.writer
                AND adopted.sequence=checkpoint_envelopes.sequence
@@ -534,10 +534,8 @@ impl Store {
         Ok(())
     }
 
-    /// Trim this member's own due cut, while it trims locally: capture the set before the cut,
-    /// plan its drop with the same rules and guards a shared checkpoint uses, and trim it. There
-    /// is no seal, verification or copy-proof. Two checks stand in for the proof: the plan is
-    /// refused whole, before anything is recorded, if it would drop the newest claim of any
+    /// Trim this member's own due cut: capture the set before the cut, plan its drop with the
+    /// audited rules and guards, and trim it. Two checks guard it: the plan is refused whole, before anything is recorded, if it would drop the newest claim of any
     /// subject and kind; and `finish_trim` compares the projection digests around every chunk
     /// it deletes and stops at the first change. The cut moves only forward, once a day; a
     /// stopped trim halts the next ones until it is resumed.
@@ -633,13 +631,16 @@ impl Store {
     }
 
     /// Initialize checkpoint history in a fresh offline restore after admitting its claim log:
-    /// record the archived tombstones (their triggers add the retired ledger's rows), mark the
-    /// cut `trimming`, and delete what the restored log still holds of them, as the source's
-    /// own trim did. The member restores its own backup, so nothing but the manifest's shape is
+    /// record the archived tombstones, mark the cut `trimming`, and delete what the restored log
+    /// still holds of them, as the source's own trim did. With `ledgers_archived` the archive
+    /// carries the retired ledgers whole, so recording adds nothing to them: a source that trims
+    /// locally retires an identity only as it deletes it, and its trim may have stopped part way.
+    /// An older archive without them rebuilds them from the tombstones, as recording does. The member restores its own backup, so nothing but the manifest's shape is
     /// checked. This never replaces existing checkpoint state.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
+        ledgers_archived: bool,
     ) -> Result<Vec<CheckpointAction>, FractalError> {
         let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight().map_err(internal)?;
@@ -666,11 +667,31 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction().map_err(internal)?;
             start_local_walk_tx(&transaction, checkpoint).map_err(internal)?;
+            // The ledger triggers fire only where the ledger is not the authority; with the
+            // ledgers archived, they stay silent while the tombstones are recorded.
+            let silence =
+                ledgers_archived && !super::retired::authoritative(&transaction).map_err(internal)?;
+            let authority = |on: bool| -> rusqlite::Result<usize> {
+                if on {
+                    transaction.execute(
+                        /* sqlite-large-value: allow-for-now lv-h7cedc579f3d7 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES(?1, '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [super::retired::AUTHORITY],
+                    )
+                } else {
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-h51f966c0da12 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [super::retired::AUTHORITY])
+                }
+            };
+            if silence {
+                authority(true).map_err(internal)?;
+            }
             record_checkpoint_tombstones_tx(&transaction, checkpoint, &manifest.envelopes, &manifest.claims)
                 .map_err(internal)?;
+            if silence {
+                authority(false).map_err(internal)?;
+            }
             transaction
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h0000000000000 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
+                    /* sqlite-large-value: allow-for-now lv-h8e65016932fc owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
                      VALUES (?1, ?2, 'trimming', ?3, ?4, ?5)",
                     params![
                         checkpoint,
@@ -898,10 +919,12 @@ impl Store {
             self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
             self.pause_trim_chunk(held);
         }
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        mark(&transaction, "trimming")?;
-        transaction.commit()?;
+        {
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            mark(&transaction, "trimming")?;
+            transaction.commit()?;
+        }
         drop(record);
         self.replica_rows_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
@@ -939,7 +962,7 @@ impl Store {
     /// Running it again after a crash deletes only what is left. A chunk deletes one envelope at
     /// a time and stops starting new steps after `TRIM_CHUNK_BUDGET`. Chunks use background
     /// writer admission and rest outside the loan between commits. Each chunk checks, inside its own
-    /// transaction, that the graph did not change; the proof showed it cannot.
+    /// transaction, that the graph did not change, and stops at the first chunk that would.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3f9bf57da525 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
         self.finish_trim_paced(checkpoint, actions, std::thread::sleep)
     }
@@ -1102,7 +1125,7 @@ impl Store {
                 /* sqlite-large-value: allow-for-now lv-ha26d7ebb680b owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
                 params![checkpoint, i64::try_from(now_ms())?],
             )?;
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-h51f966c0da12 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h5a603d0c8b2b owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
             // Every snapshot and page cursor taken before the trim expires, since the claims
             // they read may be gone.
             transaction.execute(

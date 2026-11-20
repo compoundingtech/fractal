@@ -1145,7 +1145,7 @@ fn checkpoint_restore_fails_before_mutation() {
     // The failure is the unavailable runtime contract, before anything is recorded.
     assert!(
         n.store
-            .restore_checkpoint_history(&manifest)
+            .restore_checkpoint_history(&manifest, true)
             .unwrap_err()
             .message
             .contains("ivm-checkpoint-unavailable")

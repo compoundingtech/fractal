@@ -470,7 +470,10 @@ impl Store {
         // admitted before their arrival. Preserve that history, including doctor residue.
         self.replay_replication_graph()?;
         if let Some(manifest) = checkpoint {
-            self.restore_checkpoint_history(manifest)?;
+            self.restore_checkpoint_history(
+                manifest,
+                header.version >= super::backup_format::VERSION_WITH_LEDGERS,
+            )?;
             self.replay_replication_graph()?;
         }
         self.check_backup_chains(&quarantined)?;
@@ -1425,7 +1428,7 @@ mod tests {
         assert!(source.checkpointed_envelopes().unwrap() > 0);
         assert_eq!(
             source
-                .restore_checkpoint_history(&CheckpointManifest::default())
+                .restore_checkpoint_history(&CheckpointManifest::default(), true)
                 .unwrap_err()
                 .code,
             "checkpoint-history-exists"
@@ -1455,9 +1458,9 @@ mod tests {
             now_unix_ms: now_ms() + 3 * 86_400_000,
             scratch: root.path().join("scratch"),
         };
-        for _ in 0..2 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        // The first chunk deletes some of the cut and the trim stops there: the source has
+        // retired only what it deleted, and its archive restores exactly that ledger.
+        source.set_trim_chunk_envelopes(3);
         source.set_trim_fault(Some(TrimFault::AfterChunk(1)));
         assert!(source.checkpoint_step(&context).is_err());
         assert!(source.trimmed_checkpoint().unwrap().is_none());

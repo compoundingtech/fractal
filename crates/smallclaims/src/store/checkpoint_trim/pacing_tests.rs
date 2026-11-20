@@ -7,7 +7,7 @@ use std::time::Duration;
 fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     let mut db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h175352b3edc3 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+        /* sqlite-large-value: allow-for-now lv-h938f31b4066b owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              accepted_at_unix_ms INTEGER, checkpoint TEXT, PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer,sequence,envelope_hash));
@@ -21,7 +21,7 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     let tx = db.transaction().unwrap();
     for sequence in 1..=10_001 {
         tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h9c52ebff18d6 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('writer',?1,'hash',0,'checkpoint/cut')",
+            /* sqlite-large-value: allow-for-now lv-hb3ca2c6445ed owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('writer',?1,'hash',0,'checkpoint/cut')",
             [sequence],
         )
         .unwrap();
@@ -32,12 +32,12 @@ fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     )
     .unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h8c96c824c32a owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('a-gone',NULL,'other',1,'other','checkpoint/cut')",
+        /* sqlite-large-value: allow-for-now lv-hd980ad40ca7c owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('a-gone',NULL,'other',1,'other','checkpoint/cut')",
         [],
     )
     .unwrap();
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h6aaa2338f314 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('z-held',NULL,'other',2,'other','checkpoint/cut')",
+        /* sqlite-large-value: allow-for-now lv-h46b3f4c0beff owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES('z-held',NULL,'other',2,'other','checkpoint/cut')",
         [],
     )
     .unwrap();
@@ -119,10 +119,14 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
     {
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
+        // The walk goes by rowid: two candidates already gone come first, one for the
+        // interrupted loan and one for the first resumed loan.
+        for id in ["!already-deleted-a", "!already-deleted-b"] {
+            let mut absent = tombstones[0].clone();
+            absent.id = id.into();
+            record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[absent]).unwrap();
+        }
         record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &tombstones).unwrap();
-        let mut absent = tombstones[0].clone();
-        absent.id = "!already-deleted".into();
-        record_checkpoint_tombstones_tx(&tx, checkpoint, &[], &[absent]).unwrap();
         tx.commit().unwrap();
     }
     store.set_trim_chunk_envelopes(1);
@@ -197,7 +201,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
             .query_row("SELECT count(*) FROM checkpoint_claims", [], |row| row
                 .get::<_, usize>(0))
             .unwrap(),
-        4
+        5
     );
     assert_eq!(graph_digest(&store.readers.get()).unwrap(), before);
     assert!(matches!(

@@ -864,12 +864,21 @@ impl Store {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Store {
-    /// Copy this store to `copy` from one consistent snapshot, with `VACUUM INTO` on one of its
-    /// own readers, while the writer carries on. Tests that start a store from another's state
-    /// use it.
+    /// Copy this store to `copy` from one consistent snapshot with `VACUUM INTO`, while the
+    /// writer carries on. Tests that start a store from another's state use it.
     pub fn copy_store_to(&self, copy: &Path) -> Result<()> {
-        let path = copy.to_str().ok_or_else(|| anyhow::anyhow!("copy path is not UTF-8"))?;
-        self.readers.get().execute("VACUUM INTO ?1", [path])?;
+        // Readers are read-only, and `VACUUM INTO` needs a connection that may write the copy.
+        let flags = if self.shared_memory {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        };
+        let connection = match &self.admitted {
+            Some(admitted) => admitted.open_connection_with_vfs(flags, None)?,
+            None => Connection::open_with_flags(&self.path, flags)?,
+        };
+        connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
         Ok(())
     }
 }

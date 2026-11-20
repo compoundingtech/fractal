@@ -3459,7 +3459,7 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
         .connection
         .write()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h5a92ceea7d6f owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
+            /* sqlite-large-value: allow-for-now lv-h2b33b795fddc owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='work_extended_projection_rules'",
             [],
         )
         .unwrap();
