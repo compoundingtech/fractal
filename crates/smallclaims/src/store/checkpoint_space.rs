@@ -223,11 +223,12 @@ impl ProofOwnership {
     }
 
     fn remove_set(&self, proof: &Path, failures: &mut Vec<String>) {
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            remove_if_present(
-                &PathBuf::from(format!("{}{suffix}", proof.display())),
-                failures,
-            );
+        // The proof's copy of the store, and the copy of its blob file made beside it.
+        let blobs = PathBuf::from(super::blob_file::location(proof));
+        for file in [proof, blobs.as_path()] {
+            for suffix in ["", "-journal", "-wal", "-shm"] {
+                remove_if_present(&PathBuf::from(format!("{}{suffix}", file.display())), failures);
+            }
         }
         if failures.is_empty()
             && let Err(error) = File::open(&self.dir).and_then(|dir| dir.sync_all())

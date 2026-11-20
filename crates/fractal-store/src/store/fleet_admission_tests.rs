@@ -878,11 +878,20 @@ fn staged_blobs_join_shared_authority_only_with_a_committed_claim() {
         let mut connection = source.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         promote_claim_blobs(&transaction, &json!({"blob_hash":hash})).unwrap();
-        assert_ne!(
-            projection_digest::tables(&transaction).unwrap()["blobs"],
-            baseline.projection_digests["blobs"]
-        );
+        // Promotion makes it a shared blob inside the claim's transaction, and only there.
+        let shared: bool = transaction
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(shared);
         transaction.rollback().unwrap();
+    }
+    {
+        let shared: bool = source
+            .readers
+            .get()
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(!shared, "a rolled-back claim shares no blob");
     }
     assert_eq!(
         source

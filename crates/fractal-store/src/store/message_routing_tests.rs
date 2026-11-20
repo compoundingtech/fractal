@@ -208,3 +208,88 @@ fn a_seat_polling_its_own_mail_finds_mail_routed_to_the_stream() {
     let subjects = page.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>();
     assert_eq!(subjects, [legacy.subject.as_str(), routed.subject.as_str()]);
 }
+
+#[test]
+fn a_work_wake_goes_to_the_stream_only_for_a_seat_on_this_member() {
+    let Fleet { alder, .. } = &fleet();
+    let wake = |subject: &str, name: &str| {
+        let mut input = message(subject, &seat(alder, name));
+        input.actor = Some("daemon/runtime".into());
+        input.fields.insert("from".into(), json!("daemon/runtime"));
+        input.fields.insert("tags".into(), json!([format!("st3-work:step-run/r/s@1@1@{name}")]));
+        input
+    };
+    let here = wake("message/wake-here", "here");
+    let claim = message_routing::send_work_wake(alder, &here).unwrap();
+    assert_eq!((shard_items(alder, "message/wake-here"), graph_items(alder, "message/wake-here")), (1, 0));
+    // The mirror takes it at once, so the step views and the wake deadline see it.
+    assert!(alder.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_work_wake_tags WHERE claim_id='message/wake-here')", [], |row| row.get::<_, bool>(0),
+    ).unwrap());
+    assert_eq!(message_routing::send_work_wake(alder, &here).unwrap().id, claim.id, "a retry replays it");
+    // Another member's seat keeps a graph wake, even where its host reads stream mail: that
+    // member's build may read wakes from the graph alone.
+    for (subject, name) in [("message/wake-inbox", "inbox"), ("message/wake-plain", "plain")] {
+        message_routing::send_work_wake(alder, &wake(subject, name)).unwrap();
+        assert_eq!((shard_items(alder, subject), graph_items(alder, subject)), (0, 1), "{name}");
+    }
+}
+
+/// Refuse every append to `store`'s shard, as a broken stream path would.
+fn break_shard(store: &Store) {
+    messages_shard::shard(store)
+        .unwrap()
+        .connection
+        .write()
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h59b44db7cbc4 owner=fractal_store::store::message_routing_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER refuse_appends BEFORE INSERT ON claims BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;")
+        .unwrap();
+}
+
+fn counted(store: &Store) -> Vec<(String, u64)> {
+    message_routing::fallbacks(store).into_iter().collect()
+}
+
+#[test]
+fn a_send_the_stream_fails_goes_to_the_graph_and_is_counted_by_its_code() {
+    let Fleet { alder, .. } = &fleet();
+    assert!(counted(alder).is_empty());
+    break_shard(alder);
+    let input = message("message/route-fallback", &seat(alder, "here"));
+    assert_eq!(message_routing::legacy_reason(alder, &input).unwrap(), None);
+    let (claim, appended) = message_routing::send_message(alder, &input).unwrap();
+    assert!(appended);
+    assert_eq!((shard_items(alder, &input.subject), graph_items(alder, &input.subject)), (0, 1));
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    // A retry replays the graph claim, and is no second fallback.
+    let (again, appended) = message_routing::send_message(alder, &input).unwrap();
+    assert!(!appended);
+    assert_eq!(again.id, claim.id);
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    // A code outside the fixed list counts as `other`, so a label never takes an arbitrary value.
+    message_routing::record_fallback(alder, "send", "message/route-unlisted", "an-unlisted-code", "detail");
+    assert_eq!(counted(alder), [("internal".to_owned(), 1), ("other".to_owned(), 1)]);
+}
+
+#[test]
+fn a_queued_message_the_shard_keeps_refusing_goes_to_the_graph_and_is_counted_once() {
+    let Fleet { alder, .. } = &fleet();
+    break_shard(alder);
+    let input = message("message/route-fallback-queued", &seat(alder, "here"));
+    {
+        let mut connection = alder.connection.write();
+        let transaction = connection.transaction().unwrap();
+        assert!(message_routing::send_message_tx(&transaction, "alder", &input, None).unwrap());
+        transaction.commit().unwrap();
+    }
+    // Each refusal keeps the row and counts nothing: the message has not gone anywhere yet.
+    for _ in 0..message_outbox::ATTEMPTS {
+        assert_eq!(message_outbox::drain(alder).unwrap(), 0);
+        assert!(counted(alder).is_empty());
+    }
+    // Its retries spent, the graph takes it, counted under the shard's last refusal.
+    assert_eq!(message_outbox::drain(alder).unwrap(), 1);
+    assert_eq!((shard_items(alder, &input.subject), graph_items(alder, &input.subject)), (0, 1));
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    assert_eq!(message_outbox::drain(alder).unwrap(), 0);
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+}

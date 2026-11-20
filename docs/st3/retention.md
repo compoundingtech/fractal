@@ -46,6 +46,27 @@ the exported claim count. Nonces, signatures and idempotency remain authoritativ
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.
 
+Graph mail is the exception to `durable` on a member that trims locally and opts in (`[trim] local`
+and `[trim] mail = true`). There, a closed agent or daemon thread retires a week after it closes: all
+its `message.*` claims are deleted and their IDs join the retired set
+(`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
+and any thread another claim cites are kept forever. The rule reads only the claims, so every such
+member retires the same threads without coordination, and a retired ID is never sent back. A
+thread whose closed claim arrived before its sent claim waits on a short list and is judged again
+once the sent claim is there. A citation that reaches one member before it judges a thread and
+another only after it retired it leaves the two apart: the first keeps its copy until set exchange
+applies a peer's retired set to it (the retired set wins there; today the claim range comparison
+only shows the difference). Off unless `[trim] mail = true`, until the owner decides whether it becomes the default for such members; retired mail
+does not come back on a rollback. Each
+writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
+Retirement and free-page commits run at `synchronous=NORMAL` with no checkpoint inside the commit,
+and put both back afterwards, on error too: on a busy host the fsync took most of a hold, and a
+crash before the writer's next ordinary commit loses only steps the next pass redoes. Before each
+hold a reader reads the signature and replica rows the hold will delete, so it finds them cached.
+Escalation notifications tagged `mission-escalation-v1` also stay: their native delivery receipts
+are permanent episode-stage deduplication authority, including after later ladder deadlines or restarts.
+Mail in the messages shard is not touched.
+
 ## Where writes go
 
 `log` says where a kind's writes go. `fractal schema show KIND` prints it as `RETENTION` for every

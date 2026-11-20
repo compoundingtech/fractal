@@ -252,31 +252,27 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
     if traffic == QuiescenceTraffic::StartCompletion {
-        // Admission's own signal_changed can wake the next pass while the launch worker still
-        // runs; that pass finds nothing to apply and rests. Hold it until the launch has finished,
-        // so the woken pass is the one that records the completion, whatever the host's load.
+        // Admission wakes the loop before launch completion. Hold the next dispatch until the
+        // helper has both finished the worker and applied its result: leaving `live` alone does
+        // not order the independent completion consumer's writes against the measured passes.
         let (dispatched, helper_done) = std::sync::mpsc::channel();
         *reconciler.background_dispatch_hook.lock().unwrap() = Some(Box::new({
-            let live = reconciler.start_jobs.live.clone();
-            move || {
-                helper_done.recv().unwrap();
-                let (live, changed) = &*live;
-                let mut live = live.lock().unwrap();
-                while !live.is_empty() {
-                    live = changed.wait(live).unwrap();
-                }
-            }
+            move || helper_done.recv_timeout(Duration::from_secs(30)).unwrap()
         }));
         let reconciler = reconciler.clone();
         tokio::task::spawn_blocking(move || {
             let subject = reconciler.store.desired_subjects().unwrap().into_iter()
                 .find(|subject| subject.subject == "exec/quiet-0").unwrap();
             let before = smallclaims::touched::writes();
+            // Use the existing single-start fixture barrier, not just the worker's `live` set.
+            // This also serializes with a completion consumer that already took the result.
+            reconciler.wait_for_test_starts.store(true, Ordering::Release);
             // Complete only after the initial pass rests. This real start path's
             // signal_changed must supply the next wake; the test never calls notify.
             reconciler.perform_start(
                 &subject, subject.member.as_ref().unwrap(), "helper completed start",
             ).unwrap();
+            assert!(reconciler.store.runtime_start_for(&subject.subject).unwrap().unwrap().applied);
             assert!(smallclaims::touched::writes() > before);
             dispatched.send(()).unwrap();
         }).await.unwrap();
@@ -309,7 +305,7 @@ async fn background_quiesces_after_deduping_local_only_observations() {
 
 #[tokio::test]
 async fn background_start_completion_on_a_helper_thread_wakes_a_quiet_pass() {
-    // The completion wakes a pass, which records the new observation and confirms it once.
+    // The helper's completed start wakes the loop, which converges and confirms quiescence.
     assert_eq!(quiescence_pass_counts(QuiescenceTraffic::StartCompletion).await, vec![1, 2]);
 }
 

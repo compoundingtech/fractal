@@ -618,6 +618,97 @@ fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp
     assert_eq!(resumed.pending.input_acceptances, recovered);
 }
 
+#[test]
+fn omp_admission_fallback_is_content_free_fenced_and_once_per_batch_across_reexec() {
+    for reason in ["content-mismatch", "no-message-start", "timeout"] {
+        let mut state = PiChannelResume {
+            incarnation: "runtime-a".into(),
+            ..Default::default()
+        };
+        let mut observer = None;
+        let mut frame = json!({
+            "type": "admission_fallback", "reason": reason, "content": "PRIVATE PROMPT",
+            "meta": {"messageId": "message/first", "identity": "example",
+                "inputIncarnation": "runtime-a", "extra": "PRIVATE METADATA"},
+        });
+        assert!(accept_managed_channel_frame(
+            &mut state, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert_eq!(state.pending.admission_fallbacks.len(), 1);
+        assert_eq!(state.pending.admission_fallbacks["message/first"], reason);
+        let input = omp_channel_admission_fallback_claim(
+            "agent/example", &state.incarnation, "message/first", reason,
+        );
+        assert_eq!(input.subject, "agent/example");
+        assert_eq!(input.fields["incarnation_id"], "runtime-a");
+        assert_eq!(input.fields["message_id"], "message/first");
+        assert_eq!(input.fields["reason"], reason);
+        let saved = serde_json::to_string(&state).unwrap();
+        let claim = serde_json::to_string(&input).unwrap();
+        for serialized in [&saved, &claim] {
+            assert!(!serialized.contains("PRIVATE"));
+            assert!(!serialized.contains("\"content\""));
+        }
+        let mut restored: PiChannelResume = serde_json::from_str(&saved).unwrap();
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        // Publication removes only pending work, not the first-observation deduplication.
+        restored.pending.admission_fallbacks.clear();
+        frame["reason"] = json!("timeout");
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert!(restored.pending.admission_fallbacks.is_empty());
+        assert!(restored.pending.acknowledgements.is_empty());
+        assert!(!restored.first_idle_seen);
+    }
+}
+
+#[test]
+fn omp_admission_fallback_rejects_unknown_reason_and_foreign_or_missing_binding() {
+    let valid = json!({
+        "type": "admission_fallback", "reason": "timeout",
+        "meta": {"messageId": "message/first", "identity": "example",
+            "inputIncarnation": "runtime-a"},
+    });
+    for (path, invalid) in [
+        ("/reason", json!("private-unbounded-reason")),
+        ("/reason", Value::Null),
+        ("/meta/inputIncarnation", json!("runtime-b")),
+        ("/meta/inputIncarnation", Value::Null),
+        ("/meta/identity", json!("another-seat")),
+        ("/meta/identity", Value::Null),
+        ("/meta/messageId", json!("")),
+        ("/meta/messageId", Value::Null),
+    ] {
+        let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+        let mut frame = valid.clone();
+        *frame.pointer_mut(path).unwrap() = invalid;
+        assert!(!accept_managed_channel_frame(
+            &mut state, &mut None, &frame.to_string(), "agent/example",
+        ).unwrap(), "{frame}");
+        assert!(state.pending.admission_fallbacks.is_empty());
+        assert!(state.admission_fallbacks_seen.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn omp_admission_fallback_outage_retains_pending_observation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+    let frame = json!({"type":"admission_fallback","reason":"timeout",
+        "meta":{"messageId":"message/first","identity":"example","inputIncarnation":"runtime-a"}});
+    assert!(accept_managed_channel_frame(
+        &mut state, &mut None, &frame.to_string(), "agent/example",
+    ).unwrap());
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(state.pending.publish(
+        &client, "agent/example", "omp", "runtime-a", "native",
+    ).await.is_err());
+    assert_eq!(state.pending.admission_fallbacks["message/first"], "timeout");
+}
+
 #[tokio::test]
 async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
     let root = tempfile::tempdir().unwrap();
@@ -9701,6 +9792,84 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
 }
 
 #[tokio::test]
+async fn mission_show_joins_only_the_run_revisions_source_provenance() {
+    use fractal_daemon::SeatsStoreCore as _;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("publisher").unwrap());
+    let source = r#"version 2
+mission "source-bound" state="ready" {
+  provenance {
+    reason "Republished after reviewed merge."
+    source {
+      repository "https://github.com/example/factory"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "graph/demo/mission.ts"
+      renderer "graph-v1"
+    }
+    decision "https://github.com/example/factory/pull/42"
+  }
+  goal "Keep a source-bound schedule."
+  step "hold" { agentless }
+}"#;
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "source-bound-publication").unwrap();
+    let mut run = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "source-bound".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("agent/original-owner".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "source-bound-run".into(),
+    }).unwrap();
+    let created = store.latest_claim(&run.subject, Some("mission-run.created")).unwrap().unwrap();
+    let admitted = created.body["fields"]["admission_publication"].as_str().unwrap().to_owned();
+    let newer = source.replace("Keep a source-bound schedule.", "Newer schedule.")
+        .replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .replace("/pull/42", "/pull/43");
+    let intent = fractal_daemon::parse_intent(&newer, store.origin()).unwrap();
+    store.apply_internal(&intent, "newer-publication").unwrap();
+    let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+    let publication = load_run_publication(&client, &run).await.unwrap().unwrap();
+    assert_eq!(publication.claim_id, admitted);
+    assert_eq!(publication.revision, run.revision);
+    run.provenance = None; // An older daemon omitted the existing sidecar.
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    let provenance = run.provenance.take().unwrap();
+    assert_eq!(provenance.source.commit, "a".repeat(40));
+    assert_eq!(provenance.decision, vec!["https://github.com/example/factory/pull/42"]);
+    assert_eq!(run.requester, "agent/original-owner");
+    run.revision = "0".repeat(64);
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    assert!(run.provenance.is_none());
+    assert!(load_run_publication(&client, &run).await.unwrap().is_none());
+    server.abort();
+}
+
+#[test]
+fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
+    let root = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("src");
+    let source = fs::read_to_string(root.join("main.rs")).unwrap();
+    let lookup = source.split_once("async fn load_run_publication(").unwrap().1
+        .split_once("async fn load_run_source_provenance(").unwrap().0;
+    assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
+    assert!(lookup.contains("admission_publication"));
+    assert!(lookup.contains("/v1/claims/by-id/"));
+    assert!(!lookup.contains("mission_publications("));
+    assert!(!lookup.contains("before_index"));
+    let follow = source.split_once("async fn follow_mission_run_to(").unwrap().1
+        .split_once("client.follow_recovered()").unwrap().0;
+    assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
+    assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
+    assert!(!follow.contains("mission_publications("));
+    let show_source = fs::read_to_string(root.join("launch_cli.rs")).unwrap();
+    let show = show_source.split_once("MissionViewCommand::Show(").unwrap().1
+        .split_once("print_mission_tree_continuation").unwrap().0;
+    assert!(show.contains("load_run_publication(client, &run)"));
+    assert!(!show.contains("mission_publications("));
+}
+
+#[tokio::test]
 async fn missions_start_names_a_replaced_or_missing_revision() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("single").unwrap());
@@ -9757,6 +9926,11 @@ async fn missions_start_names_a_replaced_or_missing_revision() {
 
     let publications = mission_publications(&client, "arrival").await.unwrap();
     assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0].actor.as_deref(), Some("person/test"));
+    let publication_note = mission_publication_note(publications.first());
+    assert!(publication_note.starts_with("PUBLISHER person/test · single · "));
+    assert!(publication_note.contains(&format!("\nPUBLICATION {}\n", publications[0].claim_id)));
+    assert!(!publication_note.contains("REQUESTER"));
     assert!(
         started_revision_note("arrival", &second, &publications)
             .ends_with("on single. 1 older revision shares this mission name.")
@@ -10846,6 +11020,19 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
     assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
+
+#[test]
+fn replication_status_names_stream_fallbacks_since_start_by_code() {
+    assert_eq!(render_stream_fallbacks(&BTreeMap::new()), "none since start");
+    let counts = BTreeMap::from([("internal".to_owned(), 1), ("graph-closed".to_owned(), 2)]);
+    assert_eq!(render_stream_fallbacks(&counts), "graph-closed=2 internal=1 since start");
+    // A daemon from before the count sends no field, which reads as unknown, not as none.
+    let earlier: ReplicationStatus = serde_json::from_value(serde_json::to_value(ReplicationStatus::default()).unwrap()).unwrap();
+    assert_eq!(earlier.stream_fallbacks, None);
+    let current = ReplicationStatus { stream_fallbacks: Some(BTreeMap::new()), ..ReplicationStatus::default() };
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(value["stream_fallbacks"], serde_json::json!({}));
 }
 
 #[test]

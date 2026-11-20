@@ -96,6 +96,8 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
 /// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
 
+pub(crate) use smallclaims::store::durability::committing_without_fsync;
+
 impl Store {
     /// Give up to [`FREE_PAGE_CHUNK`] free pages back to the filesystem in one short write, and
     /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
@@ -118,11 +120,12 @@ impl Store {
             return Ok(0);
         }
         // `chunk` pages. Each step gives back one, so the pragma runs to its end.
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h03a56f82053f owner=fractal_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA incremental_vacuum({chunk})"))?;
-        let mut steps = statement.query([])?;
-        while steps.next()?.is_some() {}
-        drop(steps);
-        drop(statement);
+        committing_without_fsync(&connection, || {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h03a56f82053f owner=fractal_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA incremental_vacuum({chunk})"))?;
+            let mut steps = statement.query([])?;
+            while steps.next()?.is_some() {}
+            Ok(())
+        })?;
         Ok(before.saturating_sub(free()?))
     }
 
@@ -294,6 +297,41 @@ mod tests {
             )
             .unwrap();
         pragma(store, "freelist_count")
+    }
+
+    /// The writer's synchronous level and checkpoint threshold.
+    fn durability(store: &Store) -> (i64, i64) {
+        let writer = store.connection.write();
+        (
+            writer.query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap(),
+            writer.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn giving_pages_back_leaves_the_writer_at_its_own_durability() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
+        let before = durability(&store);
+        assert_eq!(before.0, 2, "a member commits at FULL");
+        free_some_pages(&store);
+        assert_eq!(store.release_free_pages().unwrap(), FREE_PAGE_CHUNK);
+        assert_eq!(durability(&store), before);
+        // Work that fails part way puts both back too.
+        {
+            let writer = store.connection.write();
+            let failed = committing_without_fsync(&writer, || -> Result<()> {
+                let inside: (i64, i64) = (
+                    writer.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+                    writer.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))?,
+                );
+                assert_eq!(inside, (1, 0), "NORMAL, and no checkpoint at commit");
+                writer.execute_batch("BEGIN; CREATE TABLE half_done(x); ROLLBACK;")?;
+                anyhow::bail!("refused part way")
+            });
+            assert!(failed.is_err());
+        }
+        assert_eq!(durability(&store), before);
     }
 
     #[test]

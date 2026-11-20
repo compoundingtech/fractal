@@ -20,6 +20,18 @@ fn declared_admission_old_mission_keeps_pinned_bytes_and_hash() {
 }
 
 #[test]
+fn mission_dates_absent_preserve_persisted_bytes_and_revision_hash() {
+    let mission: MissionSpec = serde_json::from_str(OLD_MISSION).unwrap();
+    assert!(mission.target_at.is_none());
+    assert!(mission.milestones.is_empty());
+    assert_eq!(serde_json::to_string(&mission).unwrap(), OLD_MISSION);
+    assert_eq!(
+        hex::encode(Sha256::digest(serde_json::to_vec(&mission).unwrap())),
+        "b4c167a923deec7cd788326dd59e8c5dedae0fdf9f3be29e0c5875a87f5cd1f5"
+    );
+}
+
+#[test]
 fn declared_admission_open_enums_keep_unknown_strings() {
     let priority: DeclaredPriority = serde_json::from_str("\"future-priority\"").unwrap();
     assert_eq!(

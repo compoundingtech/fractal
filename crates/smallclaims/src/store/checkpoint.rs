@@ -880,6 +880,8 @@ impl Store {
         crate::sqlite::census_files::register(&connection);
         connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
         connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
+        drop(connection);
+        super::blob_file::copy_beside(&self.path, self.shared_memory, copy)?;
         Ok(())
     }
 }
