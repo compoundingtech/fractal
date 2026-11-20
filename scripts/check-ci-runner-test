@@ -313,6 +313,9 @@ def gate(event,base,extra,skip=None,flags=COVERED_FLAGS):
 assert gate('merge_group',['success']*6,['success']*2) == 0
 assert gate('pull_request',['success']*6,['skipped']*2) == 0
 assert gate('workflow_dispatch',['success']*6,['skipped']*2) == 0
+assert gate('push', ['success'] * 6, ['success'] * 2) == 0
+assert gate('push', ['success'] * 6, ['skipped'] * 2) != 0
+assert gate('push', ['success'] * 6, ['success', 'failure']) != 0
 for i in range(8):
     for bad in ('failure','cancelled','skipped'):
         results=['success']*8;results[i]=bad
