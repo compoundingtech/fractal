@@ -32,7 +32,7 @@ pub(super) fn row(store: &Store, state_dir: &Path, objective: &Objective, declar
             anyhow::bail!("pinned source frontier does not cover the snapshot cut");
         }
         // A paged read pins its own finite cut while Now and acquisition continue advancing.
-        let mut measured = measurement::measure(projection, snapshot.end_ms, cut, &config.timezone, matches!(objective.indicator, Indicator::GithubReadyToMerged(_)))?;
+        let mut measured = measurement::measure(projection, snapshot.end_ms, cut, &config.timezone, matches!(objective.indicator, Indicator::GithubReadyToMerged(_)), &config.author_logins)?;
         measured.source_lag_ms = now.saturating_sub(projection.frontier_ms);
         Ok(measured)
     })();
@@ -93,7 +93,8 @@ fn measured_row(objective: &Objective, declaration_revision: &str, measured: &Me
         "current": current, "window": "rolling 1h", "status": status, "verdict": verdict,
         "remaining_percent": remaining, "declaration_revision": declaration_revision,
         "measurement": measured, "latency_percentiles_ms": statistics,
-        "explain": format!("Distinct PR identities across all authors in [cut-1h,cut), under effective-dated roster revision {}. Final-ready latency requires complete lifecycle history and a proven ready state; no queue or push proxy. {} Source watermark lag: {}ms. Corrections and retractions replace prior samples at projection revision {}.",
+        "explain": format!("Distinct PR identities for {} in [cut-1h,cut), under effective-dated roster revision {}. Final-ready latency requires complete lifecycle history and a proven ready state; no queue or push proxy. {} Source watermark lag: {}ms. Corrections and retractions replace prior samples at projection revision {}.",
+            if config.author_logins.is_empty() { "all authors".to_owned() } else { format!("author logins [{}]", config.author_logins.join(", ")) },
             measured.roster_revision,
             if config.measured_only { "Measured only: no target or success verdict is assigned." } else { "Only fully covered windows can meet the authored target." },
             measured.source_lag_ms, measured.projection_revision),

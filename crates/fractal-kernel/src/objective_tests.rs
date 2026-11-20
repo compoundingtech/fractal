@@ -416,3 +416,16 @@ fn native_row_reference_grammar_matches_the_typescript_corpus() {
     }
     assert!(!valid_name("acme/writer_hold"));
 }
+
+#[test]
+fn github_author_selector_is_canonical_and_absence_means_all_authors() {
+    let selected = GITHUB_MEASURED.replace("measurement \"only\"", "measurement \"only\"\n    author-login \"Example-Bot\"\n    author-login \"example-bot\"\n    author-login \"another\"");
+    let Indicator::GithubReadyToMerged(config) = one(&selected).unwrap().indicator else { panic!() };
+    assert_eq!(config.author_logins, ["another", "example-bot"]);
+    let Indicator::GithubReadyToMerged(all) = one(GITHUB_MEASURED).unwrap().indicator else { panic!() };
+    assert!(all.author_logins.is_empty());
+    assert_ne!(config, all);
+    for invalid in ["", "two words", "ümlaut", "example/name"] {
+        assert!(one(&GITHUB_MEASURED.replace("measurement \"only\"", &format!("measurement \"only\"\n    author-login \"{invalid}\""))).is_err());
+    }
+}

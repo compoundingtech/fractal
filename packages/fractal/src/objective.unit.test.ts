@@ -806,3 +806,23 @@ objective "acme/person-read" {
     }
   })
 })
+
+describe('GitHub author cohorts', () => {
+  it('canonicalizes a nonempty cohort into repeated native selector children', () => {
+    const input = {
+      name: 'delivery/selected', about: 'Selected merge authors',
+      indicator: Fractal.indicator.githubMergedCount({
+        source: 'github-source/example', roster: 'github-scope/example', timezone: 'UTC',
+        cut: 'now', measurement: 'only', authorLogins: ['Example-Bot', 'another', 'example-bot'],
+      }),
+    } as const
+    const text = render(input)
+    expect(text).toContain('author-login "another"')
+    expect(text).toContain('author-login "example-bot"')
+    expect(text.match(/author-login/g)).toHaveLength(2)
+    expect(text.indexOf('measurement "only"')).toBeLessThan(text.indexOf('author-login'))
+    for (const authorLogins of [[], [''], ['two words'], ['ümlaut'], ['example/name']]) {
+      expect(() => render({ ...input, indicator: { ...input.indicator, authorLogins } })).toThrow('authorLogins')
+    }
+  })
+})
