@@ -61,7 +61,7 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
     throw new TypeError('Explicit paired gateway socket, host, authorization and positive timeout are required')
   const scope = Scope.makeUnsafe()
   try {
-    const gateway = Context.get(Effect.runSync(Layer.buildWithScope(Gateway.layer(options.gateway), scope)), Gateway)
+    const gateway = Context.get(Effect.runSync(Layer.buildWithScope(Gateway.layer({ ...options.gateway, browserPairing: options.pairing !== undefined }), scope)), Gateway)
     const staticAssets = assets === undefined ? undefined : Context.get(
       Effect.runSync(Layer.buildWithScope(StaticAssets.layer(assets.root, assets.identity, options.connectOrigins), scope)), StaticAssets,
     )

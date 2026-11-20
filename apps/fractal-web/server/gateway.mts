@@ -72,7 +72,7 @@ export const upgradeClientHeaders = (req: Pick<IncomingMessage, 'headers' | 'url
   return client !== undefined && /^[\x20-\x7e]{1,120}$/.test(client) ? { 'x-st3-client': client } : {}
 }
 const unavailable = (cause?: unknown) => new BoundaryError({ status: 502, code: 'client-gateway-unavailable', message: 'Client gateway unavailable\n', cause })
-const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeoutMs }: GatewayOptions) => Effect.gen(function* () {
+const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeoutMs, browserPairing = false }: GatewayOptions) => Effect.gen(function* () {
   // The service scope, not the handshake fiber, owns successful tunnels.
   const tunnels = yield* Effect.acquireRelease(Effect.sync(() => new Set<Duplex>()), (sockets) => Effect.sync(() => {
     for (const socket of sockets) socket.destroy()
@@ -80,6 +80,8 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
   }))
   const http = (req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan, preview = false) => Effect.gen(function* () {
     if (preview && !tagAuthorization) { reject(res, 403, 'Forbidden\n'); return }
+    const credential = preview ? tagAuthorization : browserAuthorization(req.headers, browserPairing ? undefined : authorization)
+    if (credential === undefined) { reject(res, 401, 'Browser pairing required\n'); return }
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
       let reply: IncomingMessage | undefined
@@ -102,7 +104,7 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
         settled = true; cleanup(); resume(Effect.succeed(reply?.statusCode ?? 502))
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
-        ...cleanHeaders(req.headers), host, authorization: preview ? tagAuthorization : browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        ...cleanHeaders(req.headers), host, authorization: credential, ...traceHeaders(span),
         'x-st3-features': withClientFeatures(req.headers['x-st3-features']),
       }, agent: false }, (incoming) => {
         reply = incoming
@@ -157,6 +159,11 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
       return 403
     }
+    const credential = preview ? tagAuthorization : browserAuthorization(req.headers, browserPairing ? undefined : authorization)
+    if (credential === undefined) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      return 401
+    }
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
       let settled = false
@@ -168,7 +175,7 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
       const clientClosed = () => fail()
       const cleanup = () => { socket.off('error', error); socket.off('close', clientClosed) }
       const upstream = request({ socketPath, path: withoutTraceQuery(req.url), method: req.method, headers: {
-        ...cleanHeaders(req.headers, true), host, authorization: preview ? tagAuthorization : browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        ...cleanHeaders(req.headers, true), host, authorization: credential, ...traceHeaders(span),
         ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.
@@ -211,7 +218,7 @@ const makeGateway = ({ socketPath, host, authorization, tagAuthorization, timeou
     })))
   return { http, upgrade }
 })
-export interface GatewayOptions { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly tagAuthorization?: string | undefined; readonly timeoutMs: number }
+export interface GatewayOptions { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly tagAuthorization?: string | undefined; readonly timeoutMs: number; readonly browserPairing?: boolean }
 export interface GatewayService {
   http(req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan, preview?: boolean): Effect.Effect<void>
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, parent: Tracer.AnySpan, preview?: boolean): Effect.Effect<number>

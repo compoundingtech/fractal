@@ -195,7 +195,13 @@ pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
         .status()
         .is_ok_and(|status| status.success());
     if !opened {
-        fractal_daemon::cli_println!("{url}");
+        // The URL carries a browser credential; neither it nor opener diagnostics
+        // may be copied into terminal output.
+        eprintln!(
+            "fractal web: could not open the browser; configure a default browser and ensure \
+             `{opener}` is available, then run `fractal web` again on this machine"
+        );
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }
