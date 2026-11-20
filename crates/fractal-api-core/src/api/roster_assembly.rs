@@ -102,7 +102,7 @@ impl Assembly {
             let lower = self.cursor.as_ref().map_or_else(|| "agent/".to_owned(), |id| format!("{id}\0"));
             let (index, local, names, rows, expiry) = agent_roster_snapshot(store, |index| {
                 let connection = store.readers.get();
-                let names = connection.prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?.query_map(
+                let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h168a03df0009 owner=fractal_api_core::api::roster_assembly TODO=trace-statement-and-value-representation */ &crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?.query_map(
                     rusqlite::params![index, lower, "agent0", self.width], |row| row.get::<_, String>(0),
                 )?.collect::<rusqlite::Result<BTreeSet<_>>>()?;
                 let local = crate::store::roster_local_frontier(&connection, index)?;
@@ -164,7 +164,7 @@ impl Assembly {
             let lower = reconcile.membership_after.as_ref()
                 .map_or_else(|| "agent/".to_owned(), |id| format!("{id}\0"));
             let names = agent_roster_snapshot(store, |index| {
-                Ok(store.readers.get().prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+                Ok(store.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h540d1ea0b50f owner=fractal_api_core::api::roster_assembly TODO=trace-statement-and-value-representation */ &crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
                     .query_map(rusqlite::params![index, lower, "agent0", self.width],
                         |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<BTreeSet<_>>>()?)
