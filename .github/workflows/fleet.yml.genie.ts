@@ -389,7 +389,7 @@ const presignNoticeJob = {
 
 export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'event' }) => {
   const queue = context.topology === 'merge-group'
-  const mergeOnly = queue ? 'true' : "github.event_name == 'merge_group'"
+  const mergeOnly = queue ? 'true' : "(github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))"
   const { pickRunnerJob, supportingStageRunsOn, primaryTestRunsOn, secondaryStageRunsOn, testBuildRunsOn } = workspaceRunners(context)
   const linuxStageJob = (args: Parameters<typeof baseLinuxStageJob>[0]) =>
     baseLinuxStageJob({ ...args, runsOn: args.runsOn ?? supportingStageRunsOn })
@@ -398,6 +398,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   name: 'Workspace CI',
   on: {
     pull_request: { types: readyPullRequestTypes },
+    push: { branches: ['main'] },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
@@ -457,7 +458,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
         {
           name: 'Require a fresh fragment on the effective PR or queue merge',
           env: {
-            IMPACT_BASE_SHA: queue ? '${{ github.event.before }}' : '${{ github.event.merge_group.base_sha }}',
+            IMPACT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.before }}',
             IMPACT_PR_NUMBER: '${{ github.event.pull_request.number }}',
             ...(queue ? {} : { IMPACT_QUEUE_REF: '${{ github.event.merge_group.head_ref }}' }),
           },
@@ -465,7 +466,11 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
   python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
   elif [ -n "$IMPACT_BASE_SHA" ]; then
-  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"${queue ? '' : ' --queue-ref "$IMPACT_QUEUE_REF"'}
+  if [ -n "\${IMPACT_QUEUE_REF:-}" ]; then
+  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA" --queue-ref "$IMPACT_QUEUE_REF"
+  else
+  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"
+  fi
   else
   echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
   fi`,
@@ -644,7 +649,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
         runsOn: primaryTestRunsOn,
         // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
         // boot canary's evidence under target/boot-canaries.
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: queue ? 'hash:1/4' : "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: `\${{ ${mergeOnly} && 'hash:1/4' || 'hash:1/2' }}`, CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
         before: [nixDevelopStep({ name: 'Prove shards form the complete selected inventory', command: ['python3', 'scripts/ci-test-partitions'] })],
       }),
@@ -659,7 +664,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: queue ? 'hash:2/4' : "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: `\${{ ${mergeOnly} && 'hash:2/4' || 'hash:2/2' }}`, CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
@@ -732,12 +737,12 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
           run: `set -eu
   set -- $RESULTS
   [ "$#" = ${aggregateStages.length} ] || { echo "incomplete base-stage results"; exit 1; }
-  if [ "$EVENT" = merge_group ]; then
+  if [ "$EVENT" = merge_group ] || [ "$EVENT" = push ]; then
   set -- $MERGE_RESULTS
   [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
   RESULTS="$RESULTS $MERGE_RESULTS"
   else
-  [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+  [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-group or main-push only"; exit 1; }
   fi
   echo "stage results: $RESULTS (evidence skip: \${GATE_SKIP:-none})"
   position=0
@@ -809,7 +814,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
           name: 'Take the signer scripts from the base commit',
           id: 'base',
           'continue-on-error': true,
-          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
           run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
   git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
   git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
@@ -873,7 +878,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
           name: 'Publish the notes that verify',
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
-          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
           run: `# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
   key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
   key_path=.st/evidence-keys
@@ -917,8 +922,8 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       env: {
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
-        BASE_SHA: '${{ github.event.merge_group.base_sha || github.sha }}',
-        ...(queue ? { CI_TEST_TOPOLOGY: 'merge-group' } : {}),
+        BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.before || github.sha }}',
+        CI_TEST_TOPOLOGY: `\${{ ${mergeOnly} && 'merge-group' || '' }}`,
       },
       steps: [
         // The tested commit with its whole history: a note's parent is that commit, and the server refuses a push from a shallow repository.

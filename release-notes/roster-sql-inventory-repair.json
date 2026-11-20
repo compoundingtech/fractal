@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restore reviewed SQL inventory coverage for bounded roster paging and read-budget probes",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema or value representation changes."},
+  "rules": {"status": "none", "detail": "Register exact existing SQL sinks with producer-owned transitional TODOs; the inventory guard remains unchanged."},
+  "compatibility": {"status": "none", "detail": "Only inventory records, adjacent source markers and their review rationale change; runtime behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Reconcile future SQL source changes with their exact reviewed inventory identities before publication."}
+}

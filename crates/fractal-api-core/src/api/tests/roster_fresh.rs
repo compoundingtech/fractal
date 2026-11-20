@@ -593,7 +593,7 @@ fn roster_expired_snapshot_releases_reader_and_preserves_complete_publication() 
                         expired.store(true, Ordering::SeqCst);
                         // Exercise the real reader progress handler, not just a Rust check.
                         store.readers.get().query_row(
-                            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                            /* sqlite-large-value: allow-for-now lv-ha365a159e859 owner=fractal_api_core::api::tests::roster_fresh TODO=trace-statement-and-value-representation */ "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000)
                              SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0),
                         )?;
                     } else {
