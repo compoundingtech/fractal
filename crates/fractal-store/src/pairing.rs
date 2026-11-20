@@ -435,6 +435,27 @@ mod tests {
             if restore { target.admit_restored_backlog() } else { target.validate_replication_backlog() }.unwrap();
             target.project_replication_backlog().unwrap();
             assert!(target.client_operation_is_trusted(&completed).unwrap());
+            // The authorization receipt counts only as an accepted copy: a record of it in any
+            // state but valid excludes it, and a valid one need not be stored (`record_bytes`).
+            let receipt_record = |state: Option<&str>| {
+                let connection = target.connection.write();
+                let receipt = format!("custom/client/operation-{}", completed.id);
+                match state {
+                    Some(state) => connection.execute(
+                        "UPDATE replica_records SET state=?1 WHERE claim_id IN (SELECT id FROM claims WHERE subject=?2)",
+                        rusqlite::params![state, receipt],
+                    ),
+                    None => connection.execute(
+                        "DELETE FROM replica_records WHERE claim_id IN (SELECT id FROM claims WHERE subject=?1)",
+                        [receipt],
+                    ),
+                }
+                .unwrap();
+            };
+            receipt_record(Some("invalid"));
+            assert!(!target.client_operation_is_trusted(&completed).unwrap());
+            receipt_record(None);
+            assert!(target.client_operation_is_trusted(&completed).unwrap());
         }
         let retained = Store::open_memory("retained").unwrap();
         let completed = retained.append_claim(&completion_input(Some("person/example"))).unwrap();

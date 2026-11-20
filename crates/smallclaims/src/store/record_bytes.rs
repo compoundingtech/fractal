@@ -9,8 +9,10 @@
 //! later replaces, or that is marked invalid with its envelope, keeps the empty `raw`: no reader
 //! takes a record's bytes for those either.
 //!
-//! The row stays: its state, claim, position and repair link are what readers and triggers use,
-//! and an older build that runs this store after a rollback finds every row it expects. Only
+//! The row stays for now: its state, claim, position and repair link are what older builds read,
+//! and an older build that runs this store after a rollback finds every row it expects. Readers
+//! in this build no longer need it (`replica_record_rows`, `admitted_claim_sql`), so a later
+//! release can delete valid records once older builds are fenced out. Only
 //! the triggers on `replica_records` that fire on any UPDATE notice the change, so they list the
 //! columns they read (`RECORD_COLUMNS_BUT_RAW`) and an emptied `raw` wakes none of them.
 use super::*;
