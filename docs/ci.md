@@ -16,6 +16,11 @@ each landed source for any required post-merge proof. Manual dispatch
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The four required queue checks and complete test partitions are retained.
 
+Closing a PR also replaces its Workspace CI concurrency group, canceling obsolete
+running and queued jobs. The closing run skips every job: PR jobs require an open,
+non-draft PR, even for always-running collectors. This does not cancel manual,
+main-push, or merge-group runs, whose independent concurrency groups are unchanged.
+
 When a trusted note covers a pull request or merge group's web check,
 `fractal-web-execution` skips at job level and allocates no runner. The always-emitted
 `fractal-web` collector accepts the skip only with an explicit evidence decision and

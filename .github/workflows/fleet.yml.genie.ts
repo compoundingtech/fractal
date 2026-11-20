@@ -395,7 +395,8 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   return scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(withCompatArchives(auditCaches({
   name: 'Workspace CI',
   on: {
-    pull_request: { types: readyPullRequestTypes },
+    // A closed-event run replaces the PR's existing concurrency group, then skips every job.
+    pull_request: { types: [...readyPullRequestTypes, 'closed'] },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},

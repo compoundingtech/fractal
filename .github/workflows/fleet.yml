@@ -5,7 +5,13 @@ name: Workspace CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - closed
   merge_group: {}
   workflow_dispatch: {}
 
@@ -20,7 +26,7 @@ concurrency:
 jobs:
   pick-runner:
     name: pick-runner
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -538,7 +544,7 @@ jobs:
         env:
           CACHE_REASON: Retains Git source objects only; builds nothing and has no signing key.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-linux-gate:
     name: evidence-gate-linux-gate
     runs-on: ubuntu-latest
@@ -607,7 +613,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-linux-clippy:
     name: evidence-gate-linux-clippy
     runs-on: ubuntu-latest
@@ -676,7 +682,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-linux-fleet-compat:
     name: evidence-gate-linux-fleet-compat
     runs-on: ubuntu-latest
@@ -745,7 +751,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-typescript-client:
     name: evidence-gate-typescript-client
     runs-on: ubuntu-latest
@@ -814,7 +820,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-genie-freshness:
     name: evidence-gate-genie-freshness
     runs-on: ubuntu-latest
@@ -883,7 +889,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-ci-script-tests:
     name: evidence-gate-ci-script-tests
     runs-on: ubuntu-latest
@@ -952,7 +958,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-fractal-web:
     name: evidence-gate-fractal-web
     needs: [fractal-web-changes]
@@ -1023,7 +1029,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-gate-rust-tests:
     name: evidence-gate-rust-tests
     runs-on: ubuntu-latest
@@ -1092,7 +1098,7 @@ jobs:
         env:
           CACHE_REASON: Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   evidence-presign-notice:
     name: evidence-presign-notice
     runs-on: ubuntu-latest
@@ -1107,7 +1113,7 @@ jobs:
       - evidence-gate-ci-script-tests
       - evidence-gate-fractal-web
       - evidence-gate-rust-tests
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && github.event_name == 'pull_request') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (always() && github.event_name == 'pull_request') }}
     permissions:
       contents: read
       pull-requests: read
@@ -1194,10 +1200,10 @@ jobs:
         env:
           CACHE_REASON: Runs Python/Git classification checks without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   namespace-capacity:
     name: namespace-capacity
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -1368,7 +1374,7 @@ jobs:
     env:
       CI_CACHE_DEV_SHELL: genie
     needs: [pick-runner, evidence-gate-genie-freshness]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -1546,7 +1552,7 @@ jobs:
   hm-module-eval:
     name: hm-module-eval
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1607,7 +1613,7 @@ jobs:
   bundled-sqlite-packages:
     name: bundled-sqlite-packages
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled()) }}
     runs-on:
       [
         "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3 }};github.run-id=${{ github.run_id }}",
@@ -1677,7 +1683,7 @@ jobs:
     env:
       CI_CACHE_DEV_SHELL: genie
     needs: [pick-runner, evidence-gate-ci-script-tests]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -1851,7 +1857,7 @@ jobs:
   typescript-client:
     name: typescript-client
     needs: [pick-runner, genie-freshness, evidence-gate-typescript-client]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -2074,11 +2080,11 @@ jobs:
         env:
           CACHE_REASON: Classifies Git paths only; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   swift-client:
     name: swift-client
     needs: [swift-client-changes]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.swift-client-changes.result == 'success' && needs.swift-client-changes.outputs.relevant == 'true') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && needs.swift-client-changes.result == 'success' && needs.swift-client-changes.outputs.relevant == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -2100,7 +2106,7 @@ jobs:
   nix-evidence-genie-freshness:
     name: nix-evidence-genie-freshness
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 20
     continue-on-error: true
@@ -2223,7 +2229,7 @@ jobs:
   nix-evidence-typescript-client:
     name: nix-evidence-typescript-client
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 20
     continue-on-error: true
@@ -2352,7 +2358,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     env:
@@ -2578,7 +2584,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -2853,7 +2859,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3125,7 +3131,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3397,7 +3403,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3662,7 +3668,7 @@ jobs:
   linux-clippy:
     name: linux-clippy
     needs: [pick-runner, evidence-gate-linux-gate, evidence-gate-linux-clippy]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-clippy.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-clippy.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3899,7 +3905,7 @@ jobs:
         evidence-gate-linux-fleet-compat,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-fleet-compat.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-linux-fleet-compat.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -4167,7 +4173,7 @@ jobs:
       - evidence-gate-rust-tests
       - evidence-gate-linux-clippy
       - evidence-gate-linux-fleet-compat
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -4258,7 +4264,7 @@ jobs:
       - evidence-gate-typescript-client
       - evidence-gate-fractal-web
       - evidence-gate-rust-tests
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ubuntu-latest
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     permissions:
@@ -4411,7 +4417,7 @@ jobs:
       - linux-tests-shard-4
       - evidence-gate-linux-gate
       - evidence-gate-rust-tests
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-latest
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     permissions:
@@ -5043,14 +5049,14 @@ jobs:
         env:
           CACHE_REASON: Diffs two fetched commits without blobs and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   fractal-web-execution:
     name: fractal-web-execution
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1,2,3]}' || '{"shard":[0]}') }}
     needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -5242,7 +5248,7 @@ jobs:
   fractal-web:
     name: fractal-web
     needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -5419,4 +5425,4 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}

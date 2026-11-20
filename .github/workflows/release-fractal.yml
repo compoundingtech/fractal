@@ -158,10 +158,10 @@ jobs:
         env:
           CACHE_REASON: Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   pick-runner:
     name: pick-runner
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -500,7 +500,7 @@ jobs:
         env:
           CACHE_REASON: Runs isolated installer and publication-gate fixtures without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   embed:
     name: release-web-embed
     needs: validate-source
@@ -554,10 +554,10 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"cache-1","outcome":"${{ steps.cache-1.outcome }}","hit":"${{ steps.cache-1.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   publishEmbed:
     name: release-publish-web-embed
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: embed
     runs-on: ubuntu-latest
     concurrency:
@@ -588,7 +588,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   build:
     needs: [pick-runner, validate-source]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
     name: "release-build (${{ matrix.target }})"
     strategy:
       fail-fast: false
@@ -766,10 +766,10 @@ jobs:
         env:
           CACHE_REASON: Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
   publishEdge:
     name: release-publish-edge
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [assemble, publishEmbed]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -831,7 +831,7 @@ jobs:
   observePublishers:
     name: report-cancelled-release-publishers
     needs: [publishEmbed, publishEdge]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && contains(needs.*.result, 'cancelled')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (always() && contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

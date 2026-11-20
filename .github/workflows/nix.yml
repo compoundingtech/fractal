@@ -101,7 +101,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   nix-release-x86_64-linux:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (false) }}
     runs-on: ci1
     timeout-minutes: 180
     steps:
