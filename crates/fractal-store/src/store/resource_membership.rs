@@ -236,7 +236,7 @@ impl From<&ExecGeneration> for ExecutionIdentity {
 pub fn dependency(host: &str, lane: &str) -> String { format!("resource-membership/{host}/{lane}") }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb7bab5eb8be2 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1674cd2f737 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
         host TEXT PRIMARY KEY, epoch TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS resource_lane_policies_v1 (
         host TEXT NOT NULL, lane TEXT NOT NULL, policy TEXT NOT NULL, PRIMARY KEY(host,lane));
@@ -245,7 +245,10 @@ pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError>
         state TEXT NOT NULL, queued_at INTEGER NOT NULL, memory INTEGER NOT NULL,
         body TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS resource_memberships_queue_v1
-        ON resource_memberships_v1(host,lane,state,queued_at,id);")
+        ON resource_memberships_v1(host,lane,state,queued_at,id);
+        CREATE TABLE IF NOT EXISTS resource_admission_pending_v1 (
+        host TEXT NOT NULL, membership_id TEXT PRIMARY KEY);
+        CREATE INDEX IF NOT EXISTS resource_admission_pending_host_v1 ON resource_admission_pending_v1(host);")
         .map_err(internal)
 }
 
@@ -506,6 +509,7 @@ impl Store {
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
         let complete = super::resource_admission_objectives::recover(&transaction, host, epoch)?;
         transaction.commit()?;
+        super::resource_admission_objectives::activate(self);
         self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
             .store(complete, std::sync::atomic::Ordering::Release);
         Ok(())

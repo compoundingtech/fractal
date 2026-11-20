@@ -3376,6 +3376,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             hook();
         }
         self.reconcile_shell_resources()?;
+        if self.resource_authority.get().is_some_and(|authority| authority.is_ok()) {
+            // Keep an idle authority's deferred evidence repair alive independently
+            // of new membership traffic; each maintenance pass processes one page.
+            if let Err(error) = self.store.replay_resource_admission_observations() {
+                tracing::warn!(%error, "resource admission observation replay deferred");
+            }
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.

@@ -284,8 +284,10 @@ mod tests {
         }).unwrap();
         assert!(store.fractal.extensions.get::<Coverage>().0.load(Ordering::Acquire));
         assert_eq!(check(&store, 2000)["source"]["local_authority"], false);
-        // A custody write must repair all evidence before it restores the complete cut.
+        // Custody traffic cannot restore coverage; only the bounded authority tick can.
         store.withdraw_resource_membership(&request.id, &request.owner, 3000).unwrap();
+        assert_eq!(check(&store, 4000)["source"]["local_authority"], false);
+        assert!(!store.replay_resource_admission_observations().unwrap());
         let row = check(&store, 4000);
         assert_eq!(row["source"]["local_authority"], true);
         assert_eq!(row["evidence"]["bad"].as_f64(), Some(1.0));
