@@ -369,3 +369,62 @@ async fn unrelated_notifications_and_claims_do_not_recapture() {
     assert_eq!(publication.captures.load(Ordering::Acquire), 2,
         "a genuine mail source change wakes without a global notification");
 }
+
+#[test]
+fn capture_releases_readers_between_pages_and_lifecycle_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "example-host").unwrap();
+    declared(&store);
+    let mut sent = 0;
+    for index in 0..SOURCE_PAGE + 1 {
+        sent = send(&store, &format!("message/checkpoint-{index:04}"), json!([]));
+    }
+    frontier(&store, sent);
+    let mut checkpoints = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        // A real write after each read ensures RESTART must pass the active
+        // reader, rather than succeeding vacuously on an empty WAL.
+        let connection = store.connection.write();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h5024471c81ae owner=fractal_api_core::mail_delivery_objectives_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('mail_checkpoint_test',?1)",
+            [checkpoints.to_string()]).unwrap();
+        let (busy, frames, checkpointed): (i64, i64, i64) = connection.query_row(
+            "PRAGMA wal_checkpoint(RESTART)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(busy, 0, "capture pinned a reader at boundary {checkpoints}");
+        assert!(frames > 0);
+        assert_eq!(frames, checkpointed);
+        checkpoints += 1;
+    }).unwrap();
+    assert_eq!(snapshot.samples.len(), SOURCE_PAGE + 1);
+    assert_eq!(snapshot.unknown, 0);
+    assert!(checkpoints >= SOURCE_PAGE + 5, "must traverse multiple source pages and every message");
+}
+
+#[test]
+fn paged_capture_uses_mail_input_cut_not_unrelated_graph_index() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-source-cut", json!([]));
+    let at = sent + 2;
+    frontier(&store, at - 1);
+    let mut inserted = false;
+    let snapshot = capture_with_progress(&store, at, || {
+        if inserted { return; }
+        inserted = true;
+        store.append_claim(&ClaimInput {
+            subject: "resource/example/capture-unrelated".into(), kind: "resource.observed".into(), actor: None,
+            fields: BTreeMap::from([("kind".into(), json!("custom.test.unrelated"))]), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }).unwrap();
+    assert!(inserted);
+    assert_eq!(snapshot.unknown, 0, "unrelated graph writes cannot poison mail coverage");
+    let mut advanced = false;
+    let snapshot = capture_with_progress(&store, at, || {
+        if advanced { return; }
+        advanced = true;
+        frontier(&store, at);
+    }).unwrap();
+    assert!(advanced);
+    assert!(snapshot.unknown > 0, "relevant writes still fence a mixed paged capture");
+}

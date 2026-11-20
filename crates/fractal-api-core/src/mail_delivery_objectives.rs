@@ -195,21 +195,64 @@ fn native_frontier(store: &Store, connection: &rusqlite::Connection, recipient: 
 }
 
 fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
-    store.read_snapshot(|_| {
+    capture_with_progress(store, now, || {})
+}
+
+const SOURCE_PAGE: usize = 128;
+type SourceRow = (String, String, u64, String);
+
+/// Each indexed page is fully consumed before processing or reading another page.
+/// In particular, no read transaction spans the retained-history scan.
+fn source_rows(store: &Store, cutoff: u64, progress: &mut impl FnMut()) -> anyhow::Result<Vec<SourceRow>> {
+    let connection = store.readers.get();
+    let mut result = Vec::new();
+    let mut cursor = (cutoff, -1_i64);
+    loop {
+        let page = {
+            let mut query = connection.prepare_cached(
+                "SELECT rowid,message,recipient,sent_ms,fields FROM local_mail_delivery_source_v1
+                 WHERE (sent_ms,rowid)>(?1,?2) ORDER BY sent_ms,rowid LIMIT ?3")?;
+            query.query_map(rusqlite::params![cursor.0, cursor.1, SOURCE_PAGE], |row|
+                Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?, row.get::<_, u64>(3)?, row.get(4)?))))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        progress();
+        let Some((rowid, (_, _, sent, _))) = page.last() else { break };
+        cursor = (*sent, *rowid);
+        result.extend(page.into_iter().map(|(_, row)| row));
+    }
+    let mut cursor = (String::new(), String::new());
+    loop {
+        let page = {
+            let mut query = connection.prepare_cached(
+                "SELECT source.message,source.recipient,source.sent_ms,source.fields
+                 FROM (SELECT message,recipient FROM local_mail_delivery_pending_v1
+                       WHERE (message,recipient)>(?1,?2) ORDER BY message,recipient LIMIT ?3) pending
+                 JOIN local_mail_delivery_source_v1 source USING(message,recipient)
+                 ORDER BY pending.message,pending.recipient")?;
+            query.query_map(rusqlite::params![cursor.0, cursor.1, SOURCE_PAGE], |row|
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?, row.get::<_, String>(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        progress();
+        let Some((message, recipient, _, _)) = page.last() else { break };
+        cursor = (message.clone(), recipient.clone());
+        // Recent pending rows already appeared in the sent-time scan.
+        result.extend(page.into_iter().filter(|(_, _, sent, _)| *sent < cutoff));
+    }
+    Ok(result)
+}
+
+fn capture_with_progress(store: &Store, now: u64, mut progress: impl FnMut()) -> anyhow::Result<Snapshot> {
+        let changed = store.subscribe_mail_objective_inputs();
+        let generation = *changed.borrow();
+        let source_cut = store.index()?;
         let owners = store.desired_subjects()?.into_iter().filter(|subject| subject.kind == "agent")
             .map(|subject| (subject.subject, subject.member.map(|member| member.host)))
             .collect::<BTreeMap<_, _>>();
         let connection = store.readers.get();
-        let source_cut = store.index()?;
-        let mut statement = connection.prepare_cached(
-            "SELECT source.message,source.recipient,source.sent_ms,source.fields
-             FROM (
-                SELECT message,recipient FROM local_mail_delivery_source_v1 WHERE sent_ms>=?1
-                UNION SELECT message,recipient FROM local_mail_delivery_pending_v1
-             ) eligible JOIN local_mail_delivery_source_v1 source USING(message,recipient)
-             ORDER BY source.message,source.recipient")?;
-        let raw = statement.query_map([now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS))], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, u64>(2)?, row.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let raw = source_rows(store,
+            now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS)), &mut progress)?;
         #[cfg(test)]
         let mut source_work = [raw.len(), 0, 0];
         let mut source = BTreeMap::<(String, String), (u64, Value)>::new();
@@ -281,6 +324,7 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
                 steps.entry((message.clone(), consumer)).or_default().entry(kind)
                     .and_modify(|first| *first = (*first).min(at)).or_insert(at);
             }
+            progress();
         }
         // The mirror's own cut must include every stream item visible to its shard.
         let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
@@ -344,11 +388,15 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
                 samples.push(LifecycleSample { onset_ms: onset, terminal });
             }
         }
+        // Paged reads do not share a SQLite snapshot. Only a relevant input advance
+        // fences this cut; unrelated graph claims cannot change these source facts.
+        if *changed.borrow() != generation || store.mail_objective_input_coverage_failed() {
+            unknown += 1;
+        }
         Ok(Snapshot { observed_ms: now, generation: 0, covered_from_ms, source_through_ms, recapture_at_ms,
             #[cfg(test)]
             source_work,
             samples, held, unknown, source_cut, error: None })
-    })
 }
 
 #[cfg(test)]

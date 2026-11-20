@@ -1109,6 +1109,12 @@ history. Retry and alias spellings collapse to one `(message, canonical agent re
 sample. Current declared host ownership determines the host row. People are outside this
 family; missing agent ownership is unknown, never a successful delivery.
 
+The producer reads retained source metadata in indexed 128-row keyset pages and releases
+each SQLite reader before processing another page or message's lifecycle. No read
+transaction spans the 30-day scan, so WAL RESTART checkpoints can proceed during capture.
+Local change bursts are coalesced in a fixed 100ms window (not a quiet-period debounce);
+a capture overlapping graph writes remains unknown rather than certifying a mixed cut.
+
 `POST /v1/mailbox/receipts` accepts `lifecycle: "accepted"` with
 `input_acceptance: { "accepted_at_unix_ms": ... }`. The native peer, physical provider
 authority, recipient and current mailbox incarnation/epoch must all match. Acceptance

@@ -69,6 +69,7 @@ export interface JournalEntry {
 export interface ResourceRequest {
   readonly key: string
   readonly operation:
+    | 'agent.turn'
     | 'resource.lane.acquire'
     | 'resource.lane.release'
     | 'resource.lane.exec'
