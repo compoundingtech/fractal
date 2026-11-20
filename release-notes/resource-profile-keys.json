@@ -3,7 +3,7 @@
   "summary": "Linux finite resources accept host-local workload profile keys across shell, Effect and KDL callers. The host freezes resource estimates before admission, generation controls enforce each member separately, and shell callers can atomically write terminal receipt files bound to the authenticated root execution and argv. Resources cancel requests authenticated cancellation and waits for confirmed retirement.",
   "replay": {
     "status": "changed",
-    "detail": "Keyed request replay preserves its accepted estimate instead of consulting a changed host seed. Historical raw requests and custody remain readable. Authority startup withholds unsupported-class admission observations, retaining custody and incomplete coverage instead of sending new enum values to older fleet readers. Recovery-only refusal observations additionally require every active reader's signed resource_recovery_observations=1 advertisement."
+    "detail": "Keyed request replay preserves its accepted estimate instead of consulting a changed host seed. Historical raw requests and custody remain readable."
   },
   "schema": {
     "status": "changed",
