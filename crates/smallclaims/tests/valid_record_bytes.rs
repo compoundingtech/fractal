@@ -287,6 +287,8 @@ fn valid_records_go_after_the_window_and_readers_and_peers_see_the_same_records(
         alder.replication_status(true, Some(FLEET), &[]).unwrap().authority_digest,
         birch.replication_status(true, Some(FLEET), &[]).unwrap().authority_digest,
     );
+}
+
 #[test]
 fn an_admitted_claim_is_one_with_an_envelope_and_no_record_in_another_state() {
     let alder = Store::open_memory("alder", Arc::new(Plain)).unwrap();
@@ -330,4 +332,29 @@ fn an_admitted_claim_is_one_with_an_envelope_and_no_record_in_another_state() {
     assert!(!admitted(), "a repaired record excludes the claim");
     set_state(None);
     assert!(admitted(), "a valid claim whose record is not stored is admitted");
+}
+
+#[test]
+fn an_envelopes_record_count_seeks_by_identity_and_scans_nothing() {
+    // The local trim capture counts each envelope's records through the view; on a store with
+    // millions of claims each count must stay a few index seeks.
+    let alder = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    note(&alder, 0);
+    alder.replication_snapshot().unwrap();
+    // Without statistics the planner assumes large tables, as on a real store; statistics of a
+    // one-claim store would make scans the cheapest plan.
+    let connection = alder.connection.write();
+    let plan: Vec<String> = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM replica_record_rows records
+             WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?3",
+        )
+        .unwrap()
+        .query_map(rusqlite::params!["alder", 1, "hash"], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // `SCAN records` reads the view's own rows as they are produced; every table is searched.
+    assert!(plan.iter().all(|step| !step.starts_with("SCAN ") || step == "SCAN records"), "{plan:#?}");
+    assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_batch_index")), "{plan:#?}");
 }
