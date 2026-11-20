@@ -130,7 +130,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Linked child runs do the parent's work. Follow their indexed parent-step links and
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
-    fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
+    pub(super) fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
         let mut activity = run_activity(run).max(self.held_progress(run)?);
         let mut pending = run
             .steps
