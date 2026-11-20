@@ -518,7 +518,12 @@ impl SeatsStore for Store {
             let other = !owner && !step && ["mission-run/", "run-generation/", "step-run/"]
                 .iter().any(|prefix| subject.starts_with(prefix));
             if owner || step || other {
-                delta.queues = true;
+                // Queue rows are keyed by assignee/claimant. Progress and renewal mutate
+                // only those agents' inputs, not fleet ordering or membership. Their cards
+                // refold queue/visibility too; reserve the fleet diff for structural changes.
+                let local_step = step && matches!(kind.as_str(), "work.progress" | "work.renewed");
+                delta.queues |= !local_step;
+                delta.subject_queues |= local_step;
                 delta.membership |= owner || other;
                 owners.insert(subject.clone());
                 if step || (other && subject.starts_with("step-run/")) {
@@ -532,8 +537,9 @@ impl SeatsStore for Store {
                         delta.subjects.extend(assignee.into_iter().chain(claimant)
                             .filter(|agent| agent.starts_with("agent/")));
                     }
-                    // Progress/submission activity is keyed by actor, not the current assignee.
-                    if matches!(kind.as_str(), "work.progress" | "work.submitted") {
+                    // Activity and renewals also affect their author, including an earlier
+                    // claimant no longer present in the current step projection.
+                    if matches!(kind.as_str(), "work.progress" | "work.submitted" | "work.renewed") {
                         delta.subjects.extend(actor.filter(|actor| actor.starts_with("agent/")));
                     }
                 }
@@ -1133,13 +1139,15 @@ impl SeatsStore for Store {
                         None
                     }
                 }) })?;
-                let refresh_queues = delta.queues
-                    || previous.valid_until_unix_ms.is_some_and(|expiry| now >= expiry)
+                let queue_expired = previous.valid_until_unix_ms.is_some_and(|expiry| now >= expiry);
+                let refresh_queues = delta.queues || delta.subject_queues || queue_expired
                     || changed.iter().any(|name| !previous.items.iter().any(|item| item["id"].as_str() == Some(name.as_str())));
                 let mut queue_metadata = None;
                 let valid_until_unix_ms = if refresh_queues {
-                    let names = previous.items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned))
-                        .chain(changed.iter().cloned()).collect::<BTreeSet<_>>();
+                    let names = if delta.queues || queue_expired {
+                        previous.items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned))
+                            .chain(changed.iter().cloned()).collect::<BTreeSet<_>>()
+                    } else { changed.clone() };
                     let metadata = crate::performance::task("roster/queue-diff",
                         || agent_queue_values::agent_queue_metadata(self, &names))?;
                     let by_id = metadata.iter().map(|item| (item["id"].as_str().unwrap_or_default(), item))

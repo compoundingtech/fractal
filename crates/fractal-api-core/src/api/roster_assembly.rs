@@ -37,6 +37,49 @@ struct Reconcile {
     queue_valid_until: Option<u128>,
 }
 
+impl Reconcile {
+    fn record(&mut self, change: AgentResourcesChange) {
+        match change {
+            AgentResourcesChange::Delta(delta) => {
+                self.dirty.extend(delta.subjects);
+                if delta.queues {
+                    self.queues = true;
+                    self.queue_after = None;
+                    self.queue_valid_until = None;
+                }
+            }
+            AgentResourcesChange::Invalidated { .. } => {
+                self.rebuild = true;
+                self.membership_after = None;
+            }
+        }
+    }
+}
+
+enum Completion {
+    Extend { index: u64, local: u64 },
+    Changed { index: u64, local: u64, change: AgentResourcesChange, names: BTreeSet<String> },
+    Ready { index: u64, local: u64, names: BTreeSet<String>, rows: Vec<Value>,
+        expiry: Option<u128>, subagents: Vec<crate::store::SubagentView> },
+}
+
+/// The extra index row detects overflow without decoding any unclassified claim bodies.
+fn claim_page_cut(connection: &rusqlite::Connection, after: u64, target: u64, width: usize)
+    -> anyhow::Result<(u64, bool)>
+{
+    let mut statement = connection.prepare_cached(
+        "SELECT store_index FROM claims WHERE store_index>?1 AND store_index<=?2
+         ORDER BY store_index LIMIT ?3",
+    )?;
+    let mut rows = statement.query(rusqlite::params![after, target, width + 1])?;
+    let mut through = after;
+    for _ in 0..width {
+        let Some(row) = rows.next()? else { return Ok((target, false)); };
+        through = row.get(0)?;
+    }
+    Ok((through, rows.next()?.is_some()))
+}
+
 impl Assembly {
     fn new(generation: u64) -> Self {
         Self { generation, policy: crate::config::idle_residency_policy(), cursor: None,
@@ -98,25 +141,12 @@ impl Assembly {
         if reconcile.after < reconcile.target {
             let (through, change) = agent_roster_snapshot(store, |_| {
                 let connection = store.readers.get();
-                let indices = connection.prepare_cached(
-                    "SELECT store_index FROM claims WHERE store_index>?1 AND store_index<=?2
-                     ORDER BY store_index LIMIT ?3",
-                )?.query_map(rusqlite::params![reconcile.after, reconcile.target, limit],
-                    |row| row.get::<_, u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                let through = indices.last().copied().unwrap_or(reconcile.target);
+                let (through, _) = claim_page_cut(&connection, reconcile.after, reconcile.target, limit)?;
                 let change = store.changed_agent_resources(reconcile.after, through, &reconcile.previous)?;
                 Ok((through, change))
             }).inspect_err(|_| self.delta_width = (self.delta_width / 2).max(1))?;
             reconcile.after = through;
-            match change {
-                AgentResourcesChange::Delta(delta) => {
-                    reconcile.dirty.extend(delta.subjects);
-                    // Queue metadata may change outside the actor/assignee cards. Diff it
-                    // in resumable pages; an ordinary renewal/progress is not a cold rebuild.
-                    reconcile.queues |= delta.queues;
-                }
-                AgentResourcesChange::Invalidated { .. } => reconcile.rebuild = true,
-            }
+            reconcile.record(change);
             return Ok(None);
         }
         if reconcile.local_after < reconcile.local_target {
@@ -179,37 +209,82 @@ impl Assembly {
             }
             return Ok(None);
         }
-        if !reconcile.dirty.is_empty() {
+        if reconcile.dirty.len() > self.width {
             let names = reconcile.dirty.iter().take(self.width).cloned().collect::<BTreeSet<_>>();
             let (rows, expiry) = agent_roster_snapshot(store, |index| fold_page(store, history, index, &names))
                 .inspect_err(|_| self.width = (self.width / 2).max(1))?;
             for name in &names { reconcile.dirty.remove(name); }
-            // Every refold is at or after this target. Reconcile again from that floor to
-            // cover writes (including new names behind the subject cursor) during refolds.
-            if reconcile.dirty.is_empty() {
-                self.floor = reconcile.target;
-                self.local_floor = reconcile.local_target;
-                self.reconcile = None;
-            }
             self.apply(&names, rows, expiry);
             return Ok(None);
         }
-        // The fixed reconciliation target may be older than writes made during its pages.
-        // Certify the final interval too; unrelated churn is consumed a page at a time.
-        let (index, local, subagents) = agent_roster_snapshot(store, |index| {
-            let local = crate::store::roster_local_frontier(&store.readers.get(), index)?;
-            let subagents = if !history && index == reconcile.target && local == reconcile.local_target {
+        // Finish the bounded tail and its affected cards in the *same* snapshot. Requiring
+        // a later empty interval would starve even one busy agent under continuous progress.
+        let completion = agent_roster_snapshot(store, |index| {
+            let connection = store.readers.get();
+            let local = crate::store::roster_local_frontier(&connection, index)?;
+            let (_, overflow) = claim_page_cut(&connection, reconcile.after, index, limit)?;
+            if overflow { return Ok(Completion::Extend { index, local }); }
+            let local_names = connection.prepare_cached(
+                "SELECT subject FROM local_observations WHERE id>?1 AND id<=?2
+                 AND after_store_index<=?3 AND kind='harness.timeline' AND subject LIKE 'agent/%'
+                 ORDER BY id LIMIT ?4",
+            )?.query_map(rusqlite::params![reconcile.local_after, local, index, limit + 1],
+                |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if local_names.len() > limit { return Ok(Completion::Extend { index, local }); }
+            drop(connection);
+            let change = if reconcile.after == index {
+                AgentResourcesChange::Delta(Default::default())
+            } else { store.changed_agent_resources(reconcile.after, index, &reconcile.previous)? };
+            let mut names = reconcile.dirty.clone();
+            names.extend(local_names);
+            match &change {
+                AgentResourcesChange::Delta(delta) if !delta.queues => names.extend(delta.subjects.iter().cloned()),
+                _ => return Ok(Completion::Changed { index, local, change, names }),
+            }
+            if names.len() > self.width {
+                return Ok(Completion::Changed { index, local, change, names });
+            }
+            let (rows, expiry) = fold_page(store, history, index, &names)?;
+            let subagents = if history { Vec::new() } else {
                 store.running_subagents(client_now_ms().min(u128::from(u64::MAX)) as u64)?
-            } else { Vec::new() };
-            Ok((index, local, subagents))
+            };
+            Ok(Completion::Ready { index, local, names, rows, expiry, subagents })
+        }).inspect_err(|_| {
+            self.delta_width = (self.delta_width / 2).max(1);
+            self.width = (self.width / 2).max(1);
         })?;
-        if index != reconcile.target || local != reconcile.local_target {
-            self.floor = reconcile.target;
-            self.local_floor = reconcile.local_target;
-            self.reconcile = None;
-            return Ok(None);
+        match completion {
+            Completion::Extend { index, local } => {
+                // Keep classified/compared coverage; only extend its unconsumed tail.
+                reconcile.target = index;
+                reconcile.local_target = local;
+                reconcile.previous = self.rows.values().cloned().collect();
+                Ok(None)
+            }
+            Completion::Changed { index, local, change, names } => {
+                reconcile.target = index;
+                reconcile.after = index;
+                reconcile.local_target = local;
+                reconcile.local_after = local;
+                reconcile.record(change);
+                reconcile.dirty.extend(names);
+                reconcile.previous = self.rows.values().cloned().collect();
+                Ok(None)
+            }
+            Completion::Ready { index, local, names, rows, expiry, subagents } => {
+                reconcile.target = index;
+                reconcile.after = index;
+                reconcile.local_target = local;
+                reconcile.local_after = local;
+                reconcile.dirty.clear();
+                self.apply(&names, rows, expiry);
+                // If publication itself exhausts the pass budget, the next attempt starts
+                // from these certified rows rather than classifying their claims again.
+                self.reconcile.as_mut().expect("reconciliation retained").previous =
+                    self.rows.values().cloned().collect();
+                Ok(Some((index, local, subagents)))
+            }
         }
-        Ok(Some((index, local, subagents)))
     }
 }
 

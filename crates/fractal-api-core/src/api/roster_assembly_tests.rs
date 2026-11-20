@@ -58,14 +58,28 @@ fn queue_activity_preserves_completed_membership_pages() {
         assemblies.0.lock().unwrap()[usize::from(history)].as_mut().unwrap().width = 2;
         let mut completed = false;
         let mut progress = 0;
+        let mut reconciliation_churn = 0;
         for attempt in 0..64 {
-            let (scanning, cursor, unchanged) = {
+            let (scanning, cursor, classified, unchanged) = {
                 let states = assemblies.0.lock().unwrap();
                 let state = states[usize::from(history)].as_ref().unwrap();
-                (state.scanning, state.cursor.clone(), state.rows.iter()
-                    .filter(|(name, _)| name.as_str() != "agent/test-00")
-                    .map(|(name, row)| (name.clone(), row.clone())).collect::<BTreeMap<_, _>>())
+                (state.scanning, state.cursor.clone(), state.reconcile.as_ref().map(|page| page.after),
+                    state.rows.iter().filter(|(name, _)| name.as_str() != "agent/test-00")
+                        .map(|(name, row)| (name.clone(), row.clone())).collect::<BTreeMap<_, _>>())
             };
+            // Keep churn running through reconciliation and the successful attempt too.
+            // There is no quiet interval in which an empty-delta check could succeed.
+            let before = store.index().unwrap();
+            let kind = if attempt % 2 == 0 { "work.progress" } else { "work.renewed" };
+            append(&store, "step-run/example/work", kind, Some("agent/test-00"),
+                json!({"summary":format!("attempt {attempt}"), "lease_expires_at_unix_ms":1}));
+            let change = store.changed_agent_resources(before, store.index().unwrap(), &[]).unwrap();
+            let AgentResourcesChange::Delta(delta) = change else { panic!("ordinary work must have a scoped delta"); };
+            assert!(!delta.queues && !delta.membership, "ordinary activity must not restart a fleet comparison");
+            assert!(delta.subject_queues, "the affected card must refresh its own queue dependencies");
+            assert!(delta.subjects.contains("agent/test-00"));
+            progress += 1;
+            if !scanning { reconciliation_churn += 1; }
             let budget = short_attempt(Arc::clone(&store));
             let result = smallclaims::read_budget::with(Some(budget), || refresh_agent_roster(&store, history));
             assert!(!store.readers.has_pinned_reader());
@@ -76,18 +90,17 @@ fn queue_activity_preserves_completed_membership_pages() {
                 let states = assemblies.0.lock().unwrap();
                 let state = states[usize::from(history)].as_ref().unwrap();
                 assert!(state.cursor >= cursor, "membership must not restart after queue activity (attempt {attempt})");
+                if let Some(after) = classified {
+                    assert!(state.reconcile.as_ref().expect("comparison coverage must survive target extension").after >= after,
+                        "already classified claims must not be replayed");
+                }
                 for (name, row) in unchanged {
                     assert_eq!(state.rows.get(&name), Some(&row), "unchanged completed rows must survive reconciliation");
                 }
             }
-            if scanning {
-                // Ordinary work activity lands between every membership-page attempt.
-                append(&store, "step-run/example/work", "work.progress", Some("agent/test-00"),
-                    json!({"summary":format!("page {attempt}")}));
-                progress += 1;
-            }
         }
         assert!(progress >= 2, "queue churn must overlap several membership pages");
+        assert!(reconciliation_churn > 0, "churn must continue during reconciliation, not stop after membership");
         assert!(completed, "queue activity must not perpetually restart membership");
         assert_uncached(&store, history);
     }
