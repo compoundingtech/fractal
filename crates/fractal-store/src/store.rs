@@ -5780,7 +5780,7 @@ impl Store {
             let overflow = populated && connection.prepare_cached(
                 "SELECT count(*) FROM (SELECT 1 FROM claims WHERE store_index>?1
                  AND store_index<=?2 LIMIT ?3)",
-            )?.query_row(params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-hc80bf6e28816 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
                 |row| row.get::<_, usize>(0))? > SUBJECT_CACHE_DELTA_ROWS;
             if conflicts != cache.conflicts || overflow {
                 cache.views.clear();
