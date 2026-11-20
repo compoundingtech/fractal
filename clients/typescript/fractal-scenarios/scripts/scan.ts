@@ -151,7 +151,7 @@ const scanRecordingCapabilities = (path: string, text: string): Finding[] => {
 export const scanRecordingContent = (path: string, text: string): Finding[] => [
   ...scanContent(path, text),
   ...text.split('\n').flatMap((line, index) =>
-    /\/tmp\/|st3-scenario-|nix-shell\./u.test(line) ? [{ path, line: index + 1, rule: 'scratch path' }] : []),
+    /\/tmp\/|(?:st3|fractal)-scenario-|nix-shell\./u.test(line) ? [{ path, line: index + 1, rule: 'scratch path' }] : []),
   ...scanRecordingCapabilities(path, text),
 ]
 

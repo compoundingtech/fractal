@@ -825,7 +825,7 @@ fs.rmSync(delayedHelloPath, { force: true });
 // omp loads this extension into every in-process subagent, as a second instance sharing the
 // process-wide stash (compoundingtech/fractal#852). A subagent's lifecycle must leave the seat's
 // channel alone: no channel of its own, and its shutdown does not close the seat's channel. Mail
-// that arrives afterwards still reaches the top-level session. st's asset reports the subagent's
+// that arrives afterwards still reaches the top-level session. Fractal's asset reports the subagent's
 // runs on the seat's channel and nothing else of it; the legacy asset sends no frame at all.
 const subHandlers = new Map();
 const subHandedOver = [];
@@ -871,8 +871,8 @@ assert.deepStrictEqual(
     : [],
   "a subagent's events reach the channel only as its runs",
 );
-// While its runs last, st's asset reports each minute every subagent omp says is busy, as in a long
-// tool call. A subagent whose session went idle without its end reports nothing, so st ends it once
+// While its runs last, Fractal's asset reports each minute every subagent omp says is busy, as in a long
+// tool call. A subagent whose session went idle without its end reports nothing, so Fractal ends it once
 // it has been quiet long enough.
 const heartbeats = [];
 const realSetInterval = globalThis.setInterval;
@@ -1016,7 +1016,7 @@ assert.deepStrictEqual(readFrames().slice(framesBeforeMain), [expectedState("act
 await handlers.get("agent_end")(successfulEnd, mainCtx);
 fs.rmSync(outboxPath, { force: true });
 
-// st3's dedicated todo observation is deliberately absent from the legacy st2 asset.
+// Fractal's dedicated todo observation is deliberately absent from the legacy st2 asset.
 if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo")) {
   const totals = (pending = 0, in_progress = 0, completed = 0, blocked = 0, abandoned = 0) =>
     ({ pending, in_progress, completed, blocked, abandoned });

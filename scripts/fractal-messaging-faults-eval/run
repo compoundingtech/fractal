@@ -577,7 +577,7 @@ def judge(proof):
         failures.append(f"delivery report is {delivery.get('state', 'unreported')}: {delivery.get('reason')}")
     replaced = [image for image in proof["seat_images_after"] if image != proof["daemon_image"]]
     if replaced:
-        failures.append(f"seat st processes still run a replaced binary: {', '.join(replaced)}")
+        failures.append(f"seat Fractal processes still run a replaced binary: {', '.join(replaced)}")
     if proof["case"] == "old-channel":
         if not proof.get("channel_pids_before") or proof["channel_pids_before"] != proof.get("channel_pids_after"):
             failures.append("previous-release channel did not reexec in the same process")
@@ -1098,7 +1098,7 @@ if __name__ == "__main__":
         parser.error(f"observe >= startup grace + {OBSERVE_MARGIN_SECONDS:g}s (25s at the real 20s grace), "
                      "long outage >=120s, short outage >=2s are required")
     if os.environ.get("ST_AGENT"):
-        parser.error("run detached outside an st seat; see the eval README")
+        parser.error("run detached outside a Fractal seat; see the eval README")
     if not shutil.which("node") or not shutil.which("pty"):
         parser.error("node (with native TypeScript support) and pty must be on PATH")
     if "ST3_MESSAGING_ROOT" not in os.environ:

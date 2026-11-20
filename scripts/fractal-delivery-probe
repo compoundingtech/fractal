@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """A durable, token-free native-channel recipient and cross-node delivery monitor.
 
-Run as its own declared st seat. This consumer reads only envelopes delivered by
+Run as its own declared Fractal seat. This consumer reads only envelopes delivered by
 the actual omp-channel driver; no mailbox poll can manufacture a read receipt.
-Python 3.9+ and the installed st3 binary are its only dependencies.
+Python 3.9+ and the installed Fractal binary are its only dependencies.
 """
 import argparse
 import asyncio
@@ -185,7 +185,7 @@ class Probe:
         self.path = self.directory / "state.json"
         self.state = json.loads(self.path.read_text()) if self.path.exists() else {"routes": {}, "receipts": {}}
         self.api = Api(config.get("socket") or os.environ["ST3_ENDPOINT"])
-        self.st3 = config.get("binary") or os.environ["ST3_BIN"]
+        self.fractal = config.get("binary") or os.environ["ST3_BIN"]
         self.child = None
         self.last_publish = 0
         # What doctor read from the last published report: each route's outcome, and the routes
@@ -285,7 +285,7 @@ class Probe:
         catalog.mkdir(exist_ok=True)
         while True:
             context = {"channel_id": str(uuid.uuid4()), "agent": self.actor, "host": self.source,
-                       "probe_pid": os.getpid(), "binary": self.st3, "endpoint": self.api.socket,
+                       "probe_pid": os.getpid(), "binary": self.fractal, "endpoint": self.api.socket,
                        "inherited_incarnation": os.environ.get("ST3_INCARNATION"),
                        "owner_run_id": os.environ.get("ST_MISSION_RUN"),
                        "provider_runtime": os.environ.get("ST_OMP_CHANNEL_RUNTIME_ID"),
@@ -300,7 +300,7 @@ class Probe:
                 stderr_transport, _ = await asyncio.get_running_loop().connect_read_pipe(
                     lambda: asyncio.StreamReaderProtocol(stderr_reader), pipe)
                 child = await asyncio.create_subprocess_exec(
-                    self.st3, "--catalog", str(catalog), "driver", "omp-channel",
+                    self.fractal, "--catalog", str(catalog), "driver", "omp-channel",
                     "--identity", self.actor[6:], stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE, stderr=write_fd,
                     env={**os.environ, "ST3_ENDPOINT": self.api.socket})
@@ -587,7 +587,7 @@ class Probe:
                 "content": (f"Route {self.actor} → {route['to']}; nonce {episode['nonce']}. "
                             f"{episode['message']} was not read within {self.deadline // 1000}s. "
                             "Report this route, nonce, message, missed deadline and any observed recovery to the alert owner. "
-                            "Reporting does not require st doctor --json to return. "
+                            "Reporting does not require fractal doctor --json to return. "
                             "If Doctor timed out, report that timeout; do not repeat the call. "
                             "A Doctor timeout does not establish that the daemon stopped. "
                             "Fresh probes continue; a real recipient read sends a recovery note."),

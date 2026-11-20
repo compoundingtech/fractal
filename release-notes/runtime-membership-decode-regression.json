@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The runtime membership decode regression now verifies cold, appended-row and same-cut actual-state reductions separately, with full status parity and the unchanged two-decode membership bound.",
+  "replay": { "status": "none", "detail": "Test-only correction; no replay or retained claim change." },
+  "schema": { "status": "none", "detail": "No schema, projection, checkpoint or digest change." },
+  "rules": { "status": "none", "detail": "No runtime behavior or lifecycle rule change." },
+  "compatibility": { "status": "none", "detail": "No client, peer or wire change." },
+  "downtime": { "status": "none", "detail": "No deployment coordination required." },
+  "manual": { "status": "none", "detail": "No manual steps or activation." },
+  "recovery": { "status": "none", "detail": "Revert the test correction; stored state is unchanged." }
+}

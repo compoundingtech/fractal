@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 /// Resolve against the approved revision, or the exact candidate being approved, not the
@@ -761,7 +761,7 @@ pub(super) async fn run_mission_view(
     }
 }
 
-/// `st missions check FILE`: exit status 1 when a gate is broken.
+/// `fractal missions check FILE`: exit status 1 when a gate is broken.
 async fn check_mission_file(
     client: &Client,
     args: MissionCheckArgs,
@@ -788,7 +788,7 @@ async fn check_mission_file(
         },
     )
     .await?;
-    let view = checked.context("this st daemon cannot check exec gates; update it")?;
+    let view = checked.context("this fractal daemon cannot check exec gates; update it")?;
     if json_output {
         print_value(&view, true)?;
     } else if view.gates.is_empty() {
@@ -1071,7 +1071,7 @@ fn render_mission_overview(view: &Value) -> String {
     out
 }
 
-/// The lanes a mission run owns, for `st missions show`.
+/// The lanes a mission run owns, for `fractal missions show`.
 fn render_run_lanes(lanes: &[fractal_daemon::model::LaneView], now: u128) -> String {
     use std::fmt::Write as _;
 

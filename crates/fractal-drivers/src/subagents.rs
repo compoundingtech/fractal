@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(ledger.ended[0].outcome, "completed");
         assert!(
             ledger.ended[0].subagent.parent_usage,
-            "Codex leaves the parent's usage to st"
+            "Codex leaves the parent's usage to Fractal"
         );
         // A follow-up task to the idle thread is its second run.
         apply_codex(&mut ledger, &activity("interacted", "child"), "parent", 4);

@@ -25,4 +25,4 @@ check 1 "${base/2026-09-24T00:00:12Z/2026-09-24T00:00:12Z FAILED direction=examp
 2026-09-24T00:00:12Z}"
 check 1 "${base/monitor-started evidence_format=2/monitor-started evidence_format=1}"
 check 1 "${base/example-mac-to-example-linux/example-linux-to-example-mac}"
-printf 'st3 message soak report tests passed\n'
+printf 'Fractal message soak report tests passed\n'
