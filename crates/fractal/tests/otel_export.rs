@@ -1159,7 +1159,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     daemon.write_claim(&format!("00-{TRACE_ID}-{PARENT_ID}-01"));
     // Prove the write accepted the remote context; a reconcile span accidentally
     // inheriting this request must fail the root checks below.
-    daemon.await_export(&traces_path, |request| {
+    let write_export = daemon.await_export(&traces_path, |request| {
         daemon_spans(request, "POST /v1/claims")
             .into_iter()
             .any(|span| {
@@ -1168,10 +1168,19 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
                     && int_attribute(span, "http.response.status_code") == Some(200)
             })
     });
+    let timestamp = |span: &Value| {
+        span["startTimeUnixNano"].as_str().and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| span["startTimeUnixNano"].as_u64()).expect("OTLP timestamp")
+    };
+    let write_span = daemon_spans(&write_export, "POST /v1/claims").into_iter()
+        .find(|span| span["traceId"].as_str() == Some(TRACE_ID)).unwrap();
+    let write_started = timestamp(write_span);
+    // Wake attribution is last-writer-wins when notifications coalesce. Prove
+    // a pass after the write and separately require the exact API wake counter.
     daemon.await_export(&traces_path, |request| {
         daemon_spans(request, "st.reconcile_pass")
             .into_iter()
-            .any(|span| string_attribute(span, "st.reconcile.wake_cause") == Some("api"))
+            .any(|span| timestamp(span) >= write_started)
     });
     let durations = daemon.await_export(&metrics_path, |request| {
         metric_points(request, "st.reconcile.pass.duration")
@@ -1223,7 +1232,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     drop(daemon);
     let traces = std::fs::read_to_string(&traces_path).expect("otelite writes reconcile traces");
     let mut pass_count = 0;
-    let mut api_count = 0;
+    let mut post_write_count = 0;
     for line in traces.lines() {
         let request: Value = serde_json::from_str(line).expect("valid OTLP trace request");
         for span in daemon_spans(&request, "st.reconcile_pass") {
@@ -1237,13 +1246,13 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
             let cause = string_attribute(span, "st.reconcile.wake_cause")
                 .expect("reconcile pass wake cause attribute");
             assert!(WAKE_CAUSES.contains(&cause), "unbounded reconcile wake cause: {span}");
-            if cause == "api" {
-                api_count += 1;
+            if timestamp(span) >= write_started {
+                post_write_count += 1;
             }
         }
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
-    assert!(api_count > 0, "write must export an API-woken reconcile pass:\n{traces}");
+    assert!(post_write_count > 0, "write must be followed by a reconcile pass:\n{traces}");
     let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
     for name in [
