@@ -33,6 +33,7 @@ fn open_installs_each_domain_in_order() {
             "attention-controls",
             "limits",
             "credit-projection-retirement",
+            "usage-source-fence",
             "run-eta",
             "gate-runners",
             "wake-lookup",
@@ -192,6 +193,7 @@ fn reopening_retires_disposable_credit_tables_and_trigger_without_changing_claim
     store.connection.batched(|transaction| -> anyhow::Result<()> {
         // Historical projection fixture, not new authoritative state.
         transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h1e32e6d704d1 owner=fractal_store::store::projectors_tests TODO=chunk-or-reference-variable-columns */
             "CREATE TABLE local_usage_credit_heads (
                 provider TEXT NOT NULL,account TEXT NOT NULL,credit_id TEXT NOT NULL,actor TEXT NOT NULL,
                 measured_seconds INTEGER NOT NULL,measured_nanos INTEGER NOT NULL,claim_id TEXT NOT NULL,credit TEXT NOT NULL,
@@ -221,4 +223,35 @@ fn reopening_retires_disposable_credit_tables_and_trigger_without_changing_claim
         [],|row|row.get(0),
     ).unwrap();
     assert_eq!(remaining,0);
+}
+
+#[test]
+fn native_usage_source_fence_is_independent_of_optional_views_and_survives_reopen() {
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("source-fence.db");
+    let store=super::Store::open(&path,"node").unwrap();
+    let identity = |store: &super::Store| store.readers.get().query_row(
+        "SELECT identity.value,CAST(epoch.value AS INTEGER)
+         FROM meta identity JOIN meta epoch ON epoch.key='local_usage_source_v1_epoch'
+         WHERE identity.key='local_usage_source_v1_identity'",
+        [], |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)),
+    ).unwrap();
+    let initial=identity(&store);
+    assert_eq!(initial.1,0);
+    let actor="agent/sample/usage-producer";
+    let claim=store.append_claim(&crate::model::ClaimInput{
+        subject:actor.into(),kind:"usage.limits.observed".into(),actor:Some(actor.into()),
+        fields:std::collections::BTreeMap::from([("readings".into(),serde_json::json!([]))]),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert_eq!(identity(&store),initial,"ordinary appends preserve incremental cursors");
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h3abbf8ee686b owner=fractal_store::store::projectors_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms WHERE id=?1",[&claim.id]).unwrap();
+    assert_eq!(identity(&store),(initial.0.clone(),1));
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-ha50a715460a4 owner=fractal_store::store::projectors_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1",[&claim.id]).unwrap();
+    assert_eq!(identity(&store),(initial.0.clone(),2));
+    drop(store);
+    let reopened=super::Store::open(&path,"node").unwrap();
+    assert_eq!(identity(&reopened),(initial.0.clone(),2));
+    let replacement=super::Store::open_memory("node").unwrap();
+    assert_ne!(identity(&replacement).0,initial.0);
 }

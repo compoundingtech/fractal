@@ -12,10 +12,47 @@ use super::*;
 /// Drop the trigger first so upgraded stores cannot keep queuing orphaned background work.
 fn retire_credit_projection(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-he6df9d2caad3 owner=fractal_store::store::projectors TODO=bound-or-reference-values-and-reclamation */
         "DROP TRIGGER IF EXISTS usage_credit_claim_insert;
          DROP TABLE IF EXISTS local_usage_credit_pending;
          DROP TABLE IF EXISTS local_usage_credit_progress;
          DROP TABLE IF EXISTS local_usage_credit_heads;"
+    )?;
+    Ok(())
+}
+
+/// Native source mirrors need a mutation fence even when no IVM views are installed.
+/// Ordinary append-only arrival preserves the incremental cursor; old-position insertion,
+/// rewriting and deletion force a replay. The UUID survives reopen, not database replacement.
+fn open_usage_source_fence(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h60538e59e3f4 owner=fractal_store::store::projectors TODO=prepare-body-and-predecessor-values */
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('local_usage_source_v1_identity',lower(hex(randomblob(16))));
+         INSERT OR IGNORE INTO meta(key,value) VALUES('local_usage_source_v1_epoch','0');
+         INSERT OR IGNORE INTO meta(key,value)
+             SELECT 'local_usage_source_v1_high_water',CAST(COALESCE(MAX(store_index),0) AS TEXT)
+             FROM claims WHERE kind='usage.limits.observed';
+         CREATE TRIGGER IF NOT EXISTS local_usage_source_v1_insert AFTER INSERT ON claims
+         WHEN NEW.kind='usage.limits.observed'
+         BEGIN
+             UPDATE meta SET value=CAST(value AS INTEGER)+1
+             WHERE key='local_usage_source_v1_epoch'
+               AND NEW.store_index<=CAST((SELECT value FROM meta WHERE key='local_usage_source_v1_high_water') AS INTEGER);
+             UPDATE meta SET value=MAX(CAST(value AS INTEGER),NEW.store_index)
+             WHERE key='local_usage_source_v1_high_water';
+         END;
+         CREATE TRIGGER IF NOT EXISTS local_usage_source_v1_update AFTER UPDATE ON claims
+         WHEN OLD.kind='usage.limits.observed' OR NEW.kind='usage.limits.observed'
+         BEGIN
+             UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='local_usage_source_v1_epoch';
+             UPDATE meta SET value=MAX(CAST(value AS INTEGER),NEW.store_index)
+             WHERE key='local_usage_source_v1_high_water';
+         END;
+         CREATE TRIGGER IF NOT EXISTS local_usage_source_v1_delete AFTER DELETE ON claims
+         WHEN OLD.kind='usage.limits.observed'
+         BEGIN
+             UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='local_usage_source_v1_epoch';
+         END;"
     )?;
     Ok(())
 }
@@ -73,6 +110,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "attention-controls", run: attention_controls::open },
     Hook { name: "limits", run: limits::open_limits },
     Hook { name: "credit-projection-retirement", run: retire_credit_projection },
+    Hook { name: "usage-source-fence", run: open_usage_source_fence },
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },

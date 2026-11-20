@@ -221,10 +221,12 @@ pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>
     if configured.is_empty() { return Ok(render(&[], now, fresh_ms, false)); }
     let extension = store.extension::<Mutex<Mirror>>();
     let mut mirror = extension.lock().unwrap_or_else(PoisonError::into_inner);
-    // Fixed-size metadata only; restore/replacement invalidates every cached source position.
+    // Always-installed source metadata, independent of optional IVM view adapters.
     let (identity, page) = store.read_snapshot(|_| {
         let identity = store.readers.get().query_row(
-            "SELECT e.database_id,s.epoch FROM ivm_event_state e CROSS JOIN ivm_source s WHERE e.singleton=1 AND s.singleton=1",
+            "SELECT identity.value,CAST(epoch.value AS INTEGER)
+             FROM meta identity JOIN meta epoch ON epoch.key='local_usage_source_v1_epoch'
+             WHERE identity.key='local_usage_source_v1_identity'",
             [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
         )?;
         let cursor = if mirror.identity.as_ref() == Some(&identity) && mirror.writers == configured { mirror.cursor } else { 0 };

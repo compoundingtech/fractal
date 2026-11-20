@@ -466,6 +466,12 @@ heartbeat. Empty configuration executes no source SQL. Quiet reads reuse derived
 an actual source or freshness boundary, without rescanning retained evidence. Quota history
 keeps one pre-horizon boundary; loss/decision history retains the 60d gauge lookback.
 
+The source fence is always installed in local `meta`, independent of optional IVM
+view adapters. A per-database nonce and mutation epoch survive reopen. Ordinary
+append-only observations preserve incremental progress; source rewrites, deletions
+and insertion at an already observed position invalidate it. Database replacement
+gets a new nonce, and every newly opened Store starts with an empty derived mirror.
+
 Credit identity remains provider/account digest/credit ID, not host or friendly account ref.
 Across writers, redeemed precedes forfeited, which precedes available/unknown; within one
 state class, full-precision provider time then claim ID wins. Historical timely dispositions

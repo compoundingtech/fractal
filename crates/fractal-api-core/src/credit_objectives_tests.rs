@@ -127,7 +127,8 @@ fn all_configured_producers_and_full_cohort_history_are_required() {
 fn missing_predecessor_stays_pending_until_actual_claim_closes_chain() {
     let mut source=Writer::default();
     source.ingest(delta("second",1,Some("first"),NOW,vec![credit("one","redeemed",NOW-DAY)]));
-    assert_eq!(cam(&rendered(&source),"cam-r01")["status"],"no-data");
+    // An unauthenticated pending successor cannot declare its provider population.
+    assert_eq!(row(&rendered(&source),"spend/cam-r01/unknown")["status"],"no-data");
     assert_eq!(source.next,0);
     source.ingest(delta("first",0,None,NOW-60*DAY,vec![]));
     assert_eq!(source.next,2);
@@ -323,7 +324,7 @@ fn native_accepted_clock_advances_a_real_source_chain_and_quiet_reads_keep_bound
     assert_eq!(cam(&rows(&store,NOW-60*DAY,DAY).unwrap(),"cam-r01")["status"],"no-data");
     store.set_write_clock_at(u128::from(NOW)).unwrap();
     let credits=(0..6).map(|id|credit(&format!("credit-{id}"),"forfeited",NOW-2*DAY)).collect();
-    append_delta(&store,delta("unused",1,Some(&enrollment.id),NOW,credits));
+    let successor=append_delta(&store,delta("unused",1,Some(&enrollment.id),NOW,credits));
     let native=rows(&store,NOW,DAY).unwrap();
     assert_eq!(cam(&native,"cam-r01")["status"],"exhausted");
     assert_eq!(cam(&native,"cam-r01")["evidence"]["current_loss_lower"],6.0);
@@ -335,6 +336,13 @@ fn native_accepted_clock_advances_a_real_source_chain_and_quiet_reads_keep_bound
     let second=scope.finish();
     assert_eq!(first.statements,second.statements);
     assert!(first.statements<=8,"quiet indexed metadata/cursor work must stay bounded: {first:?}");
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hcab44bc5e3c6 owner=fractal_api_core::credit_objectives_tests TODO=prepare-body-and-predecessor-values */
+        "UPDATE claims SET body=json_set(body,'$.fields.source_frontier.host','foreign') WHERE id=?1",
+        [&successor.id],
+    ).unwrap();
+    assert_eq!(cam(&rows(&store,NOW,DAY).unwrap(),"cam-r01")["status"],"no-data",
+        "rewritten source invalidates a previously rendered good-time/burn cache");
 }
 
 #[test]
