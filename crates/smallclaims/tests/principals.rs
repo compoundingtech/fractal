@@ -2017,7 +2017,13 @@ fn cold_dependency_revocation(compact: bool, mixed: bool) {
                 after.len(), saved as f64 / after.len() as f64,
                 saved as f64 * synthetic_completions_per_day as f64 / after.len() as f64,
             );
-            assert!(compact_bytes < old_bytes, "include dictionary UNIQUE and reverse-index btrees in the comparison");
+            // The links have had no index by claim since #6952 (a deletion leaves them for the sweep),
+            // while the edges keep their reverse index for forget. Compare like with like: the
+            // integer-keyed tables, dictionary UNIQUE included, against the links table.
+            let reverse: u64 = connection.query_row(
+                "SELECT coalesce(sum(pgsize),0) FROM dbstat WHERE name='claim_verdict_dependency_edges_claim'",
+                [], |row| row.get(0)).unwrap();
+            assert!(compact_bytes - reverse < old_bytes, "include the dictionary UNIQUE btree in the comparison");
             if mixed {
                 connection.execute_batch(
                     "INSERT INTO claim_verdict_links(link,claim_id)
