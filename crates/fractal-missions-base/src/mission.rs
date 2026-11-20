@@ -11,6 +11,7 @@ use crate::model::{
     LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
     MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
     RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
+    EscalationSpec, EscalationClock, EscalationStage, EscalationAction, EscalationState, EscalationOverride,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -348,6 +349,11 @@ fn parse_mission(
     for child in children.nodes() {
         match child.name().value() {
             "declared-priority" | "declared-lane" | "declared-budgets" => {}
+            "escalation" => {
+                if children.nodes().iter().filter(|n| n.name().value() == "escalation").count() > 1 {
+                    return Err(FractalError::new("duplicate-mission-field", "mission repeats escalation"));
+                }
+            }
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -618,6 +624,7 @@ fn parse_mission(
         id,
         state,
         revision: String::new(),
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, false)).transpose()?.unwrap_or_default(),
         system,
         declared_priority: admission.priority,
         declared_lane: admission.lane,
@@ -955,6 +962,7 @@ fn parse_loop_group(
     let mut step = StepSpec {
         id,
         path,
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -1635,6 +1643,12 @@ fn parse_step(
                 "uses-mission" => uses_mission = Some(parse_used_mission(child)?),
                 "after-run" => after_run = Some(parse_after_run(child)?),
                 "program" => program = Some(parse_program(child)?),
+                "escalation" => {
+                    if node.children().is_some_and(|body| body.nodes().iter()
+                        .filter(|entry| entry.name().value() == "escalation").count() > 1) {
+                        return Err(FractalError::new("duplicate-step-field", "step repeats escalation"));
+                    }
+                }
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
@@ -1754,6 +1768,7 @@ fn parse_step(
     let mut step = StepSpec {
         id,
         path,
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, true)).transpose()?.unwrap_or_default(),
         fresh_context,
         keep_open,
         queue: None,
@@ -2627,6 +2642,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
     let mut step = StepSpec {
         id: AFTER_RUN_STEP.into(),
         path: AFTER_RUN_STEP.into(),
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -3036,6 +3052,73 @@ pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
         ));
     }
     Ok(())
+}
+
+/// Scope determines the closed runtime state vocabulary; absence is handled by the caller.
+fn parse_escalation(node: &KdlNode, step: bool) -> Result<EscalationOverride, FractalError> {
+    reject_type(node)?;
+    crate::declaration_syntax::ensure_only_properties(node, &["disabled"])?;
+    let invalid = || FractalError::new("invalid-escalation", "expected unique policy IDs, scope-valid state/clock, and increasing positive stages with exactly one typed recipient");
+    if node.entries().iter().any(|entry| entry.name().is_none()) { return Err(invalid()); }
+    if let Some(disabled) = node.get("disabled") {
+        if disabled.as_bool() != Some(true) || node.children().is_some() {
+            return Err(invalid());
+        }
+        return Ok(EscalationOverride::Disable);
+    }
+    let body = node.children().ok_or_else(invalid)?;
+    let mut ids = BTreeSet::new();
+    let mut policies = Vec::new();
+    for policy in body.nodes() {
+        if policy.name().value() != "policy" { return Err(invalid()); }
+        crate::declaration_syntax::ensure_only_properties(policy, &["state", "clock"])?;
+        let id = one_string_with_children(policy)?;
+        validate_id(&id, "escalation")?;
+        if !ids.insert(id.clone()) { return Err(invalid()); }
+        let state = match property_string(policy, "state")?.as_deref() {
+            Some("waiting-person") if step => EscalationState::WaitingPerson,
+            Some("ready") if step => EscalationState::Ready,
+            Some("claimed") if step => EscalationState::Claimed,
+            Some("blocked") if step => EscalationState::Blocked,
+            Some("verifying") if step => EscalationState::Verifying,
+            Some("queued") if !step => EscalationState::Queued,
+            Some("running") if !step => EscalationState::Running,
+            Some("waiting") => EscalationState::Waiting,
+            Some("completed") => EscalationState::Completed,
+            Some("failed") => EscalationState::Failed,
+            Some("cancelled") => EscalationState::Cancelled,
+            _ => return Err(invalid()),
+        };
+        let clock = match property_string(policy, "clock")?.as_deref() {
+            Some("since-progress") => EscalationClock::SinceProgress,
+            Some("since-entered") => EscalationClock::SinceEntered,
+            _ => return Err(invalid()),
+        };
+        let mut stages = Vec::new();
+        let mut previous = 0;
+        for stage in policy.children().ok_or_else(invalid)?.nodes() {
+            if stage.name().value() != "stage" { return Err(invalid()); }
+            crate::declaration_syntax::ensure_only_properties(stage, &["notify", "ask"])?;
+            let after_ms = parse_duration(&one_string(stage)?)?;
+            if after_ms <= previous { return Err(invalid()); }
+            previous = after_ms;
+            let action = match (property_string(stage, "notify")?, property_string(stage, "ask")?) {
+                (Some(to), None) => { validate_report_to(&to)?; EscalationAction::Notify(to) }
+                (None, Some(to)) if to.starts_with("person/") => {
+                    for segment in to.strip_prefix("person/").unwrap_or_default().split('/') {
+                        validate_id(segment, "person")?;
+                    }
+                    EscalationAction::Ask(to)
+                }
+                _ => return Err(invalid()),
+            };
+            stages.push(EscalationStage { after_ms, action });
+        }
+        if stages.is_empty() { return Err(invalid()); }
+        policies.push(EscalationSpec { id, state, clock, stages });
+    }
+    if policies.is_empty() { return Err(invalid()); }
+    Ok(EscalationOverride::Replace { policies })
 }
 
 /// The mission's opt-in run report: who hears of a failed, cancelled or stalled run, how long a
@@ -3699,6 +3782,104 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+    #[test]
+    fn inline_escalation_parses_and_changes_revision() {
+        let source = r#"mission "refresh" state="ready" {
+            goal "Refresh";
+            escalation {
+                policy "pending-refresh" state="running" clock="since-entered" {
+                    stage "30m" notify="agent/example/manager";
+                    stage "4h" notify="agent/example/manager";
+                    stage "24h" ask="person/owner";
+                }
+            }
+            step "inherit" { agentless; }
+            step "approval" { agentless; escalation disabled=#true; }
+        }"#;
+        let mission = super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        let crate::model::EscalationOverride::Replace { policies } = &mission.escalation else { panic!("expected replacement"); };
+        assert_eq!(policies[0].stages[2].after_ms, 86_400_000);
+        assert_eq!(mission.steps["inherit"].escalation, crate::model::EscalationOverride::Inherit);
+        assert_eq!(mission.steps["approval"].escalation, crate::model::EscalationOverride::Disable);
+        let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
+        assert!(rendered.text.contains("30m"));
+        assert!(rendered.text.contains("1d"));
+        assert!(rendered.text.contains("disabled=#true"));
+        let roundtrip = super::parse_missions(&rendered.text.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        assert_eq!(mission.revision, roundtrip.revision);
+        assert_eq!(mission.escalation, roundtrip.escalation);
+        assert_eq!(mission.steps["approval"].escalation, roundtrip.steps["approval"].escalation);
+        for (from, to) in [
+            ("24h", "25h"),
+            ("since-entered", "since-progress"),
+            ("state=\"running\"", "state=\"waiting\""),
+            ("person/owner", "person/reviewer"),
+            ("pending-refresh", "residency"),
+            ("escalation disabled=#true;", ""),
+        ] {
+            let changed = source.replace(from, to);
+            let changed = super::parse_missions(&changed.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+            assert_ne!(mission.revision, changed.revision, "{from}");
+        }
+        let json = serde_json::to_string(&mission).unwrap();
+        assert_eq!(mission, serde_json::from_str(&json).unwrap());
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_stages() {
+        for stages in [
+            r#"stage "0m" notify="agent/a";"#,
+            r#"stage "4h" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m" notify="agent/a" ask="person/a";"#,
+            r#"stage "30m" ask="agent/a";"#,
+            r#"stage "30m" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m";"#,
+            r#"stage "30m" notify="agent/a" unexpected="value";"#,
+            r#"stage "30m" ask="person/";"#,
+            r#"stage "30m" notify="agent/a" {}"#,
+        ] {
+            let source = format!(r#"escalation {{ policy "p" state="claimed" clock="since-progress" {{ {stages} }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_policies_and_duplicate_blocks() {
+        let policy = r#"policy "p" state="claimed" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
+        for body in [
+            format!("{policy}\n{policy}"),
+            policy.replace("since-progress", "activation-age"),
+            policy.replace("claimed", "unknown"),
+            policy.replace("stage \"1m\" notify=\"agent/example/manager\";", ""),
+            policy.replace("since-progress", "in-state"),
+            policy.replace("\"p\"", "\"\""),
+            policy.replace("\"p\"", ""),
+            String::new(),
+        ] {
+            let document: kdl::KdlDocument = format!("escalation {{ {body} }}").parse().unwrap();
+            assert!(super::parse_escalation(&document.nodes()[0], true).is_err());
+        }
+        for body in [
+            "escalation {}; escalation {}; step \"work\" { agentless; }",
+            "step \"work\" { agentless; escalation {}; escalation {}; }",
+        ] {
+            let source = format!("mission \"test\" state=\"ready\" {{ goal \"Test\"; {body} }}");
+            assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err());
+        }
+        for state in ["waiting-person", "waiting", "ready", "claimed", "blocked", "verifying", "completed", "failed", "cancelled", "queued", "running", "working", "normal", "revision-draining", "final", "unknown"] {
+            let source = format!(r#"escalation {{ policy "p" state="{state}" clock="since-entered" {{ stage "30m" notify="agent/a"; }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], true).is_ok(),
+                matches!(state, "waiting-person" | "waiting" | "ready" | "claimed" | "blocked" | "verifying" | "completed" | "failed" | "cancelled"), "{state}");
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], false).is_ok(),
+                matches!(state, "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"), "{state}");
+        }
+        for source in ["escalation {}", "escalation", "escalation disabled=#false", "escalation disabled=\"true\"", "escalation disabled=#true {}", "escalation disabled=#true { policy \"p\"; }"] {
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
+        }
     }
 }
 
