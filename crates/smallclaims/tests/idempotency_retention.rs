@@ -210,8 +210,11 @@ fn retention_recovers_after_process_exit_before_response_delivery() {
     );
 }
 
+/// The deployment+30d follow-up: receipts from before expiry was recorded go when their effect
+/// has a durable operation identity, while the claim keeps recognizing the key. One without it
+/// stays: cleanup never discards an effect's only protection.
 #[test]
-fn retention_migration_preserves_legacy_keys_and_old_insert_shape() {
+fn retention_expires_legacy_keys_and_keeps_the_old_insert_shape() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite");
     let original = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
@@ -224,21 +227,28 @@ fn retention_migration_preserves_legacy_keys_and_old_insert_shape() {
         .execute_batch(
             "DROP TRIGGER idempotency_completed_expiry;
          ALTER TABLE idempotency DROP COLUMN expires_at_unix_ms;
-         DELETE FROM meta WHERE key='idempotency_legacy_rowid';",
+         DELETE FROM meta WHERE key='idempotency_legacy_rowid';
+         INSERT INTO idempotency(operation_id,response) VALUES('legacy-unrecorded','{}');",
         )
         .unwrap();
     drop(connection);
     let before = smallclaims::store::now_ms() as i64;
     let upgraded = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
-    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), None);
-    commit_clock_anchor(&upgraded, before + RETENTION_MS * 8);
-    assert_eq!(
-        upgraded
-            .cleanup_idempotency(before + RETENTION_MS * 8)
-            .unwrap()
-            .deleted,
-        0
-    );
+    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(0), "legacy receipts are due");
+    commit_clock_anchor(&upgraded, before);
+    let cleaned = upgraded.cleanup_idempotency(before).unwrap();
+    assert_eq!((cleaned.deleted, cleaned.extended), (1, 1));
+    let kept: (i64, i64) = upgraded
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*),MAX(expires_at_unix_ms) FROM idempotency WHERE operation_id='legacy-unrecorded'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, (1, before + RETENTION_MS), "an effect without a durable identity keeps its receipt");
+    assert_eq!(upgraded.next_idempotency_expiry().unwrap(), Some(before + RETENTION_MS));
     assert_eq!(
         upgraded
             .put_document("doc/example/upgrade", b"old", &None, "old-key")
@@ -548,3 +558,4 @@ fn retention_expired_document_keeps_recognition_after_claim_tombstoning() {
     }
     assert_eq!(store.index().unwrap(), before);
 }
+

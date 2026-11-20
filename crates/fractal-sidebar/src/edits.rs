@@ -42,6 +42,8 @@ pub enum RestoreError { Version(u32), InvalidRecord(serde_json::Error), ScopeMis
 pub const JOURNAL_VERSION: u32 = 1;
 /// Includes bounded request payload plus identity history and journal envelope.
 pub const MAX_JOURNAL_BYTES: usize = 2 * ordered_membership::MAX_EDIT_BYTES;
+/// Keep all staged identities reserved, but refuse new attempts once this edit exhausts its budget.
+const MAX_USED_IDENTITIES: usize = 256;
 #[derive(Serialize)]
 struct Journal<'a> { version: u32, state: &'a Edits }
 #[derive(Deserialize)]
@@ -56,7 +58,7 @@ struct StoredJournal<'a> {
 pub struct Edits {
     scope: Scope,
     intent: MoveIntent,
-    pub status: Status,
+    status: Status,
     pub refusal: Option<Refusal>,
     request: Option<Request>,
     dependent: Option<Identity>,
@@ -80,6 +82,7 @@ impl Edits {
         Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new(), next_delivery: Delivery::First }
     }
     pub fn scope(&self) -> &Scope { &self.scope }
+    pub fn status(&self) -> Status { self.status }
     pub fn intent(&self) -> Option<&MoveIntent> { (self.status != Status::Observed).then_some(&self.intent) }
     /// Send/replay effects always borrow this immutable request; never regenerate its identity/fence.
     pub fn request(&self) -> Option<&Request> { self.request.as_ref() }
@@ -170,7 +173,7 @@ impl Edits {
         vec![Effect::PersistPending, Effect::ReadBase]
     }
     fn stage(&mut self, identity: Identity, fence: Base, operations: Operations) -> Vec<Effect> {
-        if !self.unused(&identity) { return self.refuse(Refusal::InvalidPlan); }
+        if !self.unused(&identity) || self.used.len() >= MAX_USED_IDENTITIES { return self.refuse(Refusal::InvalidPlan); }
         self.used.push(identity.clone()); self.request = Some(Request { identity, fence, operations });
         self.next_delivery = Delivery::First;
         self.status = Status::AwaitingPersistence; vec![Effect::PersistPending]
@@ -182,6 +185,9 @@ impl Edits {
                 if self.request.as_ref().is_some_and(|previous| base.snapshot.id == previous.fence.snapshot.id || base.snapshot.store_index < previous.fence.snapshot.store_index) { return vec![Effect::ReadBase]; }
                 if plan.folders.iter().any(|operation| !matches!(operation, arrangements::Operation::FolderCreate { .. } | arrangements::Operation::FolderRename { .. } | arrangements::Operation::FolderMove { .. } | arrangements::Operation::FolderDelete { .. })) { return self.refuse(Refusal::InvalidPlan); }
                 if plan.folders.is_empty() && plan.memberships.is_empty() { return self.refuse(Refusal::InvalidPlan); }
+                // Admit both compound steps before applying folders; never exhaust the budget halfway.
+                let needed = usize::from(!plan.folders.is_empty()) + usize::from(!plan.memberships.is_empty());
+                if self.used.len().saturating_add(needed) > MAX_USED_IDENTITIES { return self.refuse(Refusal::InvalidPlan); }
                 if !plan.folders.is_empty() {
                     if !plan.memberships.is_empty() {
                         if !self.unused(&membership) || folder.action_id == membership.action_id || folder.idempotency_key == membership.idempotency_key { return self.refuse(Refusal::InvalidPlan); }
@@ -193,10 +199,11 @@ impl Edits {
             }
             Event::Fresh(base, plan) if self.status == Status::AwaitingFreshBase => {
                 if !self.valid_base(&base) { return vec![Effect::ReadBase]; }
-                let previous = &self.request.as_ref().expect("completed folder request").fence;
+                let Some(request) = self.request.as_ref() else { return self.refuse(Refusal::InvalidPlan); };
+                let previous = &request.fence;
                 if base.snapshot.id == previous.snapshot.id || base.revision == previous.revision || base.snapshot.store_index < previous.snapshot.store_index { return vec![Effect::ReadBase]; }
                 let operations = match plan { Ok(operations) if !operations.is_empty() => operations, Ok(_) => return self.refuse(Refusal::InvalidPlan), Err(reason) => return self.refuse(reason) };
-                let identity = self.dependent.take().expect("dependent membership identity");
+                let Some(identity) = self.dependent.take() else { return self.refuse(Refusal::InvalidPlan); };
                 self.stage(identity, base, Operations::Memberships(operations))
             }
             Event::Retry if matches!(self.status, Status::Refused | Status::PartiallyApplied) => {
@@ -239,6 +246,84 @@ mod tests {
     fn stage(state: &mut Edits, folder: bool, member: bool) {
         assert_eq!(state.reduce(Event::Plan { base: base(1), plan: plan(folder, member), folder: id(1), membership: id(2) }), vec![Effect::PersistPending]);
         assert_eq!(state.status, Status::AwaitingPersistence);
+    }
+    #[test]
+    fn fresh_with_missing_internal_state_refuses_instead_of_panicking() {
+        for missing_request in [false, true] {
+            let mut state = state(); stage(&mut state, true, true);
+            state.reduce(Event::Persisted(id(1))); state.reduce(Event::Observed(id(1)));
+            state.reduce(Event::CompletionPersisted(id(1)));
+            if missing_request { state.request = None; } else { state.dependent = None; }
+            assert_eq!(state.reduce(Event::Fresh(base(2), Ok(members()))), vec![Effect::PersistPending, Effect::ReadBase]);
+            assert_eq!(state.status(), Status::PartiallyApplied);
+            assert_eq!(state.refusal, Some(Refusal::InvalidPlan));
+        }
+    }
+    #[test]
+    fn retry_history_is_bounded_and_exhaustion_preserves_reserved_identities() {
+        let mut state = state();
+        assert_eq!(state.status(), Status::Intent);
+        for attempt in 0..MAX_USED_IDENTITIES as u64 {
+            let identity = id(attempt + 100);
+            assert_eq!(state.reduce(Event::Plan { base: base(attempt + 1), plan: plan(false, true),
+                folder: id(1), membership: identity.clone() }), vec![Effect::PersistPending]);
+            assert_eq!(state.used.len(), attempt as usize + 1);
+            state.reduce(Event::Persisted(identity.clone()));
+            state.reduce(Event::Refused(identity, Refusal::Conflict));
+            assert_eq!(state.reduce(Event::Retry), vec![Effect::ReadBase, Effect::Replan]);
+        }
+        let reserved = state.used.clone();
+        let request = state.request().cloned();
+        for attempt in 0..3 {
+            state.reduce(Event::Plan { base: base(1000 + attempt), plan: plan(false, true),
+                folder: id(1), membership: id(1000 + attempt) });
+            assert_eq!(state.status(), Status::Refused);
+            assert_eq!(state.refusal, Some(Refusal::InvalidPlan));
+            assert_eq!(state.used, reserved);
+            assert_eq!(state.request(), request.as_ref());
+            let (restored, _) = Edits::restore(&state.journal().unwrap(), &scope()).unwrap();
+            assert_eq!(restored.used, reserved);
+            state.reduce(Event::Retry);
+        }
+    }
+    #[test]
+    fn retries_keep_old_actions_and_keys_reserved_independently() {
+        for reuse_action in [false, true] {
+            let mut state = state();
+            for attempt in 1..=3 {
+                state.reduce(Event::Plan { base: base(attempt), plan: plan(false, true),
+                    folder: id(99), membership: id(attempt) });
+                state.reduce(Event::Persisted(id(attempt)));
+                state.reduce(Event::Refused(id(attempt), Refusal::Conflict));
+                state.reduce(Event::Retry);
+            }
+            let mut collision = id(4);
+            if reuse_action { collision.action_id = id(1).action_id; }
+            else { collision.idempotency_key = id(1).idempotency_key; }
+            state.reduce(Event::Plan { base: base(4), plan: plan(false, true),
+                folder: id(99), membership: collision });
+            assert_eq!(state.refusal, Some(Refusal::InvalidPlan));
+            assert_eq!(state.used, vec![id(1), id(2), id(3)]);
+        }
+    }
+    #[test]
+    fn compound_plan_requires_budget_for_both_steps_before_applying_folders() {
+        let mut state = state();
+        for attempt in 1..MAX_USED_IDENTITIES as u64 {
+            state.reduce(Event::Plan { base: base(attempt), plan: plan(false, true),
+                folder: id(999), membership: id(attempt) });
+            state.reduce(Event::Persisted(id(attempt)));
+            state.reduce(Event::Refused(id(attempt), Refusal::Conflict));
+            state.reduce(Event::Retry);
+        }
+        let previous = state.request().cloned();
+        state.reduce(Event::Plan { base: base(1000), plan: plan(true, true),
+            folder: id(1000), membership: id(1001) });
+        assert_eq!(state.refusal, Some(Refusal::InvalidPlan));
+        assert_eq!(state.request(), previous.as_ref());
+        assert_eq!(state.used.len(), MAX_USED_IDENTITIES - 1);
+        assert!(state.dependent.is_none());
+        assert!(Edits::restore(&state.journal().unwrap(), &scope()).is_ok());
     }
     #[test]
     fn folder_first_requires_observation_persistence_and_fresh_fences() {

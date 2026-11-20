@@ -1556,12 +1556,17 @@ enable the disabled persistent-store verification job or occupy merge-serving wo
 Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 `FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
 Only the main publication step receives the write token; PRs never execute it.
-The producer uploads the complete output closure, including already-cached references,
-then queries the remote store recursively using the same cache-scoped write token
-through a job-temporary, owner-only netrc containing only the named cache host.
-Only that remote-store command receives the netrc path; an exit trap removes the
-file on success or failure. The exact source/output/cache receipt and closure
-manifest are retained as `fractal-native-publication`. Consumers must configure
+The producer pushes the output closure; Cachix may omit dependencies already available
+from `cache.nixos.org`. Verification first requires the exact output in the owned cache,
+then enumerates its local closure and checks the whole batch against `cache.nixos.org`.
+One authenticated owned-cache batch checks the remainder. `nix-store --check-validity
+--print-invalid` reports missing members; any path still missing fails publication.
+This uses at most three remote commands regardless of closure size, and local
+availability alone never satisfies the remote proof. Private-cache queries use
+the same cache-scoped token through a job-temporary, owner-only netrc containing only
+the named cache host; an exit trap removes it on success or failure. The exact
+source/output/cache receipt and enumerated closure manifest are retained as
+`fractal-native-publication`. Consumers must configure
 read access and trust for that same cache through their fleet cache-client declarations;
 no consumer should substitute an unrelated installed binary when this output is absent.
 

@@ -74,6 +74,7 @@ mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
 mod shell_resources;
+mod resource_profiles;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -606,8 +607,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
         anyhow::bail!("runtime does not support generation-fenced payload cancellation")
     }
-    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
-        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
+        anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
@@ -1051,21 +1052,17 @@ impl RuntimeControl for NativeRuntime {
     fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
         self.exec.signal_if(id, Some(generation), libc::SIGTERM)
     }
-    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+    fn resource_exec_cgroup(&self, id: &str, generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         let current = match self.exec.observe(id)? {
             Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
                 if current.generation_id == generation => current,
             _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
         };
-        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let Some(unit) = current.scope_unit else { return Ok(Default::default()); };
         let snapshot = fractal_runtime::systemd::snapshot()?;
-        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(Default::default()); };
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
-        match fs::read_to_string(group.join("memory.peak")) {
-            Ok(value) => Ok(Some(value.trim().parse()?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        crate::store::resource_profile_learner::cgroup::read(group)
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
@@ -1335,14 +1332,13 @@ impl NativeRuntime {
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
                     anyhow::bail!("finite execution membership is not admitted");
                 };
-                let aggregate = request.capacity.map(|capacity| -> Result<fractal_runtime::Capacity> {
-                    Ok(fractal_runtime::Capacity {
-                        cores: capacity.cores.checked_mul(request.max_members).context("aggregate lane cores overflow")?,
-                        memory: capacity.memory.checked_mul(u64::from(request.max_members)).context("aggregate lane memory overflow")?,
-                    })
-                }).transpose()?;
+                // Every live snapshot contributes once, including generations retiring under an
+                // older estimate. A new estimate can never shrink another generation's envelope.
+                let aggregate = store.resource_lane_aggregate(&request.host, &request.name)?;
                 let lane = fractal_runtime::FiniteLane {
-                    name: request.name.clone(), capacity: aggregate,
+                    name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
+                    memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
+                    class: request.class.clone(),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
@@ -1639,6 +1635,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
+    resource_admission_maintenance: Mutex<Option<u128>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1873,6 +1870,7 @@ impl Reconciler<NativeRuntime> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -2109,6 +2107,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -3141,6 +3140,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         };
         [
+            read("deadline/resource-admission-maintenance", &|| {
+                self.resource_admission_maintenance_deadline()
+            }),
             read("deadline/missions", &|| {
                 self.store.next_active_mission_deadline(&self.host)
             }),
@@ -3299,6 +3301,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(deadline)
     }
 
+    fn resource_admission_maintenance_deadline(&self) -> Result<Option<u128>> {
+        let pending = self.resource_authority.get().is_some_and(|authority| authority.is_ok())
+            && self.store.has_pending_resource_admission_observations()?;
+        let mut deadline = self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending {
+            Ok(Some(*deadline.get_or_insert_with(|| now_ms().saturating_add(5_000))))
+        } else {
+            *deadline = None;
+            Ok(None)
+        }
+    }
+
+    fn maintain_resource_admission_observations(&self) -> Result<()> {
+        let now = now_ms();
+        if self.resource_admission_maintenance_deadline()?.is_none_or(|due| due > now) {
+            return Ok(());
+        }
+        let result = self.store.replay_resource_admission_observations();
+        *self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner) =
+            if matches!(&result, Ok(false)) { None } else { Some(now.saturating_add(5_000)) };
+        result.map(|_| ())
+    }
+
     pub fn reconcile_once(&self) -> Result<()> {
         self.reconcile_once_with_cause(crate::reconcile_telemetry::WakeCause::Other)
     }
@@ -3380,6 +3405,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             hook();
         }
         self.reconcile_shell_resources()?;
+        if let Err(error) = self.maintain_resource_admission_observations() {
+            tracing::warn!(%error, "resource admission observation replay deferred");
+        }
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -9285,6 +9313,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .source_host
                     .as_deref()
                     .is_some_and(|source| source != self.host);
+                if !moved && suspension.mode() == "git"
+                    && let Some(operation) = suspension.suspend_operation_id.as_deref()
+                    && let Err(error) = crate::seat_snapshot::validate_git_workspace(
+                        self.driver_state_dir.parent().unwrap(), operation, Path::new(&member.workspace),
+                    )
+                {
+                    return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
+                }
                 if suspension.mode() == "in-place" {
                     if moved {
                         return self.fail_suspension(agent, suspension, "snapshot-in-place", "an in-place suspension can only resume on its source host".into(), Vec::new());
@@ -9295,6 +9331,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let dir = crate::seat_snapshot::directory(self.driver_state_dir.parent().unwrap(), operation);
                     match crate::seat_snapshot::restore(&dir.join("payload.tar"), &self.driver_state_dir, agent, operation, member, &session) {
                         Ok(manifest) => {
+                            if manifest.workspace_kind == crate::seat_snapshot::WorkspaceKind::LegacyUnknown {
+                                self.store.append_claim(&ClaimInput {
+                                    subject: agent.into(),
+                                    kind: "runtime.action.succeeded".into(),
+                                    actor: suspension.requested_by.clone(),
+                                    fields: BTreeMap::from([
+                                        ("action".into(), Value::String("resume".into())),
+                                        ("operation_status".into(), Value::String("restoring".into())),
+                                        ("workspace_kind".into(), Value::String("legacy-unknown-kind".into())),
+                                    ]),
+                                    evidence: vec![operation.into()],
+                                    expected_subject: None,
+                                    idempotency_key: Some(format!("agent-resume-legacy-workspace-kind:{}", suspension.operation_id)),
+                                })?;
+                            }
                             let path = manifest.transcript_path.expect("validated in-place transcript path");
                             crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path.to_string_lossy().into_owned());
                         }
