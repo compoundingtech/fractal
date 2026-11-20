@@ -1,6 +1,6 @@
-//! The st agent skill. Its SKILL.md is bundled in this binary, so `st skill` always prints the
+//! The Fractal agent skill. Its SKILL.md is bundled in this binary, so `fractal skill` always prints the
 //! guidance that matches the commands it describes. Each typed harness driver installs it where
-//! that harness loads user skills; the description names `ST_AGENT`, so a session st did not start
+//! that harness loads user skills; the description names `ST_AGENT`, so a session Fractal did not start
 //! skips it, and its first step checks that variable again.
 
 use std::fs;
@@ -19,7 +19,7 @@ pub fn message_sender_guidance() -> &'static str {
         .expect("the fractal skill contains the message sender paragraph")
 }
 
-/// Every harness a typed st seat can run.
+/// Every harness a typed Fractal seat can run.
 pub const HARNESSES: [&str; 5] = ["claude", "codex", "pi", "omp", "opencode"];
 
 /// The user skill directory each harness loads. Claude Code reads `~/.claude/skills` (or
@@ -32,7 +32,7 @@ pub fn skills_dir(harness: &str, home: &Path, claude_config: Option<&Path>) -> R
             .unwrap_or_else(|| home.join(".claude"))
             .join("skills")),
         "codex" | "pi" | "omp" | "opencode" => Ok(home.join(".agents/skills")),
-        other => anyhow::bail!("st has no skill directory for harness `{other}`"),
+        other => anyhow::bail!("Fractal has no skill directory for harness `{other}`"),
     }
 }
 
@@ -55,7 +55,7 @@ fn installed_skills_dir(harness: &str) -> Result<PathBuf> {
             Some(&instance.claude_config_dir()),
         );
     }
-    let home = std::env::var_os("HOME").context("install the st skill: HOME is not set")?;
+    let home = std::env::var_os("HOME").context("install the Fractal skill: HOME is not set")?;
     let claude_config = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
     skills_dir(
         harness,
@@ -64,7 +64,7 @@ fn installed_skills_dir(harness: &str) -> Result<PathBuf> {
     )
 }
 
-/// The `st` skill directories this build wrote and has not changed since: the ones `st uninstall`
+/// The `st` skill directories this build wrote and has not changed since: the ones `fractal uninstall`
 /// may remove. A skill someone edited is theirs and stays.
 pub fn untouched_installs() -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -91,14 +91,14 @@ pub fn install_in(skills_dir: &Path) -> Result<PathBuf> {
         return Ok(path);
     }
     fs::create_dir_all(&directory)
-        .with_context(|| format!("create the st skill directory {}", directory.display()))?;
+        .with_context(|| format!("create the Fractal skill directory {}", directory.display()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)
-        .with_context(|| format!("stage the st skill in {}", directory.display()))?;
+        .with_context(|| format!("stage the Fractal skill in {}", directory.display()))?;
     temporary.write_all(SKILL.as_bytes())?;
     temporary.as_file().sync_all()?;
     temporary
         .persist(&path)
-        .with_context(|| format!("install the st skill at {}", path.display()))?;
+        .with_context(|| format!("install the Fractal skill at {}", path.display()))?;
     Ok(path)
 }
 
@@ -140,7 +140,7 @@ mod tests {
             "`--kind silent` for anything else: it wakes nobody",
             "`--speech TEXT` (at most 300 characters, read aloud to them) only when the person asked to be told this outcome",
             "Status goes to `work progress` (it lands in the graph and wakes nobody), and run events to the run's report-to.",
-            "after an st reply, the session needs at most a one-line pointer.",
+            "after a Fractal reply, the session needs at most a one-line pointer.",
             "`work claim STEP --as \"$ST_AGENT\"`",
             "this machine's host facts",
             "`work cancel-ask PERSON_STEP --as \"$ST_AGENT\" --reason TEXT`",
@@ -159,8 +159,8 @@ mod tests {
             "the provider's own classifier decides what asks",
             "\"Let Codex work without asking\" box is ticked by default",
             "`codex_work_without_asking = false`",
-            "`st service restart`",
-            "confirm with `st doctor`",
+            "`fractal service restart`",
+            "confirm with `fractal doctor`",
             "it is not a security boundary",
             "work in a subfolder of the install's work root: `~/st` by default",
             "avoid listing or searching `$HOME`",

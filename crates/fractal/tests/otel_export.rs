@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-fn st3() -> &'static Path {
+fn fractal_cli() -> &'static Path {
     test_bin!("fractal-fixture")
 }
 
@@ -68,14 +68,14 @@ fn capture(collector: &Path, root: &Path, export: bool, success: bool) -> Output
         // otelite injects the endpoint into its child. Remove it while keeping the receiver live.
         command.args(["env", "-u", "OTEL_EXPORTER_OTLP_ENDPOINT"]);
     }
-    command.arg(st3());
+    command.arg(fractal_cli());
     if success {
         // `skill` is a fast offline success through run_cli and the telemetry gate.
         command.arg("skill");
     } else {
         missing_daemon(&mut command, root);
     }
-    command.output().expect("run st3 under otelite")
+    command.output().expect("run Fractal under otelite")
 }
 
 fn string_attribute<'a>(record: &'a Value, name: &str) -> Option<&'a str> {
@@ -395,7 +395,7 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
         .args(["--protocol", "http/json", "--", "sh", "-c",
             "echo $$ > \"$1\"; shift; exec \"$@\"", "sh"])
         .arg(&pid_path)
-        .arg(st3())
+        .arg(fractal_cli())
         .args(["up", "--node", "memory-test", "--state-dir"])
         .arg(root.path().join("daemon-state"))
         .arg("--socket")
@@ -443,7 +443,7 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
 }
 
 fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {
-    let mut command = isolated_command(st3(), root);
+    let mut command = isolated_command(fractal_cli(), root);
     command
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         // Must exceed the CLI budget so the exporter cannot mask unbounded teardown.
@@ -456,9 +456,9 @@ fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {
         missing_daemon(&mut command, root);
     }
     let started = Instant::now();
-    let mut child = command.spawn().expect("run st3 with stalled collector");
+    let mut child = command.spawn().expect("run Fractal with stalled collector");
     loop {
-        if let Some(status) = child.try_wait().expect("observe st3 exit") {
+        if let Some(status) = child.try_wait().expect("observe Fractal exit") {
             let elapsed = started.elapsed();
             let output = child.wait_with_output().unwrap();
             assert_eq!(
@@ -469,7 +469,7 @@ fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {
             return elapsed;
         }
         if started.elapsed() >= Duration::from_secs(10) {
-            child.kill().expect("stop stalled st3");
+            child.kill().expect("stop stalled Fractal");
             let output = child.wait_with_output().unwrap();
             panic!("CLI stalled during telemetry teardown: {output:?}");
         }
@@ -520,8 +520,8 @@ fn cli_black_hole_collector_has_bounded_shutdown_then_backs_off() {
 }
 
 #[test]
-fn otel_sdk_disabled_and_st3_cli_off_disable_export() {
-    let Some(collector) = otelite("otel_sdk_disabled_and_st3_cli_off_disable_export") else {
+fn otel_sdk_disabled_and_fractal_cli_off_disable_export() {
+    let Some(collector) = otelite("otel_sdk_disabled_and_fractal_cli_off_disable_export") else {
         return;
     };
     for (switch, value) in [("OTEL_SDK_DISABLED", "TrUe"), ("ST3_CLI_OTEL", "off")] {
@@ -532,7 +532,7 @@ fn otel_sdk_disabled_and_st3_cli_off_disable_export() {
             .arg(root.path().join("capture"))
             .args(["--protocol", "http/json", "--", "env"])
             .arg(format!("{switch}={value}"))
-            .arg(st3());
+            .arg(fractal_cli());
         missing_daemon(&mut command, root.path());
         let output = command
             .output()
@@ -574,7 +574,7 @@ impl ExportDaemon {
         let socket = root.join("run/api.sock");
         let log = root.join("daemon.log");
         let output = std::fs::File::create(&log).unwrap();
-        let mut command = isolated_command(collector.unwrap_or_else(|| st3()), root);
+        let mut command = isolated_command(collector.unwrap_or_else(|| fractal_cli()), root);
         // Own a process group so failed startup also cannot orphan otelite's child.
         command.process_group(0);
         if collector.is_some() {
@@ -586,7 +586,7 @@ impl ExportDaemon {
                 .args(["run", "--out"])
                 .arg(root.join("capture"))
                 .args(["--protocol", "http/json", "--"])
-                .arg(st3());
+                .arg(fractal_cli());
         }
         command.args(["up", "--node", "otel-test", "--state-dir"])
             .arg(root.join("daemon-state"))
@@ -602,7 +602,7 @@ impl ExportDaemon {
             .stdout(output.try_clone().unwrap())
             .stderr(output);
         let mut daemon = Self {
-            collector: command.spawn().expect("run real st3 daemon under otelite"),
+            collector: command.spawn().expect("run real Fractal daemon under otelite"),
             socket,
             log,
         };
@@ -867,7 +867,7 @@ fn cli_request_and_daemon_server_share_one_trace() {
         .args(["run", "--out"])
         .arg(root.path().join("cli-capture"))
         .args(["--protocol", "http/json", "--"])
-        .arg(st3())
+        .arg(fractal_cli())
         .arg("--endpoint")
         .arg(&daemon.socket)
         .args(["--daemon-wait", "0", "agents", "ls"]);
@@ -1159,7 +1159,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     daemon.write_claim(&format!("00-{TRACE_ID}-{PARENT_ID}-01"));
     // Prove the write accepted the remote context; a reconcile span accidentally
     // inheriting this request must fail the root checks below.
-    daemon.await_export(&traces_path, |request| {
+    let write_export = daemon.await_export(&traces_path, |request| {
         daemon_spans(request, "POST /v1/claims")
             .into_iter()
             .any(|span| {
@@ -1168,10 +1168,23 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
                     && int_attribute(span, "http.response.status_code") == Some(200)
             })
     });
+    let timestamp = |span: &Value, key: &str| {
+        span[key].as_str().and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| span[key].as_u64()).expect("OTLP timestamp")
+    };
+    let write_span = daemon_spans(&write_export, "POST /v1/claims")
+        .into_iter()
+        .find(|span| span["traceId"].as_str() == Some(TRACE_ID))
+        .expect("exported claim write");
+    let write_started = timestamp(write_span, "startTimeUnixNano");
+    // Notify coalesces wakes, and a reconciler wake may replace the API cause
+    // before take_wake. Bind the pass to this write's timing instead of its
+    // last-writer-wins label: a cached startup pass cannot satisfy this wait.
+    // The API counter below independently proves the write recorded its wake.
     daemon.await_export(&traces_path, |request| {
         daemon_spans(request, "st.reconcile_pass")
             .into_iter()
-            .any(|span| string_attribute(span, "st.reconcile.wake_cause") == Some("api"))
+            .any(|span| timestamp(span, "startTimeUnixNano") >= write_started)
     });
     let durations = daemon.await_export(&metrics_path, |request| {
         metric_points(request, "st.reconcile.pass.duration")
@@ -1219,11 +1232,11 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
             })
     });
     // Stop and drain the collector before checking every pass, including passes
-    // exported in other batches or at shutdown, not just the first API match.
+    // exported in other batches or at shutdown, not just the first post-write match.
     drop(daemon);
     let traces = std::fs::read_to_string(&traces_path).expect("otelite writes reconcile traces");
     let mut pass_count = 0;
-    let mut api_count = 0;
+    let mut post_write_count = 0;
     for line in traces.lines() {
         let request: Value = serde_json::from_str(line).expect("valid OTLP trace request");
         for span in daemon_spans(&request, "st.reconcile_pass") {
@@ -1237,13 +1250,13 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
             let cause = string_attribute(span, "st.reconcile.wake_cause")
                 .expect("reconcile pass wake cause attribute");
             assert!(WAKE_CAUSES.contains(&cause), "unbounded reconcile wake cause: {span}");
-            if cause == "api" {
-                api_count += 1;
+            if timestamp(span, "startTimeUnixNano") >= write_started {
+                post_write_count += 1;
             }
         }
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
-    assert!(api_count > 0, "write must export an API-woken reconcile pass:\n{traces}");
+    assert!(post_write_count > 0, "write must export a subsequent reconcile pass:\n{traces}");
     let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
     for name in [
@@ -1379,7 +1392,7 @@ fn assert_startup_failure(failed_phase: &str) {
         .args(["run", "--out"])
         .arg(root.path().join("capture"))
         .args(["--protocol", "http/json", "--"])
-        .arg(st3())
+        .arg(fractal_cli())
         .args(["up", "--node", "otel-test", "--state-dir"])
         .arg(state)
         .arg("--socket")
@@ -2241,7 +2254,7 @@ fn roster_admission_waiter_links_its_holder() {
         .with_simple_exporter(exporter.clone())
         .build();
     let subscriber = tracing_subscriber::registry()
-        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("st3-admission-proof")));
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("fractal-admission-proof")));
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let _export = fractal_daemon::test_support::roster_export_scope();
     let store = fractal_daemon::store::Store::open_memory("otel-admission").unwrap();

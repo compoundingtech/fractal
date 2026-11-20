@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep GitHub observation progressing when individual watched nodes are no longer available",
+  "replay": {"status": "none", "detail": "No history replay changes."},
+  "schema": {"status": "changed", "detail": "Repository observer cursors gain an optional repository-scoped tombstone map retaining unavailable identities and their original subjects. Existing cursors default to an empty map. Additions and recoveries are replicated independently of resource-fact changes. No client-v0 schema or generated output changes."},
+  "rules": {"status": "changed", "detail": "Only NOT_FOUND errors whose path identifies a requested null nodes() entry mark that identity unavailable. The observer records state=closed with state_reason=not_found and removes the identity from its watch set, while processing healthy nodes. When a subject recovers to open, every recovery path explicitly clears its prior state_reason in the merged stored facts. Other errors, including mixed failures, still fail the observation."},
+  "compatibility": {"status": "changed", "detail": "Unavailable identities remain unwatched until authoritative rediscovery or refresh. Revalidated REST discovery, fresh GraphQL discovery, and explicit or webhook refreshes clear tombstones and resume observation with current data, bypassing stale GraphQL snapshots. NOT_FOUND is not proof of deletion. Tombstones are scoped to the original repository: a transferred issue discovered in its destination repository is observed normally, even with the same node ID, and a transfer back can recover its original subject. Unavailable subjects have no inferred transfer target; transfers that still resolve retain existing moved_to behavior."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "changed", "detail": "Older binaries ignore the added cursor field and may rediscover unavailable identities; no data migration is required."}
+}

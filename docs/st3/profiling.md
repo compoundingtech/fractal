@@ -1283,7 +1283,7 @@ I/O accounting remain available.
 
 A full replication projection fallback always writes one bounded line to daemon stderr before
 replay starts, even without `ST3_PROFILE_DIR`. It names the phase, reason, previous frontier and
-entry target, for example `st: projection full replay phase=startup/project-replication-backlog
+entry target, for example `fractal: projection full replay phase=startup/project-replication-backlog
 reason=missing-health frontier=0 target=1200` (one physical log line). Reasons distinguish missing
 or unhealthy health, a frontier ahead of the log, a non-incremental kind, a work operation,
 malformed operation metadata, an operation conflict, and `incremental-error:CODE`. Healthy

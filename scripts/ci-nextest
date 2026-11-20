@@ -26,7 +26,7 @@ fi
 
 launch=(exec)
 # Local runs on Linux keep the tests' temporary files in tmpfs. Their SQLite stores sync every WAL commit to
-# disk, and that wait, not CPU, is most of the wall time of the file-store tests (the st3 library set: 251 s
+# disk, and that wait, not CPU, is most of the wall time of the file-store tests (the Fractal library set: 251 s
 # on /dev/shm against 407 s on disk with the same CPU, scratch peak about 0.5 GiB either way; four convergence
 # seeds: 48 s against 160 s). CI never takes this branch, so the hosted runs keep real disks and every test that
 # syncs to one. It applies only when TMPDIR is unset or one of the two ordinary directories, and when /dev/shm
@@ -37,8 +37,8 @@ if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && 
     ''|/tmp|/tmp/|/var/tmp|/var/tmp/)
       if [[ -d /dev/shm && -w /dev/shm ]] && [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ]]; then
         # One directory per run, removed when the run ends. A run killed with SIGKILL leaves it behind in RAM:
-        # sweep with `find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`.
-        nextest_scratch=$(mktemp -d /dev/shm/st-nextest.XXXXXX) && {
+        # sweep with `find /dev/shm -maxdepth 1 -name 'fractal-nextest.*' -mmin +1440 -exec rm -rf {} +`.
+        nextest_scratch=$(mktemp -d /dev/shm/fractal-nextest.XXXXXX) && {
           export TMPDIR=$nextest_scratch
           trap 'rm -rf "$nextest_scratch"' EXIT
           trap 'exit 143' TERM INT HUP

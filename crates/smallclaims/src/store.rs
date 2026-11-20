@@ -3113,6 +3113,36 @@ impl Store {
         Ok(false)
     }
 
+    /// Authenticate a claim's original writer using an admitted signed envelope and its
+    /// canonical membership window. A principal signature or caller-provided origin is not
+    /// writer provenance; a copy sealed by another member cannot satisfy this proof.
+    pub fn claim_has_authenticated_writer(&self, claim_id: &str, writer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let Some(fleet_id) = self.signing_fleet_id(&connection)? else { return Ok(false); };
+        let shard = fleet_meta(&connection, "shard_id")?;
+        let membership = self.fleet_membership_sealed()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT signatures.sequence,signatures.envelope_hash,signatures.member_key,signatures.signature
+             FROM replica_records records JOIN replica_envelopes envelopes USING(writer,sequence,envelope_hash)
+             JOIN replica_envelope_signatures signatures USING(writer,sequence,envelope_hash)
+             WHERE records.claim_id=?1 AND records.writer=?2 AND records.state='valid'
+               AND envelopes.receipt_state='validated'")?;
+        let rows = statement.query_map(params![claim_id, writer], |row|
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?;
+        for row in rows {
+            let (sequence, hash, key, signature) = row?;
+            let window = shard.as_deref().map_or_else(
+                || membership.window(writer, sequence),
+                |shard| membership.shard_window(shard, writer, sequence));
+            if matches!(window, crate::fleet::Window::Keyed(keys) if keys.contains(&key))
+                && VerifiedEnvelopeSignature::verify(shard.as_deref(), &fleet_id, writer,
+                    sequence, &hash, &key, &signature).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;

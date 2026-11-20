@@ -44,7 +44,7 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             Ok(call) => call,
             Err(error) if contention(&error) => {
                 report.retries += 1;
-                eprintln!("st3: event migration read contention; retrying in {retry:?}: {error:#}");
+                eprintln!("fractal: event migration read contention; retrying in {retry:?}: {error:#}");
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
                 continue;
@@ -72,7 +72,7 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
             }
             Err(error) if contention(&error) => {
                 report.retries += 1;
-                eprintln!("st3: event migration contention; retrying in {retry:?}: {error:#}");
+                eprintln!("fractal: event migration contention; retrying in {retry:?}: {error:#}");
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             }

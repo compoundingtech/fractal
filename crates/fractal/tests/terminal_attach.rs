@@ -1,9 +1,9 @@
 #![cfg(unix)]
-//! `st terminals attach` reaches a terminal on this host through its PTY session, and a terminal
+//! `fractal terminals attach` reaches a terminal on this host through its PTY session, and a terminal
 //! behind an HTTP endpoint through the daemon's WebSocket. When the daemon, at whichever endpoint,
 //! is down or does not answer within a second, it attaches to the subject's newest PTY session on
-//! this host without st. A terminal another host owns is attached PTY to PTY over Fabric, through
-//! the owner daemon's terminal socket (or `st terminals serve-fabric` for an earlier exposure),
+//! this host without Fractal. A terminal another host owns is attached PTY to PTY over Fabric, through
+//! the owner daemon's terminal socket (or `fractal terminals serve-fabric` for an earlier exposure),
 //! and through the client gateway only when Fabric cannot reach it. Each test owns a daemon, in
 //! process or stand-in, and a stand-in PTY session that reports which process attached to it.
 
@@ -93,7 +93,7 @@ fn replicate(source: &Store, target: &Store) {
     panic!("the replica never converged");
 }
 
-/// The incarnation st derives for the stand-in session, which this test process serves.
+/// The incarnation fractal derives for the stand-in session, which this test process serves.
 fn incarnation(created_at: &str) -> String {
     format!("{}:{created_at}", std::process::id())
 }
@@ -237,7 +237,7 @@ fn recording_pty(root: &Path) -> PathBuf {
     bin
 }
 
-/// Run `st terminals attach` against `endpoint` with no terminal on stdin. This host's PTY root
+/// Run `fractal terminals attach` against `endpoint` with no terminal on stdin. This host's PTY root
 /// is `ROOT/state/st3/pty`, as `ConfiguredRegistry` writes it.
 async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
     let binary = test_bin!("fractal-fixture").to_path_buf();
@@ -264,7 +264,7 @@ async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
     (output, pid)
 }
 
-/// Run `st terminals attach` against the configured daemon for `root`: its socket is
+/// Run `fractal terminals attach` against the configured daemon for `root`: its socket is
 /// `ROOT/run/st3.sock` and its PTY root `ROOT/state/st3/pty`. Returns the output, the CLI's pid,
 /// and how long it ran.
 async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Duration) {
@@ -383,7 +383,7 @@ async fn a_replaced_pty_session_receives_nothing_from_a_local_attach() {
     }
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    // st observed an earlier session; a replacement now serves the same socket path.
+    // fractal observed an earlier session; a replacement now serves the same socket path.
     observe_terminal(&state.store, &incarnation("2026-09-29T07:00:00.000Z"));
     let socket = root.path().join("st3.sock");
     let server = serve_unix(state, &socket).await;
@@ -440,7 +440,7 @@ async fn a_terminal_on_this_host_attaches_without_st_while_its_daemon_is_down() 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("st was not consulted") && stderr.contains(&format!("`{RUNTIME_ID}`")),
-        "the attachment must say st was not consulted: {stderr}"
+        "the attachment must say Fractal was not consulted: {stderr}"
     );
     assert!(
         stderr.contains("also running: `example-worker-earlier`"),
@@ -486,7 +486,7 @@ async fn a_terminal_on_this_host_attaches_while_its_daemon_never_answers() {
     );
     let attached = session.join().unwrap().expect("the CLI attached");
     assert_eq!(attached.pid, Some(cli as i32));
-    assert!(silent.stop() > 0, "st must still ask its daemon first");
+    assert!(silent.stop() > 0, "Fractal must still ask its daemon first");
 }
 
 /// A daemon that takes every connection and never answers.
@@ -575,7 +575,7 @@ async fn a_terminal_on_this_host_attaches_whatever_endpoint_never_answers() {
         );
         let attached = session.join().unwrap().expect("the CLI attached");
         assert_eq!(attached.pid, Some(cli as i32));
-        assert!(daemon.stop() > 0, "st must still ask {endpoint} first");
+        assert!(daemon.stop() > 0, "Fractal must still ask {endpoint} first");
         std::fs::remove_file(registry.pty_root.join(format!("{RUNTIME_ID}.sock"))).unwrap();
     }
 }
@@ -722,10 +722,10 @@ fn fabric_shim(root: &Path, tunnel: Option<&Path>) {
 /// How the owner's Fabric serves the PTY protocol.
 #[derive(Clone, Copy)]
 enum Exposure {
-    /// `st terminals expose-fabric`: Fabric forwards each tunnel to the st daemon's terminal
+    /// `fractal terminals expose-fabric`: Fabric forwards each tunnel to the fractal daemon's terminal
     /// socket.
     Socket,
-    /// An exposure made by an earlier `expose-fabric`: Fabric runs `st terminals serve-fabric`
+    /// An exposure made by an earlier `expose-fabric`: Fabric runs `fractal terminals serve-fabric`
     /// with the tunnel on its stdin and stdout.
     Exec,
 }
@@ -741,7 +741,7 @@ fn fabric_tunnel(
     listener.set_nonblocking(true).unwrap();
     let binary = test_bin!("fractal-fixture").to_path_buf();
     let pty_root = owner_pty_root.to_path_buf();
-    // The owner's daemon serves its terminal socket in this process, as `st up` does in its own.
+    // The owner's daemon serves its terminal socket in this process, as `fractal up` does in its own.
     let terminal_socket = socket.with_file_name("owner-terminals.sock");
     if let Exposure::Socket = exposure {
         std::mem::forget(
@@ -811,7 +811,7 @@ fn forward(tunnel: std::os::unix::net::UnixStream, service: std::os::unix::net::
     output.join().unwrap();
 }
 
-/// Run `st terminals attach` as a person against `endpoint`, with this test's config and state.
+/// Run `fractal terminals attach` as a person against `endpoint`, with this test's config and state.
 async fn remote_attach(root: &Path, endpoint: &str) -> Output {
     let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
@@ -898,7 +898,7 @@ async fn a_replaced_pty_session_on_another_host_receives_nothing_over_fabric() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    // st selected an earlier session; a replacement now serves the same name on the owner.
+    // fractal selected an earlier session; a replacement now serves the same name on the owner.
     let state = remote_terminal(root.path(), &incarnation("2026-09-29T07:00:00.000Z"));
     let socket = root.path().join("st3.sock");
     let server = serve_unix(state, &socket).await;
@@ -914,7 +914,7 @@ async fn a_replaced_pty_session_on_another_host_receives_nothing_over_fabric() {
     assert!(
         stderr.contains("changed incarnation")
             && stderr.contains("Attaching through the client gateway instead"),
-        "the owner refuses the route, and st falls back: {stderr}"
+        "the owner refuses the route, and Fractal falls back: {stderr}"
     );
     assert!(owner.join().unwrap().is_some(), "the CLI dialed the owner");
     let attached = session

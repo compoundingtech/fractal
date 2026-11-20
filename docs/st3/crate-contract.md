@@ -59,7 +59,7 @@ the domain crates < `fractal-github` < `fractal-peer` < `fractal-reconcile` < `f
 - **Tests go with what they use.** A test moves to the highest crate among the items it uses; the
   helpers it calls are copied next to it (types that are `pub` are shared, not copied).
 - **To cut another domain** (or redo one after a merge conflict: a cut is cheaper to redo on the merged
-  tree than to merge): `scripts/crate_cut.py plan` shows the placement, `apply --layer D --crate st3-D
+  tree than to merge): `scripts/crate_cut.py plan` shows the placement, `apply --layer D --crate fractal-D
   --lower <crate below>` moves the layer, `fix` makes the workspace build (visibility and trait
   imports), `sweep` removes what the move left unused. The domains, their order and the files that hint
   at them are in `.st/crate-cut.json`; `scripts/crate-cut-test` checks the tool on a small workspace.
@@ -73,7 +73,7 @@ macros. Other crates use a part of it:
 
 | consumer | uses |
 |---|---|
-| the `st3` binary and its tests | everything it needs |
+| the `fractal` binary and its tests | everything it needs |
 | `fractal-tui` (dev) | `api`, `store`, `model`, `reconcile`, `client`, `graph`, `parse_intent` |
 | `fractal-client` (dev) | `api`, `model`, `graph`, `store`, `test_support` |
 | `fractal-feed` (dev) | `api`, `model`, `store`, `graph` |

@@ -2185,6 +2185,10 @@ struct SloArgs {
 enum SloCommand {
     /// List every objective and budget: target, current value, window and what is left.
     Ls,
+    /// Admit one existing signed graph roll receipt claim.
+    IngestRoll { claim_id: String },
+    /// Resolve immutable native creation time and pinned revision for one enrolled roll intent.
+    RollIntent { run_subject: String },
     /// Explain one objective or budget in plain words.
     Explain {
         /// An id from `fractal slo ls`, or the start of one.
@@ -7814,6 +7818,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     })?);
     fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
         .context("opening native SLO accounting before serving requests")?;
+    fractal_daemon::roll_completion::install(&store, &config.state_dir)
+        .context("opening immutable native roll receipts before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -7856,6 +7862,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         )?))?;
     }
     store.use_key_directory(&keys)?;
+    fractal_daemon::roll_completion_watch::start(&store);
     // The messages shard sits beside the graph's database and takes its fleet from the graph.
     // A shard that cannot open leaves messaging on graph claims: the daemon then does not
     // advertise it, so no peer sends it stream items.
@@ -7949,7 +7956,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "mission_resource_lane": 2,
                     "idle_residency": 1,
                     "per_run_missions": 1,
-                    "shell_resource_exec": 1,
+                    "shell_resource_exec": 2,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -11686,9 +11693,21 @@ async fn run_series(client: &Client, args: SeriesArgs, json_output: bool) -> Res
 }
 
 async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    if let Some(SloCommand::RollIntent { run_subject }) = &args.command {
+        let result: Value = client.get(&format!("/v1/slo/roll-intent?run={}", urlencoding::encode(run_subject))).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if let Some(SloCommand::IngestRoll { claim_id }) = &args.command {
+        let result: Value = client.post("/v1/slo", &serde_json::json!({"claim_id": claim_id})).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let report: Value = client.get("/v1/slo").await?;
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     match args.command.unwrap_or(SloCommand::Ls) {
+        SloCommand::IngestRoll { .. } => unreachable!("ingestion returns before reading rows"),
+        SloCommand::RollIntent { .. } => unreachable!("intent lookup returns before reading rows"),
         SloCommand::Ls => {
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&report)?);

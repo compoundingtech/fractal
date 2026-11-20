@@ -1,16 +1,16 @@
 //! Boot canaries: a seat that cannot start never ships.
 //!
-//! Each case runs a real st3 daemon with real `pty` seats of one harness (Claude, Codex, pi, omp or
+//! Each case runs a real fractal daemon with real `pty` seats of one harness (Claude, Codex, pi, omp or
 //! OpenCode) whose provider is a token-free stand-in speaking that harness's wire contract
 //! (`scripts/fractal-boot-canaries`, no login, no model). Every seat must reach a claimed step, with its
-//! current incarnation, and read an st message within the time bound, and none may park in the
+//! current incarnation, and read a Fractal message within the time bound, and none may park in the
 //! crash-loop guard. The scenarios are the launches that broke in production:
 //!
 //! - `fresh`: a new seat boots.
 //! - `restart`: the seat is restarted and the new incarnation boots.
 //! - `daemon-restart`: the daemon dies with the seat's provider, and the new daemon, whose latest
 //!   observation of the seat is still its dead predecessor, boots a replacement.
-//! - `reexec`: the st binary is replaced and the seat's driver and channels re-exec into it.
+//! - `reexec`: the fractal binary is replaced and the seat's driver and channels re-exec into it.
 //! - `concurrent`: five seats launch at once.
 //! - `suspend`: a quiet seat suspends and resumes its own native session, and a resume whose
 //!   transcript is gone fails with a typed reason while the seat stays suspended.
@@ -148,7 +148,7 @@ fn canary(harness: &str, scenario: &str) {
         (tempfile::tempdir().unwrap(), false)
     };
     let evidence = evidence_root.path().join("evidence");
-    // The replacement binary for `reexec` is a copy of st3, hundreds of megabytes in a debug build:
+    // The replacement binary for `reexec` is a copy of fractal, hundreds of megabytes in a debug build:
     // it goes on the target directory's disk, not the small tmpfs the daemon's sockets live on.
     let scratch = tempfile::Builder::new()
         .prefix("boot-canary-scratch-")

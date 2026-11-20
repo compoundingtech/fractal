@@ -264,7 +264,7 @@ pub async fn push_seat_freshness(
                 round.unreachable.insert(member);
             }
             Err(error) => {
-                eprintln!("st3: seat freshness to {member}: {error:#}");
+                eprintln!("fractal: seat freshness to {member}: {error:#}");
                 round.failed.insert(member);
             }
         }
@@ -316,7 +316,7 @@ pub fn start_seat_freshness_push(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
         // Not in a fleet: no other member reads this node's re-stamps.
         if let Err(error) = state.store.set_fleet_hears_seats(true) {
-            eprintln!("st3: seat freshness: {error:#}");
+            eprintln!("fractal: seat freshness: {error:#}");
         }
         return;
     };
@@ -364,7 +364,7 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
                     !round.failed.is_empty() || !round.owed.is_empty()
                 }
                 Err(error) => {
-                    eprintln!("st3: seat freshness push failed: {error:#}");
+                    eprintln!("fractal: seat freshness push failed: {error:#}");
                     true
                 }
             };
@@ -379,7 +379,7 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
                 .await
             };
             if let Err(error) = flag.map_err(anyhow::Error::from).and_then(|result| result) {
-                eprintln!("st3: seat freshness: {error:#}");
+                eprintln!("fractal: seat freshness: {error:#}");
             }
             retry = again.then(|| retry.map_or(pace.retry, |after| (after * 2).min(pace.longest_retry)));
         }

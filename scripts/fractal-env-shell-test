@@ -74,7 +74,7 @@ env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_MISSION_RUN=fixt
   bash "$repo/evals/fractal/ghost-bug/judges/graph.sh" >/dev/null
 IFS= read -r cleared <"$work/observed"
 test "$cleared" = : || fail 'operator command retained an inherited identity alias'
-# Daemon-owned hooks still hand the exact event and payload to their selected st3 binary.
+# Daemon-owned hooks still hand the exact event and payload to their selected Fractal binary.
 cat >"$work/bin/preferred-driver" <<'SH'
 #!/bin/sh
 printf '%s\n' "$0" "$@" >"$OBSERVED"

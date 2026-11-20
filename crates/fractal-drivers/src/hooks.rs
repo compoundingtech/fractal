@@ -34,8 +34,8 @@ const SCHEMA: u32 = 1;
 const RECEIPT_FILE: &str = "current.json";
 const SET_MANIFEST_FILE: &str = "manifest.json";
 const SETS_DIR: &str = "sets";
-/// The manifest an st3 hook set carries instead of [`SET_MANIFEST_FILE`].
-pub const ST3_SET_MARKER: &str = "st3-hooks.json";
+/// The manifest a Fractal hook set carries instead of [`SET_MANIFEST_FILE`].
+pub const FRACTAL_SET_MARKER: &str = "st3-hooks.json";
 const HOOKS: [(&str, &[u8]); 10] = [
     ("codex-session-start.sh", CODEX_SESSION_START),
     ("codex-pre-compact.sh", CODEX_PRE_COMPACT),
@@ -244,11 +244,11 @@ pub(crate) fn is_managed_hook_reference(text: &str) -> bool {
 /// Install-owned hook root. `$ST_HOOKS` can pin a scratch or custom state layout; otherwise use
 /// `$XDG_STATE_HOME/st2/hooks` or `~/.local/state/st2/hooks`.
 pub fn hooks_root() -> Result<PathBuf> {
-    // st3 exports its own hook set under the same name. That set is not an st2 root, so an st2
-    // process started beneath an st3 seat (a test run, for one) keeps its own default root.
+    // Fractal exports its own hook set under the same name. That set is not an st2 root, so an st2
+    // process started beneath a Fractal seat (a test run, for one) keeps its own default root.
     if let Some(path) = std::env::var_os("ST_HOOKS")
         .filter(|value| !value.is_empty())
-        .filter(|path| !Path::new(path).join(ST3_SET_MARKER).exists())
+        .filter(|path| !Path::new(path).join(FRACTAL_SET_MARKER).exists())
     {
         return Ok(root_of_exported_hooks(PathBuf::from(path)));
     }
@@ -264,7 +264,7 @@ pub fn hooks_root() -> Result<PathBuf> {
 
 /// The hook root an exported `$ST_HOOKS` names.
 ///
-/// st2 exports the root, but st3 exports its binary's set directory, because st3's Claude settings
+/// st2 exports the root, but Fractal exports its binary's set directory, because Fractal's Claude settings
 /// run `$ST_HOOKS/claude-observe.sh`. Read as a root, that set directory sends a pi or omp launch
 /// looking for `<set>/sets/<set>/`, so every seat fails with `launch-error` once the set is new. A
 /// set directory is `<root>/sets/sha256-…` and holds its own manifest, so it names its root.
@@ -283,7 +283,7 @@ fn root_of_exported_hooks(path: PathBuf) -> PathBuf {
 }
 
 /// The exported `$ST_HOOKS` directory when it is itself a set that holds this binary's exact
-/// `name` asset. st3 publishes the pi and omp channel extensions in its own set, so its seats load
+/// `name` asset. Fractal publishes the pi and omp channel extensions in its own set, so its seats load
 /// them from there and never need st2's hook root.
 pub fn exported_set_holding(name: &str) -> Option<PathBuf> {
     let (_, expected) = HOOKS.iter().find(|(file, _)| *file == name)?;
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn an_exported_set_directory_names_its_hook_root() {
-        // st3 exports `$ST_HOOKS` as the set directory. Verified as a root, it fails.
+        // Fractal exports `$ST_HOOKS` as the set directory. Verified as a root, it fails.
         let tmp = tempfile::tempdir().unwrap();
         let set = install_at(tmp.path(), false).unwrap();
         assert!(verify_required_set_at(&set).is_err());
