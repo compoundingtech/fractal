@@ -144,6 +144,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
         let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        fit.recovery_capable = request.profile.as_ref().and_then(|key| policy.profiles.get(key))
+            .is_some_and(|seed| seed.recovery_capable);
+        if cfg!(target_os = "linux") {
+            smallclaims::touched::note_read(|| "host-lane-pressure".into());
+            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+        }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
@@ -334,7 +340,7 @@ mod tests {
         // Model authoritative custody written by a newer binary, without asking this binary
         // to admit an unsupported class. Preserve the exact persisted body through cleanup.
         store.connection.write().execute(
-            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','recovery') WHERE id=?1",
+            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','future-class') WHERE id=?1",
             [&future.id],
         ).unwrap();
         let body = || store.connection.write().query_row(
@@ -441,14 +447,11 @@ mod tests {
         request.profile = Some("unknown.workload".into());
         assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
         request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
-        reconciler.resolve_resource_profile(&mut request).unwrap();
-        assert!(request.profile_estimate.as_ref().unwrap().seed_revision.is_none());
+        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
         let mut raw = profile_request();
         raw.profile = None;
         raw.capacity = request.capacity;
-        let original = raw.clone();
-        reconciler.resolve_resource_profile(&mut raw).unwrap();
-        assert_eq!(raw, original);
+        assert!(reconciler.resolve_resource_profile(&mut raw).unwrap_err().to_string().contains("raw-resource-declaration"));
     }
 
     #[test]
@@ -837,7 +840,7 @@ mod tests {
                 "inherited-exec" => r#"agentless
                     exec "payload" { command "true"; }"#.to_owned(),
                 "queued-exec" => r#"agentless
-                    lane "checks" host="node" max-members=1 coverage="logical" { capacity cores=1 memory="1G"; }
+                    lane "checks" host="node" max-members=1 profile="check.unit" coverage="logical"
                     exec "payload" { command "true"; }"#.to_owned(),
                 _ => unreachable!(),
             };
@@ -868,7 +871,7 @@ mod tests {
                 attempt: upstream.steps[0].attempt, invocation: None,
             };
             let parent = LaneRequest {
-                profile: None, profile_estimate: None, disk_path: None,
+                profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
                 id: "parent".into(), name: "checks".into(), host: "node".into(),
                 max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical,
                 admission_timeout_ms: None, owner: owner.clone(),
@@ -888,7 +891,9 @@ mod tests {
             assert!(store.resource_context_for_run(&child.subject).unwrap().is_some());
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
-            );
+            ).with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                profiles: BTreeMap::from([("check.unit".into(), profile_seed())]), ..Default::default()
+            }));
             // As in the program-host fault regression, prevent a JavaScript host from starting
             // without depending on installed runtimes, process scheduling, or wall-clock sleeps.
             let dir = tempfile::tempdir().unwrap();
