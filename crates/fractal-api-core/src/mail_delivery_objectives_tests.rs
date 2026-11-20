@@ -350,12 +350,13 @@ async fn unrelated_notifications_and_claims_do_not_recapture() {
         expected_subject: None, idempotency_key: None,
     }).unwrap();
     for _ in 0..16 { tokio::task::yield_now().await; }
-    let changed = publication.changed.lock().unwrap();
-    assert_eq!(*changed.as_ref().unwrap().borrow(), generation);
-    assert!(!changed.as_ref().unwrap().has_changed().unwrap(),
-        "unrelated input cannot schedule a capture even after this task yields");
-    assert_eq!(publication.captures.load(Ordering::Acquire), 1);
-    drop(changed);
+    {
+        let changed = publication.changed.lock().unwrap();
+        assert_eq!(*changed.as_ref().unwrap().borrow(), generation);
+        assert!(!changed.as_ref().unwrap().has_changed().unwrap(),
+            "unrelated input cannot schedule a capture even after this task yields");
+        assert_eq!(publication.captures.load(Ordering::Acquire), 1);
+    }
     send(&state.store, "message/example-real-source-wake", json!([]));
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
