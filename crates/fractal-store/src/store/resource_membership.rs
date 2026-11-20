@@ -236,7 +236,7 @@ impl From<&ExecGeneration> for ExecutionIdentity {
 pub fn dependency(host: &str, lane: &str) -> String { format!("resource-membership/{host}/{lane}") }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<(), FractalError> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1674cd2f737 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h94d100aa2222 owner=fractal_store::store::resource_membership TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS resource_authorities_v1 (
         host TEXT PRIMARY KEY, epoch TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS resource_lane_policies_v1 (
         host TEXT NOT NULL, lane TEXT NOT NULL, policy TEXT NOT NULL, PRIMARY KEY(host,lane));
@@ -1088,7 +1088,7 @@ mod tests {
 
         for (class, refusal, complete) in [
             (RequestClass::Unknown("future-class".into()), None, false),
-            (RequestClass::Unknown("recovery".into()), Some(RefusalCode::RecoveryNotAllowed), false),
+            (RequestClass::Recovery, Some(RefusalCode::RecoveryNotAllowed), false),
             (RequestClass::Agent, Some(RefusalCode::RecoveryNotAllowed), false),
             (RequestClass::Check, None, true),
         ] {

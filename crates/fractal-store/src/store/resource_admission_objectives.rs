@@ -56,7 +56,7 @@ impl Store {
         for (id, body) in &members {
             let member: Membership = serde_json::from_str(body)?;
             let published = publish(&tx, &member)?;
-            tx.execute("DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [id])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hbe53b1627d37 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [id])?;
             if !published {
                 // Rotate blocked IDs behind already-pending work. New traffic cannot
                 // reset a traversal or starve existing IDs, and each tick is bounded.
@@ -81,7 +81,7 @@ impl Store {
 }
 
 fn enqueue(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
-    tx.execute("INSERT OR IGNORE INTO resource_admission_pending_v1(host,membership_id) VALUES(?1,?2)",
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7ae18f03ddc9 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_admission_pending_v1(host,membership_id) VALUES(?1,?2)",
         rusqlite::params![member.request.host,member.request.id])?;
     Ok(())
 }
@@ -91,7 +91,7 @@ fn enqueue(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
 pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
     let complete = publish(tx, member)?;
     if complete {
-        tx.execute("DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [&member.request.id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h35fccbf73a79 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [&member.request.id])?;
     } else {
         enqueue(tx, member)?;
     }

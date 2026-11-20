@@ -106,6 +106,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             })().map_err(|error| format!("resource authority recovery failed: {error:#}"))
         });
         initialized.as_ref().map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        smallclaims::touched::note_due(now_ms() + 5_000);
         Ok(())
     }
 

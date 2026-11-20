@@ -356,7 +356,7 @@ fn old_registry_rejects_recovery_enums_without_stalling_known_replication() {
         let older = node("older", Some(&older_key), Some(&anchor_key));
         let mut registry = fractal_schema::registry().clone();
         let fields = &mut registry.claims.get_mut("resource.admission.observed").unwrap().fields;
-        fields.get_mut("class").unwrap().values.retain(|value| value != "recovery");
+        fields.get_mut("class").unwrap().values = ["landing", "check", "agent"].map(str::to_owned).to_vec();
         fields.get_mut("refusal").unwrap().values.retain(|value| value != "recovery-not-allowed");
         older.set_claim_registry(registry);
         sync(&current, &older);
