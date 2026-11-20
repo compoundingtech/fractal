@@ -402,7 +402,9 @@ impl StoreConfig {
 /// its own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
 /// set, until the owner decides whether it becomes the default (Factory's decision of
 /// 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person mail where it
-/// is on).
+/// is on). `replay_safe_receipts` is how long a replay-safe response receipt (a lease renewal,
+/// which a retry simply repeats) is kept: `1h` unless set, and `0` keeps them for the seven days
+/// every other receipt is kept. It applies to every member, trimming or not.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -413,11 +415,13 @@ pub struct TrimConfig {
     pub daily_claims: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mail: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe_receipts: Option<String>,
 }
 
 impl Default for TrimConfig {
     fn default() -> Self {
-        Self { local: true, notify: None, daily_claims: None, mail: None }
+        Self { local: true, notify: None, daily_claims: None, mail: None, replay_safe_receipts: None }
     }
 }
 
@@ -432,7 +436,18 @@ impl TrimConfig {
         self.local && self.mail == Some(true)
     }
 
+    /// How long replay-safe receipts are kept, in milliseconds; 0 when they are kept as long as
+    /// every other receipt.
+    pub fn replay_safe_receipt_window_ms(&self) -> Result<u64> {
+        match self.replay_safe_receipts.as_deref().map(str::trim) {
+            None => Ok(60 * 60 * 1_000),
+            Some("0") => Ok(0),
+            Some(value) => parse_duration_ms(value, "trim.replay_safe_receipts"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.replay_safe_receipt_window_ms()?;
         anyhow::ensure!(
             self.notify.as_deref().is_none_or(|agent| {
                 agent.starts_with("agent/")
@@ -2470,6 +2485,20 @@ sekrets_profile = "nathan/daemon-gh"
         let config: Config = toml::from_str("[checkpoint]\nenabled = false\n").unwrap();
         assert!(!config.checkpoint.enabled);
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
+    }
+
+    #[test]
+    fn replay_safe_receipts_last_an_hour_unless_set_and_zero_keeps_them_a_week() {
+        let config = Config::default();
+        assert_eq!(config.trim.replay_safe_receipt_window_ms().unwrap(), 3_600_000);
+        // The default is not written, so an older build reading this config never meets the key.
+        assert!(!toml::to_string(&config).unwrap().contains("replay_safe_receipts"));
+        let set: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"6h\"\n").unwrap();
+        assert_eq!(set.trim.replay_safe_receipt_window_ms().unwrap(), 6 * 3_600_000);
+        let off: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"0\"\n").unwrap();
+        assert_eq!(off.trim.replay_safe_receipt_window_ms().unwrap(), 0);
+        let bad = TrimConfig { replay_safe_receipts: Some("soon".into()), ..TrimConfig::default() };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

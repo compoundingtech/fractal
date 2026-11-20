@@ -1263,3 +1263,55 @@ fn refresh_intake_mutation_wins_and_stale_epoch_cannot_seal() {
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
 }
+
+#[test]
+fn a_renewal_retried_after_its_receipt_expired_renews_again() {
+    let renewal = claimed_step(1);
+    let (store, subject) = (&renewal.store, renewal.subject.as_str());
+    let first = store.work_action(subject, "renew", &request("renewal-retry", None)).unwrap();
+    let key = smallclaims::store::opaque_cache_key("renewal-retry");
+    let replay_safe: bool = store.connection.write().query_row(
+        "SELECT replay_safe FROM idempotency WHERE operation_id=?1", [&key], |row| row.get(0)).unwrap();
+    assert!(replay_safe, "a renewal's receipt is replay-safe");
+    // The mission apply and the run's creation left receipts too, some replay-safe.
+    let others = |store: &Store| -> Vec<(String, bool)> {
+        let writer = store.connection.write();
+        let mut statement = writer.prepare("SELECT operation_id, replay_safe FROM idempotency WHERE operation_id<>?1 ORDER BY rowid").unwrap();
+        statement.query_map([&key], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let before = others(store);
+    assert!(before.iter().any(|(_, safe)| *safe), "a run apply's replay-safe receipt: {before:?}");
+    // As if every receipt completed two hours ago, then the hourly pass.
+    let hour = smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS;
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hf1fb3b4ee803 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET expires_at_unix_ms=expires_at_unix_ms-?1", [2 * hour]).unwrap();
+    let now = smallclaims::store::now_ms() as i64;
+    let mut deleted = 0;
+    loop {
+        let cleaned = store.cleanup_replay_safe_idempotency(now, hour).unwrap();
+        deleted += cleaned.deleted;
+        if cleaned.examined + cleaned.passed == 0 { break; }
+    }
+    assert!(deleted >= 1);
+    let gone: bool = store.connection.write().query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM idempotency WHERE operation_id=?1)", [&key], |row| row.get(0)).unwrap();
+    assert!(gone);
+    assert_eq!(others(store), before, "only the renewal's receipt went");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    // A run's other replay-safe receipts keep the in-use rule while the run is live.
+    let reader = store.readers.get();
+    let run = serde_json::to_string(&json!({"run": first.run})).unwrap();
+    assert!(store.runtime.replay_safe_response_pinned(&reader, &run).unwrap());
+    // And so do those whose run has ended, or that name no run or are not JSON: only a
+    // renewal's step view is shortened; the rest wait for the 7-day cleanup.
+    for other in [r#"{"run":"mission-run/ended-long-ago"}"#, r#"{"status":"applied"}"#, "digest-0123"] {
+        assert!(store.runtime.replay_safe_response_pinned(&reader, other).unwrap(), "{other}");
+    }
+    let renewal = serde_json::to_string(&first).unwrap();
+    assert!(!store.runtime.replay_safe_response_pinned(&reader, &renewal).unwrap());
+    drop(reader);
+    // The retry is a new renewal: no expired-key error, and the lease moves on again.
+    let retried = store.work_action(subject, "renew", &request("renewal-retry", None)).unwrap();
+    assert!(retried.claim_expires_at_unix_ms >= first.claim_expires_at_unix_ms);
+    assert_eq!(retried.status, first.status);
+}

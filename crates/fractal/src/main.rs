@@ -8132,7 +8132,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ) {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
-    spawn_response_expiry(store.clone());
+    spawn_response_expiry_with(store.clone(), config.trim.replay_safe_receipt_window_ms()?.min(i64::MAX as u64) as i64);
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
     fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
@@ -22834,7 +22834,14 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
 /// Register before the first rowid deadline read. The callback performs no SQL and never
 /// takes the writer: it only coalesces committed-write notifications. Deadline reads run on a
 /// pooled reader, so unrelated commits add no expiry SQL to the writer path.
+#[cfg(test)]
 fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
+    spawn_response_expiry_with(store, smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS)
+}
+
+/// `replay_safe_window_ms` is `[trim] replay_safe_receipts`: replay-safe receipts older than it
+/// go too, in their own paced chunks.
+fn spawn_response_expiry_with(store: Arc<Store>, replay_safe_window_ms: i64) -> tokio::task::JoinHandle<()> {
     let (changed, receiver) = tokio::sync::watch::channel(());
     let observer = store.observe_commits(move |connection| {
         if connection.is_autocommit() {
@@ -22843,13 +22850,14 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
     });
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
-        expire_completed_responses(store, receiver).await;
+        expire_completed_responses(store, receiver, replay_safe_window_ms).await;
     }))
 }
 
 async fn expire_completed_responses(
     store: Arc<Store>,
     mut changed: tokio::sync::watch::Receiver<()>,
+    replay_safe_window_ms: i64,
 ) {
     let mut clock_deferred = false;
     let mut retry = Duration::from_millis(200);
@@ -22859,7 +22867,11 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || {
+                let ordinary = read_store.next_idempotency_expiry()?;
+                let replay_safe = read_store.next_replay_safe_expiry(replay_safe_window_ms)?;
+                Ok::<_, anyhow::Error>(ordinary.into_iter().chain(replay_safe).min())
+            })).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("fractal", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -22925,7 +22937,9 @@ async fn expire_completed_responses(
         let clean_store = store.clone();
         match clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
-                clean_store.cleanup_idempotency(now)
+                // Two short writer transactions, never one long one.
+                clean_store.cleanup_idempotency(now)?;
+                clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
         .await

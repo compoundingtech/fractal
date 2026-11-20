@@ -6802,6 +6802,30 @@ impl Store {
         idempotency::next_expiry(&self.readers.get())
     }
 
+    /// When the replay-safe pass next has a receipt to expire, for `window_ms`.
+    pub fn next_replay_safe_expiry(&self, window_ms: i64) -> Result<Option<i64>> {
+        idempotency::next_replay_safe_expiry(&self.readers.get(), window_ms)
+    }
+
+    /// Remove one chunk of replay-safe receipts older than `window_ms`, with the clock limit of
+    /// `cleanup_idempotency`. The runtime says which must still wait for the ordinary retention.
+    pub fn cleanup_replay_safe_idempotency(&self, now_unix_ms: i64, window_ms: i64) -> Result<idempotency::Cleanup> {
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(clock_limit) = idempotency::clock_limit(&transaction)? else {
+            return Ok(idempotency::Cleanup::default());
+        };
+        let cleaned = idempotency::cleanup_replay_safe_tx(
+            &transaction,
+            now_unix_ms.min(clock_limit),
+            window_ms,
+            idempotency::CLEANUP_CHUNK,
+            |connection, response| self.runtime.replay_safe_response_pinned(connection, response),
+        )?;
+        transaction.commit()?;
+        Ok(cleaned)
+    }
+
     pub fn idempotency_clock_limit(&self) -> Result<Option<i64>> {
         idempotency::clock_limit(&self.readers.get())
     }

@@ -67,6 +67,12 @@ pub trait Runtime: Send + Sync {
     ) -> Result<bool> {
         Ok(false)
     }
+    /// Whether a replay-safe receipt past its short window must still wait for the ordinary
+    /// retention. A runtime returns false for a receipt that a retry simply repeats, such as a
+    /// lease renewal's, even while its work is live; by default the in-use rule decides.
+    fn replay_safe_response_pinned(&self, connection: &Connection, response: &str) -> Result<bool> {
+        self.idempotency_response_in_use(connection, response)
+    }
 
     /// Migrate an older store's tables before any table is created. The graph has checked that
     /// the schema version is one it supports.

@@ -7321,6 +7321,10 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
         header["data"].as_object_mut().unwrap().remove("source_build");
         // Like source_build, the writer's registry digest changes when a release adds claim kinds.
         header["data"].as_object_mut().unwrap().remove("registry_digest");
+        // This build keeps blobs out of the projection digest (blob bytes in their own file, #6894),
+        // so a release that digests them lists one more table, and the root over the tables differs.
+        header["data"]["tables"].as_object_mut().unwrap().remove("blobs");
+        header["data"].as_object_mut().unwrap().remove("graph_digest");
         // The end record's hash covers the header, so only its count can match.
         let end = &records[records.len() - 1];
         assert_eq!(end["record"], "end", "{end}");
@@ -7334,8 +7338,18 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let restored = release_restore(&mut o, &empty_shard_archive, &root.path().join("release-restored/claims.sqlite3"));
     assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
     let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
-    assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
-    assert_eq!(report["projections_match"], true, "{report}");
+    // Every table both builds digest restores to this build's digest. A release that also digests
+    // blobs reports a different root and no projection match for that table alone.
+    let shared = |tables: &Value| {
+        let mut tables = tables.as_object().unwrap().clone();
+        tables.remove("blobs");
+        tables
+    };
+    assert_eq!(shared(&report["tables"]), shared(&ours[0]["data"]["tables"]), "{report}");
+    if report["tables"].get("blobs").is_none() {
+        assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
+        assert_eq!(report["projections_match"], true, "{report}");
+    }
 
     // A stream item, read on the member: the next archive carries the shard, as version 5.
     o.start().await;
