@@ -88,6 +88,7 @@ pub mod prepared_seal;
 mod prepared_seal_tests;
 mod binary_payloads;
 pub mod record_bytes;
+pub mod member_signatures;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -1220,6 +1221,9 @@ impl Store {
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(record_bytes::VIEW_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(member_signatures::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)

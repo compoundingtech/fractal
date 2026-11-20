@@ -85,6 +85,10 @@ pub struct ReplicationExchange {
     /// protocol; older peers leave it out and are compared by envelopes alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_ranges: Option<ClaimRangeSummary>,
+    /// The writer signatures of the claims this exchange carries (`store::member_signatures`),
+    /// so a claim authenticates without its envelope. Older peers neither send nor read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_member_signatures: Vec<crate::store::member_signatures::ClaimMemberSignature>,
 }
 
 /// The claim-range protocol version this build speaks.
