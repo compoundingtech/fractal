@@ -6,6 +6,8 @@ name: Workspace CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
   merge_group: {}
   workflow_dispatch: {}
 
@@ -1176,7 +1178,7 @@ jobs:
         run: python3 scripts/release_notes_test.py
       - name: Require a fresh fragment on the effective PR or queue merge
         env:
-          IMPACT_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          IMPACT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before }}
           IMPACT_PR_NUMBER: ${{ github.event.pull_request.number }}
           IMPACT_QUEUE_REF: ${{ github.event.merge_group.head_ref }}
         run: |
@@ -1184,7 +1186,11 @@ jobs:
             impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
             python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
             elif [ -n "$IMPACT_BASE_SHA" ]; then
+            if [ -n "${IMPACT_QUEUE_REF:-}" ]; then
             python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA" --queue-ref "$IMPACT_QUEUE_REF"
+            else
+            python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"
+            fi
             else
             echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
             fi
@@ -1470,7 +1476,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -1502,7 +1508,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-genie-freshness"]'
           STEP_OUTCOMES: '{"freshness":"${{ steps.freshness.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-genie-freshness.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -1775,7 +1781,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -1807,7 +1813,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-script-tests"]'
           STEP_OUTCOMES: '{"tests":"${{ steps.tests.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-ci-script-tests.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -1951,7 +1957,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -1983,7 +1989,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-typescript-client"]'
           STEP_OUTCOMES: '{"install":"${{ steps.install.outcome }}","client":"${{ steps.client.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-typescript-client.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -2100,7 +2106,7 @@ jobs:
   nix-evidence-genie-freshness:
     name: nix-evidence-genie-freshness
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 20
     continue-on-error: true
@@ -2158,7 +2164,7 @@ jobs:
       - name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -2190,7 +2196,7 @@ jobs:
         continue-on-error: true
         name: Sign the nix record for genie-freshness
         env:
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once nix-genie-freshness
@@ -2223,7 +2229,7 @@ jobs:
   nix-evidence-typescript-client:
     name: nix-evidence-typescript-client
     needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 20
     continue-on-error: true
@@ -2281,7 +2287,7 @@ jobs:
       - name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -2313,7 +2319,7 @@ jobs:
         continue-on-error: true
         name: Sign the nix record for typescript-client
         env:
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once nix-typescript-client
@@ -2590,7 +2596,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CI_RUN_ID: ${{ github.run_id }}
-      CI_TEST_PARTITION: ${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}
+      CI_TEST_PARTITION: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'hash:1/4' || 'hash:1/2' }}
       CI_TEST_THREADS: "8"
       CI_CACHE_DEV_SHELL: default
     steps:
@@ -2782,7 +2788,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -2813,7 +2819,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2865,7 +2871,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CI_RUN_ID: ${{ github.run_id }}
-      CI_TEST_PARTITION: ${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}
+      CI_TEST_PARTITION: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'hash:2/4' || 'hash:2/2' }}
       CI_TEST_THREADS: "8"
       CI_CACHE_DEV_SHELL: default
     steps:
@@ -3054,7 +3060,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -3085,7 +3091,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-2
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -3125,7 +3131,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3326,7 +3332,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -3357,7 +3363,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-3
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -3397,7 +3403,7 @@ jobs:
         evidence-gate-rust-tests,
         compat-archives-x86_64-unknown-linux-gnu,
       ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -3598,7 +3604,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -3629,7 +3635,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-4
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -3829,7 +3835,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -3860,7 +3866,7 @@ jobs:
           STAGE: clippy
           STAGE_JOB: linux-clippy
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -4086,7 +4092,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -4117,7 +4123,7 @@ jobs:
           STAGE: fleet-compat
           STAGE_JOB: linux-fleet-compat
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -4187,12 +4193,12 @@ jobs:
           set -eu
             set -- $RESULTS
             [ "$#" = 6 ] || { echo "incomplete base-stage results"; exit 1; }
-            if [ "$EVENT" = merge_group ]; then
+            if [ "$EVENT" = merge_group ] || [ "$EVENT" = push ]; then
             set -- $MERGE_RESULTS
             [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
             RESULTS="$RESULTS $MERGE_RESULTS"
             else
-            [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+            [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-group or main-push only"; exit 1; }
             fi
             echo "stage results: $RESULTS (evidence skip: ${GATE_SKIP:-none})"
             position=0
@@ -4312,7 +4318,7 @@ jobs:
         id: base
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
             git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
@@ -4375,7 +4381,7 @@ jobs:
         if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
             key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
@@ -4423,7 +4429,8 @@ jobs:
     env:
       EVIDENCE_PUSH_TOKEN: ${{ github.token }}
       NEEDS_JSON: ${{ toJSON(needs) }}
-      BASE_SHA: ${{ github.event.merge_group.base_sha || github.sha }}
+      BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before || github.sha }}
+      CI_TEST_TOPOLOGY: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'merge-group' || '' }}
     steps:
       - name: Check out the tested commit
         continue-on-error: true
@@ -5175,7 +5182,7 @@ jobs:
         name: Take the evidence signer from the base commit
         id: evidence-base
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
@@ -5208,7 +5215,7 @@ jobs:
           STEP_OUTCOMES: '{"run":"${{ steps.run.outcome }}"}'
           STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''4'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"

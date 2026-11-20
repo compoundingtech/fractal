@@ -749,7 +749,7 @@ impl SeatsStore for Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(&AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h25806c4c9d67 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &AGENT_ROSTER_SUBJECT_PAGE_SQL)?
             .query_map(params![index, "agent/", "agent0", bound + 1], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         if names.len() > bound {
@@ -1089,7 +1089,7 @@ impl SeatsStore for Store {
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
-                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h19fe7faeaaf7 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0a36171e464 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
@@ -1129,7 +1129,7 @@ impl SeatsStore for Store {
                     }
                     (Some(covered), None) => {
                         let connection = self.readers.get();
-                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc5cb621b4eae owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h19fe7faeaaf7 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
