@@ -328,6 +328,48 @@ fn expired_audit_history_is_not_materialized_on_unrelated_events() {
     assert_eq!(snapshot.source_work, [1, 0, 0]);
 }
 
+#[tokio::test]
+async fn unrelated_notifications_and_claims_do_not_recapture() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = crate::api::tests_shared::state(directory.path());
+    let publication = state.store.extension::<Publication>();
+    start(&state);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while publication.snapshot.lock().unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(publication.snapshot.lock().unwrap().as_ref().unwrap().error.is_none());
+    let generation = *publication.changed.lock().unwrap().as_ref().unwrap().borrow();
+    for _ in 0..128 {
+        crate::api::signal_local_change(&state);
+    }
+    state.store.append_claim(&ClaimInput {
+        subject: "resource/example/unrelated".into(), kind: "resource.observed".into(), actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.unrelated"))]), evidence: Vec::new(),
+        expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    for _ in 0..16 { tokio::task::yield_now().await; }
+    {
+        let changed = publication.changed.lock().unwrap();
+        assert_eq!(*changed.as_ref().unwrap().borrow(), generation);
+        assert!(!changed.as_ref().unwrap().has_changed().unwrap(),
+            "unrelated input cannot schedule a capture even after this task yields");
+        assert_eq!(publication.captures.load(Ordering::Acquire), 1);
+    }
+    send(&state.store, "message/example-real-source-wake", json!([]));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let complete = publication.snapshot.lock().unwrap().as_ref()
+                .is_some_and(|snapshot| snapshot.source_work[0] == 1);
+            if complete { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert_eq!(publication.captures.load(Ordering::Acquire), 2,
+        "a genuine mail source change wakes without a global notification");
+}
+
 #[test]
 fn capture_releases_readers_between_pages_and_lifecycle_messages() {
     let directory = tempfile::tempdir().unwrap();
@@ -358,44 +400,77 @@ fn capture_releases_readers_between_pages_and_lifecycle_messages() {
     assert!(checkpoints >= SOURCE_PAGE + 5, "must traverse multiple source pages and every message");
 }
 
-#[tokio::test(start_paused = true)]
-async fn change_bursts_coalesce_until_the_previous_capture_has_rested() {
-    let root = tempfile::tempdir().unwrap();
-    let mut state = crate::api::tests_shared::state(root.path());
-    state.store = std::sync::Arc::new(Store::open_memory("example-host").unwrap());
-    declared(&state.store);
-    let sent = send(&state.store, "message/example-burst", json!([]));
-    frontier(&state.store, sent);
-    let publication = state.store.extension::<Publication>();
-    start(&state);
-    publication.captured.notified().await;
-    assert_eq!(publication.captures.load(Ordering::SeqCst), 1);
-
-    for burst in 1..=2 {
-        for generation in (burst - 1) * 128 + 1..=burst * 128 {
-            state.event_notify.send_replace(generation);
-            tokio::task::yield_now().await;
-        }
-        // Pending changes remain honest unknowns, not a renewed coverage claim.
-        assert_eq!(rows(&state.store, sent).unwrap()[0]["status"], "no-data");
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(FRESHNESS / 2 - 1),
-            publication.captured.notified(),
-        ).await.is_err(), "no source capture may run during the minimum rest interval");
-        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize);
-
-        tokio::time::advance(std::time::Duration::from_millis(1)).await;
-        publication.captured.notified().await;
-        assert_eq!(publication.captures.load(Ordering::SeqCst), burst as usize + 1);
-        let guard = publication.snapshot.lock().unwrap();
-        let snapshot = guard.as_ref().unwrap();
-        assert_eq!(snapshot.generation, burst * 128);
-        assert_eq!(snapshot.source_work, [1, 0, 0]);
-    }
+#[test]
+fn paged_capture_uses_mail_input_cut_not_unrelated_graph_index() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-source-cut", json!([]));
+    let at = sent + 2;
+    frontier(&store, at - 1);
+    let mut inserted = false;
+    let snapshot = capture_with_progress(&store, at, || {
+        if inserted { return; }
+        inserted = true;
+        store.append_claim(&ClaimInput {
+            subject: "resource/example/capture-unrelated".into(), kind: "resource.observed".into(), actor: None,
+            fields: BTreeMap::from([("kind".into(), json!("custom.test.unrelated"))]), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }).unwrap();
+    assert!(inserted);
+    assert_eq!(snapshot.unknown, 0, "unrelated graph writes cannot poison mail coverage");
+    let mut advanced = false;
+    let snapshot = capture_with_progress(&store, at, || {
+        if advanced { return; }
+        advanced = true;
+        frontier(&store, at);
+    }).unwrap();
+    assert!(advanced);
+    assert!(snapshot.unknown > 0, "relevant writes still fence a mixed paged capture");
 }
 
 #[test]
-fn unrelated_graph_claims_during_capture_keep_coverage_unknown() {
+fn paged_capture_resolves_committed_writer_loan_before_certifying() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-writer-resolution", json!([]));
+    let at = sent + 2;
+    frontier(&store, at - 1);
+    std::thread::scope(|scope| {
+        let (write, write_now) = std::sync::mpsc::channel();
+        let (committed, commit_done) = std::sync::mpsc::channel();
+        let (finished, capture_done) = std::sync::mpsc::channel();
+        let store = &store;
+        let writer = scope.spawn(move || {
+            write_now.recv().unwrap();
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            crate::store::mail_input_acceptance::record_frontier(&transaction,
+                "agent/example/worker", "incarnation-one", at, at).unwrap();
+            transaction.commit().unwrap();
+            committed.send(()).unwrap();
+            // Keep the already-committed loan alive. Its native generation has not
+            // published yet; certification must wait for resolution, not just COMMIT.
+            let returned_before_resolution = capture_done.recv_timeout(std::time::Duration::from_secs(1)).is_ok();
+            drop(writer);
+            returned_before_resolution
+        });
+        let mut requested = false;
+        let snapshot = capture_with_progress(store, at, || {
+            if requested { return; }
+            requested = true;
+            write.send(()).unwrap();
+            commit_done.recv().unwrap();
+        }).unwrap();
+        let _ = finished.send(());
+        assert!(!writer.join().unwrap(), "capture certified before the committed writer loan resolved");
+        assert!(snapshot.unknown > 0, "the resolved generation must fence the mixed paged read");
+    });
+}
+
+#[test]
+fn runtime_identity_inputs_during_capture_keep_coverage_unknown() {
     let store = Store::open_memory("example-host").unwrap();
     declared(&store);
     let sent = send(&store, "message/example-concurrent-graph", json!([]));
