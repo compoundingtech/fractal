@@ -870,10 +870,77 @@ impl Default for RetrySpec {
     }
 }
 
+/// Inline, absolute-delay ladder, identified within its mission or step scope.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationSpec {
+    pub id: String,
+    pub state: EscalationState,
+    pub clock: EscalationClock,
+    pub stages: Vec<EscalationStage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationClock {
+    SinceProgress,
+    SinceEntered,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationStage {
+    pub after_ms: u64,
+    pub action: EscalationAction,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationAction {
+    Notify(String),
+    Ask(String),
+}
+
+/// Closed runtime state vocabulary (work states and mission run statuses, not phases).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationState {
+    WaitingPerson, Waiting, Ready, Claimed, Blocked, Verifying,
+    Completed, Failed, Cancelled, Queued, Running,
+}
+
+impl EscalationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitingPerson => "waiting-person", Self::Waiting => "waiting",
+            Self::Ready => "ready", Self::Claimed => "claimed", Self::Blocked => "blocked",
+            Self::Verifying => "verifying", Self::Completed => "completed",
+            Self::Failed => "failed", Self::Cancelled => "cancelled",
+            Self::Queued => "queued", Self::Running => "running",
+        }
+    }
+}
+
+/// Absence inherits; a disabled declaration is distinct from replacement.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "_tag", rename_all = "kebab-case")]
+pub enum EscalationOverride {
+    #[default]
+    Inherit,
+    Disable,
+    Replace { policies: Vec<EscalationSpec> },
+}
+
+impl EscalationOverride {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StepSpec {
     pub id: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
+    pub escalation: EscalationOverride,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     /// st's own step that holds its run open while the mission watches: not work. Read it with
@@ -1092,6 +1159,8 @@ pub struct MissionSpec {
     pub subject: String,
     pub state: MissionState,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
+    pub escalation: EscalationOverride,
     /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
