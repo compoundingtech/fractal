@@ -27,7 +27,7 @@ DARWIN = "aarch64-apple-darwin"
 class ArchiveTests(unittest.TestCase):
     def test_clean_extraction_and_closed_cache_hit(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             archive = root / "archives/pinned.tar.gz"
             calls = []
 
@@ -80,7 +80,7 @@ class ArchiveTests(unittest.TestCase):
     def test_generated_consumer_wiring(self):
         expected = {
             "fleet.yml": ["linux-test-build", "linux-tests", "linux-tests-shard-2", "linux-tests-shard-3", "linux-tests-shard-4", "linux-fleet-compat"],
-            "main-upkeep.yml": ["linux-tests", "linux-fleet-compat", "proof-linux-test-build", "proof-linux-tests", "proof-linux-fleet-compat"],
+            "main-upkeep.yml": ["linux-tests", "linux-fleet-compat"],
             "daily-long.yml": ["linux-test-build", "daily-tests", "daily-tests-shard-2", "mail-redelivery-canaries", "linux-fleet-compat"],
             "debug-assertions-daily.yml": ["debug-assertions-tests"],
             "macos.yml": ["macos-ci"],
@@ -105,8 +105,8 @@ class ArchiveTests(unittest.TestCase):
                     self.assertNotIn("ci-compat-archive", job, name)
                     self.assertNotIn("actions/download-artifact@", job, name)
             if filename == "main-upkeep.yml":
-                self.assertIn("proof-evidence-gate-linux-fleet-compat", jobs)
-                self.assertNotIn(producer_id, jobs["proof-evidence-gate-linux-fleet-compat"])
+                self.assertFalse(any(name.startswith("proof-") for name in jobs))
+                self.assertIn("python3 scripts/check-main-ci", jobs["main-checks"])
             for kind in kinds:
                 self.assertIn(f"ci-compat-archive identity {kind} {target}", producer)
             if len(kinds) == 2:
