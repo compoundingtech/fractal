@@ -128,10 +128,20 @@ fn scrub_historical_environments(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "secure_delete", 1)?;
     let scrub = scrub_pending_environments(connection);
     // Restore OFF, ON or FAST before propagating any scrub error.
-    let restored = connection.pragma_update(None, "secure_delete", previous);
+    let restored = connection.pragma_update(None, "secure_delete", secure_delete_mode(previous));
     scrub?;
     restored?;
     Ok(())
+}
+
+/// The pragma's argument for a mode it reported. SQLite reads a number as a boolean, so 2
+/// would set ON: FAST is only set by name.
+fn secure_delete_mode(mode: i64) -> &'static str {
+    match mode {
+        0 => "OFF",
+        2 => "FAST",
+        _ => "ON",
+    }
 }
 
 fn scrub_pending_environments(connection: &Connection) -> Result<()> {
@@ -704,7 +714,7 @@ mod tests {
             connection.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
             connection.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
                 [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
-            connection.pragma_update(None, "secure_delete", mode).unwrap();
+            connection.pragma_update(None, "secure_delete", secure_delete_mode(mode)).unwrap();
             scrub_historical_environments(&connection).unwrap();
             assert_eq!(connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), mode);
             assert_no_environment_bytes(&path);
@@ -797,7 +807,7 @@ mod tests {
         reader.execute_batch("BEGIN; SELECT * FROM shell_resources_v1;").unwrap();
         writer.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
             [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
-        writer.pragma_update(None, "secure_delete", 2).unwrap();
+        writer.pragma_update(None, "secure_delete", "FAST").unwrap();
         assert!(scrub_historical_environments(&writer).is_err());
         assert_eq!(writer.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();

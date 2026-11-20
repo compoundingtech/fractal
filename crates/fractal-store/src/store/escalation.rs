@@ -7,9 +7,12 @@ pub struct EscalationEpisode {
     pub since: u128,
 }
 
+// The triggers skip a pending row that exists with NOT EXISTS, not OR IGNORE: an UPSERT's
+// ON CONFLICT overrides the conflict policy of the triggers it fires, so a position upsert
+// (record_position_tx) raised the UNIQUE error. The v1 triggers that relied on it are dropped.
 // One row per clock-bearing receipt, ordered by the shared canonical key. Inserting an
 // out-of-order status changes only its own transition bit and the next status's bit.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfeeb5c6bf008 owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1528e725b8ce owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_escalation_clocks_v1 (
  store_index INTEGER PRIMARY KEY, subject TEXT NOT NULL, ordering BLOB NOT NULL,
  claim_id TEXT NOT NULL, state TEXT, at TEXT NOT NULL, pause_until TEXT,
@@ -23,23 +26,33 @@ CREATE TABLE IF NOT EXISTS local_escalation_pending_v1(store_index INTEGER PRIMA
 CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
  run_id TEXT PRIMARY KEY, origin TEXT NOT NULL
 );
-CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v1 AFTER INSERT ON claims
+DROP TRIGGER IF EXISTS local_escalation_insert_v1;
+DROP TRIGGER IF EXISTS local_escalation_change_v1;
+DROP TRIGGER IF EXISTS local_escalation_delete_v1;
+DROP TRIGGER IF EXISTS local_escalation_position_insert_v1;
+DROP TRIGGER IF EXISTS local_escalation_position_v1;
+CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v2 AFTER INSERT ON claims
 WHEN (NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
  AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress') BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 VALUES(NEW.store_index); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_change_v1 AFTER UPDATE ON claims BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT NEW.store_index
- WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
+ INSERT INTO local_escalation_pending_v1 SELECT NEW.store_index
+ WHERE NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_change_v2 AFTER UPDATE ON claims BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT NEW.store_index
+ WHERE (EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
  OR ((NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
- AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress')); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v1 AFTER DELETE ON claims BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT OLD.store_index
- WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v1 AFTER INSERT ON claim_positions BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_position_v1 AFTER UPDATE ON claim_positions
+ AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress')))
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v2 AFTER DELETE ON claims BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT OLD.store_index
+ WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=OLD.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v2 AFTER INSERT ON claim_positions BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_v2 AFTER UPDATE ON claim_positions
 WHEN OLD.position<>NEW.position BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;
+ INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index); END;
 ";
 
 pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
