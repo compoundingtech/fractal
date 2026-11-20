@@ -1858,7 +1858,7 @@ impl ReadPool {
                     connection
                 }
                 Err(error) => {
-                    eprintln!("st3: open another read connection: {error:#}; waiting for one");
+                    eprintln!("fractal: open another read connection: {error:#}; waiting for one");
                     let wait_started = std::time::Instant::now();
                     let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
