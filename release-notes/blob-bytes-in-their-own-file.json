@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Blob bytes move out of the main store into their own file, <store>.blobs.<ext> beside it, three days after a member first runs this build ([store] blob_move_after). The blobs table keeps every row with its hash and size; an hourly paced pass copies each row's bytes into the blob file, commits that, then empties the row and gives the pages back. Readers take a blob's bytes from either place. MEASURED",
+  "summary": "Blob bytes move out of the main store into their own file, <store>.blobs.<ext> beside it, three days after a member first runs this build ([store] blob_move_after). The blobs table keeps every row with its hash and size; an hourly paced pass copies rows' bytes into the blob file, lets a checkpoint of the blob file (off the writer) put them on disk, then empties those rows and gives the pages back. Readers take a blob's bytes from either place. On a copy of a real 56.7 GB member (208,285 blobs, 1.87 GB of bytes), the main file shrank to 54.8 GB: the blobs table went from 2.01 GB to 0.44 GB (emptied rows leave sparse pages behind), and the blob file holds 2.03 GB. Disk use overall is about the same; what shrinks is the file every query reads.",
   "replay": {
     "status": "none",
     "detail": "Claims, envelopes and replication are unchanged: a blob's bytes still travel in the envelope that names it, and where a member keeps them is local."
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No migration at start. The move runs in the background, each step two writer holds of at most 40 ms each, with a rest of four times the hold, and gives free pages back 128 at a time. HOLDS"
+    "detail": "No migration at start. The move runs in the background, each step one writer hold (a copy, or an emptying of rows whose copies a checkpoint has made durable) of about 40 ms, with a rest of four times the hold, and gives free pages back 128 at a time. Measured on that copy with builds running, 3,616 holds: p50 1.2 ms, p99 44.5 ms, max 186 ms, 0.08% over 100 ms; the smallest ordinary write in the same run p50 1.2 ms, p99 14.5 ms, max 1.86 s, 0.25% over 100 ms. Free-page steps: p50 5.2 ms, p99 56 ms, max 140 ms. The first open of this build reseeds the projection digest once (blobs left it); on that copy it opened in 16 s."
   },
   "manual": {
     "status": "changed",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Within three days of upgrading (blob_move_after), a rollback to the previous release works as before: no byte has moved. After that, the store is at user_version 25, which the previous release refuses to open rather than serve empty blobs. `fractal store restore-blob-bytes` copies every byte back and lowers it to what it was. Crash safety: a row's bytes are copied and committed durably to the blob file before the row is emptied."
+    "detail": "Within three days of upgrading (blob_move_after), a rollback to the previous release works as before: no byte has moved. After that, the store is at user_version 25, which the previous release refuses to open rather than serve empty blobs. `fractal store restore-blob-bytes` copies every byte back and lowers it to what it was. Crash safety: a row is emptied only after a checkpoint of the blob file has put its copy on disk. A copy of the store needs its blob file beside it: checkpoint proof copies take it; an operator's hand-made copy must too. Offline backups stream envelope payloads, which still carry the bytes."
   }
 }
