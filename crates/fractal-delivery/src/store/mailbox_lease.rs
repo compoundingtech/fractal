@@ -419,11 +419,11 @@ impl MailboxLeaseStore for Store {
         });
         let pinned = self.readers.has_pinned_reader();
         let wall = if pinned { CARD_FAULT_PINNED_WALL_BACKSTOP } else { duration };
-        // An enclosing roster/request budget may shorten this capture, never lengthen
-        // its own backstop: optional fault work must leave time for the rest of the card.
+        // An enclosing roster/request budget may shorten a pinned capture, never
+        // lengthen its backstop. Unpinned admission retains the request's wall bound.
         let budget = smallclaims::read_budget::current().map_or_else(
             || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", wall),
-            |parent| parent.child(wall),
+            |parent| if pinned { parent.child(wall) } else { parent },
         );
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
