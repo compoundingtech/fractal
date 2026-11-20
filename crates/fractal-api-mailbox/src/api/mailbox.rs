@@ -1746,7 +1746,6 @@ mod tests {
                     ("from".into(), json!("agent/sender")),
                     ("to".into(), json!(fence.subject)),
                     ("content".into(), json!("Synthetic ordering fixture")),
-                    ("ordering_fixture".into(), json!(at)),
                 ]),
                 evidence: Vec::new(),
                 expected_subject: None,
