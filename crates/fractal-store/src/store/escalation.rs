@@ -20,6 +20,9 @@ CREATE INDEX IF NOT EXISTS local_escalation_entry_v1 ON local_escalation_clocks_
 CREATE INDEX IF NOT EXISTS local_escalation_progress_v1 ON local_escalation_clocks_v1(subject,ordering) WHERE progress=1;
 CREATE INDEX IF NOT EXISTS local_escalation_clock_v1 ON local_escalation_clocks_v1(subject,ordering) WHERE clock=1;
 CREATE TABLE IF NOT EXISTS local_escalation_pending_v1(store_index INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
+ run_id TEXT PRIMARY KEY, origin TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v1 AFTER INSERT ON claims
 WHEN (NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
  AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress') BEGIN
@@ -46,7 +49,17 @@ pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
         rebuild(tx)?;
         tx.execute(/* sqlite-large-value: allow-for-now lv-hc63df415703a owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_escalation_clocks_v1','ready')", [])?;
     }
-    flush(tx)
+    flush(tx)?;
+    let registered: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='local_escalation_registration_v1')", [], |row| row.get(0))?;
+    if !registered {
+        // One-time discovery for stores predating durable registration. Normal opens and
+        // reconciliation only visit the pending receipts and the retained run roster.
+        let subjects = tx.prepare_cached("SELECT DISTINCT subject FROM claims WHERE kind='mission-run.created'")?
+            .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for subject in subjects { register_run(tx, &subject)?; }
+        tx.execute("INSERT INTO meta(key,value) VALUES('local_escalation_registration_v1','ready')", [])?;
+    }
+    Ok(())
 }
 
 pub(super) fn rebuild(tx: &Transaction<'_>) -> Result<()> {
@@ -85,6 +98,21 @@ fn repair_transition(tx: &Transaction<'_>, subject: &str, ordering: &[u8], inclu
     Ok(())
 }
 
+fn register_run(tx: &Transaction<'_>, subject: &str) -> Result<()> {
+    let Some(id) = subject.strip_prefix("mission-run/") else { return Ok(()); };
+    // The creation receipt, not the writer of a later transition, owns the run.
+    let origin: Option<String> = tx.query_row(
+        &canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created'
+         AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+         ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+        [subject], |row| row.get(0)).optional()?;
+    if let Some(origin) = origin {
+        tx.execute("INSERT INTO local_escalation_runs_v1(run_id,origin) VALUES(?1,?2)
+            ON CONFLICT(run_id) DO UPDATE SET origin=excluded.origin", params![id, origin])?;
+    }
+    Ok(())
+}
+
 pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
     loop {
         let indexes = tx.prepare_cached("SELECT store_index FROM local_escalation_pending_v1 ORDER BY store_index LIMIT 256")?
@@ -109,6 +137,9 @@ pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
                         claim.accepted_at_unix_ms.to_string(), pause.map(|at| at.to_string()), progress, progress && fields["clock"].is_string()])?;
                     repair_transition(tx, &claim.subject, &key, true)?;
                     repair_transition(tx, &claim.subject, &key, false)?;
+                    // Commit discovery with the clock-bearing run receipt, even when no
+                    // reconciler has seen the run. Evaluation prunes ineligible/drained ladders.
+                    register_run(tx, &claim.subject)?;
                 }
             }
             tx.execute(/* sqlite-large-value: allow-for-now lv-h09dc9b16a789 owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_escalation_pending_v1 WHERE store_index=?1", [index])?;
@@ -183,7 +214,7 @@ mod tests {
                 subject TEXT,kind TEXT,origin TEXT,actor TEXT,body TEXT,predecessors TEXT,accepted_at_unix_ms TEXT);
             CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
             CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY,position INTEGER);
-            CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+            CREATE TABLE replica_records(claim_id TEXT,position INTEGER,state TEXT);
             INSERT INTO batches VALUES('batch','writer',1);").unwrap();
         let tx = db.transaction().unwrap();
         open(&tx).unwrap();
@@ -200,6 +231,32 @@ mod tests {
 
     fn entry(tx: &Transaction<'_>) -> String {
         tx.query_row(ENTRY, ["step-run/test"], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn run_receipts_register_before_evaluation_and_reopen_does_not_restore_drained_runs() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        tx.execute("INSERT INTO claims VALUES(1,'created','batch','mission-run/test',
+            'mission-run.created','writer',NULL,?1,'[]','1')",
+            [json!({"fields":{"status":"running"}}).to_string()]).unwrap();
+        flush(&tx).unwrap();
+        let owner: String = tx.query_row("SELECT origin FROM local_escalation_runs_v1 WHERE run_id='test'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(owner, "writer");
+        tx.execute("DELETE FROM local_escalation_runs_v1", []).unwrap();
+        open(&tx).unwrap();
+        let count: u64 = tx.query_row("SELECT COUNT(*) FROM local_escalation_runs_v1", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        // A later transition belongs to its creator, not this receipt's writer.
+        tx.execute("INSERT INTO claims VALUES(2,'terminal','batch','mission-run/test',
+            'mission-run.state','other',NULL,?1,'[]','2')",
+            [json!({"fields":{"status":"cancelled"}}).to_string()]).unwrap();
+        flush(&tx).unwrap();
+        let owner: String = tx.query_row("SELECT origin FROM local_escalation_runs_v1 WHERE run_id='test'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(owner, "writer");
+        tx.commit().unwrap();
     }
 
     #[test]

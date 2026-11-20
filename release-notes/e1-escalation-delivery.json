@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Deliver mission escalation stages through native messages and person asks with durable episode deduplication.",
-  "replay": { "status": "changed", "detail": "Canonical transition and progress receipts name escalation episodes. Native message and person-ask receipts own delivery deduplication; a local restart index retains terminal ladders until their last deadline." },
+  "replay": { "status": "changed", "detail": "Canonical transition and progress receipts name escalation episodes. Native message and person-ask receipts own delivery deduplication; a local restart index registers clock-bearing run receipts transactionally and retains terminal ladders until their last deadline, including runs completed before their first reconciliation. Existing run discovery is bootstrapped once behind a durable marker; drained entries are not resurrected on reopen." },
   "schema": { "status": "changed", "detail": "Adds the local_escalation_runs_v1 restart index and rebuildable local_escalation_clocks_v1 episode projection with local_escalation_pending_v1 change capture; existing escalation declarations are unchanged." },
   "rules": { "status": "none", "detail": "No automatic deployment or policy publication." },
   "compatibility": { "status": "changed", "detail": "Publishing escalation declarations requires signed mission-escalation-v1=1 feature advertisements from every active anchored member. Missing or older readers refuse publication, including direct mission.published claims." },

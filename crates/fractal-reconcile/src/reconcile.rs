@@ -11575,8 +11575,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
-    /// the last pass listed the active runs.
+    /// Evaluate one run and remember what it read. `active_only` leaves terminal execution
+    /// alone, but still evaluates escalation deadlines committed with its transition.
     fn evaluate_one_mission_run(
         &self,
         id: &str,
@@ -11603,11 +11603,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         engine.release_left(&run)?;
                         settled = self.settle_program_waits(engine, &run)?;
                     }
-                    if active_only
-                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
-                    {
-                        return Ok(false);
-                    }
                     active_generations.insert(run.generation.clone());
                     active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
                     // From the view the evaluation started with: a write it makes changes subjects
@@ -11625,6 +11620,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                             Err(error) => self.record_fault(&run.subject, "escalation", Err(error))?,
                         }
+                    }
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
                     }
                     // Telling a run's reporter never holds the run back or fails it.
                     match self.report_choice(&run.subject).and_then(|choice| match choice {
@@ -11785,14 +11785,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
         if !unseen.is_empty() {
-            // Another host's run, or one that already ended, is not this host's to evaluate.
-            let active = self
-                .store
-                .active_mission_run_ids_for_origin(&self.host)?
-                .into_iter()
+            // Terminal runs with pending escalation discovery belong to this host too.
+            let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
+            eligible.extend(self.store.escalation_run_ids(&self.host)?);
+            let eligible = eligible.into_iter()
                 .map(|id| format!("mission-run/{id}"))
                 .collect::<BTreeSet<_>>();
-            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+            changed_runs.extend(unseen.into_iter().filter(|subject| eligible.contains(subject)));
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();

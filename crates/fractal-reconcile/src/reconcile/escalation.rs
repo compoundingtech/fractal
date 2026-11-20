@@ -44,8 +44,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 due = [due, self.deliver_escalation(&step.subject, policy, &episode, now)?].into_iter().flatten().min();
             }
         }
-        // Register before the evaluator can end the run. On restart terminal ladders are loaded
-        // alongside active runs, and are removed only after their final native delivery.
+        // Durable run receipts register discovery before any evaluation. Keep terminal ladders
+        // scheduled until their final native delivery; prune runs without eligible policy here.
         self.store.retain_escalation_run(&run.id, &self.host,
             has_policy && (!matches!(run.status.as_str(), "completed" | "failed" | "cancelled") || due.is_some()))?;
         Ok(due)

@@ -122,6 +122,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: |transaction, _| agent_messages::flush(transaction),
     },
     AppendProjector {
+        name: "wake-demand",
+        takes: Takes::Kinds(&["message.sent"]),
+        project: |transaction, _| wake_demand::flush(transaction),
+    },
+    AppendProjector {
         name: "limits",
         takes: Takes::Kinds(&["harness.limits", "usage.limits.observed"]),
         project: |transaction, _| limits::flush_limits(transaction).map(drop),
@@ -199,6 +204,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::flush },
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
+    Hook { name: "wake-demand", run: wake_demand::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
     Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },

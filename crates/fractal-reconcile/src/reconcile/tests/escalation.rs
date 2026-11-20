@@ -203,50 +203,86 @@ fn replicated_native_receipts_including_an_answered_ask_prevent_refiring() {
 }
 
 #[test]
-fn complete_reconciliation_pass_resumes_terminal_ladders_after_reopening() {
+fn unseen_terminal_runs_resume_due_ladders_after_reopening_without_refiring() {
     struct Clock;
     impl Drop for Clock {
         fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
     }
     let _clock = Clock;
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("terminal.sqlite3");
-    let store = Arc::new(Store::open(&path, "node").unwrap());
-    let key = crate::store::directive_notes::tests_shared_delivery::enable(&store);
-    crate::store::directive_notes::tests_shared_delivery::claim(&store, "daemon/node", "daemon.started", None,
-        serde_json::json!({"status":"running","features":{"mission-escalation-v1":1}}));
-    store.replication_snapshot().unwrap();
-    let source = SOURCE.replace("step \"work\" { agentless }", r#"step "work" {
-        agentless
-        escalation { policy "overdue" state="completed" clock="since-entered" {
-            stage "10m" notify="agent/node.reporter"
-            stage "20m" ask="person/example"
-        } }
-    }"#);
-    apply_source(&store, &source, "terminal-policy");
-    let run = store.create_mission_run(&crate::model::MissionRunRequest {
-        mission: "escalated".into(), revision: None, workspace: "/tmp".into(),
-        requester: Some("person/example".into()), mode: Some("run".into()),
-        inputs: BTreeMap::new(), idempotency_key: "terminal-run".into(),
-    }).unwrap();
-    let worker = reconciler(store.clone());
-    worker.reconcile_once().unwrap();
-    store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
-    store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
-    worker.reconcile_once().unwrap();
-    assert_eq!(store.escalation_run_ids("node").unwrap(), vec![run.id.clone()]);
-    let entered = store.escalation_episode(&run.steps[0].subject, "completed", run.steps[0].created_at_unix_ms, false).unwrap();
-    drop(worker);
-    drop(store);
-    let now = entered.since + 1_200_001;
-    smallclaims::store::set_thread_clock(Some(now));
-    let store = Arc::new(Store::open(&path, "node").unwrap());
-    store.set_member_key(Some(key)).unwrap();
-    store.set_write_clock_at(now).unwrap();
-    let worker = reconciler(store.clone());
-    worker.reconcile_once().unwrap();
-    assert_eq!(delivered(&store).len(), 2);
-    assert!(store.escalation_run_ids("node").unwrap().is_empty());
-    worker.reconcile_once().unwrap();
-    assert_eq!(delivered(&store).len(), 2);
+    for (status, follow_changes) in [
+        ("completed", false), ("cancelled", false),
+        ("completed", true), ("cancelled", true),
+    ] {
+        smallclaims::store::set_thread_clock(None);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("terminal.sqlite3");
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        let key = crate::store::directive_notes::tests_shared_delivery::enable(&store);
+        crate::store::directive_notes::tests_shared_delivery::claim(&store, "daemon/node", "daemon.started", None,
+            serde_json::json!({"status":"running","features":{"mission-escalation-v1":1}}));
+        store.replication_snapshot().unwrap();
+        let source = SOURCE.replace("step \"work\" { agentless }", &format!(r#"step "work" {{
+            agentless
+            escalation {{ policy "overdue" state="{status}" clock="since-entered" {{
+                stage "10m" notify="agent/node.reporter"
+                stage "20m" ask="person/example"
+            }} }}
+        }}"#));
+        apply_source(&store, &source, "terminal-policy");
+        let worker = reconciler(store.clone());
+        // Initialize the follower before the run exists, without reconciling the run.
+        worker.evaluate_changed_mission_runs().unwrap();
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "escalated".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/example".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "terminal-run".into(),
+        }).unwrap();
+        store.set_step_state(&run.steps[0].subject, status, None).unwrap();
+        store.set_mission_run_state(&run.id, status, "terminal", None).unwrap();
+        // No evaluation has registered this run: discovery is committed with its receipts.
+        assert_eq!(store.escalation_run_ids("node").unwrap(), vec![run.id.clone()]);
+        assert!(delivered(&store).is_empty());
+        let entered = store.escalation_episode(&run.steps[0].subject, status, run.steps[0].created_at_unix_ms, false).unwrap();
+        if follow_changes {
+            let now = entered.since + 600_001;
+            smallclaims::store::set_thread_clock(Some(now));
+            store.set_write_clock_at(now).unwrap();
+            let (evaluated, _) = worker.evaluate_changed_mission_runs().unwrap();
+            assert!(evaluated > 0);
+            assert_eq!(delivered(&store).len(), 1);
+        }
+        drop(worker);
+        drop(store);
+        let now = entered.since + 600_001;
+        smallclaims::store::set_thread_clock(Some(now));
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        store.set_member_key(Some(key.clone())).unwrap();
+        store.set_write_clock_at(now).unwrap();
+        let worker = reconciler(store.clone());
+        worker.reconcile_once().unwrap();
+        assert_eq!(delivered(&store).len(), 1);
+        assert_eq!(store.escalation_run_ids("node").unwrap(), vec![run.id.clone()]);
+        drop(worker);
+        drop(store);
+        let now = entered.since + 1_200_001;
+        smallclaims::store::set_thread_clock(Some(now));
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        store.set_member_key(Some(key.clone())).unwrap();
+        store.set_write_clock_at(now).unwrap();
+        let worker = reconciler(store.clone());
+        worker.reconcile_once().unwrap();
+        let before = delivered(&store);
+        assert_eq!(before.len(), 2);
+        assert!(store.escalation_run_ids("node").unwrap().is_empty());
+        worker.reconcile_once().unwrap();
+        assert_eq!(delivered(&store), before);
+        drop(worker);
+        drop(store);
+        // Opening again must not repopulate an already-drained discovery roster.
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        store.set_member_key(Some(key)).unwrap();
+        assert!(store.escalation_run_ids("node").unwrap().is_empty());
+        reconciler(store.clone()).reconcile_once().unwrap();
+        assert_eq!(delivered(&store), before);
+    }
 }
