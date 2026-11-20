@@ -198,9 +198,7 @@ fn historical_files(home: &Path) -> Result<Arc<Vec<SessionMetadata>>> {
     let inventory = &inventories[home];
     match (&inventory.files, &inventory.error) {
         (Some((_, files)), _) => Ok(files.clone()),
-        (None, Some(error)) => {
-            return Err(DiscoveryError::Failed(error.clone()).into());
-        }
+        (None, Some(error)) => Err(DiscoveryError::Failed(error.clone()).into()),
         (None, None) => Err(DiscoveryError::HistoryPending.into()),
     }
 }
@@ -1600,21 +1598,20 @@ fn read_opencode_sessions(database: &Path, native_id: Option<&str>) -> Result<Ve
     if !database.is_file() {
         return Ok(Vec::new());
     }
-    let file_metadata = fs::metadata(&database)?;
+    let file_metadata = fs::metadata(database)?;
     let database_updated_at = system_time_ms(file_metadata.modified().unwrap_or(UNIX_EPOCH));
-    let connection = open_opencode_database(&database)?;
-    let sql = if native_id.is_some() {
-        "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
+    let connection = open_opencode_database(database)?;
+    let mut statement = if native_id.is_some() {
+        connection.prepare("SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
                 COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
          FROM session s LEFT JOIN message m ON m.session_id = s.id \
-         WHERE s.id = ?1 GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+         WHERE s.id = ?1 GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2")?
     } else {
-        "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
+        connection.prepare("SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
                 COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
          FROM session s LEFT JOIN message m ON m.session_id = s.id \
-         WHERE ?1 IS NULL GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+         WHERE ?1 IS NULL GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2")?
     };
-    let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map(params![native_id, MAX_EXPOSED_HISTORY as i64], |row| {
         let native_id: String = row.get(0)?;
         let directory: Option<String> = row.get(1)?;

@@ -146,7 +146,10 @@ fn revalidate(home: &Path, id: &str, files: Vec<SessionMetadata>, budget: Durati
                 } else {
                     read_metadata(file.driver, &file.transcript)?
                 };
-                if let Some(metadata) = metadata && metadata.native_id == file.native_id {
+                if let Some(mut metadata) = metadata && metadata.native_id == file.native_id {
+                    // The containing session root, not the transcript header, supplies
+                    // Codex's originating home. Keep that indexed provenance on refresh.
+                    metadata.codex_home = file.codex_home;
                     current.push(metadata);
                 }
             }
@@ -211,6 +214,27 @@ mod tests {
             cwd: None, title: None, started_at_unix_ms: 1, updated_at_unix_ms: 1,
             revision: "1".into(),
         }
+    }
+
+    #[test]
+    fn exact_codex_refresh_preserves_indexed_originating_home() {
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = home.path().join(".codex");
+        let sessions = codex_home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let transcript = sessions.join("rollout-selected.jsonl");
+        fs::write(&transcript, concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"selected-full-id\",",
+            "\"cwd\":\"/workspace\",\"timestamp\":\"2026-11-20T00:00:00Z\"}}\n"
+        )).unwrap();
+        let mut indexed = read_metadata(ExternalDriver::Codex, &transcript).unwrap().unwrap();
+        indexed.codex_home = Some(codex_home.clone());
+        let id = external_session_id(indexed.driver, &indexed.native_id);
+        let found = revalidate(home.path(), &id, vec![indexed], Duration::from_secs(2))
+            .unwrap().and_then(ExternalConversation::into_readable_session).unwrap();
+        assert_eq!(found.codex_home, Some(codex_home));
+        assert_eq!(found.native_id, "selected-full-id");
+        assert_eq!(found.transcript, transcript);
     }
 
     #[test]
