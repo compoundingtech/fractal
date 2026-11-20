@@ -34,7 +34,7 @@ pub fn print(arguments: fmt::Arguments<'_>) {
         return;
     }
     if let Err(error) = output_result(io::stdout().lock().write_fmt(arguments), ()) {
-        let _ = writeln!(io::stderr().lock(), "st: write stdout: {error}");
+        let _ = writeln!(io::stderr().lock(), "fractal: write stdout: {error}");
         std::process::exit(1);
     }
 }
@@ -58,7 +58,7 @@ pub fn finish(code: ExitCode) -> ExitCode {
         Ok(()) => code,
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => code,
         Err(error) => {
-            let _ = writeln!(io::stderr().lock(), "st: flush stdout: {error}");
+            let _ = writeln!(io::stderr().lock(), "fractal: flush stdout: {error}");
             ExitCode::FAILURE
         }
     }

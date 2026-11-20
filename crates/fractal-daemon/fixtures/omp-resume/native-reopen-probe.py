@@ -4,7 +4,7 @@
 
 Copy this script and native-interrupted-ask.jsonl verbatim into dotfiles' OMP pin
 (flakes/external/omp). That pin's hermetic flake check is the contraction gate on
-EVERY OMP bump. smalltalk's Rust test is opt-in because it does not provide OMP.
+EVERY OMP bump. Fractal's Rust test is opt-in because it does not provide OMP.
 
 OMP_BIN must name the raw pinned OMP executable, not a fleet extension launcher.
 Exit 0: F5-to-retry is rendered, no native reopen (bridge still needed).

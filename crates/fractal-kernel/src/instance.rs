@@ -1,6 +1,6 @@
-//! A named, fully separate st on one machine.
+//! A named, fully separate Fractal on one machine.
 //!
-//! `st --instance NAME` (or `FRACTAL_INSTANCE=NAME`, with `ST_INSTANCE` fallback) runs a second
+//! `fractal --instance NAME` (or `FRACTAL_INSTANCE=NAME`, with `ST_INSTANCE` fallback) runs a second
 //! Fractal next to the default one for testing and for a clean first run. Everything it owns
 //! lives under one directory,
 //! `~/.st-instance/NAME`, so removing that directory (plus the service definitions that point into
@@ -247,7 +247,7 @@ pub fn native_session_home() -> Result<Option<PathBuf>> {
 }
 
 fn fail(message: &str) -> ! {
-    eprintln!("st: {message}");
+    eprintln!("fractal: {message}");
     std::process::exit(2);
 }
 

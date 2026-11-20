@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/ci-local: the stages run in a home of their own, with no st, GitHub or SSH agent variable, with buffered parallel lanes and a separate fleet target, and the
+"""scripts/ci-local: the stages run in a home of their own, with no Fractal, GitHub or SSH agent variable, with buffered parallel lanes and a separate fleet target, and the
 exit status is the first failure's. cargo and the stage scripts are stubs that record what they saw; nothing compiles."""
 import contextlib
 import json

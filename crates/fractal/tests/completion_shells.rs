@@ -56,7 +56,7 @@ async fn daemon(root: &Path) -> (PathBuf, tokio::task::JoinHandle<()>) {
     (socket, server)
 }
 
-fn st3() -> PathBuf {
+fn fractal_cli() -> PathBuf {
     test_bin!("fractal-unstamped").to_path_buf()
 }
 
@@ -76,9 +76,9 @@ fn environment(command: &mut Command, root: &Path, socket: &Path) {
         .env("ST3_COMPLETION_DEADLINE_MS", "10000");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let st = bin.join("fractal");
-    if !st.exists() {
-        std::os::unix::fs::symlink(st3(), &st).unwrap();
+    let executable_link = bin.join("fractal");
+    if !executable_link.exists() {
+        std::os::unix::fs::symlink(fractal_cli(), &executable_link).unwrap();
     }
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
@@ -98,7 +98,7 @@ fn complete_with(
     line: &[&str],
     adjust: impl FnOnce(&mut Command),
 ) -> (Output, Duration) {
-    let mut command = Command::new(st3());
+    let mut command = Command::new(fractal_cli());
     environment(&mut command, root, socket);
     adjust(&mut command);
     command
@@ -120,7 +120,7 @@ fn lines(output: &Output) -> Vec<String> {
 }
 
 fn stub(root: &Path, shell: &str) -> PathBuf {
-    let output = Command::new(st3())
+    let output = Command::new(fractal_cli())
         .args(["completions", shell])
         .output()
         .unwrap();
@@ -163,7 +163,7 @@ fn alias_completion_callbacks_are_silent_without_warning_suppression() {
     use std::os::unix::process::CommandExt;
     let root = tempfile::tempdir().unwrap();
     for name in ["st", "st3"] {
-        let mut command = Command::new(st3());
+        let mut command = Command::new(fractal_cli());
         environment(&mut command, root.path(), &root.path().join("absent.sock"));
         let output = command.arg0(name)
             .env("COMPLETE", "fish")
@@ -376,7 +376,7 @@ exit 1
 }
 
 async fn command(root: &Path, socket: &Path, args: &[&str]) -> (Output, Duration) {
-    let mut command = Command::new(st3());
+    let mut command = Command::new(fractal_cli());
     environment(&mut command, root, socket);
     command.args(args);
     tokio::task::spawn_blocking(move || {

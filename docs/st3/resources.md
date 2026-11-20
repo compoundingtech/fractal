@@ -80,6 +80,27 @@ Ownership comes from the authenticated run/attempt or native agent invocation, n
 environment labels. An ad-hoc local operator has an explicit local/person owner. Nested
 membership inheritance requires that same authenticated owner; inventory never exports grants.
 
+Shell payload environment values exist only in the submitting daemon's memory, keyed by execution
+ID, until launch (or terminal refusal/cancellation). Neither names nor values are retained in the
+execution record, inspection responses, or receipts; `command.environment` is always empty there.
+A daemon restart loses pending launch environments, including explicitly empty ones. An execution
+that has not launched refuses with `environment-unavailable` when it reaches launch; resubmit it
+with its live environment. Existing native generations keep their execution facts and custody and
+are observed/retired without relaunching or substituting the daemon's environment.
+The runtime's durable launch-operation identity is passed separately as typed control-plane
+metadata. Payload keys such as `ST3_START_OPERATION` are never parsed into generation receipts,
+start-rejection evidence, producer custody, or runtime operation tracing.
+
+On first upgraded store open, historical shell command environments are cleared in place while
+execution history, outcomes, receipts, and membership custody remain readable. The writer enables
+SQLite secure deletion, truncates the WAL, rewrites the database with `VACUUM`, and truncates the
+WAL again before recording completion. Busy checkpoints or rewrite errors fail store open; stop
+competing readers/writers and retry the open. This scrubs the active database and WAL, not external
+backups, snapshots, or payload-produced output. Do not downgrade to a writer that persists shell
+environments. Secrets deliberately printed by payloads or supplied as argv remain the caller's
+responsibility.
+
+
 ## Program API
 
 ```ts

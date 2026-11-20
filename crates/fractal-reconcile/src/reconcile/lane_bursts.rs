@@ -19,14 +19,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A raise found at start that no holder's renewal restored within a lease comes down.
             if now_ms() >= self.found_lanes_kept_until() {
                 for (agent, lane) in std::mem::take(&mut state.lane_found) {
-                    eprintln!("st3: WARN {agent}'s lane was raised to {} when this daemon started and no burst holder renewed it: it goes back to what its steps hold",
+                    eprintln!("fractal: WARN {agent}'s lane was raised to {} when this daemon started and no burst holder renewed it: it goes back to what its steps hold",
                         show_lane(lane));
                     state.burst_touched.insert(agent);
                 }
             }
         }
         for agent in status.burst_expire(now) {
-            eprintln!("st3: WARN {agent}'s lane burst lapsed: its holder stopped renewing it");
+            eprintln!("fractal: WARN {agent}'s lane burst lapsed: its holder stopped renewing it");
         }
         let waiting = status.state().lane_bursts.iter().filter(|burst| !burst.granted && burst.refused.is_none())
             .map(|burst| (burst.subject.clone(), burst.capacity)).collect::<Vec<_>>();
@@ -46,7 +46,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         memory: raised.memory.max(lane.memory),
                     });
                     state.burst_touched.insert(agent.clone());
-                    eprintln!("st3: {agent}'s lane burst {} is granted", show_lane(lane));
+                    eprintln!("fractal: {agent}'s lane burst {} is granted", show_lane(lane));
                 }
                 BurstJudged::Waits(reason) => {
                     burst.wait = Some(reason);
@@ -91,7 +91,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 cores: raised.cores.max(live.cores),
                 memory: raised.memory.max(live.memory),
             });
-            eprintln!("st3: {}'s lane is raised to {} above its own: it counts as held and stays raised for a burst holder's renewal",
+            eprintln!("fractal: {}'s lane is raised to {} above its own: it counts as held and stays raised for a burst holder's renewal",
                 desired.subject, show_lane(live));
             found = true;
         }
