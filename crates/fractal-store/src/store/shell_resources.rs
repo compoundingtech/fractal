@@ -177,16 +177,18 @@ fn give_back_free_list(connection: &Connection) -> Result<()> {
 }
 
 /// Overwrite pages freed before secure_delete was enabled, before the table copy can
-/// reuse them. One near-page-sized row needs at least one leaf page; allocating the
-/// initial free-page count therefore consumes the entire old free list. B-tree
-/// bookkeeping can grow the file slightly, but never copies the rest of the store.
+/// reuse them. The first near-page-sized row fits the scratch table's existing root
+/// leaf; two rows force a split into two new leaf pages. A nonempty free list needs
+/// at least those two rows, and every later row needs another leaf page. Allocating
+/// the larger of two rows and the initial free-page count consumes the old free
+/// list. B-tree bookkeeping can grow the file slightly, never copy the whole store.
 /// A crash leaves only zero rows; the next attempt drops them securely and repeats.
 fn erase_free_list(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4929ecffa855 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_environment_free_scrub_v1;
         CREATE TABLE shell_environment_free_scrub_v1 (body BLOB NOT NULL);")?;
     let free: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    let mut remaining = free;
+    let mut remaining = if free == 0 { 0 } else { free.max(2) };
     while remaining > 0 {
         let batch = remaining.min(128);
         let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
@@ -768,6 +770,27 @@ mod tests {
     #[test]
     fn historical_scrub_without_incremental_vacuum_erases_without_vacuum() {
         scrub_erases_a_freed_secret("NONE");
+    }
+
+    #[test]
+    fn free_list_scrub_accounts_for_its_existing_root_leaf() {
+        for payload_pages in [1_u64, 2] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch("PRAGMA auto_vacuum=NONE;
+                CREATE TABLE scrub_page_seed (body BLOB NOT NULL);").unwrap();
+            let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap();
+            connection.execute("INSERT INTO scrub_page_seed VALUES(zeroblob(?1))",
+                [page_size * payload_pages]).unwrap();
+            connection.execute_batch("DROP TABLE scrub_page_seed;").unwrap();
+            let free: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+            assert_eq!(free, payload_pages + 1, "one root page plus overflow pages");
+            let before: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+            // Creating the scratch root consumes one free page. With two seeded
+            // pages, just one remains: its first row fits the root without using it.
+            erase_free_list(&connection).unwrap();
+            let after: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+            assert!(after <= before + 1, "only the root split may need one extra page");
+        }
     }
 
     #[test]
