@@ -272,7 +272,26 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             reconciler.perform_start(
                 &subject, subject.member.as_ref().unwrap(), "helper completed start",
             ).unwrap();
-            assert!(reconciler.store.runtime_start_for(&subject.subject).unwrap().unwrap().applied);
+            // runtime_start_for returns pending work only: a successfully applied start is
+            // no longer visible there. Prove adoption through its durable observations before
+            // releasing dispatch, rather than assuming the completed operation stays pending.
+            assert!(reconciler.store.runtime_start_for(&subject.subject).unwrap().is_none());
+            let succeeded = reconciler.store.observations_for(
+                &subject.subject, "runtime.action.succeeded",
+            ).unwrap();
+            let [succeeded] = succeeded.as_slice() else {
+                panic!("expected exactly one completed helper start: {succeeded:?}");
+            };
+            assert!(succeeded.body["fields"]["operation"].is_string());
+            let observed = reconciler.store.latest_observation(
+                &subject.subject, "runtime.observed",
+            ).unwrap().unwrap();
+            assert_eq!(observed.body["fields"]["adopted"], true);
+            assert!(observed.body["fields"]["incarnation_id"].is_string());
+            assert_eq!(
+                observed.body["fields"]["incarnation_id"],
+                succeeded.body["fields"]["incarnation_id"],
+            );
             assert!(smallclaims::touched::writes() > before);
             dispatched.send(()).unwrap();
         }).await.unwrap();
