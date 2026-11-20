@@ -1558,9 +1558,11 @@ Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 Only the main publication step receives the write token; PRs never execute it.
 The producer pushes the output closure; Cachix may omit dependencies already available
 from `cache.nixos.org`. Verification first requires the exact output in the owned cache,
-then enumerates its local closure and requires every other path to exist remotely in
-either `cache.nixos.org` or the owned cache. A path absent from both fails publication;
-local availability alone never satisfies the remote proof. Private-cache queries use
+then enumerates its local closure and checks the whole batch against `cache.nixos.org`.
+One authenticated owned-cache batch checks the remainder. `nix-store --check-validity
+--print-invalid` reports missing members; any path still missing fails publication.
+This uses at most three remote commands regardless of closure size, and local
+availability alone never satisfies the remote proof. Private-cache queries use
 the same cache-scoped token through a job-temporary, owner-only netrc containing only
 the named cache host; an exit trap removes it on success or failure. The exact
 source/output/cache receipt and enumerated closure manifest are retained as
