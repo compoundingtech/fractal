@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS claim_member_signature_pending (
 const SIGN_CURSOR: &str = "claim_member_signature_cursor";
 const SIGN_PAGE: usize = 512;
 const PROMOTE_PAGE: usize = 512;
+const PENDING_CURSOR: &str = "claim_member_signature_pending_cursor";
 /// A signature for a claim that never arrives is dropped after this long.
 const PENDING_KEEP_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 
@@ -138,22 +139,26 @@ impl Store {
             let Some(fleet_id) = self.signing_fleet_id(&connection)? else { return Ok(0) };
             (fleet_id, fleet_membership_tx(&connection)?)
         };
-        let verified: Vec<&ClaimMemberSignature> = signatures
+        // A signature counts only for a key membership admits for its writer at that sequence.
+        // Membership may not know the writer's key yet: the claim that keys it can travel in the
+        // same exchange as the signatures. Such a signature waits, and is judged again once the
+        // claim has arrived (`promote_claim_member_signatures`); a fenced sequence is dropped.
+        let verified: Vec<(&ClaimMemberSignature, bool)> = signatures
             .iter()
-            .filter(|signature| {
+            .filter_map(|signature| {
                 let admitted = match membership.window(&signature.writer, signature.sequence) {
                     crate::fleet::Window::Keyed(keys) => keys.contains(&signature.member_key),
-                    crate::fleet::Window::Legacy => true,
-                    crate::fleet::Window::Fenced => false,
+                    crate::fleet::Window::Legacy => false,
+                    crate::fleet::Window::Fenced => return None,
                 };
-                admitted
-                    && crate::fleet::verify_signature(
+                crate::fleet::verify_signature(
                         &signature.member_key,
                         &crate::fleet::keys::claim_signature_message(
                             &fleet_id, &signature.writer, signature.sequence, &signature.claim_id,
                         ),
                         &signature.signature,
                     )
+                    .then_some((signature, admitted))
             })
             .collect();
         if verified.is_empty() {
@@ -165,14 +170,16 @@ impl Store {
         self.connection
             .batched(|tx| -> Result<usize> {
                 let mut kept = 0;
-                for signature in verified {
+                for (signature, admitted) in verified {
                     match claim_writer_tx(tx, &signature.claim_id)? {
-                        Some((writer, sequence)) => {
+                        Some((writer, sequence)) if admitted => {
                             if writer == signature.writer && sequence == signature.sequence {
                                 kept += insert_signature_tx(tx, signature)?;
                             }
                         }
-                        None => {
+                        // Another writer's claim, and nothing can admit it later.
+                        Some(_) if !admitted => {}
+                        _ => {
                             tx.execute(
                                 /* sqlite-large-value: allow-for-now lv-h39694ad7823a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signature_pending(
                                      claim_id, writer, sequence, member_key, signature, received_at_unix_ms)
@@ -195,14 +202,23 @@ impl Store {
     pub fn promote_claim_member_signatures(&self) -> Result<usize> {
         let now = i64::try_from(now_ms())?;
         let keep = i64::try_from(PENDING_KEEP_MS)?;
+        let membership = fleet_membership_tx(&self.readers.get())?;
         self.connection
             .batched(|tx| -> Result<usize> {
+                // A cursor moves through the waiting rows and wraps, so rows whose claims have not
+                // arrived do not hide the rows behind them.
+                let after: (String, String) = tx
+                    .query_row("SELECT value FROM meta WHERE key=?1", [PENDING_CURSOR], |row| row.get::<_, String>(0))
+                    .optional()?
+                    .and_then(|value| value.split_once('\n').map(|(a, b)| (a.to_owned(), b.to_owned())))
+                    .unwrap_or_default();
                 let page = tx
                     .prepare_cached(
                         "SELECT claim_id, writer, sequence, member_key, signature, received_at_unix_ms
-                         FROM claim_member_signature_pending LIMIT ?1",
+                         FROM claim_member_signature_pending WHERE (claim_id, member_key) > (?2, ?3)
+                         ORDER BY claim_id, member_key LIMIT ?1",
                     )?
-                    .query_map([PROMOTE_PAGE], |row| {
+                    .query_map(params![PROMOTE_PAGE, after.0, after.1], |row| {
                         Ok((
                             ClaimMemberSignature {
                                 claim_id: row.get(0)?,
@@ -218,8 +234,14 @@ impl Store {
                 let mut settled = 0;
                 for (signature, received) in &page {
                     let decided = match claim_writer_tx(tx, &signature.claim_id)? {
+                        // The claim has arrived, and with it its writer's admission if there is
+                        // one: keep the signature only if that writer's key is the one admitted.
                         Some((writer, sequence)) => {
-                            if writer == signature.writer && sequence == signature.sequence {
+                            let admitted = matches!(
+                                membership.window(&signature.writer, signature.sequence),
+                                crate::fleet::Window::Keyed(keys) if keys.contains(&signature.member_key)
+                            );
+                            if admitted && writer == signature.writer && sequence == signature.sequence {
                                 insert_signature_tx(tx, signature)?;
                             }
                             true
@@ -234,6 +256,11 @@ impl Store {
                         settled += 1;
                     }
                 }
+                let next = page.last().map_or_else(String::new, |(last, _)| format!("{}\n{}", last.claim_id, last.member_key));
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hc4a49862daba owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![PENDING_CURSOR, next],
+                )?;
                 Ok(settled)
             })
             .map_err(anyhow::Error::msg)?
@@ -273,7 +300,7 @@ impl Store {
         Ok(found)
     }
 
-    /// The writer signatures this store holds for `claim_ids`, as an exchange carries them.
+    /// Every writer signature this store holds for `claim_ids`, as an exchange carries them.
     pub fn claim_member_signatures_for(&self, claim_ids: &[String]) -> Result<Vec<ClaimMemberSignature>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
@@ -286,19 +313,18 @@ impl Store {
         )?;
         let mut found = Vec::new();
         for claim_id in claim_ids {
-            if let Some(signature) = statement
-                .query_row(/* sqlite-large-value: allow-for-now lv-h4f1be29c47a1 owner=smallclaims::store::member_signatures TODO=trace-statement-and-value-representation */ [claim_id], |row| {
-                    Ok(ClaimMemberSignature {
-                        claim_id: row.get(0)?,
-                        writer: row.get(1)?,
-                        sequence: row.get(2)?,
-                        member_key: row.get(3)?,
-                        signature: row.get(4)?,
-                    })
+            // Every key's signature: a writer whose key rotated signed under each.
+            let rows = statement.query_map([claim_id], |row| {
+                Ok(ClaimMemberSignature {
+                    claim_id: row.get(0)?,
+                    writer: row.get(1)?,
+                    sequence: row.get(2)?,
+                    member_key: row.get(3)?,
+                    signature: row.get(4)?,
                 })
-                .optional()?
-            {
-                found.push(signature);
+            })?;
+            for row in rows {
+                found.push(row?);
             }
         }
         Ok(found)

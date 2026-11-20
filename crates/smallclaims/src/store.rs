@@ -7925,6 +7925,8 @@ impl Store {
                     inventory.public()
                 }
             },
+            // About 200 bytes for each claim of an envelope sent: bounded by the envelope limit
+            // (`replication_page_limit`), and small beside the envelopes' own payloads.
             claim_member_signatures: self.claim_member_signatures_for_envelopes(&missing)?,
             envelopes: match archive {
                 Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,

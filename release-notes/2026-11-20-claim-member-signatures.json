@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta key claim_member_signature_cursor for the signing pass. No storage version change."
+    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta keys claim_member_signature_cursor (signing pass) and claim_member_signature_pending_cursor (settling waiting signatures). No storage version change."
   },
   "rules": {
     "status": "none",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Exchanges carry an optional claim_member_signatures list beside the envelopes they send (about 200 bytes per claim). Older peers neither send nor read it; their claims get a signature once their writer runs this build and signs its own. The signed message is st3-claim-v1, fleet, writer, sequence and claim id with the writer's member key."
+    "detail": "Exchanges carry an optional claim_member_signatures list beside the envelopes they send (about 200 bytes per claim). Older peers neither send nor read it; their claims get a signature once their writer runs this build and signs its own. The signed message is st3-claim-v1, fleet, writer, sequence and claim id with the writer's member key. A member keeps a peer's signature only when membership admits that key for the writer: a fleet without membership keys keeps only its members' own signatures."
   },
   "downtime": {
     "status": "changed",
