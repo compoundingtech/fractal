@@ -1151,6 +1151,13 @@ producer frontier. One-shot lifecycle/budget/freshness boundaries wake evaluatio
 polling or request-time sampling is used. Native ownership/response declarations bind this
 host row through the existing native indicator mechanism, without a separate alert evaluator.
 
+Mail source publication follows a source-specific committed-input generation, not global
+API or reconciliation notifications. Mail source, acceptance, lifecycle, identity/conflict,
+declared ownership, native runtime/frontier and shard mirror changes invalidate it; unrelated
+notifications do not recapture retained history. Identity/conflict checks remain authoritative
+at each source cut. Incremental keyed maintenance is tracked
+in [#6921](https://github.com/compoundingtech/fractal/issues/6921).
+
 The local acceptance and lifecycle ledgers retain metadata across restarts and source-mark
 retention. They contain recipient identity, source timestamps, sender/tags and lifecycle
 provenance, not message content or model output. They currently retain this audit metadata

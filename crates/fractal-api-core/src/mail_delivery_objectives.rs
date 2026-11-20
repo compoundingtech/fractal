@@ -19,6 +19,8 @@ struct Publication {
     snapshot: Mutex<Option<Snapshot>>,
     changed: Mutex<Option<tokio::sync::watch::Receiver<u64>>>,
     incarnation: Mutex<Option<String>>,
+    #[cfg(test)]
+    captures: std::sync::atomic::AtomicUsize,
 }
 #[derive(Debug)]
 struct Snapshot {
@@ -47,11 +49,13 @@ pub fn start(state: &crate::api::AppState) {
     if publication.started.swap(true, Ordering::AcqRel) { return; }
     *publication.incarnation.lock().unwrap_or_else(PoisonError::into_inner) = Some(crate::model::new_request_id());
     let state = state.clone();
-    let mut changed = state.event_notify.subscribe();
+    let mut changed = state.store.subscribe_mail_objective_inputs();
     *publication.changed.lock().unwrap_or_else(PoisonError::into_inner) = Some(changed.clone());
     tokio::spawn(async move {
         loop {
             let generation = *changed.borrow_and_update();
+            #[cfg(test)]
+            publication.captures.fetch_add(1, Ordering::AcqRel);
             let store = state.store.clone();
             let captured = tokio::task::spawn_blocking(move || capture(&store, now())).await;
             let mut snapshot = match captured {
@@ -95,6 +99,12 @@ pub fn start(state: &crate::api::AppState) {
                             snapshot.observed_ms = now();
                         }
                         if boundary.is_some_and(|deadline| deadline <= now()) {
+                            // Retained-source expiry needs a new population; budget boundaries
+                            // only rerender the same samples. Neither depends on broad API wakes.
+                            let recapture = publication.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
+                                .as_ref().and_then(|snapshot| snapshot.recapture_at_ms)
+                                .is_some_and(|deadline| deadline <= now());
+                            if recapture { break; }
                             crate::api::signal_local_change(&state);
                         }
                     }
@@ -126,6 +136,7 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
         .as_ref().map(|changed| *changed.borrow());
     let known = snapshot.is_some_and(|snapshot| snapshot.error.is_none() && snapshot.unknown == 0
         && generation == Some(snapshot.generation)
+        && !store.mail_objective_input_coverage_failed()
         && now.saturating_sub(snapshot.observed_ms) <= FRESHNESS
         && now.saturating_sub(snapshot.source_through_ms) <= FRESHNESS);
     let samples = snapshot.map_or(&[][..], |snapshot| snapshot.samples.as_slice());

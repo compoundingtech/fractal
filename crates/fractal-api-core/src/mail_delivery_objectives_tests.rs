@@ -327,3 +327,44 @@ fn expired_audit_history_is_not_materialized_on_unrelated_events() {
     let snapshot = capture(&store, expired).unwrap();
     assert_eq!(snapshot.source_work, [1, 0, 0]);
 }
+
+#[tokio::test]
+async fn unrelated_notifications_and_claims_do_not_recapture() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = crate::api::tests_shared::state(directory.path());
+    let publication = state.store.extension::<Publication>();
+    start(&state);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while publication.snapshot.lock().unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(publication.snapshot.lock().unwrap().as_ref().unwrap().error.is_none());
+    let generation = *publication.changed.lock().unwrap().as_ref().unwrap().borrow();
+    for _ in 0..128 {
+        crate::api::signal_local_change(&state);
+    }
+    state.store.append_claim(&ClaimInput {
+        subject: "resource/example/unrelated".into(), kind: "resource.observed".into(), actor: None,
+        fields: BTreeMap::from([("kind".into(), json!("custom.test.unrelated"))]), evidence: Vec::new(),
+        expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    for _ in 0..16 { tokio::task::yield_now().await; }
+    let changed = publication.changed.lock().unwrap();
+    assert_eq!(*changed.as_ref().unwrap().borrow(), generation);
+    assert!(!changed.as_ref().unwrap().has_changed().unwrap(),
+        "unrelated input cannot schedule a capture even after this task yields");
+    assert_eq!(publication.captures.load(Ordering::Acquire), 1);
+    drop(changed);
+    send(&state.store, "message/example-real-source-wake", json!([]));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let complete = publication.snapshot.lock().unwrap().as_ref()
+                .is_some_and(|snapshot| snapshot.source_work[0] == 1);
+            if complete { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert_eq!(publication.captures.load(Ordering::Acquire), 2,
+        "a genuine mail source change wakes without a global notification");
+}
