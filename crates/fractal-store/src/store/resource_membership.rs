@@ -504,10 +504,10 @@ impl Store {
         let transaction = connection.transaction()?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
-        super::resource_admission_objectives::recover(&transaction, host, epoch)?;
+        let complete = super::resource_admission_objectives::recover(&transaction, host, epoch)?;
         transaction.commit()?;
         self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(complete, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -1026,6 +1026,14 @@ mod tests {
         assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
         let after = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
         assert_eq!(after, before);
+        let coverage = store.claims_by_kinds_after(&[super::resource_admission_objectives::COVERAGE_KIND], None, 0, 10).unwrap();
+        assert_eq!(coverage.claims.last().unwrap().body["fields"]["complete"], false);
+        assert!(!store.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
+            .load(std::sync::atomic::Ordering::Acquire));
+        let mut supported = request.clone();
+        supported.id = "supported-after-recovery".into();
+        supported.name = "supported-lane".into();
+        assert!(matches!(store.request_resource_membership(&supported, test_fit(), 3).unwrap(), Admission::Admitted(_)));
     }
 
     #[test]
