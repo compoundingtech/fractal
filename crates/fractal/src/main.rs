@@ -8348,7 +8348,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ));
             let admission_notify = notify.clone();
             let admission_events = event_notify.clone();
-            let admission_state_dir = state.state_dir.clone();
+            let admission_state_dir = config.state_dir.clone();
             tokio::spawn(fractal_daemon::maintenance::run_replication_admission(
                 Arc::downgrade(&store),
                 move || {
