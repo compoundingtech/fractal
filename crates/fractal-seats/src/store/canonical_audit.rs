@@ -226,6 +226,10 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        // Host-local deferred publication queue; never part of the shared projection digest.
+        "resource_admission_pending_v1",
+        // Host-local retirement-qualified learner samples and permanent replay dedupe.
+        "resource_profile_samples_v1",
         "shell_resources_v1",
         // Owner-scoped cancellation tombstones govern only this host's runtime requests.
         "shell_resource_request_cancellations_v1",
