@@ -86,6 +86,7 @@ pub mod prepared_seal;
 mod prepared_seal_tests;
 mod binary_payloads;
 pub mod record_bytes;
+pub mod member_signatures;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -1210,6 +1211,9 @@ impl Store {
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
@@ -7810,6 +7814,7 @@ impl Store {
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary()?),
+            claim_member_signatures: Vec::new(),
         })
     }
 
@@ -7943,6 +7948,7 @@ impl Store {
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
+                claim_member_signatures: Vec::new(),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -8001,6 +8007,9 @@ impl Store {
                     inventory.public()
                 }
             },
+            // About 200 bytes for each claim of an envelope sent: bounded by the envelope limit
+            // (`replication_page_limit`), and small beside the envelopes' own payloads.
+            claim_member_signatures: self.claim_member_signatures_for_envelopes(&missing)?,
             envelopes: match archive {
                 Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
                 None => self.replica_envelopes(missing)?,
@@ -8479,6 +8488,11 @@ impl Store {
             progress.compare_graphs(equal, now);
         }
         drop(sync);
+        // The writers' signatures of the claims the exchange carries, kept once they verify
+        // (`member_signatures`); a failure here costs only signatures a later exchange brings.
+        if let Err(error) = self.receive_claim_member_signatures(relay, &input.claim_member_signatures) {
+            eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
+        }
         Ok(ReplicationReceipt {
             received,
             duplicate,
@@ -10769,6 +10783,7 @@ impl Store {
         }
         Ok(ReplicationStatus {
             configured,
+            claim_signatures_refused: self.claim_member_signatures_refused()?,
             fleet_id: fleet_id.map(str::to_owned),
             health: self.replication_health(configured)?,
             authority_digest: snapshot.authority_digest.clone(),

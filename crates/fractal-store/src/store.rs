@@ -387,6 +387,8 @@ mod gate_runners_tests;
 #[cfg(test)]
 mod wake_lookup_tests;
 #[cfg(test)]
+mod mail_delivery_source_tests;
+#[cfg(test)]
 mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
