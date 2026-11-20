@@ -3293,9 +3293,8 @@ pub fn client_agent_resources_cached(
     }))
 }
 
-/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
-/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
-/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+/// Run a roster fold not enclosed by a request or snapshot in a snapshot of its own.
+/// Background refreshes supply a wall budget; direct folds retain the card CPU budget.
 fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
         return fold();
@@ -6485,11 +6484,30 @@ fn agent_roster_cut_not_ready(wanted: u64) -> ApiError {
 /// How many agents one short snapshot reduces while the refresher warms the roster.
 const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 
+/// Scheduling and I/O waits count too: card CPU limits alone do not release a WAL reader.
+const AGENT_ROSTER_SNAPSHOT_BUDGET: Duration = Duration::from_secs(2);
+
+fn agent_roster_snapshot<T>(
+    store: &Store,
+    fold: impl FnOnce(u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new("roster/refresh", AGENT_ROSTER_SNAPSHOT_BUDGET),
+        |parent| parent.child(AGENT_ROSTER_SNAPSHOT_BUDGET),
+    );
+    smallclaims::read_budget::with(Some(budget), || store.read_snapshot(|index| {
+        smallclaims::read_budget::check()?;
+        let result = fold(index)?;
+        smallclaims::read_budget::check()?;
+        Ok(result)
+    }))
+}
+
 /// Reduce every agent's current-view and card status in short snapshots of at most
 /// [`AGENT_ROSTER_WARM_CHUNK`] agents. These per-agent reductions stay cached until a claim
 /// they depend on arrives, so the folds that follow at one cut read them instead of the log.
 fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
-    let subjects = store.read_snapshot(|index| {
+    let subjects = agent_roster_snapshot(store, |index| {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
@@ -6500,7 +6518,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     })?;
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
-        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
+        agent_roster_snapshot(store, |index| crate::otel::roster_phase("status_fold", || {
             store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
@@ -6549,13 +6567,13 @@ fn refresh_agent_roster_source(
     store: &Store, history: bool,
 ) -> anyhow::Result<Option<CapturedPresentedAgents>> {
     store.begin_agent_roster_fault_retries(history);
-    let (current, captured) = store.read_snapshot(|index| {
+    let (current, captured) = agent_roster_snapshot(store, |index| {
         let current = store.agent_roster_current(index, history)?;
         let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
         Ok((current, captured))
     })?;
     if current { return Ok(captured); }
-    let complete = |store: &Store| store.read_snapshot(|index| {
+    let complete = |store: &Store| agent_roster_snapshot(store, |index| {
         if let Some(reason) =
             store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
         {
@@ -6571,14 +6589,14 @@ fn refresh_agent_roster_source(
             return Ok(captured);
         };
         store.note_agent_roster_chunked(&reason);
-        let order = store.read_snapshot(|index| {
+        let order = agent_roster_snapshot(store, |index| {
             Ok(client_agent_page_refs(store, history, index)?.iter()
                 .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
                 .collect::<Vec<_>>())
         })?;
         for chunk in order.chunks(AGENT_ROSTER_WARM_CHUNK) {
             let chunk = chunk.iter().cloned().collect::<BTreeSet<_>>();
-            store.read_snapshot(|index| {
+            agent_roster_snapshot(store, |index| {
                 client_agent_cards_selected(store, history, index, &chunk, true).map(drop)
             })?;
         }
