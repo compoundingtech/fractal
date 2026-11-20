@@ -404,7 +404,6 @@ pub fn without_deferred_maintenance_for_test<T>(work: impl FnOnce() -> T) -> T {
 /// in a savepoint of one transaction that commits once for all of them, and its caller hears back
 /// after that commit. `write` lends the connection itself to its caller until the guard drops,
 /// for writes that manage their own transactions. Nothing else ever takes SQLite's write lock.
-
 pub struct WriterConnection {
     pub jobs: Mutex<Option<std::sync::mpsc::Sender<WriterJob>>>,
     pub thread: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -575,11 +574,10 @@ impl WriterConnection {
                 let directory_admission = admitted;
                 write_queue(
                     connection,
-                    queue,
+                    (queue, background_queue),
                     &index,
                     &counted,
                     (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref()),
-                    background_queue,
                     &observed_fifo,
                     &deferred_work,
                 );
@@ -979,14 +977,14 @@ impl Drop for WriterConnection {
 /// transaction, and lend the connection to each lending write in its turn.
 fn write_queue(
     mut connection: Connection,
-    queue: std::sync::mpsc::Receiver<WriterJob>,
+    intake: (std::sync::mpsc::Receiver<WriterJob>, Arc<writer_queue::BackgroundAdmission>),
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
     callbacks: (&CommitObservers, &TransactionFinalizers, Option<&Arc<writer_observer::MutationState>>, Option<&telemetry::Writer>),
-    background: Arc<writer_queue::BackgroundAdmission>,
     fifo: &Arc<crate::fifo::Queue>,
     deferred: &Mutex<Option<Arc<DeferredMaintenance>>>,
 ) {
+    let (queue, background) = intake;
     let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
     let mut due = None;
     loop {
@@ -2948,10 +2946,10 @@ mod tests {
         }
         let observed = fifo.clone();
         let thread = std::thread::spawn(move || {
-            write_queue(writer, receiver, &AtomicU64::new(0),
+            write_queue(writer, (receiver, Arc::new(writer_queue::BackgroundAdmission::default())), &AtomicU64::new(0),
                 &(AtomicU64::new(0), AtomicU64::new(0)),
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
-                Arc::new(writer_queue::BackgroundAdmission::default()), &observed,
+                &observed,
                 &Mutex::new(None));
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
