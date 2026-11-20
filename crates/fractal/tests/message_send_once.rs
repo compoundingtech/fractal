@@ -286,11 +286,12 @@ async fn running_the_same_send_twice_sends_one_message() {
         first["subject"].as_str().unwrap()
     );
     assert!(
-        stderr(&human).contains("already sent"),
+        stderr(&human).contains("confirmed on retry"),
         "{}",
         stderr(&human)
     );
     assert_eq!(message_count(&store), 1);
+    assert!(!stderr(&human).contains("nothing new was sent"));
 
     // Different words are a different message.
     let mut other = SEND.to_vec();
@@ -364,13 +365,14 @@ async fn send_reply_references_use_read_normalization() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn running_the_same_reply_twice_sends_one_reply() {
+async fn different_reply_bodies_deliver_and_identical_retries_deduplicate() {
     let root = tempfile::tempdir().unwrap();
     let (socket, store, server) = daemon(root.path()).await;
+    let env = [("ST3_MESSAGE_KEY_HOUR", "490000")];
     let original = value(
         &st(
             &socket,
-            &[],
+            &env,
             &[
                 "--json",
                 "conversations",
@@ -398,13 +400,34 @@ async fn running_the_same_reply_twice_sends_one_reply() {
         "Yes, start now.",
     ];
 
-    let first = value(&st(&socket, &[], &reply).await);
-    let second = value(&st(&socket, &[], &reply).await);
+    let first = value(&st(&socket, &env, &reply).await);
+    let second = value(&st(&socket, &env, &reply).await);
     assert_eq!(message_count(&store), 2, "a repeated reply sent twice");
     assert_eq!(first["already_sent"], false);
     assert_eq!(second["subject"], first["subject"]);
     assert_eq!(second["in_reply_to"], parent);
     assert_eq!(second["already_sent"], true);
+    assert_eq!(second["idempotency_key"], first["idempotency_key"]);
+
+    // Same thread, sender, recipient and kind; only the body changes.
+    let mut different_body = reply;
+    *different_body.last_mut().unwrap() = "Wait, start after the checks finish.";
+    let different = value(&st(&socket, &env, &different_body).await);
+    assert_eq!(different["already_sent"], false, "{different}");
+    assert_eq!(different["in_reply_to"], parent);
+    assert_ne!(different["subject"], first["subject"]);
+    assert_ne!(different["idempotency_key"], first["idempotency_key"]);
+    let delivered = store.message(different["subject"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(delivered.content, "Wait, start after the checks finish.");
+    assert_eq!(delivered.from, LEAD);
+    assert_eq!(delivered.to, WORKER);
+    assert_eq!(message_count(&store), 3, "a distinct reply body was dropped");
+
+    let retry = value(&st(&socket, &env, &different_body).await);
+    assert_eq!(retry["already_sent"], true, "{retry}");
+    assert_eq!(retry["subject"], different["subject"]);
+    assert_eq!(retry["idempotency_key"], different["idempotency_key"]);
+    assert_eq!(message_count(&store), 3, "an identical reply retry sent twice");
 
     // A reply's own lifecycle writes carry keys too; they are not sends.
     let settled = format!(
@@ -426,6 +449,29 @@ async fn running_the_same_reply_twice_sends_one_reply() {
         .await,
     );
     assert_eq!(status["landed"], false, "{status}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_send_answer_confirms_success_on_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let (back, store, server) = daemon(root.path()).await;
+    let front = root.path().join("front.sock");
+    let losses = Arc::new(Losses::default());
+    losses.sends.store(1, Ordering::SeqCst);
+    let proxy = lossy_proxy(front.clone(), back, losses).await;
+
+    let sent = st(&front, &[], &SEND[1..]).await;
+    assert!(sent.status.success(), "{}", stderr(&sent));
+    assert_eq!(message_count(&store), 1);
+    let subject = std::str::from_utf8(&sent.stdout).unwrap();
+    assert!(subject.trim().starts_with("message/"), "{subject}");
+    let confirmation = stderr(&sent);
+    assert!(confirmation.contains(subject.trim()), "{confirmation}");
+    assert!(confirmation.contains("confirmed on retry"), "{confirmation}");
+    assert!(!confirmation.contains("nothing new was sent"), "{confirmation}");
+    assert!(!confirmation.contains("already sent"), "{confirmation}");
+    proxy.abort();
     server.abort();
 }
 

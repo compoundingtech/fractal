@@ -16827,14 +16827,14 @@ fn shell_word(value: &str) -> String {
     }
 }
 
-/// A send's result. The human form prints the message alone on stdout, as for a new message,
-/// and says on stderr when the message had already been sent.
+/// A send's result. Stdout always names the message; stderr confirms a successful retry without
+/// suggesting that its body was dropped.
 fn print_message_receipt(receipt: &MessageSendReceipt, json_output: bool) -> Result<()> {
     if json_output {
         return print_value(receipt, true);
     }
     if receipt.already_sent {
-        stderr_message("st", format_args!("{} was already sent{} (idempotency key {}); nothing new was sent", receipt.message.subject,
+        stderr_message("st", format_args!("{} was sent{} (confirmed on retry; idempotency key {})", receipt.message.subject,
         receipt
             .sent_at
             .as_deref()
