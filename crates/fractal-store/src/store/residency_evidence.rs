@@ -43,7 +43,7 @@ fn append_input_tx(
 ) -> Result<ClaimRecord> {
     validate_claim_input(input)?;
     let operation = identities::claim_operation(input)?;
-    if let Some(record) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+    if let Some(record) = claim_operation_outcome_tx(transaction, operation.as_ref().map(|(id, digest)| (id.as_str(), digest.as_str())))? {
         return Ok(record);
     }
     for evidence in &input.evidence {
@@ -79,7 +79,7 @@ impl Store {
                 return Ok(false);
             }
             let operation = identities::claim_operation(input)?;
-            if claim_operation_outcome_tx(transaction, operation.as_ref())?.is_some() {
+            if claim_operation_outcome_tx(transaction, operation.as_ref().map(|(id, digest)| (id.as_str(), digest.as_str())))?.is_some() {
                 return Ok(false);
             }
             let predecessor = latest_claim_id_tx(transaction, &input.subject).map_err(internal)?;
@@ -176,7 +176,7 @@ mod tests {
         assert!(publisher.claims_for(&input.subject, Some(&input.kind)).unwrap().is_empty());
         let operation = identities::claim_operation(&input).unwrap();
         publisher.connection.batched(|tx| {
-            assert!(claim_operation_outcome_tx(tx, operation.as_ref()).unwrap().is_none());
+            assert!(claim_operation_outcome_tx(tx, operation.as_ref().map(|(id, digest)| (id.as_str(), digest.as_str()))).unwrap().is_none());
             Ok::<_, FractalError>(())
         }).unwrap().unwrap();
 
