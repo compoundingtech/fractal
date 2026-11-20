@@ -1556,14 +1556,31 @@ enable the disabled persistent-store verification job or occupy merge-serving wo
 Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 `FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
 Only the main publication step receives the write token; PRs never execute it.
-The producer uploads the complete output closure, including already-cached references,
-then queries the remote store recursively using the same cache-scoped write token
-through a job-temporary, owner-only netrc containing only the named cache host.
-Only that remote-store command receives the netrc path; an exit trap removes the
-file on success or failure. The exact source/output/cache receipt and closure
-manifest are retained as `fractal-native-publication`. Consumers must configure
+The producer pushes the output closure; Cachix may omit dependencies already available
+from `cache.nixos.org`. Verification first requires the exact output in the owned cache,
+then enumerates its local closure and checks the whole batch against `cache.nixos.org`.
+One authenticated owned-cache batch checks the remainder. `nix-store --check-validity
+--print-invalid` reports missing members; any path still missing fails publication.
+This uses at most three remote commands regardless of closure size, and local
+availability alone never satisfies the remote proof. Private-cache queries use
+the same cache-scoped token through a job-temporary, owner-only netrc containing only
+the named cache host; an exit trap removes it on success or failure. The exact
+source/output/cache receipt and enumerated closure manifest are retained as
+`fractal-native-publication`. Consumers must configure
 read access and trust for that same cache through their fleet cache-client declarations;
 no consumer should substitute an unrelated installed binary when this output is absent.
+
+Each publication has a commit-keyed job concurrency group with cancellation disabled;
+there is no workflow-wide group that can replace another commit's pending publisher.
+For backfills, dispatch `nix.yml` on `main` with the required `sha` input set to a full
+40-character commit SHA. Checkout uses that exact SHA at depth one; the guard fetches
+the remaining main history explicitly with `--no-tags --unshallow`, avoiding evidence
+tags. Before Nix
+setup or any token-bearing step, the guard checks the SHA syntax, verifies checkout
+identity, fetches current `origin/main`, and requires the SHA to be its ancestor.
+The build and receipt use this validated SHA, not the dispatch event's main-tip SHA.
+Dispatches from other branches, scheduled events, and PRs cannot publish. This lane
+does not add a required check or merge-queue job.
 
 | Workflow | What it runs |
 | --- | --- |

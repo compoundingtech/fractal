@@ -21,6 +21,13 @@ subjects, claim fields or wire types, and do not change `STORAGE_VERSION` or
 `LOCAL_STORAGE_SCHEMA`, so registry and local-storage schema digests are unchanged.
 They remain outside `SHARED_TABLES` and the shared projection digest inventory.
 
+`card_actual_revisions` contains disposable member-local invalidation counters for
+in-memory actual-state reductions. Claims, canonical positions and repaired-claim
+membership remain the authority; the counters are neither shared projection rows
+nor replicated state. Reopening starts with empty in-memory reductions, so the
+counter table can be recreated without losing authoritative facts. Source mutation
+triggers maintain it after graph-owned source tables initialize.
+
 `local_runtime_cleanup_settled` is host-local exact-incarnation cleanup authority,
 not a replicated projection. Its receipts survive projection reconstruction and
 remain outside shared logical rows and projection digests. Constructors install
@@ -33,6 +40,15 @@ vacuuming and checkpointing their physical storage. Like local cleanup receipts 
 secret registrations, it is neither a shared projection nor reconstructible from
 claims, and remains outside replication and shared projection digests. Importing
 another host's completion marker would not prove erasure of this database.
+
+`shell_resource_request_cancellations_v1` is host-local resource authority, beside
+`shell_resources_v1` and membership custody. It retains owner-scoped request
+cancellation tombstones for seven days so cancellation before acceptance prevents
+a delayed or retried submission from launching. The authenticated cancellation
+path writes them; shell submission checks and expires them. They are not claims,
+shared projections or rebuildable caches: their authority applies only to the
+runtime owning the request on this host. They stay outside graph replication and
+shared projection digests.
 
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;

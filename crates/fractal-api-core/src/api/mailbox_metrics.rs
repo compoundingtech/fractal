@@ -12,12 +12,9 @@ const AGE_BANDS: [&str; 2] = ["recent", "stale"];
 
 /// Declared agents whose member is owned by this daemon's origin. Keep this selection shared
 /// with sibling per-agent gauges, so people, retired seats and remote members never leak in.
+/// The host index bounds selection to local declarations, independent of unrelated inventory.
 pub fn managed_agents_owned_by_local_host(store: &Store) -> anyhow::Result<Vec<String>> {
-    Ok(store.desired_subjects()?.into_iter()
-        .filter(|subject| subject.kind == "agent"
-            && subject.member.as_ref().is_some_and(|member| member.host == store.origin()))
-        .map(|subject| subject.subject)
-        .collect())
+    store.hosted_agents(store.origin())
 }
 
 #[derive(Default)]
@@ -135,6 +132,98 @@ pub fn start(store: &Arc<Store>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_agents_owned_by_local_host_preserves_membership_with_bounded_sqlite_work() {
+        use crate::SeatsStoreCore;
+        use smallclaims::sqlite::work::SqliteWorkScope;
+
+        let store = Store::open_memory("node").unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\n\
+             agent \"example/z-local\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             agent \"example/a-local\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             agent \"example/remote\" { host \"remote\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             agent \"example/unreadable\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             agent \"example/missing-member\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             agent \"example/stopped\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n\
+             mission \"example/non-agent\" state=\"ready\" {\n goal \"Membership fixture.\"\n step \"work\" { agentless }\n}\n",
+            "node",
+        ).unwrap();
+        store.apply_internal(&intent, "membership-initial").unwrap();
+        let mut member = serde_json::to_value(
+            intent.subjects["agent/example/unreadable"].member.as_ref().unwrap(),
+        ).unwrap();
+        // A valid JSON host still matches the host index, but the member cannot decode.
+        member["kind"] = serde_json::json!("future-member-kind");
+        store.replace_desired_member_for_test(
+            "agent/example/unreadable", &serde_json::to_string(&member).unwrap(),
+        );
+        store.replace_desired_member_for_test("agent/example/missing-member", "null");
+        // A local member alone must not admit a non-agent declaration.
+        store.replace_desired_member_for_test(
+            "mission/example/non-agent",
+            &serde_json::to_string(intent.subjects["agent/example/a-local"].member.as_ref().unwrap()).unwrap(),
+        );
+        let stopped = crate::graph::parse_intent(
+            "version 2\nstop \"agent/example/stopped\"\n", "node",
+        ).unwrap();
+        store.apply_internal(&stopped, "membership-stop").unwrap();
+
+        let old_selection = || {
+            store.desired_subjects().unwrap().into_iter()
+                .filter(|subject| subject.kind == "agent"
+                    && subject.member.as_ref().is_some_and(|member| member.host == store.origin()))
+                .map(|subject| subject.subject)
+                .collect::<Vec<_>>()
+        };
+        let measure_old = || {
+            old_selection();
+            let scope = SqliteWorkScope::start();
+            let agents = old_selection();
+            (agents, scope.finish())
+        };
+        let measure = || {
+            // Exclude first-use reader/statement initialization from both inventory sizes.
+            managed_agents_owned_by_local_host(&store).unwrap();
+            // Thread-local accounting excludes concurrent tests' statements.
+            let scope = SqliteWorkScope::start();
+            let agents = managed_agents_owned_by_local_host(&store).unwrap();
+            (agents, scope.finish())
+        };
+        let expected = vec!["agent/example/a-local".to_owned(), "agent/example/z-local".to_owned()];
+        let (old_before, old_before_work) = measure_old();
+        assert_eq!(old_before, expected);
+        let (before, before_work) = measure();
+        assert_eq!(before, expected);
+        assert!(before_work.statements > 0 && before_work.vm_steps > 0, "{before_work:?}");
+        assert_eq!(before_work.fullscan_steps, 0, "{before_work:?}");
+        assert_eq!(before_work.sorts, 0, "{before_work:?}");
+        assert_eq!(before_work.autoindex_rows, 0, "{before_work:?}");
+
+        let mut source = String::from("version 2\n");
+        for index in 0..256 {
+            source.push_str(&format!(
+                "agent \"unrelated/remote-{index}\" {{ host \"remote\"; workspace \"/tmp\"; harness \"omp\" {{}} }}\n\
+                 mission \"unrelated/mission-{index}\" state=\"ready\" {{\n goal \"Unrelated inventory.\"\n step \"work\" {{ agentless }}\n}}\n",
+            ));
+        }
+        let unrelated = crate::graph::parse_intent(&source, "node").unwrap();
+        store.apply_internal(&unrelated, "membership-unrelated").unwrap();
+        let (old_after, old_after_work) = measure_old();
+        assert_eq!(old_after, expected);
+        let (after, after_work) = measure();
+        assert_eq!(after, expected);
+        assert_eq!(after_work, before_work,
+            "unrelated declarations must not increase shared metric membership SQL");
+        assert!(old_after_work.vm_steps > old_before_work.vm_steps,
+            "the old full-inventory selection must grow: {old_before_work:?} -> {old_after_work:?}");
+        assert!(old_after_work.vm_steps > after_work.vm_steps,
+            "indexed selection must reduce SQLite work: old={old_after_work:?}, new={after_work:?}");
+        eprintln!(
+            "managed metric membership unrelated_inventory=0/512 old_small={old_before_work:?} old_large={old_after_work:?} indexed_small={before_work:?} indexed_large={after_work:?}",
+        );
+    }
 
     #[test]
     fn mailbox_metrics_age_is_zero_for_empty_and_future_messages() {

@@ -603,6 +603,10 @@ as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
 
+An API write is proved by its accepted request span and the `cause=api` wake
+counter, followed by an independent reconcile pass. Its pass label may name a
+later coalesced wake; tests must not require the last-writer-wins label to retain `api`.
+
 `st.reconcile.passes_per_wake` records the number of completed passes when an
 outer wake rests or reaches its 64-pass continuation cap. It includes the
 quiet confirmation pass, uses the outer wake's cause (not `continuation`),

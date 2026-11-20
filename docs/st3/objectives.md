@@ -287,6 +287,251 @@ targets retain count semantics (`met`/`missed`); ratio/gauge budgets retain the 
 coverage remains `no-data`, never a recovery of an open episode. Measured-only
 ready-to-merged has no success verdict and cannot acquire one through ownership.
 
+### Fleet roll completion
+
+`fleet/roll-completion` measures **whole rolls**, not host-roll pairs: 90% must have
+every immutable target host verified within 24 hours of declaration. The 30-day
+budget allows 10% bad rolls and uses the common paired burns (14.4× over 1h+5m,
+6× over 6h+30m, at least one known roll in each window). Holds, admission waits,
+retries and rollback do not pause or reset the declaration clock. There is no
+public fleet roster or personal owner embedded in this generic source.
+
+The deployment authority is an actual bound agent with this existing resource edge:
+
+```kdl
+resource "roll-authority" subject="resource/fleet/roll-completion" reason="Declare immutable rolls"
+```
+
+Only that agent's bound execution may publish declaration/resolution claims through
+`fractal claim`. An agentless mission-run credential, `--actor` text, or an unbound
+local client cannot impersonate the authority. Signed `resource.observed` claims
+carry `fields.kind = "custom.fractal.fleet-roll-receipt"` using the existing open custom
+resource schema, and the version-1 receipt in `fields.facts`.
+
+Authority receipts also require a currently usable delegated signing chain.
+Historical signature authentication alone does not preserve authority after a key
+in that chain is revoked: admission and replay remove that receipt's trusted
+contribution, rather than retaining cached healthy adoption. Existing source
+enrollment can recover only from a surviving authenticated candidate.
+
+For an enrolled native rollout, resolve the onset and pinned revision with
+`fractal slo roll-intent mission-run/RUN_ID --json`. It returns `roll_id`,
+`declared_at_ms`, `dotfiles_revision` and `resource_claim_id`, authenticated against
+the original native creation envelope and immutable resource input. The onset is
+the creation claim's canonical native acceptance time, **not** a deadline-derived
+mission view timestamp or a caller's current clock. Missing proof is an error.
+
+For example, declaration facts are:
+
+```json
+{
+  "version": 1,
+  "kind": "roll-declared",
+  "roll_id": "example-roll-42",
+  "declared_at_ms": 1795000000000,
+  "targets": {
+    "host-a": {
+      "dotfiles_revision": "1111111111111111111111111111111111111111",
+      "daemon_revision": "3333333333333333333333333333333333333333"
+    }
+  }
+}
+```
+
+Declare the complete nonempty cohort **before the first build/admission, drain,
+hold or activation effect**. Dotfiles and daemon revisions are nonempty exact pinned
+identities. This rollout activates dotfiles, system, home and daemon only;
+`factory_revision` is not a supported target or verification field and is
+rejected, including `null`. Autonomous factory-applier provenance is not a
+declared host activation target.
+Optional `system_path` and `home_path` constrain already known realized paths; do not
+delay declaration until evaluation/build produces paths.
+A held host remains in the cohort. Same roll ID/time/targets is an idempotent
+retry; changing the time or cohort is refused, never treated as a new attempt.
+
+The declaration clock and all target/resolution/observation references stay
+immutable. Same-target native runs can be discovered out of order across hosts:
+each host's own collector also signs `intent-observed` proof binding the source
+enrollment, immutable declaration ID and original `mission-run.created` claim ID.
+It verifies the creation's original signed host envelope and pinned resource
+revision, never caller evidence or a deadline-derived projection clock.
+The effective SLO onset is the minimum of declaration time and these canonical
+native acceptance times. A later-discovered earlier intent can only move the
+deadline **earlier**, never restart it or rewrite the signed declaration.
+Every own intent needs an admitted proof before the source can close past it.
+Frontier deltas carry those proofs and mirrors wait for their original creation
+and pinned input dependencies. Generic public intent-onset signing is forbidden
+for every principal, including the real declaration authority.
+
+Publish under `resource/fleet/roll-completion/ROLL/declaration` using the actual
+bound actor, never a fabricated identity:
+
+```sh
+fractal claim resource/fleet/roll-completion/ROLL/declaration resource.observed \
+  --actor "$ST_AGENT" --field kind=custom.fractal.fleet-roll-receipt --field state=declared \
+  --field "facts=$DECLARATION_JSON" --idempotency-key "roll/ROLL/declaration" --json
+fractal slo ingest-roll CLAIM_ID --json
+```
+
+`POST /v1/slo` accepts only `{"claim_id":"..."}`, not receipt JSON or a local file.
+It resolves the claim from the graph and requires verified whole-record, direct
+signature authority before reserving a roll ID. The signer must have the declared
+resource binding; unsigned, delegated, partial, and unauthorized claims cannot poison
+the cohort. Origin strings in imported JSON are not proof.
+
+After resolving the actual controller and home candidates, the **same signed
+declaration authority** publishes one immutable `host-target-resolved` receipt per
+host under `resource/fleet/roll-completion/ROLL/HOST/resolution`. Its fields are
+`version`, `roll_id`, `declared_at_ms`, `host`, `target` (the immutable declared
+identity), `expected_system_path`, `expected_home_path`, and
+`declaration_claim_id` (the admitted declaration claim). Publish it with the same
+`fractal claim` form and `state=resolved`, then admit its claim reference.
+Conflicting resolved paths are refused; retries do not change the original clock.
+
+The producer calls the target daemon's `POST /v1/slo/observe` with only
+`{"claim_id":"SIGNED_RESOLUTION_CLAIM_ID"}`. The daemon independently reads its own
+active system/home profiles, running compiled revision and readiness. It rejects
+another host's resolution and never accepts caller-provided adoption, paths, health,
+or revision evidence. Missing supported observations remain unknown. The removed
+`factory_revision` field is rejected rather than promising an unavailable reader.
+
+The internal collector publishes a signed `host-observed` resource observation
+under `resource/fleet/roll-completion/ROLL/HOST/OBSERVED_AT_MS`; only a verified
+direct `host/HOST` signature with no actor attribution may assert that host's
+adoption. Generic public claim publication forbids **all** host-observed receipts,
+even for a bound roll authority, so the daemon cannot be used as a signing oracle.
+The collector returns its signed observation `claim_id` with the admission result.
+The observation time is sampled only after resolution authentication, graph
+readiness, daemon health and active-profile reads finish. It is floored by the
+native acceptance clock, with source-census/publication serialization held until
+the signed observation is published. A measurement that crosses the deadline
+cannot count as timely by retaining its start time.
+These existing generic claims carry their signature proof through ordinary graph
+replication and replay; there are no new schema claim kinds.
+
+Adoption is `verified`, `not-adopted` or `unknown`. Only unknown observations may
+omit evidence. Known negative observations require the same complete, nonempty
+independent evidence as verification and at least one actual mismatch or
+not-ready daemon; a missing probe is unknown, not a negative proof, and an
+all-matching negative label is refused. Missing receipt, unknown adoption and predeadline nonadoption
+remain unknown even after the deadline; only an observed **post-deadline**
+nonadoption or eventual late verification proves a miss. Completion is the last
+target host's earliest exact verification, not inferred installation time. A
+timely completed roll remains known despite later unknown readings. A mixed
+verified/unknown cohort is not a completed roll. Timely events account at final
+verification; late events account at the original deadline, so late ingestion
+does not move failures into the current accounting window. Historical evidence
+can revise earlier windows without creating another denominator event.
+
+Signed graph claims are source authority. The local
+`state_dir/roll-signed-receipts.sqlite3` ledger retains admitted claim references,
+immutable receipt keys and admission times; restart revalidates graph signatures
+and authority before rebuilding the in-memory source. Backups must retain the
+graph and its signature/provenance records. The obsolete unsigned
+`roll-receipts.sqlite3` remains diagnostic only and is deliberately never replayed
+as authority; re-publish legitimate source receipts through the signed producer.
+No unsigned JSON import path remains.
+
+The commit observer subscribes before its initial graph scan and admits signed
+declarations, resolutions and observations from normal replication. Missing
+dependencies remain pending and retry only on graph commits. Source admission wakes
+native projections; there is no file poll. SLO reads use only the maintained
+in-memory source, never ledger I/O or its writer lock.
+
+Population eligibility requires **source-complete native intent coverage**, not
+just whichever declarations have arrived locally. Before declaration effects,
+the actual bound authority enrolls its source once at
+`resource/fleet/roll-completion/sources/ACTOR/enabled`, with state `enabled` and facts:
+
+```json
+{"version":1,"kind":"source-enabled","producer":"agent/example/deployer","enabled_at_ms":1234567890000,"mission_prefix":"example/roll/","resource_input":"main","revision_fact":"head","roll_id_prefix":"example/"}
+```
+
+Publish with the same authenticated `fractal claim` interface as declarations,
+but **omit `--idempotency-key` for source enrollment**. Generic operation keys
+are not signing-key scoped and can otherwise replay a revoked enrollment forever.
+Republish the unchanged journal facts from the actual bound authority when
+declaring a roll. Native admission retains equivalent signed candidates without
+resetting the earliest still-valid enrollment epoch. After key rotation/revocation,
+replay selects the earliest surviving authenticated candidate and starts coverage
+no earlier than its own durable acceptance; no journal or rollout clock is reset.
+The journal timestamp does not authorize backdated coverage: native admission and
+membership epochs clamp the coverage start. Each current fleet member then closes
+its **own** durable native mission-intent stream, including held, pending and
+terminal runs. Pinned immutable resource inputs determine the roll ID; unresolved
+or missing declarations bound the cut before the earliest uncovered intent.
+Foreign-origin intent copies never substitute for their original member's proof.
+
+Native daemons publish signed source frontiers on source changes and at most once
+per minute while quiet. Generic frontier publication is forbidden, even for a
+bound authority. Each frontier pins the producer membership, current host keys,
+source enrollment, preceding frontier and only the new own-origin receipt IDs
+since its native snapshot cursor. These bounded deltas include declaration,
+resolution, **host observation and native intent-onset** receipts. The mirror waits for the entire
+chain and every delta receipt, so a frontier arriving ahead of a positive adoption
+claim cannot make an older negative observation falsely complete.
+
+Each incarnation versions one stable frontier resource subject; heartbeat time
+does not create another resource card. A delta contains at most 512 receipt IDs.
+After downtime, native commit-driven catch-up advances through bounded chunks,
+closing before the earliest excluded receipt's canonical acceptance time. Several
+chunks can share a timestamp but have strictly increasing snapshot cursors. An
+empty initial interval remains unknown until the entire timestamp bucket arrives;
+no truncation certifies a larger cut. Atomic native publication rejects an
+intervening backdated source write and fences subsequent own writes beyond the
+cut. Observation timestamps use that same native monotonic floor inside the
+shared collector/census guard.
+
+The cursor is bound to the existing native durable database identity and source
+epoch (`ivm_event_state.database_id`, `ivm_source.epoch`), captured in the same
+snapshot as the census. Ordinary reopen preserves this identity. Native
+restore/clone identity rotation starts a new source interval at the new native
+cut, never reuses an old arrival cursor, and cannot inherit prior coverage.
+
+The roll runtime explicitly initializes this existing canonical source lifecycle
+before retaining signed receipt references. Initialization does not attach
+optional materialized views or enable their claim-capture hooks, and preserves an
+existing source epoch, event-retention choice and unavailable state. Missing or
+unavailable lifecycle proof is never replaced with a fabricated identity.
+
+The in-memory reducer keeps only the latest closed frontier per producer/host;
+signed graph and ledger history retain predecessor proof for replay.
+Authenticated retries of the retained frontier are idempotent even after its
+predecessor leaves the hot reducer. Older native writer positions are terminal,
+not missing dependencies; the commit watcher drops them instead of retaining
+one pending candidate per heartbeat. A new frontier still waits for an
+unadmitted predecessor and every receipt in its delta.
+
+Evaluation intersects all configured producers × all current host incarnations
+and evaluates ratios and paired burn windows at that common proven cut, not
+wall-clock `now`. The uncovered tail stays explicit. A missing member proof,
+reincarnation, source conflict, or a frontier older than 120 seconds is unknown.
+Each window also needs source history covering its width plus the 24-hour
+declaration-to-deadline lookback; new enrollment cannot fabricate thirty days of
+history. Without that proof, status is `no-data` and budget remaining is absent.
+Unknown open rolls stay visible separately and never erase independently known
+completed outcome counts or become good/bad denominator events. In each budget
+window, overdue unknown rolls with deadlines in that window reduce coverage:
+known outcomes / (known outcomes + relevant overdue unknowns). Each window
+requires at least 90% coverage and one known outcome. Not-yet-due open rolls are
+pending, not coverage failures. Insufficient coverage is `no-data`, not healthy
+recovery; known good/bad counts remain visible. No known outcomes means
+`no-data`, not green. `measurement` exposes the frontier, receipt time,
+population, open unknowns and each budget window's coverage and unknown count.
+
+Bind ownership with the existing declaration mechanism; no new owner route:
+
+```kdl
+objective "example/roll-completion" {
+  about "Deployment outcome owned by the deployer"
+  indicator "native" { objective "fleet/roll-completion"; }
+  on-breach "fault" owner="agent/example/deployer" condition="roll-completion"
+}
+```
+
+The binding inherits measurement and opens the existing member-local owner
+episode for burning/exhausted budgets. Unknown data never recovers an episode.
+
 ### Native ratios, covered-time gauges and ownership
 
 The native budget contract measures failures directly rather than turning a percentile miss
@@ -795,6 +1040,8 @@ The native registry admits these system-only claims on `resource-admission/HOST/
 `resource.admission.coverage` uses `resource-admission/HOST` for each acquired source cut.
 Both kinds remain durable replicated evidence, not launch capabilities. Ordinary public
 claim writers cannot publish either kind.
+Evidence retains newer class names and the `recovery-not-allowed` refusal losslessly.
+These facts do not extend the execution host's supported admission classes.
 The daemon subscribes to claim-change notifications and arms one timer for the nearest
 open deadline or 5m/30m/1h/6h/30d accounting boundary. The wake autonomously evaluates
 the full native objective set and existing owner bindings even without an SLO reader.
@@ -802,7 +1049,14 @@ Timers do not sample membership or manufacture lifecycle facts; an empty source 
 timer. There is no periodic admission-source poll.
 
 Local native coverage is admitted only after this process acquires the host authority and
-completes replay. A persisted marker cannot certify an absent producer after restart.
+completes replay of supported membership classes. Retained unsupported-class custody is
+still replayed as evidence without changing its authoritative bytes or grants, but the
+source cut records `complete: false` and process-local coverage remains unknown. Supported
+work may still acquire capacity under the existing custody and authority fences.
+Unsupported queued rows never enter executable FIFO ordering, and background DSL cleanup
+defers unsupported memberships instead of aborting supported reconciliation. Any held
+custody still counts against capacity until a reader with authority can retire it.
+A persisted marker cannot certify an absent producer after restart.
 Remote evidence remains unknown: replication alone does not certify a remote complete cut.
 Unreadable or uncertain clocks also leave the source unknown, never green. Coverage modes
 remain visible in `coverage_modes`; a logical grant does not claim physical enforcement.

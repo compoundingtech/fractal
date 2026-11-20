@@ -108,6 +108,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_cut_epoch",
         // Like message cut epochs, desired write generations invalidate local cursors.
         "local_desired_write_witness",
+        // Disposable local invalidation counters, not replicated actual-state authority.
+        "card_actual_revisions",
         // Rebuildable daily-digest arrival indexes, dependency work and staging:
         // replicated notice/document claims, not these cursors, are the authority.
         "local_ask_digest_pending",
@@ -224,6 +226,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_lane_policies_v1",
         "resource_memberships_v1",
         "shell_resources_v1",
+        // Owner-scoped cancellation tombstones govern only this host's runtime requests.
+        "shell_resource_request_cancellations_v1",
         // Host-local physical-erasure completion, not replicated or rebuildable from claims.
         "shell_environment_scrub_v1",
         // Settled teardown receipts belong only to this host's runtime cleanup.

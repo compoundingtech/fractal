@@ -6,7 +6,7 @@
 use super::doc::{Doc, DocExt, Hit, Target};
 use super::{text, theme};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use fractal_client::{ClientError, DocumentContent, DocumentReferences, DocumentsPage};
 use fractal_ui_model::documents::{DocumentList, DocumentTrail, DocumentView, Unavailable, parse_reference};
 use std::cell::RefCell;
@@ -58,19 +58,6 @@ pub(crate) fn openable(reference: &str) -> Option<&str> {
     parse_reference(reference).map(|_| reference)
 }
 
-/// Whether a reference found at this place is only part of a longer word: `mydoc/x`, or
-/// `doc/x` inside `doc/x-more`.
-pub(crate) fn inside_word(before: &str, after: &str) -> bool {
-    let name = |c: char| c.is_ascii_alphanumeric() || "_~+-".contains(c);
-    let joined_before = before.chars().next_back().is_some_and(|c| name(c) || c == '/' || c == '.' || c == '@');
-    let mut rest = after.chars();
-    let joined_after = match rest.next() {
-        Some(c) if name(c) => true,
-        Some('.' | '/') => rest.next().is_some_and(name),
-        _ => false,
-    };
-    joined_before || joined_after
-}
 
 /// A page's Markdown as drawn at one width, and the links it drew (text and address).
 type Rendered = Rc<(Vec<Line<'static>>, Vec<text::DrawnLink>)>;
