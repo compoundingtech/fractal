@@ -13,6 +13,7 @@ use fractal_attention::store::owned_sets_tests_shared::{bundle, direct, share, s
 use fractal_attention::store::tests_shared::*;
 use fractal_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 mod empty_authority_guard;
+mod native_roots;
 
 fn options(store: &Store, sequence: u64) -> Options {
     let current = store

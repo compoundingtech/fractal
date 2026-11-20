@@ -8612,7 +8612,7 @@ async fn health(
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
         "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"resource_recovery_observations":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
