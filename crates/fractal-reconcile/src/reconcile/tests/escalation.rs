@@ -72,6 +72,53 @@ fn overdue_stages_catch_up_in_order_and_restart_never_refires_native_messages_or
 }
 
 #[test]
+fn closed_graph_notification_keeps_deduplication_at_later_deadline_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    let _key = crate::store::directive_notes::tests_shared_delivery::enable(&store);
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    let (run, mut definition) = setup(&store, EscalationClock::SinceEntered);
+    let later = 10 * 24 * 60 * 60 * 1000u64;
+    let EscalationOverride::Replace { policies } = &mut definition.steps.get_mut("work").unwrap().escalation else {
+        panic!("fixture needs a replacement ladder");
+    };
+    policies[0].stages = vec![
+        EscalationStage { after_ms: 10, action: EscalationAction::Notify("agent/node.reporter".into()) },
+        EscalationStage { after_ms: later, action: EscalationAction::Notify("agent/node.reporter".into()) },
+    ];
+    let since = store.escalation_episode(&run.steps[0].subject, "ready", run.steps[0].created_at_unix_ms, false).unwrap().since;
+    reconciler(store.clone()).escalate_run(&run, &definition, since + 10).unwrap();
+    let before = delivered(&store);
+    assert_eq!(before.len(), 1);
+    let receipt = store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.into_iter()
+        .find(|claim| claim.body["fields"]["title"].as_str().is_some_and(|title| title.starts_with("Escalation overdue stage"))).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: receipt.subject.clone(), kind: "message.closed".into(), actor: Some("agent/node.reporter".into()),
+        fields: BTreeMap::from([("status".into(), serde_json::json!("closed"))]), evidence: Vec::new(),
+        expected_subject: None, idempotency_key: Some("close-first-escalation".into()),
+    }).unwrap();
+    // The real local retirement path must not delete permanent episode-stage authority.
+    let retired_at = u64::try_from(since).unwrap() + later;
+    let mut retirement = store.retire_closed_mail_step(retired_at).unwrap();
+    assert_eq!(retirement.threads, 0);
+    while retirement.more {
+        retirement = store.retire_closed_mail_step(retired_at).unwrap();
+        assert_eq!(retirement.threads, 0);
+    }
+    assert!(store.message_sent(&receipt.subject).unwrap());
+    drop(store);
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    reconciler(store.clone()).escalate_run(&run, &definition, since + u128::from(later)).unwrap();
+    let after = delivered(&store);
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[0], before[0]);
+    reconciler(store.clone()).escalate_run(&run, &definition, since + u128::from(later) + 1).unwrap();
+    assert_eq!(delivered(&store), after);
+}
+
+#[test]
 fn progress_resets_only_since_progress_and_same_state_renewals_do_not_reset_entry() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let (run, definition) = setup(&store, EscalationClock::SinceProgress);

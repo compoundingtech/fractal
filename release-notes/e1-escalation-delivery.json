@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "Publishing escalation declarations requires signed mission-escalation-v1=1 feature advertisements from every active anchored member. Missing or older readers refuse publication, including direct mission.published claims." },
   "downtime": { "status": "none", "detail": "Normal binary restart only." },
   "manual": { "status": "changed", "detail": "Upgrade or fence every reader before publishing escalation policies. Every overdue stage is delivered in declaration order; since-progress honors declared waits until expiry or explicit resume, while since-entered retains the state-entry episode. Evaluation uses bounded indexed episode lookups independent of subject history length." },
-  "recovery": { "status": "changed", "detail": "Keep native delivery receipts when restarting. Remove escalation declarations and republish before rolling back to a reader without escalation support." }
+  "recovery": { "status": "changed", "detail": "Keep native delivery receipts when restarting. Tagged escalation notification receipts are retained by closed-mail retirement as permanent episode-stage deduplication authority. Remove escalation declarations and republish before rolling back to a reader without escalation support." }
 }
