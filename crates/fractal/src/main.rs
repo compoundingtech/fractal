@@ -23141,6 +23141,7 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
         let pass_started = Instant::now();
         let (mut rows, mut bytes, mut unreleased, mut released) = (0, 0, 0, 0);
         let mut longest = Duration::ZERO;
+        let mut caught_up = false;
         loop {
             let step_store = store.clone();
             let step = match store.connection.write_workers().spawn_blocking(move || {
@@ -23167,6 +23168,7 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
                 unreleased = 0;
             }
             if !step.more {
+                caught_up = !step.waiting;
                 break;
             }
             tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
@@ -23178,7 +23180,59 @@ async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
                 pass_started.elapsed().as_secs(),
             ));
         }
+        if caught_up {
+            compact_blob_rows(&store).await;
+        }
         tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// Pack the `blobs` rows the move emptied, a bounded writer hold a step, giving free pages back
+/// as it goes (`Store::compact_blob_rows_step`). One pass per store, over the rows the move had
+/// emptied when the pass began; after it, each call finds nothing to do. Rows emptied later are
+/// few (new blobs, an hour at a time) and stay where they are.
+async fn compact_blob_rows(store: &Arc<Store>) {
+    const HOLD_BUDGET: Duration = Duration::from_millis(40);
+    // Rows a step considers; the hold budget usually ends it first.
+    const BATCH: usize = 2_000;
+    // Rows relocated between giving free pages back.
+    const RELEASE_EVERY_ROWS: usize = 20_000;
+    let started = Instant::now();
+    let (mut relocated, mut unreleased, mut released) = (0, 0, 0);
+    let mut longest = Duration::ZERO;
+    loop {
+        let step_store = store.clone();
+        let step = match store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("blobs.compact", || step_store.compact_blob_rows_step(BATCH, HOLD_BUDGET))
+        }).await {
+            Ok(Ok(step)) => step,
+            Ok(Err(error)) => {
+                stderr_message("fractal", format_args!("packing blob rows failed: {error:#}"));
+                break;
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("packing blob rows stopped: {error}"));
+                break;
+            }
+        };
+        relocated += step.relocated;
+        unreleased += step.relocated;
+        longest = longest.max(step.hold);
+        if unreleased >= RELEASE_EVERY_ROWS || (!step.more && unreleased > 0) {
+            released += release_free_pages_paced(store).await;
+            unreleased = 0;
+        }
+        if !step.more {
+            break;
+        }
+        tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+    }
+    if relocated > 0 {
+        stderr_message("fractal", format_args!(
+            "blob rows packed: {relocated} rows, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+            longest.as_millis(),
+            started.elapsed().as_secs(),
+        ));
     }
 }
 
