@@ -165,6 +165,9 @@ because older daemons refuse replicated revisions that carry such members.
 A set with an objective, GitHub source or GitHub scope additionally requires
 `features.owned_set_native_roots=1` from every admitted member. This requirement also covers
 previously retired members, since their receipt references remain part of the set.
+A source policy whose namespace or unmanaged-allow globs name these native families additionally
+requires `features.owned_set_native_policy=1`, even if the bundle has no native members yet.
+Native membership support alone does not establish native namespace enforcement support.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 
@@ -261,9 +264,12 @@ fractal apply --set garden ... --source-policy policy.json
 `policy.json` holds `{"enforce": "off"|"audit"|"enforce", "publisher": [...], "namespaces": [...],
 "unmanaged_allow": [...]}`. Each omitted field keeps the selected value, and explicit flags override
 the file. A policy equal to `off` with empty lists is stored as absent. Namespace and allow globs
-claim top-level `agent/`, `schedule/`, `subscription/` or `mission/` subjects only: an agent's
-`exec`/`pty` tasks ride with their agent, and other `exec/` and `pty/` subjects are runtime
-(mission-run tasks, owned terminals), so such a glob is refused with `invalid-source-policy`.
+claim top-level `agent/`, `schedule/`, `subscription/`, `mission/`, `objective/`, `github-source/`
+or `github-scope/` subjects. For example, `github-source/garden` claims that exact source and
+`objective/garden/*` claims the objective namespace; matching `unmanaged_allow` globs exempt
+subjects from namespace ownership. An agent's `exec`/`pty` tasks ride with their agent, and other
+`exec/` and `pty/` subjects are runtime (mission-run tasks, owned terminals), so such a glob is
+refused with `invalid-source-policy`. Other unsupported families remain refused as well.
 
 - `off`, or no policy, is the behaviour above: a plain declaration of a member is refused with
   `set-managed-subject`, and nothing else is checked. There is no force path.
