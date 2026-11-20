@@ -2759,7 +2759,7 @@ fn cold_dependency_reads_and_invalidation_pages_are_history_bounded() {
 }
 
 /// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
-/// Repeated observations grow the durable log, not the projected credit inventory.
+/// Legacy observations remain durable but cannot manufacture authenticated source coverage.
 #[test]
 fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     const WRITER: &str = "agent/sample/usage-producer";
@@ -2767,8 +2767,6 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
     store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
-    // Complete initialization outside measured request scopes; joining the worker is deterministic.
-    store.wait_for_usage_credit_backfill().unwrap();
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
     let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
@@ -2788,18 +2786,22 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
         }).unwrap()
     };
     // An identity not refreshed by any later batch must never vanish from the inventory.
-    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let _forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
     let mut enabled = Vec::new();
     let mut disabled = Vec::new();
     for n in 1..=1_000 {
-        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        let _refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
         if !matches!(n, 100 | 1_000) {
             continue;
         }
         for configured in [true, false] {
             store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
             if configured {
-                store.wait_for_usage_credit_backfill().unwrap();
+                // Replay bounded source pages before measuring steady-state requests.
+                // No source frontier exists in this legacy fixture: no historical pass is valid.
+                for _ in 0..(n / 64 + 2) {
+                    fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+                }
             }
             let mut samples = Vec::new();
             for _ in 0..4 {
@@ -2807,17 +2809,11 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
                 let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
                 let spent = scope.finish();
                 if configured {
-                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
-                    assert_eq!(row["status"], "missed");
-                    assert_eq!(row["current"], "1 forfeited window-equivalents");
-                    let evidence = row["evidence"].as_array().unwrap();
-                    assert_eq!(evidence.len(), 2);
-                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
-                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
-                } else {
-                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/unknown").unwrap();
                     assert_eq!(row["status"], "no-data");
-                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
                 }
                 samples.push(spent);
             }
@@ -2836,6 +2832,67 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
         assert!(large.fullscan_steps <= small.fullscan_steps + 8,
             "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
     }
+}
+
+/// Authenticated source history is warmed incrementally, then quiet reads stay bounded.
+#[test]
+fn slo_spend_closed_source_sql_work_is_bounded_independently_of_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("spend.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let start = now - 61 * DAY;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let mut previous = None::<String>;
+    let mut append = |sequence: u64, observed: u64, credits: Value| {
+        store.set_write_clock_at(observed as u128).unwrap();
+        let claim = store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), credits),
+                ("source_frontier".into(), json!({
+                    "producer_incarnation":"cost-source", "host":"cost-node",
+                    "sequence":sequence, "previous_claim":previous,
+                    "accounts":[{"provider":"anthropic","account":"digest","provider_plan":"anthropic/pro"}],
+                    "observed_at":time(observed), "covered_from":time(start),
+                    "covered_through":time(observed), "complete":true,
+                })),
+            ]),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        previous = Some(claim.id);
+    };
+    // Native enrollment really precedes the evaluation horizon; it is not backdated JSON.
+    append(0, start, json!([]));
+    let mut measurements = Vec::new();
+    for sequence in 1..=1_000 {
+        let observed = now - 1_000 + sequence;
+        append(sequence, observed, json!([{
+            "account":"digest","account_ref":"account/one","provider":"anthropic",
+            "provider_plan":"anthropic/pro","credit_id":"retained",
+            "expires_at":time(now-DAY),"measured_at":time(observed),
+            "state":"forfeited","coverage":"reported","source":"omp-usage","host":"cost-node",
+            "disposition":{"kind":"declined","at":time(now-2*DAY),"evidence_ref":"plan/declined"},
+        }]));
+        if !matches!(sequence, 100 | 1_000) { continue; }
+        for _ in 0..(sequence / 64 + 2) {
+            fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+        }
+        let scope = work::SqliteWorkScope::start();
+        let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
+        let spent = scope.finish();
+        let row = rows.iter().find(|row| row["id"] == "spend/cam-r01/anthropic").unwrap();
+        assert_ne!(row["status"], "no-data", "closed source must exercise real native accounting");
+        assert_eq!(row["source"]["producers"][0]["next_sequence"], sequence + 1);
+        measurements.push(spent);
+    }
+    let (small, large) = (measurements[0], measurements[1]);
+    assert!(large.statements <= small.statements + 2, "{small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps + SLACK, "{small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps + 8, "{small:?} -> {large:?}");
 }
 
 /// The roll source maintains signed graph receipt references; SLO reads must not scan history.
