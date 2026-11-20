@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bind message senders and acceptance actors to the authenticated caller consistently on both message route forms, returning HTTP 403 for mismatched attribution.",
+  "replay": {"status": "none", "detail": "Existing messages and claims are unchanged."},
+  "schema": {"status": "none", "detail": "No client-v0, claim schema or generated-client changes. Existing message fields do not encode caller trust class; no new provenance field is introduced."},
+  "rules": {"status": "none", "detail": "No claim registry or convergence rule changes."},
+  "compatibility": {"status": "changed", "detail": "Authenticated message attribution mismatches return HTTP 403 with foreign-agent-actor. Both /v1/messages and /v1/messages/ support the same send operation. Authenticated callers can clean up only their own mailbox, not all mailboxes. Bound callers, paired clients and native drivers retain their own attribution; local operator authority and validated lifecycle delegation remain unchanged."},
+  "downtime": {"status": "none", "detail": "No migration or scheduled downtime."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Existing idempotency and message recovery behavior is unchanged."}
+}

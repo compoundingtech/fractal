@@ -223,8 +223,9 @@ pub struct CleanupRequest {
     pub dry_run: bool,
 }
 
-pub async fn cleanup(
+pub(super) async fn cleanup(
     State(state): State<AppState>,
+    principal: Option<Extension<write_principal::WritePrincipal>>,
     Json(request): Json<CleanupRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if request.older_than_ms == 0 || request.all == request.to.is_some() {
@@ -238,16 +239,31 @@ pub async fn cleanup(
     let store = state.store.clone();
     let result = blocking_api(move || {
         let to = request.to.as_deref().map(normalize_message_party);
+        let to = if let Some(Extension(principal)) = principal.as_ref() {
+            if request.all || !to.as_deref()
+                .map(|to| is_bound_actor(&store, to, principal.actor()))
+                .transpose()?.unwrap_or(false)
+            {
+                return Err(messages::attribution_error());
+            }
+            Some(principal.actor())
+        } else {
+            to.as_deref()
+        };
+        // Cleanup carries no delegation or successor evidence. Those actors use the
+        // attributed lifecycle route, which validates their proof for each message.
         let messages = overdue(
             &reader,
             client_now_ms(),
             request.older_than_ms,
-            to.as_deref(),
+            to,
             true,
         )
         .map_err(ApiError::internal)?;
         let mut archived = Vec::new();
         for message in messages {
+            let actor = principal.as_ref()
+                .map_or(message.to.as_str(), |Extension(principal)| principal.actor());
             if !request.dry_run {
                 let mut head = store
                     .latest_claim(&message.subject, None)
@@ -283,7 +299,7 @@ pub async fn cleanup(
                             &store,
                             &message.subject,
                             &format!("message.{lifecycle}"),
-                            Some(&message.to),
+                            Some(actor),
                             &BTreeMap::from([("status".into(), json!(lifecycle))]),
                         )
                         .map_err(ApiError::bad)?;
@@ -294,7 +310,7 @@ pub async fn cleanup(
                         .append_claim(&ClaimInput {
                             subject: message.subject.clone(),
                             kind: format!("message.{lifecycle}"),
-                            actor: Some(message.to.clone()),
+                            actor: Some(actor.to_owned()),
                             fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
                             evidence: head
                                 .as_ref()
@@ -378,6 +394,7 @@ mod tests {
         assert_eq!(report(&state, now).unwrap().count, 0);
         let Json(result) = cleanup(
             State(state.clone()),
+            None,
             Json(CleanupRequest {
                 older_than_ms: THRESHOLD_MS,
                 to: None,
@@ -510,23 +527,24 @@ mod tests {
             to,
             dry_run,
         };
-        let Json(preview) = cleanup(State(state.clone()), Json(request(true, None)))
+        let Json(preview) = cleanup(State(state.clone()), None, Json(request(true, None)))
             .await
             .unwrap();
         assert_eq!(preview["count"], 5);
         assert_eq!(report(&state, now).unwrap().count, 4);
         let Json(selected) = cleanup(
             State(state.clone()),
+            None,
             Json(request(false, Some("agent/example/retired".into()))),
         )
         .await
         .unwrap();
         assert_eq!(selected["count"], 4);
-        let Json(all) = cleanup(State(state.clone()), Json(request(false, None)))
+        let Json(all) = cleanup(State(state.clone()), None, Json(request(false, None)))
             .await
             .unwrap();
         assert_eq!(all["count"], 1);
-        let Json(repeat) = cleanup(State(state.clone()), Json(request(false, None)))
+        let Json(repeat) = cleanup(State(state.clone()), None, Json(request(false, None)))
             .await
             .unwrap();
         assert_eq!(repeat["count"], 0);
