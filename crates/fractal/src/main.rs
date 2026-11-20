@@ -8132,6 +8132,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ) {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.verdict_link_sweep", sweep_orphan_verdict_links(store.clone())));
     spawn_response_expiry_with(store.clone(), config.trim.replay_safe_receipt_window_ms()?.min(i64::MAX as u64) as i64);
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
@@ -22287,6 +22288,50 @@ const SIGNATURE_BOOTSTRAP_RETRY: Duration =
     if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(30) };
 /// A verdict drain at least this large is logged; smaller ones are ordinary sealing work.
 const SIGNATURE_BACKLOG_REPORTED: usize = 1_000;
+
+/// Verdict links whose claim is gone: a deleted claim leaves its links (they have no index by
+/// claim), and a requeue that meets one drops it. A pass a day walks the rest in key order from
+/// its cursor, each loan followed by an equally long quiet interval.
+async fn sweep_orphan_verdict_links(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<u64>> {
+            let now = || now_ms().min(u128::from(u64::MAX)) as u64;
+            if let Some(wait) = worker.verdict_link_sweep_wait(now())? {
+                return Ok(Some(wait));
+            }
+            let started = std::time::Instant::now();
+            let (mut examined, mut deleted, mut longest) = (0, 0, Duration::ZERO);
+            loop {
+                let page_started = std::time::Instant::now();
+                let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.verdict_link_sweep", || worker.sweep_orphan_verdict_links(now()))?;
+                examined += page.examined;
+                deleted += page.deleted;
+                longest = longest.max(page.held);
+                if page.finished {
+                    break;
+                }
+                std::thread::sleep(page_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+            }
+            if deleted != 0 {
+                stderr_message("fractal", format_args!("orphan verdict links swept: {deleted} of {examined} in {:.0}s, longest writer hold {} ms", started.elapsed().as_secs_f64(), longest.as_millis()));
+            }
+            Ok(None)
+        }).await;
+        match result {
+            Ok(Ok(Some(wait))) => tokio::time::sleep(Duration::from_millis(wait.min(60 * 60 * 1_000))).await,
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
+                stderr_message("fractal", format_args!("orphan verdict-link sweep retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
+                tokio::time::sleep(SIGNATURE_BOOTSTRAP_RETRY).await;
+            }
+            result => {
+                stderr_message("fractal", format_args!("orphan verdict-link sweep stopped: {result:?}"));
+                return;
+            }
+        }
+    }
+}
 
 async fn migrate_signature_candidates(store: Arc<Store>) {
     let mut reported_fault = None;
