@@ -50,8 +50,12 @@ async fn conversation_changes_carry_a_stream_item_that_arrives_while_the_graph_s
     let after = conversation_changes_local(&state, &session, &session_id, Some(next), 0).await.unwrap();
     assert!(on_stream(&after).is_empty(), "read once: {after}");
 
-    // A cursor from before the stream part existed has read none of the stream.
-    let old = next.rsplit_once('.').unwrap().0;
+    // A cursor from before the receipt part existed has seen no stream receipts, and one from
+    // before the stream part existed has read none of the stream.
+    let without_receipts = next.rsplit_once('.').unwrap().0;
+    let position = conversation_position(&state, &session_id, without_receipts).unwrap();
+    assert_eq!((position.stream_position > 0, position.receipt_position), (true, 0));
+    let old = without_receipts.rsplit_once('.').unwrap().0;
     let position = conversation_position(&state, &session_id, old).unwrap();
     assert_eq!(position.stream_position, 0);
 }
