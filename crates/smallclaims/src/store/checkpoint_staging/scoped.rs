@@ -51,10 +51,10 @@ impl StagedSet {
             let mut held = connection.prepare_cached(
                 "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
                         envelopes.accepted_at_unix_ms,
-                        (SELECT COUNT(*) FROM replica_records counted
+                        (SELECT COUNT(*) FROM replica_record_rows counted
                          WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
                            AND counted.envelope_hash=envelopes.envelope_hash)
-                 FROM replica_records records JOIN replica_envelopes envelopes
+                 FROM replica_record_rows records JOIN replica_envelopes envelopes
                    ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                      AND envelopes.envelope_hash=records.envelope_hash
                  WHERE records.claim_id=?1 AND envelopes.rowid <= ?2",
@@ -223,13 +223,13 @@ impl StagedSet {
             // not before the cut, as in a full capture.
             let mut sealed = connection.prepare_cached(
                 "SELECT sequence, envelope_hash, accepted_at_unix_ms,
-                        (SELECT COUNT(*) FROM replica_records counted
+                        (SELECT COUNT(*) FROM replica_record_rows counted
                          WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
                            AND counted.envelope_hash=envelopes.envelope_hash)
                  FROM replica_envelopes envelopes
                  WHERE writer=?1 AND rowid <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3
                    AND NOT EXISTS(
-                     SELECT 1 FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+                     SELECT 1 FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
                      JOIN batches ON batches.id=claims.batch_id
                      WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
                        AND records.envelope_hash=envelopes.envelope_hash AND records.state<>'repaired'
@@ -295,14 +295,14 @@ impl StagedSet {
             let mut sealed = connection.prepare_cached(
                 "SELECT EXISTS(
                    SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id
-                   JOIN replica_records records ON records.claim_id=citer.id
+                   JOIN replica_record_rows records ON records.claim_id=citer.id
                    JOIN replica_envelopes envelopes
                      ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                        AND envelopes.envelope_hash=records.envelope_hash
                    WHERE citer.id=?1 AND records.state<>'repaired'
                      AND envelopes.rowid <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
                      AND NOT EXISTS(
-                       SELECT 1 FROM replica_records other CROSS JOIN claims late ON late.id=other.claim_id
+                       SELECT 1 FROM replica_record_rows other CROSS JOIN claims late ON late.id=other.claim_id
                        JOIN batches ON batches.id=late.batch_id
                        WHERE other.writer=records.writer AND other.sequence=records.sequence
                          AND other.envelope_hash=records.envelope_hash AND other.state<>'repaired'

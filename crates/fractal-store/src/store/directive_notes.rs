@@ -97,7 +97,7 @@ WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS directive_note_record_delete AFTER DELETE ON replica_records
-WHEN OLD.claim_id IS NOT NULL BEGIN
+WHEN OLD.claim_id IS NOT NULL AND OLD.state<>'valid' BEGIN
     INSERT OR IGNORE INTO local_directive_note_dirty
     SELECT subject FROM claims WHERE id=OLD.claim_id AND kind='person.directive-note-set'
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=OLD.claim_id)

@@ -99,7 +99,7 @@ WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id BEGIN
         AND NOT EXISTS (SELECT 1 FROM local_glass_head_pending WHERE claim_id=claims.id);
 END;
 CREATE TRIGGER IF NOT EXISTS glass_heads_record_delete AFTER DELETE ON replica_records
-WHEN OLD.claim_id IS NOT NULL BEGIN
+WHEN OLD.claim_id IS NOT NULL AND OLD.state<>'valid' BEGIN
     INSERT OR IGNORE INTO local_glass_head_dirty
     SELECT subject FROM claims WHERE id=OLD.claim_id
         AND kind IN ('glass.upserted','glass.deleted')
@@ -121,6 +121,8 @@ END;
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
+    // A valid record's deletion wakes the record trigger no longer (`record_bytes`).
+    smallclaims::store::record_bytes::replace_changed_triggers(connection, SCHEMA, &["glass_heads_record_delete"])?;
     connection
         .execute_batch(/* sqlite-large-value: allow-for-now lv-h14edaf0aaf6c owner=fractal_store::store::glass_heads TODO=trace-statement-and-value-representation */ SCHEMA)
         .context("creating glass head projection")

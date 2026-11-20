@@ -98,7 +98,8 @@ CREATE TRIGGER IF NOT EXISTS custom_record_update AFTER UPDATE OF position,claim
 WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id OR OLD.state IS NOT NEW.state BEGIN
  INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records BEGIN
+CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records
+WHEN OLD.state<>'valid' BEGIN
  INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=OLD.claim_id ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 "#;

@@ -154,7 +154,7 @@ impl Store {
 }
 
 fn tracking(connection: &Connection) -> Result<()> {
-    use smallclaims::store::record_bytes::{replaced_update_trigger, update_event};
+    use smallclaims::store::record_bytes::{RECORD_DELETE_MATTERS, replace_if_changed, replaced_update_trigger, update_event};
     // Persistent body-free queues also capture edits made by another SQLite writer. Flush runs
     // at append/projection/commit boundaries and explicitly before canonical completion inputs.
     for (table, identity) in [("claims", "id"), ("claim_positions", "claim_id"),
@@ -167,15 +167,23 @@ fn tracking(connection: &Connection) -> Result<()> {
             } else {
                 (event.to_owned(), "")
             };
-            connection.execute_batch(&format!(
+            // A valid record's deletion changes no claim (`record_bytes`).
+            let when = if table == "replica_records" && event == "DELETE" {
+                format!(" WHEN {RECORD_DELETE_MATTERS}")
+            } else {
+                String::new()
+            };
+            let sql = format!(
                 /* sqlite-large-value: allow-for-now lv-hb41247584095 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}{suffix}
-                 AFTER {clause} ON {table} BEGIN
+                 AFTER {clause} ON {table}{when} BEGIN
                  INSERT INTO local_completion_health_v1_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL AND (
                     EXISTS(SELECT 1 FROM claims WHERE id={row}.{identity} AND {RELEVANT})
                     OR EXISTS(SELECT 1 FROM local_completion_health_v1_claims WHERE claim_id={row}.{identity}))
                  AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id={row}.{identity});
-                 END;"))?;
+                 END;");
+            replace_if_changed(connection, "TRIGGER", &format!("completion_health_v1_{table}_{event}_{row}{suffix}"), &sql)?;
+            connection.execute_batch(&sql)?;
         }
     }
     for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"), ("UPDATE", "OLD")] {

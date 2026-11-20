@@ -181,7 +181,7 @@ BEGIN
         (SELECT 1 FROM ivm_claim_views WHERE claim_id=NEW.claim_id AND view=ivm_views.name);
 END;
 CREATE TRIGGER IF NOT EXISTS ivm_record_rank_delete AFTER DELETE ON replica_records
-WHEN OLD.claim_id IS NOT NULL
+WHEN OLD.claim_id IS NOT NULL AND OLD.state<>'valid'
 BEGIN
     UPDATE ivm_views SET ready=0 WHERE ready<>0 AND EXISTS
         (SELECT 1 FROM ivm_claim_views WHERE claim_id=OLD.claim_id AND view=ivm_views.name);

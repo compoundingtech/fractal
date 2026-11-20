@@ -8092,7 +8092,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
-    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.record_repairs", resolve_record_repairs(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -22306,9 +22307,13 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 }
 
 /// Valid records' bytes empty after startup, a page per writer batch, each committing its
-/// cursor; then the pages they held go back to the filesystem, one short write at a time
-/// (`record_bytes`). A failed page retries, including after a daemon restart.
-async fn release_valid_record_bytes(store: Arc<Store>) {
+/// cursor. Once `delete_after_ms` has passed since this member first ran a build that keeps no
+/// valid record, the records themselves go the same way (`record_bytes`), and the first deletion
+/// moves the store to the storage version an older build refuses. Then the pages they held go
+/// back to the filesystem, one short write at a time. A failed page retries, including after a
+/// daemon restart.
+async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
+    use smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE;
     let (mut emptied, mut bytes) = (0, 0);
     loop {
         let page_store = store.clone();
@@ -22326,13 +22331,35 @@ async fn release_valid_record_bytes(store: Arc<Store>) {
             }
         }
     }
-    if emptied == 0 {
+    let mut deleted = 0;
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_records", || page_store.release_valid_records(delete_after_ms))).await;
+        match result {
+            Ok(Ok(report)) if report.done => break,
+            Ok(Ok(report)) if report.waiting_until_unix_ms.is_some() => {
+                // The rollback window: check again within the hour.
+                let until = report.waiting_until_unix_ms.unwrap_or_default();
+                let wait = until.saturating_sub(now_ms()).min(60 * 60 * 1000);
+                tokio::time::sleep(Duration::from_millis(u64::try_from(wait).unwrap_or(u64::MAX).max(1000))).await;
+            }
+            Ok(Ok(report)) => {
+                deleted += report.deleted;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            error => {
+                stderr_message("fractal", format_args!("deleting valid records failed: {error:?}"));
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+    if emptied == 0 && deleted == 0 {
         return;
     }
     let mut released = 0;
     loop {
         let vacuum_store = store.clone();
-        match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || vacuum_store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE))).await {
+        match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || vacuum_store.release_free_pages_in(FREE_PAGES_PER_WRITE))).await {
             Ok(Ok(0)) => break,
             Ok(Ok(pages)) => released += pages,
             error => {
@@ -22342,7 +22369,25 @@ async fn release_valid_record_bytes(store: Arc<Store>) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes), deleted {deleted}, and gave {released} free pages back"));
+}
+
+/// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
+/// time while any waits, otherwise a look every ten minutes.
+async fn resolve_record_repairs(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.record_repairs", || page_store.resolve_record_repairs())).await;
+        let pause = match result {
+            Ok(Ok(report)) if report.waiting == 0 || report.done => Duration::from_secs(10 * 60),
+            Ok(Ok(_)) => Duration::from_millis(50),
+            error => {
+                stderr_message("fractal", format_args!("finding repaired records failed: {error:?}"));
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
 }
 
 /// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request

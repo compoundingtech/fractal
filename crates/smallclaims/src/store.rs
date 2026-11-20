@@ -1219,6 +1219,9 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(record_bytes::VIEW_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
         claim_ranges::install(connection)?;
@@ -11563,14 +11566,20 @@ fn apply_replication_repair_with_operations_tx(
     if !replacement_exists {
         return Ok((0, BTreeSet::new()));
     }
-    let (repaired_claim, previous_replacement) = transaction
+    let record = transaction
         .query_row(
             "SELECT claim_id, replacement_claim_id FROM replica_records WHERE record_ref=?1",
             [record_ref],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
         )
-        .optional()?
-        .unwrap_or_default();
+        .optional()?;
+    // A store that keeps no valid record has no row for a valid claim's record: the repair
+    // waits until its record is found again (`record_bytes::resolve_record_repairs`).
+    if record.is_none() && !record_bytes::valid_records_kept(transaction)? {
+        record_bytes::await_repaired_record_tx(transaction, record_ref)?;
+        return Ok((0, BTreeSet::new()));
+    }
+    let (repaired_claim, previous_replacement) = record.unwrap_or_default();
     let changed = transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h48ffdf85be51 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired', replacement_claim_id=?2,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=?3

@@ -169,3 +169,297 @@ pub fn admitted_claim_sql(alias: &str) -> String {
           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state='repaired'))"
     )
 }
+
+/// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
+/// valid, a repaired one, or a valid one a store has not yet deleted), and for each valid claim
+/// whose record is gone the row it had: its envelope, found by the claim's batch, its position
+/// and its claim. A valid claim needs no stored record (`record_bytes`), so a reader that asks
+/// which envelope holds a claim, or how many records an envelope holds, reads this view instead.
+/// It holds no data of its own.
+pub const VIEW_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE VIEW IF NOT EXISTS replica_record_rows(writer, sequence, envelope_hash, position, state, claim_id) AS
+    SELECT writer, sequence, envelope_hash, position, state, claim_id FROM replica_records
+    UNION ALL
+    SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash, positions.position,
+           'valid', claims.id
+    FROM claims
+    JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+    JOIN claim_positions AS positions ON positions.claim_id=claims.id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM replica_records AS stored
+        WHERE stored.writer=envelopes.writer AND stored.sequence=envelopes.sequence
+          AND stored.envelope_hash=envelopes.envelope_hash AND stored.position=positions.position);
+";
+
+/// What a trigger on `replica_records` that fires on DELETE adds to its condition: a valid
+/// record's deletion changes no claim's state or position, since its claim keeps its row and its
+/// position stays in `claim_positions`, so only a record that is not valid wakes it.
+pub const RECORD_DELETE_MATTERS: &str = "OLD.state<>'valid'";
+
+/// Replace `name`, a trigger or view, when the store holds a definition other than `sql` (a
+/// `CREATE ... IF NOT EXISTS` would keep the old one), so a reopen with the same definition
+/// changes nothing. An older build that runs the store again puts its own definition back the
+/// same way.
+pub fn replace_if_changed(connection: &Connection, kind: &str, name: &str, sql: &str) -> Result<()> {
+    let tokens = |sql: &str| {
+        sql.replace("IF NOT EXISTS ", "").trim().trim_end_matches(';').split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let installed: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type=lower(?1) AND name=?2",
+            [kind, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if installed.as_deref().is_some_and(|installed| tokens(installed) != tokens(sql)) {
+        connection.execute_batch(&format!("DROP {kind} {name}"))?;
+    }
+    Ok(())
+}
+
+/// [`replace_if_changed`] for each trigger `names` defines in `schema`, a batch of
+/// `CREATE TRIGGER IF NOT EXISTS name ... END;` statements, before the batch runs.
+pub fn replace_changed_triggers(connection: &Connection, schema: &str, names: &[&str]) -> Result<()> {
+    for name in names {
+        let marker = format!("CREATE TRIGGER IF NOT EXISTS {name} ");
+        let start = schema.find(&marker).with_context(|| format!("missing trigger {name}"))?;
+        let length = schema[start..].find("\nEND;").with_context(|| format!("unterminated trigger {name}"))?;
+        replace_if_changed(connection, "TRIGGER", name, &schema[start..start + length + "\nEND;".len()])?;
+    }
+    Ok(())
+}
+
+/// The storage version from which a store keeps no valid record at all: it commits with the
+/// first deletion of one (`release_valid_records`). Below it, admission and sealing still store
+/// a valid record (without bytes), so a member rolled back before then finds a record for every
+/// claim; from it, a build that reads only up to version 22 refuses the store.
+pub const VALID_RECORDS_GONE_VERSION: u32 = 23;
+
+/// Whether this store still stores a record for each valid claim.
+pub fn valid_records_kept(connection: &Connection) -> Result<bool> {
+    let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    Ok(version < VALID_RECORDS_GONE_VERSION)
+}
+
+/// Remove the record an earlier attempt kept for a claim or blob that is valid now. A repaired
+/// record stays: the repair is what it records.
+pub(crate) fn drop_kept_record_tx(connection: &Connection, record_ref: &str, previous_state: Option<&str>) -> Result<()> {
+    if previous_state.is_some_and(|state| state != "repaired") {
+        connection.execute(
+            "DELETE FROM replica_records WHERE record_ref=?1 AND state<>'repaired'",
+            [record_ref],
+        )?;
+    }
+    Ok(())
+}
+
+const RECORDS_CURSOR: &str = "valid_records_cursor";
+const FIRST_RUN: &str = "valid_records_first_run_unix_ms";
+/// The records past the cursor one deleting page reads.
+const DELETE_PAGE_SQL: &str = "SELECT rowid,
+        state='valid' AND claim_id IS NOT NULL
+        -- A forked writer sequence (two envelopes of one batch) keeps its records, so the
+        -- view never shows one envelope's claims under the other.
+        AND (SELECT COUNT(*) FROM replica_envelopes WHERE batch_id=
+              (SELECT batch_id FROM claims WHERE id=replica_records.claim_id))=1
+        -- A repair names its record; keep any record a repair claim names.
+        AND NOT EXISTS (SELECT 1 FROM claims repairs INDEXED BY claims_kind_index
+                        WHERE repairs.kind='record.repaired'
+                          AND json_extract(repairs.body,'$.fields.record')=replica_records.record_ref)
+     FROM replica_records NOT INDEXED WHERE rowid>?1 ORDER BY rowid LIMIT ?2";
+
+/// What one page of [`Store::release_valid_records`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ValidRecordsRelease {
+    pub scanned: usize,
+    pub deleted: usize,
+    /// Nothing is deleted before this time (unix ms): the rollback window.
+    pub waiting_until_unix_ms: Option<u128>,
+    pub done: bool,
+    pub work: Duration,
+}
+
+impl Store {
+    /// Delete one bounded page of valid replica records, once `delete_after_ms` has passed since
+    /// this store first ran a build that does this. A valid claim needs no record: its row, its
+    /// position and its envelope say everything the record did (`replica_record_rows`). The first
+    /// deletion commits storage version [`VALID_RECORDS_GONE_VERSION`] in its own transaction, so
+    /// from then on admission and sealing store no valid record either and an older build that
+    /// would read one refuses the store. The cursor commits with each page and stays after the
+    /// pass, as the bytes pass's does.
+    pub fn release_valid_records(&self, delete_after_ms: u64) -> Result<ValidRecordsRelease> {
+        self.connection
+            .batched(|tx| release_records_page(tx, delete_after_ms))
+            .map_err(anyhow::Error::msg)?
+    }
+}
+
+fn release_records_page(tx: &Connection, delete_after_ms: u64) -> Result<ValidRecordsRelease> {
+    let now = now_ms();
+    let first: Option<String> = tx
+        .query_row("SELECT value FROM meta WHERE key=?1", [FIRST_RUN], |row| row.get(0))
+        .optional()?;
+    let first = match first {
+        Some(value) => value.parse::<u128>()?,
+        None => {
+            tx.execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![FIRST_RUN, now.to_string()],
+            )?;
+            now
+        }
+    };
+    let opens = first + u128::from(delete_after_ms);
+    if now < opens && valid_records_kept(tx)? {
+        return Ok(ValidRecordsRelease { waiting_until_unix_ms: Some(opens), ..Default::default() });
+    }
+    let mut after: i64 = tx
+        .query_row("SELECT value FROM meta WHERE key=?1", [RECORDS_CURSOR], |row| row.get::<_, String>(0))
+        .optional()?
+        .map(|value| value.parse::<i64>())
+        .transpose()?
+        .unwrap_or(0);
+    let started = Instant::now();
+    let mut report = ValidRecordsRelease::default();
+    let page = tx
+        .prepare_cached(DELETE_PAGE_SQL)?
+        .query_map(params![after, PAGE], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut delete = tx.prepare_cached("DELETE FROM replica_records WHERE rowid=?1")?;
+    for (rowid, deletable) in &page {
+        if *deletable {
+            if report.deleted == 0 && valid_records_kept(tx)? {
+                tx.pragma_update(None, "user_version", VALID_RECORDS_GONE_VERSION)?;
+            }
+            delete.execute([rowid])?;
+            report.deleted += 1;
+        }
+        after = *rowid;
+        report.scanned += 1;
+        if started.elapsed() >= BUDGET {
+            break;
+        }
+    }
+    report.done = page.is_empty();
+    report.work = started.elapsed();
+    if report.scanned > 0 {
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![RECORDS_CURSOR, after.to_string()],
+        )?;
+    }
+    Ok(report)
+}
+
+const LOOKUP_CURSOR: &str = "record_repair_lookup_cursor";
+
+/// A repair names the record it replaces by `record_ref`, a hash of the record's envelope and
+/// position. Once a valid record is gone that hash names no row, so a repair that finds none
+/// waits here until [`Store::resolve_record_repairs`] or admission puts the record back.
+pub(crate) fn await_repaired_record_tx(connection: &Connection, record_ref: &str) -> Result<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO record_repair_lookups(record_ref) VALUES (?1)",
+        [record_ref],
+    )?;
+    Ok(())
+}
+
+/// Store the record of a valid claim a repair waits for (`await_repaired_record_tx`), so the
+/// repair finds it. True when one was waiting.
+pub(crate) fn restore_awaited_record_tx(
+    connection: &Connection,
+    record_ref: &str,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+    position: u64,
+    claim_id: &str,
+) -> Result<bool> {
+    if connection.execute("DELETE FROM record_repair_lookups WHERE record_ref=?1", [record_ref])? == 0 {
+        return Ok(false);
+    }
+    connection.execute(
+        "INSERT OR IGNORE INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
+             state, claim_id, subject_hint, kind_hint, updated_at_unix_ms)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'valid', id, subject, kind, ?7 FROM claims WHERE id=?8",
+        params![record_ref, writer, sequence, envelope_hash, position, VALID_RECORD_RAW, now_ms().to_string(), claim_id],
+    )?;
+    Ok(true)
+}
+
+/// What one page of [`Store::resolve_record_repairs`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordRepairResolution {
+    pub waiting: usize,
+    pub scanned: usize,
+    pub restored: usize,
+    pub done: bool,
+}
+
+impl Store {
+    /// Look for the records repairs wait for, one bounded page of the store's valid claims at a
+    /// time, by computing each one's record reference. A page that restores one applies the
+    /// repairs again. A walk that ends with repairs still waiting starts over at the next call:
+    /// their records have not arrived, and admission restores one that does.
+    pub fn resolve_record_repairs(&self) -> Result<RecordRepairResolution> {
+        let resolution = self
+            .connection
+            .batched(resolve_page)
+            .map_err(anyhow::Error::msg)??;
+        if resolution.restored > 0 {
+            self.apply_replication_repairs()?;
+        }
+        Ok(resolution)
+    }
+}
+
+fn resolve_page(tx: &Transaction<'_>) -> Result<RecordRepairResolution> {
+    let mut report = RecordRepairResolution {
+        waiting: tx.query_row("SELECT COUNT(*) FROM record_repair_lookups", [], |row| row.get(0))?,
+        ..Default::default()
+    };
+    if report.waiting == 0 {
+        report.done = true;
+        return Ok(report);
+    }
+    let mut after: i64 = tx
+        .query_row("SELECT value FROM meta WHERE key=?1", [LOOKUP_CURSOR], |row| row.get::<_, String>(0))
+        .optional()?
+        .map(|value| value.parse::<i64>())
+        .transpose()?
+        .unwrap_or(0);
+    let started = Instant::now();
+    let rows = tx
+        .prepare_cached(
+            "SELECT claims.store_index, claims.id, envelopes.writer, envelopes.sequence,
+                    envelopes.envelope_hash, positions.position
+             FROM claims
+             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+             JOIN claim_positions AS positions ON positions.claim_id=claims.id
+             WHERE claims.store_index>?1 ORDER BY claims.store_index LIMIT ?2",
+        )?
+        .query_map(params![after, PAGE], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?, row.get::<_, String>(4)?, row.get::<_, u64>(5)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (index, claim, writer, sequence, hash, position) in &rows {
+        let record_ref = crate::hash::replica_record_ref(writer, *sequence, hash, *position);
+        if restore_awaited_record_tx(tx, &record_ref, writer, *sequence, hash, *position, claim)? {
+            report.restored += 1;
+        }
+        after = *index;
+        report.scanned += 1;
+        if started.elapsed() >= BUDGET {
+            break;
+        }
+    }
+    // A finished walk starts over: what still waits may arrive later.
+    report.done = rows.is_empty();
+    tx.execute(
+        "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![LOOKUP_CURSOR, if report.done { "0".to_owned() } else { after.to_string() }],
+    )?;
+    Ok(report)
+}
