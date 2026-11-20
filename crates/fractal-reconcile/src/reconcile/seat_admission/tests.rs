@@ -9,12 +9,33 @@ fn reconciler() -> Reconciler<FakeRuntime> {
         Arc::new(Notify::new()),
     )
 }
+#[tokio::test]
+async fn idle_host_without_finite_custody_does_not_poll_pressure() {
+    let reconciler = reconciler();
+    reconciler.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap());
+    assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
+    assert!(!reconciler.step_deadlines.lock().unwrap().contains_key("resource-pressure"));
+}
+
 
 #[tokio::test]
 async fn logical_admission_keeps_pressure_refresh_platform_explicit_without_native_lanes() {
     let reconciler = reconciler();
     assert!(reconciler.seat_admission.lanes.is_none());
     assert!(reconciler.seat_admission.config.is_none());
+    use crate::store::resource_membership::{Admission, Fit, LaneRequest};
+    let request: LaneRequest = serde_json::from_value(serde_json::json!({
+        "id":"pressure-owner", "name":"checks", "host":"node", "maxMembers":1,
+        "capacity":{"cores":1,"memory":1024}, "coverage":"logical",
+        "owner":{"run":"run","step":"step","attempt":1}, "class":"check",
+    })).unwrap();
+    reconciler.store.start_resource_authority("node", "pressure-authority").unwrap();
+    let fit = Fit { room: request.capacity, ..Fit::default() };
+    let Admission::Admitted(grant) = reconciler.store.request_resource_membership(&request, fit.clone(), 1).unwrap()
+        else { panic!("finite fixture must admit"); };
+    let mut queued = request.clone();
+    queued.id = "pressure-queued".into();
+    assert!(matches!(reconciler.store.request_resource_membership(&queued, fit, 2).unwrap(), Admission::Queued { .. }));
     let now = u64::try_from(now_ms() / 1000).unwrap();
     reconciler.refresh_seat_admission_at(now);
     let deadlines = reconciler.step_deadlines.lock().unwrap();
@@ -26,6 +47,15 @@ async fn logical_admission_keeps_pressure_refresh_platform_explicit_without_nati
         assert!(reconciler.seat_admission.pressure.lock().unwrap().is_none());
         assert!(!deadlines.contains_key("resource-pressure"));
     }
+    drop(deadlines);
+    reconciler.store.cancel_resource_membership(&grant, &request.owner, 3).unwrap();
+    let runtime = fractal_runtime::ExecRuntime::new(PathBuf::new(), PathBuf::new());
+    assert!(reconciler.store.retire_resource_membership(&grant, &request.owner, &runtime, 3).unwrap());
+    assert!(reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
+        "queued custody alone keeps pressure recovery observable");
+    reconciler.store.withdraw_resource_membership(&queued.id, &queued.owner, 4).unwrap();
+    assert!(!reconciler.store.has_live_finite_resource_memberships("node").unwrap(),
+        "terminal custody no longer needs pressure observations");
 }
 
 #[test]

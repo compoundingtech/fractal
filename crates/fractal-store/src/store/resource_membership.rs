@@ -439,6 +439,15 @@ impl Store {
     }
 
 
+    /// PSI sampling is demand-driven by supported finite custody, not an idle host timer.
+    pub fn has_live_finite_resource_memberships(&self, host: &str) -> Result<bool> {
+        Ok(self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_memberships_v1 WHERE host=?1
+             AND state IN ('queued','admitted','launched','retiring','uncertain') AND memory>0
+             AND coalesce(json_extract(body,'$.request.class'),'agent') IN ('agent','check','landing','recovery'))",
+            [host], |row| row.get(0))?)
+    }
+
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1

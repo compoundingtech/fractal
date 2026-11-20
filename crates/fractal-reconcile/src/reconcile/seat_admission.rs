@@ -79,8 +79,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
         // Both logical finite admission and enforced lanes consult the Linux PSI brake.
-        // Recovery must therefore wake even without configured native seat lanes.
-        if cfg!(target_os = "linux") {
+        // Keep sampling while supported finite custody can need admission or recovery,
+        // but never turn an otherwise idle host into a five-second full-pass poller.
+        if cfg!(target_os = "linux") && self.store.has_live_finite_resource_memberships(&self.host)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "reading finite pressure observation demand");
+                true
+            })
+        {
             if let Err(error) = admission.pressure_decision() {
                 tracing::error!(%error, "invalid native admission PSI policy");
             }
