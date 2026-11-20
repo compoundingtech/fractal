@@ -93,7 +93,9 @@ class ArchiveTests(unittest.TestCase):
             producer_id = f"compat-archives-{target}"
             self.assertEqual(sum(name.startswith("compat-archives-") for name in jobs), 1, filename)
             producer = jobs[producer_id]
-            self.assertIn("runs-on: ubuntu-latest", producer)
+            self.assertIn("nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=", producer)
+            self.assertNotIn("ubuntu-latest", producer)
+            self.assertNotIn("needs:", producer)
             kinds = ["messaging"] if filename in ["macos.yml", "debug-assertions-daily.yml"] else ["fleet", "messaging"]
             self.assertEqual(producer.count("uses: actions/cache/save@v4"), len(kinds), filename)
             self.assertNotIn("restore-keys:", producer)
