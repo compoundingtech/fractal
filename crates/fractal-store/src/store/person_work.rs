@@ -752,7 +752,8 @@ const RESPONSES_SQL: &str = "WITH RECURSIVE sources(subject,attempt) AS (
           SELECT ?1,?2 UNION
           SELECT json_extract(carried.body,'$.fields.source_step_run'),
             coalesce(json_extract(carried.body,'$.fields.source_attempt'),sources.attempt)
-          FROM sources JOIN claims carried ON carried.subject=sources.subject
+          FROM sources CROSS JOIN claims carried INDEXED BY claims_subject_kind_index
+          ON carried.subject=sources.subject
             AND carried.kind='step-run.carried'
             AND json_extract(carried.body,'$.fields.attempt')=sources.attempt
         ), candidates(subject) AS (
@@ -1285,6 +1286,54 @@ mod standing_responses_tests {
         ).expect("person ask origin index is installed on store open");
         connection.execute_batch(index).unwrap();
         connection
+    }
+
+    #[test]
+    fn carried_response_enrichment_does_not_read_unrelated_history() {
+        use super::*;
+        let connection = response_connection();
+        connection.execute_batch("
+            CREATE INDEX claims_kind_index ON claims(kind);
+            INSERT INTO batches VALUES('selected','member-alder',1);
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms) VALUES
+                ('carry','selected','new','step-run.carried',
+                 '{\"fields\":{\"attempt\":2,\"source_step_run\":\"old\",\"source_attempt\":1}}','1'),
+                ('answer','selected','old','work.person-done',
+                 '{\"fields\":{\"attempt\":1,\"summary\":\"kept\"}}','2'),
+                ('boundary','selected','zz-boundary','step-run.carried','{\"fields\":{}}','3');
+        ").unwrap();
+        // Seed a key above the measured subjects in both populations. Without it,
+        // the small fixture ends its index range at EOF, while the grown fixture
+        // executes one extra IdxGT to reject the next subject. Compare the same
+        // range-boundary path, retaining exact VM equality rather than a tolerance.
+        let sql = canonical_sql(RESPONSES_SQL);
+        let measure = || {
+            let mut query = connection.prepare(&sql).unwrap();
+            let subjects = query.query_map(params!["new", 2], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(subjects, ["old"]);
+            query.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let before = measure();
+        connection.execute_batch("
+            INSERT INTO batches VALUES('noise','member-alder',2);
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms)
+            SELECT 'carry/'||i,'noise','unrelated/'||i,'step-run.carried',
+                '{\"fields\":{\"attempt\":2,\"source_step_run\":\"elsewhere\"}}','3' FROM n;
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms)
+            SELECT 'answer/'||i,'noise','unrelated/'||i,'work.person-done',
+                '{\"fields\":{\"attempt\":1}}','4' FROM n;
+        ").unwrap();
+        let after = measure();
+        assert_eq!(before, after, "unrelated carried and response history must not increase VM work");
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map(params!["new", 2], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains(
+            "SEARCH carried USING INDEX claims_subject_kind_index (subject=? AND kind=?)"
+        )), "{plan:?}");
     }
 
     fn enrich_equivalent(connection: &super::Connection, view: &mut super::StepRunView) {
