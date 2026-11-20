@@ -327,3 +327,33 @@ fn expired_audit_history_is_not_materialized_on_unrelated_events() {
     let snapshot = capture(&store, expired).unwrap();
     assert_eq!(snapshot.source_work, [1, 0, 0]);
 }
+
+#[test]
+fn capture_releases_readers_between_pages_and_lifecycle_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("graph.db"), "example-host").unwrap();
+    declared(&store);
+    let mut sent = 0;
+    for index in 0..SOURCE_PAGE + 1 {
+        sent = send(&store, &format!("message/checkpoint-{index:04}"), json!([]));
+    }
+    frontier(&store, sent);
+    let mut checkpoints = 0;
+    let snapshot = capture_with_progress(&store, sent, || {
+        // A real write after each read ensures RESTART must pass the active
+        // reader, rather than succeeding vacuously on an empty WAL.
+        let connection = store.connection.write();
+        connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('mail_checkpoint_test',?1)",
+            [checkpoints.to_string()]).unwrap();
+        let (busy, frames, checkpointed): (i64, i64, i64) = connection.query_row(
+            "PRAGMA wal_checkpoint(RESTART)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(busy, 0, "capture pinned a reader at boundary {checkpoints}");
+        assert!(frames > 0);
+        assert_eq!(frames, checkpointed);
+        checkpoints += 1;
+    }).unwrap();
+    assert_eq!(snapshot.samples.len(), SOURCE_PAGE + 1);
+    assert_eq!(snapshot.unknown, 0);
+    assert!(checkpoints >= SOURCE_PAGE + 5, "must traverse multiple source pages and every message");
+}
