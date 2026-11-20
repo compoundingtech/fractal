@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Mailbox ordering and subject-cache overflow regressions now use schema-valid claims. The ordering fixture omits an undeclared message field, and the overflow fixture uses a namespaced custom subject. Existing send-time ordering, incremental cache reuse and repeated-overflow assertions remain unchanged.",
+  "summary": "Mailbox ordering and subject-cache overflow regressions now use schema-valid claims. The ordering fixture omits an undeclared message field and imports a concurrent earlier send from an independent writer instead of violating local once-only cardinality. The overflow fixture uses a namespaced custom subject. Existing send-time ordering, incremental cache reuse and repeated-overflow assertions remain unchanged.",
   "replay": { "status": "none", "detail": "Test fixtures only; no replay or backfill." },
   "schema": { "status": "none", "detail": "No schema changes; fixtures obey existing validation." },
   "rules": { "status": "none", "detail": "No admission or rule changes." },

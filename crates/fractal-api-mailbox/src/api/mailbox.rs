@@ -1809,7 +1809,21 @@ mod tests {
         assert_eq!(subjects(&delta.1), subjects(&oracle));
         // Refreshing an existing subject's key must also move it, even when its
         // message view is otherwise unchanged by an imported earlier send.
-        send_at(&store.graph, "0000000000000020", 5);
+        // Each writer admits message.sent only once; the earlier send arrives
+        // from an independent writer rather than violating local cardinality.
+        const FLEET: &str = "18ba3167-11fb-472c-8ff8-e46e0fefb1e4";
+        let source = Store::open(&root.path().join("source.db"), "source").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        send_at(&source.graph, "0000000000000020", 5);
+        let exchange = source.export_replication_exchange(
+            FLEET, &store.replication_inventory().unwrap(),
+        ).unwrap();
+        store.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.project_replication_backlog().unwrap();
+        assert!(store.graph.claims_for("message/0000000000000020", Some("message.sent"))
+            .unwrap().iter().any(|claim| claim.origin == "source" && claim.accepted_at_unix_ms == 5));
         let (_, moved, _, _) = update_snapshot(
             &store, &fence, raw_snapshot, Some((mark, delta)), (0, 0),
             &mut recovery, &mut policies, &mut order,
