@@ -231,11 +231,13 @@ print(json.dumps({"namespace": os.readlink("/proc/self/ns/pid"), "chain": chain,
 """
 
 
-def supervised(command, **env):
-    """Run a command under the guardian from a caller without seat ancestry."""
+def supervised(command, namespace=True, **env):
+    """Run a command under the guardian from a caller without seat ancestry, asking for a PID
+    namespace as supervise_test does."""
     environment = {key: value for key, value in os.environ.items() if key not in ("ST_AGENT", "ST3_SUBJECT")}
     environment.update(env)
-    return subprocess.run([sys.executable, str(HERE / "fractal_test_process.py"), "--", *command],
+    flags = ["--pid-namespace"] if namespace else []
+    return subprocess.run([sys.executable, str(HERE / "fractal_test_process.py"), *flags, "--", *command],
                           env=environment, capture_output=True, text=True, timeout=30)
 
 
@@ -276,6 +278,14 @@ if os.fork() == 0:
 
     def test_the_exit_status_passes_through(self):
         self.assertEqual(supervised(["sh", "-c", "exit 7"]).returncode, 7)
+
+    def test_without_the_flag_the_guardian_stays_in_this_namespace(self):
+        # Stages and scripts may run cargo, whose host-wide queue judges tickets by PID.
+        result = supervised([sys.executable, "-c", ANCESTRY], namespace=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(result.stdout)
+        self.assertEqual(seen["namespace"], os.readlink("/proc/self/ns/pid"))
+        self.assertNotEqual(seen["supervisor"], "2")
 
     def test_off_keeps_the_guardian_in_this_namespace(self):
         result = supervised([sys.executable, "-c", ANCESTRY], FRACTAL_TEST_PID_NAMESPACE="off")
