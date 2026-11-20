@@ -140,7 +140,9 @@ fn closed_escalation_delivery_authority_stays_while_ordinary_mail_retires() {
     let mut notification = sent("message/escalation", "daemon/runtime", RECIPIENT, Vec::new());
     notification.fields.insert("tags".into(), json!(["mission-escalation-v1", "mission-run/example"]));
     let receipt = store.append_claim(&notification).unwrap();
-    store.append_claim(&lifecycle("message/escalation", "message.closed")).unwrap();
+    for kind in ["message.delivered", "message.read", "message.closed"] {
+        store.append_claim(&lifecycle("message/escalation", kind)).unwrap();
+    }
     let ordinary = thread(&store, "message/ordinary", SENDER, RECIPIENT, true);
     assert_eq!(retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS).0, 1);
     assert!(claims(&store).contains(&receipt.id));
