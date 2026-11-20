@@ -18,7 +18,7 @@ fn ask(store: &Store, key: &str) -> (StepRunView, StepRunView) {
 
 fn ask_with_inputs(store: &Store, key: &str, head: &str, context: &str) -> (StepRunView, StepRunView) {
     let run = store.create_mission_run(&crate::model::MissionRunRequest {
-        mission: "answer".into(), revision: None, workspace: ".".into(), requester: Some("person/test".into()),
+        mission: "answer".into(), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
         mode: Some("run".into()), inputs: BTreeMap::from([("head".into(), head.into()), ("context".into(), context.into())]), idempotency_key: key.into(),
     }).unwrap();
     let step = run.steps.iter().find(|step| step.step == "work").unwrap();
@@ -240,7 +240,7 @@ fn authored_person_step_response_is_bound_and_carried_by_reference() {
     let store = Store::open_memory("controller").unwrap();
     publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; step \"work\" { assigned-to \"person/test\"; goal \"Approve authored work.\"; } }", "authored");
     let run = store.create_mission_run(&crate::model::MissionRunRequest {
-        mission: "answer".into(), revision: None, workspace: ".".into(), requester: Some("person/test".into()),
+        mission: "answer".into(), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
         mode: Some("run".into()), inputs: BTreeMap::new(), idempotency_key: "authored-run".into(),
     }).unwrap();
     store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
@@ -268,7 +268,7 @@ fn gate_fields(owner: &StepRunView) -> BTreeMap<String, Value> {
 
 fn gate_run(store: &Store, key: &str) -> MissionRunView {
     store.create_mission_run(&crate::model::MissionRunRequest {
-        mission: "answer".into(), revision: None, workspace: ".".into(), requester: Some("person/test".into()),
+        mission: "answer".into(), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
         mode: Some("run".into()), inputs: BTreeMap::from([("head".into(), "head-a".into()), ("context".into(), "context-a".into())]),
         idempotency_key: key.into(),
     }).unwrap()
@@ -353,8 +353,9 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
         assert_eq!(count,1,"recovery must not synthesize {kind}");
     }
     drop(reader);
+    let changed_input_scratch = tempfile::tempdir().unwrap();
     let changed_input = store.create_mission_run(&crate::model::MissionRunRequest {
-        mission:"answer".into(),revision:None,workspace:".".into(),requester:Some("person/test".into()),mode:Some("run".into()),
+        mission:"answer".into(),revision:None,workspace:changed_input_scratch.path().to_string_lossy().into_owned(),requester:Some("person/test".into()),mode:Some("run".into()),
         inputs:BTreeMap::from([("head".into(),"head-b".into()),("context".into(),"context-a".into())]),idempotency_key:"changed-root-head".into(),
     }).unwrap();
     assert!(continuity::eligible_root_gate_requests_tx(&store.readers.get(),&source,&changed_input,&confirmed).unwrap().is_empty());

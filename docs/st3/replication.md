@@ -11,6 +11,30 @@ or replica. Devices read and act through a member's client gateway and are not s
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
 
+## Replication health
+
+Fleet admission and a running daemon do not establish replication health. The
+daemon and `fractal replication-worker` are separately supervised; both must
+actually be running. A saved join receipt or stored envelopes are not evidence
+of a fresh exchange. Fleet status, doctor/health and alerts report missing worker
+or stale exchange evidence as degraded, including a dial-out join whose imported
+membership and peer lists are still empty.
+
+Daemon/store startup has a bounded 60-second grace for the worker's first
+heartbeat and exchange. After that grace, missing worker evidence fails health;
+an observed heartbeat expires after 25 seconds and exchange evidence after
+60 seconds. Exchange evidence belongs to the authenticated sender incarnation,
+not whichever member key has the same name when processing finishes. Ended
+incarnations do not prevent a live sole current creator from being healthy.
+
+Before membership arrives, the worker uses the sponsor routes saved by the join.
+An empty member list therefore does not mean the node has no bootstrap target.
+If synchronization never begins, inspect the worker's supervisor state and logs,
+not just the daemon or carrier's reachability. With externally managed services,
+complete that manager's activation and verify its worker job rather than
+installing a second set of native services.
+
+
 ## Automatic transport selection
 
 The local `fleet.toml` `transports` list is both an enablement filter and a
@@ -552,6 +576,37 @@ writer, one larger envelope alone. That is a payload budget, not a bound on resi
 decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
 millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
+
+An out-of-order claim on an already prepared resource subject inserts only its immutable
+canonical sort key during admission. It marks preparation stale and queues the existing
+paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
+New arrivals reset a staged cursor only when their key is at or before its folded prefix;
+later keys preserve progress. A persisted round-robin cursor prevents restarted subjects
+from starving peers. After four prefix resets, the subject is prioritized for a complete
+paced rebuild; envelopes touching it wait retryably, without quarantine or receive errors.
+All claims in a held envelope wait together, including unrelated subjects in that envelope;
+other envelopes and peers remain eligible. Later envelopes touching the capped subject
+also wait for the prioritized rebuild, without a handler-error retry backoff.
+The cap clears only on complete publication, and emits one diagnostic per episode.
+Publication advances a persisted admission-wake generation in the same commit. A local
+commit observer schedules admission, repair and projection after the writer returns;
+held envelopes therefore resume even in a quiet fleet with no new receive or resend.
+The local worker also checks at startup, covering an interruption between publication and wake.
+If catch-up throttles projection after re-admission, the worker schedules a continuation at
+the throttle deadline even without new traffic. It releases the store while waiting and
+notifies readers only after projection succeeds; the catch-up throttle remains in force.
+Query-only readers
+use the canonical snapshot fold until publication; writer-context reads report
+`resource-preparation-not-caught-up` rather than doing that unbounded fallback.
+Envelope admission remains atomic, including its source rows and stale marker.
+The deferred worker publishes the complete observation only after its indexed walk finishes.
+Preparation cache version 2 adopts complete version-1 rows without a history rebuild;
+an older binary sees the version change and rebuilds before serving its readers.
+After a writer loan returns, the shared writer scheduler queues paced preparation loans,
+including work created by local commits. Foreground operations do not wait for an ever-growing
+queue to empty. On-disk stores also schedule persisted stale marks at startup, even without
+checkpointing or a new replication receive.
+
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each

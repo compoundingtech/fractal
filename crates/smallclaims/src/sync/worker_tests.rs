@@ -2834,7 +2834,7 @@ async fn legacy_hmac_only_receipt_ack_cannot_complete_leave() {
             .completed
             .is_empty()
     );
-    let (legacy, _): (Value, bool) = post_signed_to(
+    let (legacy, _, _): (Value, bool, Option<String>) = post_signed_to(
         &http,
         &peer,
         "b",
@@ -2959,6 +2959,7 @@ async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() 
         &replay,
         None,
         Default::default(),
+        Some(fixture.key.public()),
     )
     .await
     .unwrap();
@@ -3060,6 +3061,7 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         &ordinary,
         None,
         Default::default(),
+        Some(&key),
     )
     .await
     .unwrap();
@@ -3186,6 +3188,7 @@ async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed
             &exchange,
             None,
             Default::default(),
+            Some(fixture.key.public()),
         )
         .await
         .unwrap();
@@ -4746,6 +4749,12 @@ struct SlowExport {
     slow: Arc<std::sync::atomic::AtomicBool>,
     fail_next: Arc<std::sync::atomic::AtomicBool>,
     receives: Arc<std::sync::atomic::AtomicUsize>,
+    pause_after_receipt: Option<Arc<ReceiptBarrier>>,
+}
+
+struct ReceiptBarrier {
+    received: tokio::sync::Notify,
+    page: Mutex<Option<ReplicationExchange>>,
 }
 
 impl Backend for SlowExport {
@@ -4777,10 +4786,25 @@ impl Backend for SlowExport {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: crate::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
+        if let Some(received) = &self.pause_after_receipt {
+            // Stop at the real durable page boundary, before Local admits or projects it.
+            self.local.0.receive_replication_exchange_via(
+                peer,
+                fleet_id,
+                exchange,
+                round_trip.is_some(),
+                carrier,
+                authenticated_member_key,
+            ).map_err(anyhow::Error::msg)?;
+            *received.page.lock().unwrap() = Some(exchange.clone());
+            received.received.notify_one();
+            return std::future::pending().await;
+        }
         let result = self
             .local
-            .receive(peer, fleet_id, exchange, round_trip, carrier)
+            .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
             .await?;
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4853,6 +4877,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         slow: Arc::new(AtomicBool::new(true)),
         fail_next: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
+        pause_after_receipt: None,
     };
     let state = PeerState::new(
         backend.clone(),
@@ -4953,7 +4978,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     ));
     let server = tokio::spawn(axum::serve(listener, app).into_future());
     let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
-    let (answer, _) = post_signed(
+    let (answer, _, authenticated_member_key) = post_signed(
         &replication_http_client(),
         &Local(left.clone()),
         &peer,
@@ -4972,7 +4997,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
     Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None, Default::default())
+        .receive("cedar", fleet_id, &answer, None, Default::default(), authenticated_member_key.as_deref())
         .await
         .unwrap();
     for store in [&left, &right] {
@@ -5022,6 +5047,134 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         right.replication_inventory().unwrap().digest
     );
     server.abort();
+}
+
+/// Cancelling between page receipt and projection must not require an idle peer:
+/// the page survives closing the stores, and replay plus a fresh worker round converges.
+#[tokio::test]
+async fn interrupted_exchange_reopens_pending_page_and_resumes_without_duplicate_claims() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let left_path = root.path().join("birch.sqlite3");
+    let right_path = root.path().join("cedar.sqlite3");
+    let left = Arc::new(plain_open(&left_path, "birch").unwrap());
+    let right = Arc::new(plain_open(&right_path, "cedar").unwrap());
+    for store in [&left, &right] {
+        store.bind_fleet(fleet_id).unwrap();
+        for sequence in 0..2 {
+            store.append_claim(&ClaimInput {
+                subject: format!("note/{}/{sequence}", store.origin),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), Value::String(store.origin.clone()))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+    }
+    let page = right
+        .export_replication_exchange(fleet_id, &ReplicationInventory::default())
+        .unwrap();
+    assert_eq!(page.envelopes.len(), 2);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState::new(
+        Local(right.clone()),
+        "cedar".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])),
+    );
+    let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
+    let http = replication_http_client();
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let received = Arc::new(ReceiptBarrier {
+        received: tokio::sync::Notify::new(),
+        page: Mutex::new(None),
+    });
+    {
+        let backend = SlowExport {
+            local: Local(left.clone()),
+            slow: Arc::new(AtomicBool::new(false)),
+            fail_next: Arc::new(AtomicBool::new(false)),
+            receives: Arc::new(AtomicUsize::new(0)),
+            pause_after_receipt: Some(received.clone()),
+        };
+        let interrupted = exchange(&http, &backend, "birch", &peer, &auth, &fleet);
+        tokio::pin!(interrupted);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut interrupted => panic!("exchange passed the receipt barrier: {result:?}"),
+                () = received.received.notified() => {}
+            }
+        }).await.expect("exchange did not reach durable receipt");
+        // Dropping the worker future cancels it before admission, projection or the push.
+    }
+    // The peer can append transport observations while handling the query.
+    // Replay the actual received page, not the earlier fixture inventory.
+    let page = received.page.lock().unwrap().take().expect("durable received page");
+    let pending = |store: &Store| -> usize {
+        store.connection.write().query_row(
+            "SELECT COUNT(*) FROM replica_envelopes WHERE writer='cedar' AND receipt_state='pending'",
+            [],
+            |row| row.get(0),
+        ).unwrap()
+    };
+    assert_eq!(pending(&left), page.envelopes.len(), "the entire page is pending");
+    for sequence in 0..2 {
+        assert!(left.latest_claim(&format!("note/cedar/{sequence}"), Some("example.note")).unwrap().is_none());
+        assert!(right.latest_claim(&format!("note/birch/{sequence}"), Some("example.note")).unwrap().is_none());
+    }
+    server.abort();
+    let _ = server.await;
+    drop(left);
+    drop(right);
+
+    // Reopen the on-disk stores, rather than reusing an in-memory worker or its inventory.
+    let left = Arc::new(plain_open(&left_path, "birch").unwrap());
+    let right = Arc::new(plain_open(&right_path, "cedar").unwrap());
+    assert_eq!(pending(&left), page.envelopes.len(), "receipt survives reopen before projection");
+    let replay = Local(left.clone())
+        .receive("cedar", fleet_id, &page, None, Default::default(), None)
+        .await.unwrap();
+    assert_eq!(replay.receipt.received, 0, "replay cannot insert a second envelope");
+    assert_eq!(replay.receipt.duplicate, page.envelopes.len());
+    assert_eq!(pending(&left), 0, "normal receive recovers the durable backlog");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState::new(
+        Local(right.clone()),
+        "cedar".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])),
+    );
+    let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
+    // One resumed round completes the missing push; another proves an ordinary retry is harmless.
+    for _ in 0..2 {
+        exchange(&http, &Local(left.clone()), "birch", &peer, &auth, &fleet).await.unwrap();
+    }
+    for store in [&left, &right] {
+        for writer in ["birch", "cedar"] {
+            for sequence in 0..2 {
+                let claims = store.claims_for(&format!("note/{writer}/{sequence}"), Some("example.note")).unwrap();
+                assert_eq!(claims.len(), 1, "each original claim must survive exactly once");
+                assert_eq!(claims[0].body["fields"]["text"], Value::String(writer.into()));
+            }
+        }
+    }
+    assert_eq!(left.replication_inventory().unwrap().digest, right.replication_inventory().unwrap().digest);
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -5314,6 +5467,7 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
         slow: Arc::new(AtomicBool::new(false)),
         fail_next: Arc::new(AtomicBool::new(true)),
         receives: Arc::new(AtomicUsize::new(0)),
+        pause_after_receipt: None,
     };
     let state = PeerState::new(
         backend.clone(),
@@ -5377,6 +5531,7 @@ async fn responder_failed_export_emits_failure_answer_diagnostic() {
         slow: Arc::new(AtomicBool::new(false)),
         fail_next: Arc::new(AtomicBool::new(true)),
         receives: Arc::new(AtomicUsize::new(0)),
+        pause_after_receipt: None,
     };
     let state = PeerState::new(backend, "cedar".into(), auth.clone(),
         FleetContext::legacy(BTreeSet::from(["birch".into()])));
@@ -5601,6 +5756,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
             slow: Arc::new(AtomicBool::new(true)),
             fail_next: Arc::new(AtomicBool::new(false)),
             receives: received.clone(),
+            pause_after_receipt: None,
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(

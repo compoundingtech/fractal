@@ -9,6 +9,8 @@ pub(super) const RETRY_RETIREMENT_FAULT_SCOPE: &str = "program/retry-resource-re
 struct Acquire {
     name: String,
     host: String,
+    profile: Option<String>,
+    disk_path: Option<String>,
     #[serde(default = "one")]
     max_members: u32,
     capacity: Option<fractal_runtime::Capacity>,
@@ -109,6 +111,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn program_membership(&self, run: &MissionRunView, request: &program::Request, grant: &Grant) -> Result<Membership> {
         let record = self.store.resource_membership_for_grant(grant)?;
+        record.request.class.ensure_supported()?;
         anyhow::ensure!(record.request.host == self.host, "resource membership does not belong to this execution host");
         let owns = record.request.owner.run == run.subject
             && record.request.owner.step == request.step && record.request.owner.attempt == request.attempt;
@@ -126,6 +129,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn retire_program_membership(&self, record: &Membership) -> Result<bool> {
+        record.request.class.ensure_supported()?;
         let mut retirement_errors = Vec::new();
         for child in &record.child_runs {
             smallclaims::touched::note_read(|| child.clone());
@@ -168,6 +172,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let Some(previous) = self.store.step_run(&owner.step)? else { continue; };
             if previous.step != view.step { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported previous-attempt resource retirement until upgrade");
+                ready = false;
+                continue;
+            }
             self.ensure_resource_authority()?;
             // Record the dependency even while asynchronous child/root retirement is pending.
             smallclaims::touched::note_read(||
@@ -181,6 +190,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         for record in self.store.resource_memberships_for_host(&self.host)? {
             if !record.request.owner.invocation.as_deref().is_some_and(|id| id.starts_with("program:"))
                 || matches!(record.state.as_str(), "retired" | "refused") { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported program resource cancellation until upgrade");
+                continue;
+            }
             let active = self.store.step_run(&record.request.owner.step)?.is_some_and(|step|
                 step.attempt == record.request.owner.attempt && program::RUNNING_STATES.contains(&step.status.as_str()));
             let live = self.program_engine.get().is_some_and(|engine|
@@ -219,15 +232,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 let options: Acquire = serde_json::from_value(payload.clone())?;
                 anyhow::ensure!(options.host == self.host, "the resource execution host must be this daemon's host");
-                let lane = LaneRequest {
+                let mut lane = LaneRequest {
                     id: request.idempotency_key(), name: options.name, host: options.host,
                     max_members: options.max_members, capacity: options.capacity, coverage: options.coverage,
                     class: options.class, disk: options.disk, io: options.io,
+                    profile: options.profile, profile_estimate: None, disk_path: options.disk_path,
                     admission_timeout_ms: options.admission_timeout.as_deref()
                         .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?,
                     owner: Owner { run: run.subject.clone(), step: request.step.clone(), attempt: request.attempt,
                         invocation: Some(format!("program:{}", request.key)) },
                 };
+                self.resolve_resource_profile(&mut lane)?;
                 let fit = self.resource_lane_fit(&lane)?;
                 let admission = self.store.request_resource_membership(&lane, fit, now)?;
                 if !matches!(&admission, Admission::Queued { .. }) {
@@ -364,7 +379,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut member = member;
             resource_lanes::set_request(&mut member, &record.request)?;
-            self.runtime.start_resource_guarded(&self.store, &member, &|| {
+            self.runtime.start_resource_guarded(&self.store, &member, None, &|| {
                 let current = self.store.step_run(&request.step)?.context("program step disappeared before payload release")?;
                 anyhow::ensure!(current.attempt == request.attempt && program::RUNNING_STATES.contains(&current.status.as_str()),
                     "program attempt was cancelled before payload release");
@@ -423,6 +438,22 @@ mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
 
+    #[test]
+    fn keyed_acquisition_decodes_declaration_but_never_caller_estimates() {
+        let payload = serde_json::json!({
+            "name": "checks", "host": "node", "profile": "check.unit",
+            "diskPath": "/workspace", "maxMembers": 3, "coverage": "enforced", "class": "check"
+        });
+        let options: Acquire = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(options.profile.as_deref(), Some("check.unit"));
+        assert_eq!(options.disk_path.as_deref(), Some("/workspace"));
+        assert_eq!(options.max_members, 3);
+        assert!(options.capacity.is_none());
+        let mut injected = payload;
+        injected["profileEstimate"] = serde_json::json!({"seedRevision":"caller"});
+        assert!(serde_json::from_value::<Acquire>(injected).is_err());
+    }
+
     fn fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
     }
@@ -449,6 +480,7 @@ mission "retry-lane" state="ready" {{
                 let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
                 reconciler.ensure_resource_authority().unwrap();
                 let old = LaneRequest {
+                    profile: None, profile_estimate: None, disk_path: None,
                     id: "failed-attempt".into(), name: "heavy-gate".into(), host: "node".into(),
                     max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
                     coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -527,6 +559,7 @@ mission "retry-child" state="ready" {{
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
         reconciler.ensure_resource_authority().unwrap();
         let old = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "parent-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -608,6 +641,7 @@ mission "window-child" state="ready" {{
             let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
             reconciler.ensure_resource_authority().unwrap();
             let old = LaneRequest {
+                profile: None, profile_estimate: None, disk_path: None,
                 id: "uncertain-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
                 coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -751,6 +785,7 @@ mission "resource-child" state="ready" {
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
         reconciler.ensure_resource_authority().unwrap();
         let lane = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "scope-holder".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -769,6 +804,13 @@ mission "resource-child" state="ready" {
             idempotency_key: "scope-child".into(),
         }).unwrap();
         let record = store.resource_membership_for_grant(&grant).unwrap();
+        let mut future = record.clone();
+        future.request.class = fractal_runtime::RequestClass::Unknown("future-class".into());
+        let child_status = store.mission_run_status(&child).unwrap();
+        let index = store.index().unwrap();
+        assert!(reconciler.retire_program_membership(&future).unwrap_err().to_string().contains("unsupported resource class future-class"));
+        assert_eq!(store.mission_run_status(&child).unwrap(), child_status);
+        assert_eq!(store.index().unwrap(), index, "unsupported-class retirement must append no child cancellation claims");
         let (result, reads) = smallclaims::touched::record(|| reconciler.retire_program_membership(&record));
         assert!(!result.unwrap(), "normal asynchronous cancellation must not refuse scope release");
         assert!(reads.contains(&child));
@@ -796,6 +838,7 @@ mission "resource-child" state="ready" {
         let store = Arc::new(Store::open_memory("node").unwrap());
         store.start_resource_authority("node", "epoch").unwrap();
         let lane = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "unknown-scope".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,

@@ -61,7 +61,13 @@ pub(super) fn append_observer_refresh_tx(
 /// request is pending until an observation or a state carries its attempt. It names the poll that
 /// answers it, so it stays the same while that poll runs.
 pub fn pending_attempt(connection: &Connection, observer: &str) -> rusqlite::Result<Option<String>> {
-    Ok(pending_requests(connection, observer)?.into_iter().next().map(|(attempt, _)| attempt))
+    connection
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hf930998a9bf2 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &pending_requests_sql(true),
+            params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 /// The attempt a poll taken for pending `attempt` answers, read right before the poll's reads.
@@ -88,47 +94,54 @@ pub fn coalesced_attempt(connection: &Connection, observer: &str, attempt: &str)
 /// webhook refresh is no longer pending once a later webhook refresh from the same member is
 /// answered.
 fn pending_requests(connection: &Connection, observer: &str) -> rusqlite::Result<Vec<(String, Option<String>)>> {
-    // The observations are listed once, not scanned for each request; see
-    // `pending_subscription_mission_requests`.
-    let mut statement = connection.prepare(
-        /* sqlite-large-value: allow-for-now lv-h1e605cea76d4 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
-            "WITH answered(attempt) AS (
-               SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
-               WHERE result.subject=?1
-                 AND result.kind IN ('observer.observed', 'observer.state')
-                 AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
-             )
-             SELECT json_extract(request.body, '$.fields.attempt'),
-                    (SELECT origin FROM batches WHERE id=request.batch_id)
-             FROM claims request
-             WHERE request.subject=?1
-               AND request.kind='observer.refresh-requested'
-               AND (
-                 json_extract(request.body, '$.fields.attempt') IS NULL
-                 OR json_extract(request.body, '$.fields.attempt') NOT IN (SELECT attempt FROM answered)
-               )
-               AND NOT (
-                 json_extract(request.body, '$.fields.attempt') LIKE ?2
-                 AND EXISTS (
-                   SELECT 1 FROM claims later
-                   WHERE later.subject=?1
-                     AND later.kind='observer.refresh-requested'
-                     AND json_extract(later.body, '$.fields.attempt') LIKE ?2
-                     AND json_extract(later.body, '$.fields.attempt') IN (SELECT attempt FROM answered)
-                     AND (SELECT origin FROM batches WHERE id=later.batch_id)
-                       IS (SELECT origin FROM batches WHERE id=request.batch_id)
-                     AND {}
-                 )
-               )
-             ORDER BY CANONICAL_ASC(request)",
-            canonical::after_sql("later", "request"),
-        )),
-    )?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h76ad4685e6b9 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &pending_requests_sql(false))?;
     statement
         .query_map(params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?
         .collect()
+}
+
+/// Decode history once and reduce answered webhooks to one frontier per origin, rather than
+/// searching all later requests for every outstanding request. The oldest-only reader returns
+/// one SQLite row and never constructs the full pending vector.
+/// A NULL batch origin makes the old canonical tuple comparison unknown at equal timestamps;
+/// only a strictly newer timestamp can cover those requests. Keep that SQL NULL behavior,
+/// including for requests without an attempt.
+fn pending_requests_sql(oldest_only: bool) -> String {
+    canonical_sql(&format!(
+        "WITH answered(attempt) AS MATERIALIZED (
+           SELECT json_extract(body, '$.fields.attempt') FROM claims
+           WHERE subject=?1 AND kind IN ('observer.observed', 'observer.state')
+             AND json_extract(body, '$.fields.attempt') IS NOT NULL
+         ),
+         requests AS MATERIALIZED (
+           SELECT json_extract(request.body, '$.fields.attempt') AS attempt,
+                  (SELECT origin FROM batches WHERE id=request.batch_id) AS origin,
+                  request.accepted_at_unix_ms AS accepted,
+                  ROW_NUMBER() OVER (ORDER BY CANONICAL_ASC(request)) AS position
+           FROM claims request
+           WHERE request.subject=?1 AND request.kind='observer.refresh-requested'
+         ),
+         latest_answered AS MATERIALIZED (
+           SELECT origin, MAX(position) AS position
+           FROM requests
+           WHERE attempt LIKE ?2 AND attempt IN (SELECT attempt FROM answered)
+           GROUP BY origin
+         )
+         SELECT request.attempt, request.origin
+         FROM requests request
+         LEFT JOIN latest_answered latest ON latest.origin IS request.origin
+         LEFT JOIN requests frontier ON frontier.position=latest.position
+         WHERE (request.attempt IS NULL OR request.attempt NOT IN (SELECT attempt FROM answered))
+           AND NOT (request.attempt LIKE ?2 AND COALESCE(
+             CASE WHEN request.origin IS NULL
+               THEN (length(frontier.accepted), frontier.accepted) >
+                    (length(request.accepted), request.accepted)
+               ELSE latest.position > request.position END, 0))
+         ORDER BY request.position{}",
+        if oldest_only { " LIMIT 1" } else { "" },
+    ))
 }
 
 /// Whether `observer` already has a refresh request for `attempt`.
@@ -197,6 +210,201 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+             CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE, batch_id TEXT,
+               subject TEXT, kind TEXT, body TEXT, accepted_at_unix_ms TEXT);
+             CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
+             CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER);
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);",
+        ).unwrap();
+        connection
+    }
+
+    fn history_claim(
+        connection: &Connection,
+        id: &str,
+        observer: &str,
+        kind: &str,
+        attempt: Option<&str>,
+        origin: Option<&str>,
+        time: &str,
+    ) {
+        connection.execute("INSERT INTO batches VALUES(?1,?2,1)", params![id, origin]).unwrap();
+        connection.execute("INSERT INTO claim_positions VALUES(?1,0)", [id]).unwrap();
+        connection.execute(
+            "INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms)
+             VALUES(?1,?1,?2,?3,?4,?5)",
+            params![id, observer, kind, json!({"fields":{"attempt":attempt}}).to_string(), time],
+        ).unwrap();
+    }
+
+    fn old_pending_sql() -> String {
+        canonical_sql(&format!(
+            "WITH answered(attempt) AS (
+               SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
+               WHERE result.subject=?1 AND result.kind IN ('observer.observed', 'observer.state')
+                 AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
+             )
+             SELECT json_extract(request.body, '$.fields.attempt'),
+                    (SELECT origin FROM batches WHERE id=request.batch_id)
+             FROM claims request
+             WHERE request.subject=?1 AND request.kind='observer.refresh-requested'
+               AND (json_extract(request.body, '$.fields.attempt') IS NULL
+                 OR json_extract(request.body, '$.fields.attempt') NOT IN (SELECT attempt FROM answered))
+               AND NOT (json_extract(request.body, '$.fields.attempt') LIKE ?2 AND EXISTS (
+                 SELECT 1 FROM claims later
+                 WHERE later.subject=?1 AND later.kind='observer.refresh-requested'
+                   AND json_extract(later.body, '$.fields.attempt') LIKE ?2
+                   AND json_extract(later.body, '$.fields.attempt') IN (SELECT attempt FROM answered)
+                   AND (SELECT origin FROM batches WHERE id=later.batch_id)
+                     IS (SELECT origin FROM batches WHERE id=request.batch_id)
+                   AND {}
+               ))
+             ORDER BY CANONICAL_ASC(request)",
+            canonical::after_sql("later", "request"),
+        ))
+    }
+
+    #[test]
+    fn pending_query_matches_legacy_history_semantics() {
+        let connection = history();
+        let webhook = |name: &str| format!("{}{name}", github_webhook::ATTEMPT_PREFIX);
+        let first = webhook("first");
+        let last = webhook("last");
+        let other = webhook("other");
+        let null_first = webhook("null-first");
+        let null_last = webhook("null-last");
+        let fixtures = [
+            ("z", "observer/test", "observer.refresh-requested", Some(first.as_str()), Some("a"), "9"),
+            ("a", "observer/test", "observer.refresh-requested", Some(last.as_str()), Some("a"), "10"),
+            ("b", "observer/test", "observer.refresh-requested", Some(other.as_str()), Some("b"), "9"),
+            ("c", "observer/test", "observer.refresh-requested", Some("declared"), Some("a"), "9"),
+            ("d", "observer/test", "observer.state", Some(last.as_str()), Some("a"), "11"),
+            ("e", "observer/test", "observer.refresh-requested", Some(null_first.as_str()), None, "10"),
+            ("f", "observer/test", "observer.refresh-requested", Some(null_last.as_str()), None, "10"),
+            ("g", "observer/test", "observer.observed", Some(null_last.as_str()), None, "11"),
+            ("h", "observer/elsewhere", "observer.state", Some(other.as_str()), Some("b"), "12"),
+            ("i", "observer/test", "observer.state", None, Some("a"), "13"),
+            ("j", "observer/test", "observer.refresh-requested", None, None, "9"),
+            ("k", "observer/test", "observer.refresh-requested", None, Some("a"), "8"),
+            ("l", "observer/test", "observer.refresh-requested", Some("declared-new"), Some("a"), "20"),
+            ("m", "observer/test", "observer.refresh-requested", None, Some("b"), "30"),
+            ("n", "observer/test", "observer.refresh-requested", Some(last.as_str()), Some("b"), "31"),
+        ];
+        type Pending = Vec<(Option<String>, Option<String>)>;
+        let read = |sql: &str| -> Pending {
+            connection.prepare(sql).unwrap()
+                .query_map(params!["observer/test", format!("{}%", github_webhook::ATTEMPT_PREFIX)],
+                    |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        for (id, observer, kind, attempt, origin, time) in fixtures {
+            history_claim(&connection, id, observer, kind, attempt, origin, time);
+            let expected = read(&old_pending_sql());
+            assert_eq!(read(&pending_requests_sql(false)), expected, "{id}");
+            assert_eq!(read(&pending_requests_sql(true)), expected.into_iter().take(1).collect::<Pending>(), "{id}");
+        }
+        // Answers carry attempts, not origins. The final request repeats an answered attempt
+        // on b, covering b's earlier webhook and making its missing-attempt predicate NULL.
+        assert_eq!(
+            read(&pending_requests_sql(false)),
+            vec![
+                (Some("declared".into()), Some("a".into())),
+                (Some(null_first), None),
+                (Some("declared-new".into()), Some("a".into())),
+            ],
+        );
+    }
+
+    #[test]
+    fn oldest_reader_does_not_decode_the_pending_tail() {
+        let connection = history();
+        history_claim(&connection, "first", "observer/test", "observer.refresh-requested", Some("first"), Some("a"), "1");
+        history_claim(&connection, "missing", "observer/test", "observer.refresh-requested", None, Some("a"), "2");
+        assert_eq!(pending_attempt(&connection, "observer/test").unwrap().as_deref(), Some("first"));
+        assert!(pending_requests(&connection, "observer/test").is_err());
+        connection.execute("DELETE FROM claims WHERE id='first'", []).unwrap();
+        assert!(pending_attempt(&connection, "observer/test").is_err());
+    }
+
+    #[test]
+    fn pending_history_vm_steps_grow_subquadratically() {
+        fn cost(count: usize, answered: bool) -> i32 {
+            let connection = history();
+            for index in 0..count {
+                let id = format!("request-{index}");
+                let attempt = format!("{}{index}", github_webhook::ATTEMPT_PREFIX);
+                let origin = format!("origin-{}", index % 16);
+                history_claim(&connection, &id, "observer/test", "observer.refresh-requested",
+                    Some(&attempt), Some(&origin), &index.to_string());
+                if answered && index % 2 == 0 {
+                    history_claim(&connection, &format!("answer-{index}"), "observer/test", "observer.observed",
+                        Some(&attempt), Some(&origin), &index.to_string());
+                }
+            }
+            let mut statement = connection.prepare(&pending_requests_sql(true)).unwrap();
+            let _: Option<String> = statement.query_row(
+                params!["observer/test", format!("{}%", github_webhook::ATTEMPT_PREFIX)],
+                |row| row.get(0),
+            ).optional().unwrap();
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        }
+        for answered in [false, true] {
+            let small = cost(128, answered);
+            let large = cost(512, answered);
+            assert!(large < small * 8, "answered={answered}: {small} -> {large}");
+        }
+    }
+
+    #[test]
+    fn coalescing_keeps_member_boundaries_and_canonical_wire_order() {
+        let connection = history();
+        let first = format!("{}first", github_webhook::ATTEMPT_PREFIX);
+        let newest = format!("{}newest", github_webhook::ATTEMPT_PREFIX);
+        let elsewhere = format!("{}elsewhere", github_webhook::ATTEMPT_PREFIX);
+        for (id, attempt, origin) in [
+            ("z-first", first.as_str(), "a"),
+            ("a-newest", newest.as_str(), "a"),
+            ("other", elsewhere.as_str(), "b"),
+            ("declared", "declared", "a"),
+        ] {
+            history_claim(&connection, id, "observer/test", "observer.refresh-requested",
+                Some(attempt), Some(origin), "10");
+        }
+        // Arrival and lexical IDs disagree with the wire order within the first batch.
+        connection.execute("UPDATE claims SET batch_id='z-first' WHERE id='a-newest'", []).unwrap();
+        connection.execute("UPDATE claim_positions SET position=1 WHERE claim_id='a-newest'", []).unwrap();
+        assert_eq!(pending_requests(&connection, "observer/test").unwrap(), vec![
+            ("declared".into(), Some("a".into())),
+            (first.clone(), Some("a".into())),
+            (newest.clone(), Some("a".into())),
+            (elsewhere.clone(), Some("b".into())),
+        ]);
+        assert_eq!(coalesced_attempt(&connection, "observer/test", &first).unwrap(), newest);
+        assert_eq!(coalesced_attempt(&connection, "observer/test", &elsewhere).unwrap(), elsewhere);
+        assert_eq!(coalesced_attempt(&connection, "observer/test", "declared").unwrap(), "declared");
+        let absent = format!("{}absent", github_webhook::ATTEMPT_PREFIX);
+        assert_eq!(coalesced_attempt(&connection, "observer/test", &absent).unwrap(), absent);
+        history_claim(&connection, "answer", "observer/test", "observer.observed",
+            Some(&newest), Some("a"), "11");
+        assert_eq!(coalesced_attempt(&connection, "observer/test", &first).unwrap(), first);
+        assert_eq!(pending_attempt(&connection, "observer/test").unwrap().as_deref(), Some("declared"));
+        let legacy: Vec<(String, Option<String>)> = connection
+            .prepare(&old_pending_sql())
+            .unwrap()
+            .query_map(
+                params!["observer/test", format!("{}%", github_webhook::ATTEMPT_PREFIX)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(pending_requests(&connection, "observer/test").unwrap(), legacy);
+    }
 
     const SOURCE: &str = r#"version 2
 resource "garden" { kind "vcs.repository" }

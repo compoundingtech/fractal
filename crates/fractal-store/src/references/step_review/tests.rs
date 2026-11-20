@@ -94,7 +94,7 @@ fn agent_review_step_unknown_requires_later_validation() {
     for owner in [
         None,
         Some("agent/example/missing"),
-        Some("agent/example/st-run-value-owner"),
+        Some("agent/example/fractal-run-value-owner"),
         Some("agent/${OWNER}"),
         Some("person/${OWNER}"),
     ] {

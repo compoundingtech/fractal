@@ -10,6 +10,10 @@ pub struct FinitePolicy {
     pub disk_floors: std::collections::BTreeMap<std::path::PathBuf, u64>,
     /// None permits unrestricted heavy IO; constrained hosts default to one slot.
     pub heavy_io_slots: Option<u32>,
+    /// The execution host owns declared seeds; callers select keys, not known-key bytes.
+    pub profiles: std::collections::BTreeMap<String, crate::ResourceProfileSeed>,
+    pub psi_brake: crate::resource_pressure::Policy,
+    pub profile_readiness: crate::resource_readiness::HostReadiness,
 }
 
 impl Default for FinitePolicy {
@@ -18,6 +22,9 @@ impl Default for FinitePolicy {
             disk_floor_bytes: 2 << 30,
             disk_floors: std::collections::BTreeMap::new(),
             heavy_io_slots: Some(1),
+            profiles: std::collections::BTreeMap::new(),
+            psi_brake: crate::resource_pressure::Policy::default(),
+            profile_readiness: crate::resource_readiness::HostReadiness::default(),
         }
     }
 }

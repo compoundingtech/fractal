@@ -509,3 +509,57 @@ after the old build was excused and the cut advanced (`trimmed=false`,
 The shard passed 6,487 tests and failed only the stale seed-34 trim expectation.
 The measured v37 never-trim set is `[34, 179]`; exact per-seed equality,
 old-build-excusal continuation, the three-seed cap and majority coverage remain enforced.
+
+`claims-v38.json` adds the durable native admission evidence kinds
+`resource.admission.observed`, `resource.admission.coverage`, and `gate.admission.observed`
+to the registry that already includes residency. Versions 1 through 37 remain frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v38.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v38.
+Native admission draws use the originating simulation host, a coherent epoch and simulation
+clock, a typed queued owner, and a finite admission request. Gate evidence records a durable
+accepted outcome with the same onset and observation clock; these facts confer no build grant.
+The focused `the_corpus_generates_valid_native_admission_inputs` regression checks all three
+specifications against the live registry, validates and admits their generated inputs, and
+replicates every resulting claim to the oracle. Full registry-kind coverage remains intact.
+New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
+old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
+must come from actual v38 outcomes rather than assuming historical results still apply.
+
+In [hosted run 44486252490, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44486252490/job/135438980421),
+seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
+`after excuse and cut=None`), so its v37 non-trimming expectation no longer applies.
+The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
+The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
+the three-seed cap and majority trim coverage remain enforced.
+
+`claims-v39.json` adds the durable `custom.client.observation-minute` summary kind.
+Versions 1 through 38 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v39.json`.
+The simulation and audit reports select v39. Phone summaries retain source-bound
+minute populations and canonical latency histograms; missing minutes are not
+invented by the native evaluator. Previous seeded trim characterizations remain
+historical; exact per-seed equality, old-build-excusal continuation, the three-seed
+cap and majority trim coverage are unchanged.
+
+In hosted run [44551516592](https://github.com/compoundingtech/fractal/actions/runs/44551516592),
+[seed 2](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697651881)
+and [seed 34](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697652144)
+each converged without an initial checkpoint trim, then trimmed on every modern node after
+the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts. The loader selected
+v39; the failure messages still named the superseded v38 characterization.
+The current v39 never-trim list is `[2, 34, 179]`, retaining the prior seed-179 expectation
+and adding the two measured changes. This run does not establish a full dense-seed
+characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
+cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
+
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
+The simulation and audit reports select v40. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.

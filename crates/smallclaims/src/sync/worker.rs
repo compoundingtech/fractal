@@ -476,14 +476,14 @@ impl FleetContext {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
+    /// Record that a member refused this node for good, so it stops dialing and `fractal doctor`
     /// can say what happened.
     async fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
         if self.removed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
         eprintln!(
-            "st3: {reported_by} refused this node ({}): {}; it stops syncing",
+            "fractal: {reported_by} refused this node ({}): {}; it stops syncing",
             removed.code, removed.message
         );
         // The settings lock is a blocking flock, and endpoint publication holds it across a
@@ -517,7 +517,7 @@ impl FleetContext {
         .await
         .unwrap_or_else(|error| Err(anyhow::anyhow!("the refusal writer stopped: {error}")));
         if let Err(error) = persisted {
-            eprintln!("st3: cannot persist fleet refusal: {error:#}");
+            eprintln!("fractal: cannot persist fleet refusal: {error:#}");
         }
     }
 
@@ -1413,6 +1413,7 @@ fn may_carry_direct_leave(exchange: &ReplicationExchange, key: &str) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_from_peer<B: Backend>(
     backend: &B,
     fleet: &FleetContext,
@@ -1421,6 +1422,7 @@ async fn receive_from_peer<B: Backend>(
     exchange: &ReplicationExchange,
     round_trip: Option<Duration>,
     carrier: crate::replication::ReplicationCarrier,
+    authenticated_member_key: Option<&str>,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
     let _refresh = fleet.view_refresh.lock().await;
     let before = backend.fleet_view().await?;
@@ -1447,7 +1449,7 @@ async fn receive_from_peer<B: Backend>(
         *leave = updated;
     }
     let received = backend
-        .receive(peer, fleet_id, exchange, round_trip, carrier)
+        .receive(peer, fleet_id, exchange, round_trip, carrier, authenticated_member_key)
         .await?;
     if received.changed {
         backend.changed().await;
@@ -1760,7 +1762,7 @@ async fn dial_peer<B: Backend>(
     // set changes. A refused preferred route is never held: see the refusal below.
     let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
-        // A removed node stops dialing; `st3 doctor` says what to do next.
+        // A removed node stops dialing; `fractal doctor` says what to do next.
         if fleet.is_removed() {
             tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
             continue;
@@ -2925,6 +2927,7 @@ async fn receive_exchange_inner_to<B: Backend>(
             let relay = relay.clone();
             let shard = shard.clone();
             let backend_timing = Arc::clone(timing);
+            let authenticated_member_key = sender.member_key.clone().filter(|_| sender.member_signature_valid);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
@@ -2936,7 +2939,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
-                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default())
+                                .receive(&relay, state.auth.fleet_id(), &request, None, Default::default(), authenticated_member_key.as_deref())
                                 .await;
                             backend_timing.record("local-receive-done");
                             let received = received
@@ -2967,6 +2970,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                             &request,
                             None,
                             Default::default(),
+                            authenticated_member_key.as_deref(),
                         )
                         .await;
                         backend_timing.record("local-receive-done");
@@ -3577,7 +3581,7 @@ async fn finish_leave_receipt(
         .get(&peer.name)
         .cloned()
         .context("member-left response has no durable receipt proof")?;
-    let (ack, _): (Value, bool) = post_signed_to(
+    let (ack, _, _): (Value, bool, Option<String>) = post_signed_to(
         http,
         peer,
         node,
@@ -3665,7 +3669,7 @@ async fn exchange_inner<B: Backend>(
         ..first
     };
     let started = std::time::Instant::now();
-    let (remote, peer_inflates) =
+    let (remote, peer_inflates, authenticated_member_key) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
     ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
@@ -3678,6 +3682,7 @@ async fn exchange_inner<B: Backend>(
         &remote,
         Some(round_trip),
         carrier,
+        authenticated_member_key.as_deref(),
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
@@ -3701,7 +3706,7 @@ async fn exchange_inner<B: Backend>(
             .exchange;
         let started = std::time::Instant::now();
         // A peer that says it takes compressed requests gets a large push compressed.
-        let (response, _) =
+        let (response, _, authenticated_member_key) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
@@ -3716,6 +3721,7 @@ async fn exchange_inner<B: Backend>(
             &response,
             Some(round_trip),
             carrier,
+            authenticated_member_key.as_deref(),
         )
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
@@ -3933,8 +3939,8 @@ async fn walk_claim_ranges<B: Backend>(
         let mut ask = summary.clone();
         ask.inventory.claim_range_query = Some(query.clone());
         let started = std::time::Instant::now();
-        let answer = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
-            Ok((answer, _)) => answer,
+        let (answer, authenticated_member_key) = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
+            Ok((answer, _, authenticated_member_key)) => (answer, authenticated_member_key),
             Err(error) => {
                 result = Err(error);
                 break;
@@ -3948,6 +3954,7 @@ async fn walk_claim_ranges<B: Backend>(
             &answer,
             Some(started.elapsed()),
             carrier,
+            authenticated_member_key.as_deref(),
         )
         .await
         {
@@ -4000,7 +4007,7 @@ async fn adopt_advertised_checkpoint<B: Backend>(
         Ok(Some(need)) => need,
         Ok(None) => return false,
         Err(error) => {
-            eprintln!("st3: checkpoint need unavailable: {error:#}");
+            eprintln!("fractal: checkpoint need unavailable: {error:#}");
             return false;
         }
     };
@@ -4035,7 +4042,7 @@ async fn adopt_advertised_checkpoint<B: Backend>(
         Ok(actions) => {
             for action in &actions {
                 eprintln!(
-                    "st3: checkpoint {} (manifest from {})",
+                    "fractal: checkpoint {} (manifest from {})",
                     serde_json::to_string(action).unwrap_or_default(),
                     peer.name
                 );
@@ -4044,7 +4051,7 @@ async fn adopt_advertised_checkpoint<B: Backend>(
         }
         Err(error) => {
             eprintln!(
-                "st3: adopting {} from {} failed: {error:#}",
+                "fractal: adopting {} from {} failed: {error:#}",
                 need.checkpoint, peer.name
             );
             ADOPTION_FAILURES
@@ -4109,7 +4116,7 @@ async fn post_signed<B: Backend>(
     fleet: &FleetContext,
     exchange: &ReplicationExchange,
     compress: bool,
-) -> Result<(ReplicationExchange, bool)> {
+) -> Result<(ReplicationExchange, bool, Option<String>)> {
     if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
         select_leave_confirmer(backend, fleet, &peer.name).await?;
     }
@@ -4217,7 +4224,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     path: &str,
     request: &B,
     compress: bool,
-) -> Result<(R, bool)> {
+) -> Result<(R, bool, Option<String>)> {
     let observation = Arc::new(ClientConnectObservation {
         timing: ExchangeTiming {
             id: uuid::Uuid::now_v7().to_string(),
@@ -4270,7 +4277,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     timing: &ExchangeTiming,
     client_stage: &mut crate::replication::ReplicationClientStage,
     preparation: &mut Option<RequestPreparation>,
-) -> Result<(R, bool)> {
+) -> Result<(R, bool, Option<String>)> {
     let body = serde_json::to_vec(request)?;
     let uncompressed_body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let request_digest = FleetAuth::body_digest(&body);
@@ -4489,7 +4496,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         ));
     }
     fleet.note_activity(&peer.name);
-    Ok((response.value, accepts_deflate(&headers)))
+    Ok((response.value, accepts_deflate(&headers), responder.member_key.filter(|_| responder.member_signature_valid)))
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! `st demo play` end to end: the real st binary under a PTY in a throwaway HOME resets its own
+//! `fractal demo play` end to end: the real fractal binary under a PTY in a throwaway HOME resets its own
 //! instance, seeds a demo, plays timed and key-paced beats in the terminal interface, and leaves
 //! no daemon or scripted agent behind when the presenter quits.
 use alacritty_terminal::{

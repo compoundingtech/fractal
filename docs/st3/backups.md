@@ -211,14 +211,14 @@ daemon nor connect the recovered state to your live fleet:
 (
   set -eu
   umask 077
-  st_recovery_root=$(mktemp -d "${TMPDIR:-/tmp}/st-recovery.XXXXXX")
-  fractal backup create "$st_recovery_root/claims.jsonl"
-  mkdir -p "$st_recovery_root/restored"
-  fractal backup restore "$st_recovery_root/claims.jsonl" \
-    --database "$st_recovery_root/restored/claims.sqlite3" --json \
-    > "$st_recovery_root/restore-report.json"
-  printf 'Private rehearsal files: %s\n' "$st_recovery_root"
-  cat "$st_recovery_root/restore-report.json"
+  fractal_recovery_root=$(mktemp -d "${TMPDIR:-/tmp}/fractal-recovery.XXXXXX")
+  fractal backup create "$fractal_recovery_root/claims.jsonl"
+  mkdir -p "$fractal_recovery_root/restored"
+  fractal backup restore "$fractal_recovery_root/claims.jsonl" \
+    --database "$fractal_recovery_root/restored/claims.sqlite3" --json \
+    > "$fractal_recovery_root/restore-report.json"
+  printf 'Private rehearsal files: %s\n' "$fractal_recovery_root"
+  cat "$fractal_recovery_root/restore-report.json"
 )
 ```
 

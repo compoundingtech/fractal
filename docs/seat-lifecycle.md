@@ -201,7 +201,7 @@ receipt history do not depend on retained timeline entries or trace sampling.
 Unknown execution/invocation IDs and attempt evidence are omitted on the wire,
 not synthesized as null fields. Typed clients and signed relays preserve that
 absence; existing explicitly nullable legacy attribution fields remain nullable.
-`st usage --by invocation` groups exact identities; `--by attempt` groups by step
+`fractal usage --by invocation` groups exact identities; `--by attempt` groups by step
 and attempt together, never by the attempt number alone. The Usage TUI offers the
 same two groupings and keeps missing evidence in explicit unknown groups.
 
@@ -445,19 +445,28 @@ fractal import show SESSION
 fractal conversations timeline SESSION
 ```
 
-`import ls` reads exact transcript paths named by live harness commands without scanning saved
-history; `import ls --all` lists saved transcripts as well. The daemon reads saved transcripts in
-the background, starting when it starts; `import ls --all` and `import show` answer from the
-latest complete read within two seconds. Right after a daemon start on slow storage, they may ask
-you to retry. `import show` gives the harness, native session ID, workspace, and process, if one is
-running. A running harness whose command line does not name its exact transcript is listed as
-blocked; exit it, then import its saved session from `import ls --all`. Check the workspace before
-importing: do not import a session already run by an agent.
+`import ls` reads live process evidence without walking saved history. For omp, an open transcript
+descriptor and its complete header ID establish the association; `--resume` arguments alone do
+not prove which conversation is currently selected. Missing or ambiguous evidence leaves the
+process visible but blocked. Process enumeration and descriptor queries have subprocess deadlines,
+and cold transcript reads run in bounded, shared background workers rather than on request threads.
+Discovery waits at most five seconds, inside the client request budget; errors distinguish an
+unfinished history index, an unavailable exact read, and failed discovery.
 
-For omp, the inventory reads only session transcripts, not JSONL tool logs within a session's
-attachment directory. If several transcript copies have the same native ID, fractal prefers a copy
-whose workspace matches the live process and then the newest copy; import refuses copies still
-indistinguishable by those rules before stopping any process.
+The daemon indexes saved transcripts in the background. `import ls --all` includes the latest
+complete inventory, waiting at most two seconds for a history refresh. `import show` looks up the
+complete session ID in that index, independently of the listing page, rather than walking every
+transcript. A cold index may report that it is not ready. Import revalidates the indexed transcript
+before takeover. Check the workspace before importing: do not import a session already run by an
+agent.
+
+For omp, history scans exclude JSONL tool logs within attachment directories. Exact lookup refuses
+multiple transcript copies with the same full native ID, regardless of workspace or modification
+time, including when one copy is open in a running process. Symlinks and hardlinks to the same
+physical file are aliases, not copies. Saved OpenCode sessions are revalidated by their complete
+native ID in the SQLite database, not as JSONL transcripts.
+
+Discovery is not native attach: `import run` still stops the selected predecessor.
 
 ```sh
 fractal import run SESSION --as person/ada

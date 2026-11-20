@@ -17,12 +17,13 @@ pub(super) fn set_request(member: &mut MemberSpec, request: &LaneRequest) -> Res
 fn lower_request(lane: &crate::model::ResourceLaneSpec, id: String, owner: Owner) -> LaneRequest {
     LaneRequest {
         id, owner, name: lane.name.clone(), host: lane.host.clone(), max_members: lane.max_members,
+        profile: lane.profile.clone(), profile_estimate: None, disk_path: lane.disk_path.clone(),
         capacity: lane.capacity, coverage: match lane.coverage {
             crate::model::ResourceLaneCoverage::Logical => Coverage::Logical,
             crate::model::ResourceLaneCoverage::Enforced => Coverage::Enforced,
         },
         admission_timeout_ms: lane.admission_timeout_ms,
-        class: lane.class, disk: lane.disk.clone(), io: lane.io,
+        class: lane.class.clone(), disk: lane.disk.clone(), io: lane.io,
     }
 }
 
@@ -89,6 +90,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             if record.request.owner.invocation.as_deref().is_none_or(|invocation| !invocation.starts_with("exec/"))
                 || matches!(record.state.as_str(), "retired" | "refused" | "withdrawn")
             { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported DSL resource cancellation until upgrade");
+                continue;
+            }
             let retained = desired.iter().filter_map(|subject| subject.member.as_ref())
                 .map(request).collect::<Result<Vec<_>>>()?.into_iter().flatten()
                 .any(|request| request == record.request);
@@ -139,6 +144,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let policy = &self.seat_admission.finite_policy;
         let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        fit.recovery_capable = request.profile.as_ref().and_then(|key| policy.profiles.get(key))
+            .is_some_and(|seed| seed.recovery_capable);
+        if cfg!(target_os = "linux") {
+            smallclaims::touched::note_read(|| "host-lane-pressure".into());
+            fit.pressure_blocked = self.seat_admission.pressure_decision()?.blocked;
+        }
         if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
             return Ok(fit);
         }
@@ -182,7 +193,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         if self.seat_admission.status.lane_wait_class(&request.id,
-            "finite execution waits for native admission".into(), true, now, request.class)
+            "finite execution waits for native admission".into(), true, now, request.class.clone())
         {
             self.incremental.touch("seat-admission");
             self.signal_changed();
@@ -274,10 +285,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         };
         anyhow::ensure!(member.host == lane.host, "step lane host must match its exec execution host");
-        let request = lower_request(lane,
+        let mut request = lower_request(lane,
             format!("dsl:{}:{}:{}:{}", run.subject, run.generation, view.attempt, subject),
             Owner { run: run.subject.clone(), step: view.subject.clone(), attempt: view.attempt, invocation: Some(subject.to_owned()) },
         );
+        self.resolve_resource_profile(&mut request)?;
         set_request(member, &request)
     }
 }
@@ -291,6 +303,157 @@ mod tests {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
     }
 
+    fn profile_request() -> LaneRequest {
+        LaneRequest {
+            id: "profile-member".into(), name: "checks".into(), host: "node".into(), max_members: 2,
+            profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
+            capacity: None, class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
+        }
+    }
+
+    fn profile_seed() -> fractal_runtime::ResourceProfileSeed {
+        fractal_runtime::ResourceProfileSeed {
+            cores: 4, memory: 8 * GIB, memory_high: None,
+            learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly, recovery_capable: false,
+            source: Some("declared".into()), reason: Some("unit checks".into()), disk: None, io: None,
+        }
+    }
+
+    #[test]
+    fn obsolete_unsupported_dsl_custody_does_not_block_supported_cleanup_or_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(directory.path(), None, Path::new("unused-pty")));
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        reconciler.ensure_resource_authority().unwrap();
+        let mut future = profile_request();
+        future.id = "obsolete-future-dsl".into();
+        future.profile = None;
+        future.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
+        future.class = fractal_runtime::RequestClass::Agent;
+        future.owner.invocation = Some("exec/obsolete-future".into());
+        let Admission::Admitted(future_grant) = store.request_resource_membership(&future, test_fit(), 1).unwrap()
+            else { panic!("future fixture must first acquire custody"); };
+        store.prepare_resource_membership(&future_grant, "exec/obsolete-future").unwrap();
+        // Model authoritative custody written by a newer binary, without asking this binary
+        // to admit an unsupported class. Preserve the exact persisted body through cleanup.
+        store.connection.write().execute(
+            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','future-class') WHERE id=?1",
+            [&future.id],
+        ).unwrap();
+        let body = || store.connection.write().query_row(
+            "SELECT body FROM resource_memberships_v1 WHERE id=?1", [&future.id],
+            |row| row.get::<_, String>(0),
+        ).unwrap();
+        let before = body();
+        let mut supported = future.clone();
+        supported.id = "obsolete-supported-dsl".into();
+        supported.owner.invocation = Some("exec/obsolete-supported".into());
+        let Admission::Admitted(supported_grant) = store.request_resource_membership(&supported, test_fit(), 2).unwrap()
+            else { panic!("supported fixture must acquire remaining custody"); };
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 2 * GIB);
+        reconciler.seat_admission.status.lane_wait_class("obsolete-seat",
+            "obsolete seat".into(), true, 1, fractal_runtime::RequestClass::Agent);
+
+        reconciler.cancel_invalid_admissions(&[]).unwrap();
+
+        assert_eq!(body(), before, "unsupported request, roots and custody must remain byte-for-byte unchanged");
+        assert_eq!(store.resource_membership_for_grant(&supported_grant).unwrap().state, "retired");
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), GIB);
+        assert!(reconciler.seat_admission.status.state().lane_waits.is_empty(),
+            "cleanup after the DSL dispatch must still run");
+        // Repeated reconciliation must neither wedge nor release the unsupported member.
+        reconciler.cancel_invalid_admissions(&[]).unwrap();
+        assert_eq!(body(), before);
+        supported.id = "continuing-supported-dsl".into();
+        supported.owner.invocation = Some("exec/continuing-supported".into());
+        assert!(matches!(store.request_resource_membership(&supported, test_fit(), 3).unwrap(), Admission::Admitted(_)),
+            "supported work must still acquire the capacity freed by supported cleanup");
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 2 * GIB);
+    }
+
+    #[test]
+    fn known_profile_resolves_host_capacity_disk_io_and_frozen_provenance() {
+        use super::super::tests::FakeRuntime;
+        let directory = tempfile::tempdir().unwrap();
+        let mut seed = profile_seed();
+        seed.disk = Some(3 * GIB);
+        seed.io = Some(fractal_runtime::IoClass::Heavy);
+        let expected = seed.estimate().unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), seed)]), ..Default::default()
+        };
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
+        let mut request = profile_request();
+        request.disk_path = Some(directory.path().display().to_string());
+        reconciler.resolve_resource_profile(&mut request).unwrap();
+        assert_eq!(request.capacity, Some(fractal_runtime::Capacity { cores: 4, memory: 8 * GIB }));
+        assert_eq!(request.disk, Some(fractal_runtime::DiskRequest {
+            bytes: 3 * GIB, path: std::fs::canonicalize(directory.path()).unwrap().display().to_string(),
+        }));
+        assert_eq!(request.io, Some(fractal_runtime::IoClass::Heavy));
+        assert_eq!(request.profile_estimate, Some(expected));
+        let estimate = request.profile_estimate.unwrap();
+        assert!(estimate.seed_revision.is_some());
+        assert_eq!(estimate.samples, fractal_runtime::ResourceProfileSamples { memory: 0, disk: 0 });
+        assert!(estimate.learned_revision.is_none());
+        assert!(estimate.memory_high_bytes.is_none());
+    }
+
+    #[test]
+    fn queued_profile_replay_retains_snapshot_after_seed_change() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), profile_seed())]), ..Default::default()
+        };
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
+        let intent = profile_request();
+        let mut accepted = intent.clone();
+        reconciler.resolve_resource_profile(&mut accepted).unwrap();
+        let fit = Fit { outside_bytes: 128 * GIB, ..test_fit() };
+        assert!(matches!(store.request_resource_membership(&accepted, fit, 1).unwrap(), Admission::Queued { .. }));
+        let mut changed = profile_seed();
+        changed.memory = 12 * GIB;
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), changed)]), ..Default::default()
+        };
+        let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
+        let mut replay = intent;
+        reconciler.resolve_resource_profile(&mut replay).unwrap();
+        assert_eq!(replay, accepted);
+    }
+
+    #[test]
+    fn profile_resolution_refuses_overrides_and_unknown_keys_without_raw_capacity() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), profile_seed())]), ..Default::default()
+        };
+        let reconciler = Reconciler::new(store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
+        let mut request = profile_request();
+        request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
+        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("profile-override-conflict"));
+        request = profile_request();
+        request.profile = Some("unknown.workload".into());
+        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
+        request.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
+        assert!(reconciler.resolve_resource_profile(&mut request).unwrap_err().to_string().contains("unknown-profile"));
+        let mut raw = profile_request();
+        raw.profile = None;
+        raw.capacity = request.capacity;
+        assert!(reconciler.resolve_resource_profile(&mut raw).unwrap_err().to_string().contains("raw-resource-declaration"));
+    }
+
     #[test]
     fn disabled_heavy_io_refuses_before_disk_or_memory_observation() {
         use super::super::tests::FakeRuntime;
@@ -300,6 +463,7 @@ mod tests {
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy));
         let candidate = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "disabled".into(), name: "checks".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -327,6 +491,7 @@ mod tests {
                 filesystem: 7, available: reading.load(Ordering::Relaxed), total: 200 * GIB,
             })));
         let candidate = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "disk-wait".into(), name: "checks".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check,
@@ -344,6 +509,49 @@ mod tests {
         assert!(matches!(store.request_resource_membership(&candidate, fit, 2).unwrap(), Admission::Admitted(_)));
     }
 
+    #[test]
+    fn replication_health_alert_raises_without_a_worker_and_recovers_with_live_evidence() {
+        use super::super::tests::FakeRuntime;
+        use smallclaims::replication::ReplicationHealth;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.bind_fleet("fleet/silent").unwrap();
+        let now = smallclaims::store::now_ms();
+        store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), None);
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_replication_health().unwrap();
+        let title = "Replication is not healthy on node";
+        let raised = store
+            .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+            .unwrap();
+        assert!(
+            raised.iter().any(|request| request.title == title),
+            "{raised:?}"
+        );
+
+        store.replication_worker_observed_for_test(Some(now.saturating_sub(120_000)), Some(now));
+        store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .entry("sponsor".into())
+            .or_default()
+            .observe(0, Some((0, 0)), now);
+        reconciler.reconcile_replication_health().unwrap();
+        assert_eq!(store.replication_health(true).unwrap(), ReplicationHealth::Healthy);
+        let recovered = store
+            .pending_operational_failures(crate::reconcile::RECONCILER_ACTOR, "node")
+            .unwrap();
+        assert!(
+            recovered.iter().all(|request| request.title != title),
+            "{recovered:?}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_logical_requests_use_native_custody_without_linux_lane_observation() {
@@ -352,6 +560,7 @@ mod tests {
         store.start_resource_authority("node", "epoch").unwrap();
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
         let candidate = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "logical".into(), name: "checks".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -382,6 +591,7 @@ mod tests {
             .with_finite_resources(Some(policy))
             .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));
         let candidate = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "ci-check".into(), name: "ci".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: RequestClass::Check, disk: Some(DiskRequest { bytes: 61, path: "/mount/work".into() }),
@@ -426,6 +636,7 @@ mod tests {
         });
         let capacity = Capacity { cores: 4, memory: 15 * GIB };
         let requests: Vec<_> = (0..20).map(|index| LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: format!("queued-{index:02}"), name: "checks".into(), host: "node".into(),
             max_members: 1, capacity: Some(capacity), coverage: Coverage::Logical,
             admission_timeout_ms: None,
@@ -470,6 +681,7 @@ mod tests {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, source, "inherited-retry");
         let parent = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "program-parent".into(), name: "verification".into(), host: "node".into(),
             max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
@@ -628,7 +840,7 @@ mod tests {
                 "inherited-exec" => r#"agentless
                     exec "payload" { command "true"; }"#.to_owned(),
                 "queued-exec" => r#"agentless
-                    lane "checks" host="node" max-members=1 coverage="logical" { capacity cores=1 memory="1G"; }
+                    lane "checks" host="node" max-members=1 profile="check.unit" coverage="logical"
                     exec "payload" { command "true"; }"#.to_owned(),
                 _ => unreachable!(),
             };
@@ -659,6 +871,7 @@ mod tests {
                 attempt: upstream.steps[0].attempt, invocation: None,
             };
             let parent = LaneRequest {
+                profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
                 id: "parent".into(), name: "checks".into(), host: "node".into(),
                 max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical,
                 admission_timeout_ms: None, owner: owner.clone(),
@@ -678,7 +891,9 @@ mod tests {
             assert!(store.resource_context_for_run(&child.subject).unwrap().is_some());
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
-            );
+            ).with_finite_resources(Some(fractal_runtime::host::FinitePolicy {
+                profiles: BTreeMap::from([("check.unit".into(), profile_seed())]), ..Default::default()
+            }));
             // As in the program-host fault regression, prevent a JavaScript host from starting
             // without depending on installed runtimes, process scheduling, or wall-clock sleeps.
             let dir = tempfile::tempdir().unwrap();

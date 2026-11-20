@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Enable sha2's runtime-detected hardware SHA instructions on aarch64 targets. Manifest-policy regression coverage guards target-specific feature selection, and standard SHA-256/SHA-512 vectors guard digest compatibility. Stored and exchanged digest bytes remain unchanged.",
+  "replay": { "status": "none", "detail": "No replay, backfill or retained claim change." },
+  "schema": { "status": "none", "detail": "No schema, projection or digest format change." },
+  "rules": { "status": "none", "detail": "No claim, membership or reconciliation rule change." },
+  "compatibility": { "status": "none", "detail": "SHA-256 bytes are identical. Runtime CPU feature detection retains the software fallback; non-aarch64 feature selection is unchanged." },
+  "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no coordinated interruption." },
+  "manual": { "status": "none", "detail": "No manual steps or feature activation." },
+  "recovery": { "status": "none", "detail": "Revert the dependency feature to restore the software backend; no stored state conversion." }
+}

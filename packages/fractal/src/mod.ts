@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { Schema, SchemaGetter } from 'effect'
+import { DateTime, Duration as EffectDuration, Schema, SchemaGetter } from 'effect'
 
 import { node, type Node, type Value } from './kdl.ts'
 import type {
@@ -33,6 +33,7 @@ import {
   ReviewSchema,
   DurationSchema as Duration,
   NonNegativeDurationSchema as NonNegativeDuration,
+  Instant,
   launchReferences,
   lowerDuration,
   lowerInstant,
@@ -54,6 +55,7 @@ export {
   DurationSchema,
   NonNegativeDurationSchema,
   InstantSchema,
+  Instant,
   normalizeDuration,
   normalizeInstant,
   lowerDuration,
@@ -362,12 +364,89 @@ const declaredAdmissionNodes = ({
       ]),
 ]
 
+// Match native declaration_syntax::validate_name(value, false), including empty segments.
+const ResourceReferenceName = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string =>
+      value.length <= 512 &&
+      /^[A-Za-z0-9][A-Za-z0-9._@/-]*$/u.test(value) &&
+      !value.endsWith('/') &&
+      !value.split('/').some((part) => part === '' || part === '..'),
+    { message: 'invalid resource reference name' },
+  ),
+)
+// Native absolute URIs accept any scheme and preserve authored bytes, not URL normalization.
+const ResourceReferenceUri = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string =>
+      value.length <= 4096 &&
+      /^[A-Za-z][A-Za-z0-9+.-]*:.+$/u.test(value) &&
+      /^[\x21-\x7e]+$/u.test(value) &&
+      !/["<>\\^`{|}]/u.test(value) &&
+      !/%(?![A-Fa-f0-9]{2})/u.test(value),
+    { message: 'expected an absolute resource URI' },
+  ),
+)
+const ResourceReferenceFields = {
+  name: ResourceReferenceName,
+  reason: Schema.optionalKey(
+    Text.pipe(Schema.refine((value): value is string => value.trim().length > 0)),
+  ),
+}
+
+/** A named native declared-resource edge, not a managed resource body or kit metadata. */
+export const ResourceReferenceSchema = Schema.Union([
+  Schema.Struct({
+    ...ResourceReferenceFields,
+    subject: Schema.String.pipe(
+      Schema.refine(
+        (value): value is string =>
+          value.startsWith('resource/') &&
+          Schema.is(ResourceReferenceName)(value.slice('resource/'.length)),
+        { message: 'expected resource/ followed by a valid resource name' },
+      ),
+    ),
+    uri: Schema.optionalKey(Schema.Never),
+  }),
+  Schema.Struct({
+    ...ResourceReferenceFields,
+    uri: ResourceReferenceUri,
+    subject: Schema.optionalKey(Schema.Never),
+  }),
+]).annotate({ identifier: 'Fractal.ResourceReference' })
+
+export type ResourceReference = typeof ResourceReferenceSchema.Encoded
+
+const ResourceReferences = Schema.Array(ResourceReferenceSchema).pipe(
+  Schema.refine(
+    (values): values is typeof values =>
+      new Set(values.map((value) => value.name)).size === values.length,
+    { message: 'resource reference names must be unique within their declaration' },
+  ),
+)
+
+const resourceReferenceNodes = (
+  references: readonly ResourceReference[] | undefined,
+): Node[] =>
+  (references ?? []).map((reference) =>
+    node({
+      name: 'resource',
+      args: [reference.name],
+      props: {
+        ...(reference.subject === undefined ? {} : { subject: reference.subject }),
+        ...(reference.uri === undefined ? {} : { uri: reference.uri }),
+        ...(reference.reason === undefined ? {} : { reason: reference.reason }),
+      },
+    }),
+  )
+
 const AgentSchemaFields = Schema.Struct({
   id: SubjectId,
   identity: Schema.optionalKey(Text),
   name: Schema.optionalKey(Text),
   description: Schema.optionalKey(Text),
   principal: Schema.optionalKey(PersonReferenceSchema),
+  resourceReferences: Schema.optionalKey(ResourceReferences),
   lifecycle: Schema.optionalKey(
     Schema.Union([Schema.Literal('standing'), Schema.Literal('owner'), Schema.Literal('bounded')]),
   ),
@@ -825,9 +904,122 @@ const UsedMissionSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('output'), outputOf: LocalId }),
 ]).annotate({ identifier: 'Fractal.UsedMission' })
 
+const EscalationAfter = Schema.Duration.check(Schema.makeFilter((after) => {
+  const millis = EffectDuration.toMillis(after)
+  return Number.isSafeInteger(millis) && millis > 0
+}, { message: 'escalation delay must be a positive, finite whole number of milliseconds' }))
+
+export const EscalationActionSchema = Schema.Union([
+  Schema.TaggedStruct('notify', { recipient: AgentReferenceSchema }),
+  Schema.TaggedStruct('ask', { recipient: PersonReferenceSchema }),
+]).annotate({ identifier: 'Fractal.EscalationAction' })
+
+/** Step states mirror the existing WorkState literal union, not presentation labels. */
+const StepEscalationState = Schema.Literals([
+  'waiting-person', 'waiting', 'ready', 'claimed', 'blocked', 'verifying',
+  'completed', 'failed', 'cancelled',
+])
+const RunEscalationState = Schema.Literals([
+  'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled',
+])
+const EscalationClock = Schema.Literals(['since-progress', 'since-entered'])
+/** Absolute stage delays. IDs are required and unique within their declaration scope. */
+export const EscalationSchema = Schema.Struct({
+  id: LocalId,
+  when: Schema.Struct({
+    state: StepEscalationState,
+    clock: EscalationClock,
+  }),
+  stages: Schema.NonEmptyArray(Schema.Struct({
+    after: EscalationAfter,
+    action: EscalationActionSchema,
+  })),
+}).check(Schema.makeFilter(
+  (policy) => policy.stages.every((stage, index) =>
+    index === 0 || EffectDuration.isGreaterThan(stage.after, policy.stages[index - 1]!.after)),
+  { message: 'escalation stages must have strictly increasing absolute delays' },
+)).annotate({ identifier: 'Fractal.Escalation' })
+
+export const MissionEscalationSchema = Schema.Struct({
+  ...EscalationSchema.fields,
+  when: Schema.Struct({ state: RunEscalationState, clock: EscalationClock }),
+}).check(Schema.makeFilter(
+  (policy) => policy.stages.every((stage, index) =>
+    index === 0 || EffectDuration.isGreaterThan(stage.after, policy.stages[index - 1]!.after)),
+  { message: 'escalation stages must have strictly increasing absolute delays' },
+))
+export const StepEscalationOverrideSchema = Schema.Union([
+  Schema.TaggedStruct('inherit', {}),
+  Schema.TaggedStruct('disable', {}),
+  Schema.TaggedStruct('replace', {
+    policies: Schema.NonEmptyArray(EscalationSchema).check(Schema.makeFilter(
+      (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
+      { message: 'escalation policy IDs must be unique within a scope' },
+    )),
+  }),
+])
+export const MissionEscalationOverrideSchema = Schema.Union([
+  Schema.TaggedStruct('inherit', {}),
+  Schema.TaggedStruct('disable', {}),
+  Schema.TaggedStruct('replace', {
+    policies: Schema.NonEmptyArray(MissionEscalationSchema).check(Schema.makeFilter(
+      (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
+      { message: 'escalation policy IDs must be unique within a scope' },
+    )),
+  }),
+])
+
+type EscalationInput = typeof EscalationSchema.Encoded | typeof MissionEscalationSchema.Encoded
+/** Named constructors expand directly into native policy content. */
+export const silence = <TState extends EscalationInput['when']['state']>(input: Omit<EscalationInput, 'when'> & {
+  readonly state: TState
+}): Omit<EscalationInput, 'when'> & { when: { state: TState; clock: 'since-progress' } } => ({
+  id: input.id, when: { state: input.state, clock: 'since-progress' }, stages: input.stages,
+})
+export const residency = <TState extends EscalationInput['when']['state']>(input: Omit<EscalationInput, 'when'> & {
+  readonly state: TState
+}): Omit<EscalationInput, 'when'> & { when: { state: TState; clock: 'since-entered' } } => ({
+  id: input.id, when: { state: input.state, clock: 'since-entered' }, stages: input.stages,
+})
+
+const lowerEscalationAction = (action: typeof EscalationActionSchema.Type): Record<string, Value> => {
+  switch (action._tag) {
+    case 'notify': return { notify: `agent/${action.recipient.id}` }
+    case 'ask': return { ask: action.recipient.subject }
+  }
+}
+
+const lowerEscalation = (
+  value: typeof StepEscalationOverrideSchema.Type | typeof MissionEscalationOverrideSchema.Type | undefined,
+): Node[] => {
+  if (value === undefined || value._tag === 'inherit') return []
+  if (value._tag === 'disable') return [node({ name: 'escalation', props: { disabled: true } })]
+  return [block({
+    name: 'escalation',
+    children: value.policies.map((policy) => node({
+      name: 'policy',
+      args: [policy.id],
+      props: { state: policy.when.state, clock: policy.when.clock },
+      children: policy.stages.map((stage) => node({
+        name: 'stage',
+        args: [humanEscalationDuration(EffectDuration.toMillis(stage.after))],
+        props: lowerEscalationAction(stage.action),
+      })),
+    })),
+  })]
+}
+
+const humanEscalationDuration = (millis: number): string => {
+  for (const [unit, suffix] of [[86_400_000, 'd'], [3_600_000, 'h'], [60_000, 'm'], [1_000, 's'], [1, 'ms']] as const) {
+    if (millis % unit === 0) return `${millis / unit}${suffix}`
+  }
+  return `${millis}ms`
+}
+
 /** One mission step. */
 export const StepSchema = Schema.Struct({
   id: LocalId,
+  escalation: Schema.optionalKey(StepEscalationOverrideSchema),
   ...OwnedDeclarationFields,
   documents: Schema.optionalKey(Schema.Array(PinnedDocumentReferenceSchema)),
   timeout: Schema.optionalKey(Duration),
@@ -1019,6 +1211,7 @@ export const ReportToSchema = Schema.declare<typeof AgentSchema.Encoded>(isAgent
 export const MissionSchema = Schema.Struct({
   id: MissionId,
   budget: Schema.optionalKey(MissionBudget),
+  resourceReferences: Schema.optionalKey(ResourceReferences),
   ...RetiredAdmissionFields,
   inputs: Schema.optionalKey(
     Schema.Array(MissionInputSchema).pipe(
@@ -1031,6 +1224,7 @@ export const MissionSchema = Schema.Struct({
   ...OwnedDeclarationFields,
   state: Schema.Literal('ready'),
   reportTo: ReportToSchema,
+  escalation: Schema.optionalKey(MissionEscalationOverrideSchema),
   assignedTo: Schema.optionalKey(Schema.Union([AgentReferenceSchema, PersonReferenceSchema])),
   concurrentRuns: Schema.optionalKey(
     Schema.Int.pipe(
@@ -1044,6 +1238,17 @@ export const MissionSchema = Schema.Struct({
   stalledAfter: Schema.optionalKey(Duration),
   reportStalls: Schema.optionalKey(Schema.Boolean),
   reportCompleted: Schema.optionalKey(Schema.Boolean),
+  /** Soft metadata only; no scheduling, notification or execution effect. */
+  targetAt: Schema.optionalKey(Instant),
+  milestones: Schema.optionalKey(Schema.Array(Schema.Struct({
+    id: LocalId,
+    at: Instant,
+  })).check(Schema.makeFilter(
+    (values) => new Set(values.map((value) => value.id)).size === values.length
+      && values.every((value, index) => index === 0
+        || value.at.epochMilliseconds > values[index - 1]!.at.epochMilliseconds),
+    { message: 'milestones need unique IDs and strictly increasing instants' },
+  ))),
   goal: Goal,
   gates: Schema.optionalKey(
     Gates.pipe(
@@ -1734,6 +1939,7 @@ const productsNode = (products: readonly (typeof ProductSchema.Encoded)[]): Node
 const lowerStep = (input: typeof StepSchema.Encoded): Node => {
   const s = decode({ schema: StepSchema, input })
   const children: Node[] = []
+  children.push(...lowerEscalation(s.escalation))
   if (s.agentless === true) children.push(node({ name: 'agentless' }))
   if (s.assignedTo !== undefined) {
     children.push(
@@ -2502,6 +2708,10 @@ export const missionWire = <const TMission extends string>(
   return {
     ...m,
     reportTo: { id: m.reportTo.id },
+    ...(m.targetAt === undefined ? {} : { targetAt: DateTime.formatIso(m.targetAt) }),
+    ...(m.milestones === undefined ? {} : {
+      milestones: m.milestones.map(({ id, at }) => ({ id, at: DateTime.formatIso(at) })),
+    }),
     ...(m.assignedTo !== undefined && 'id' in m.assignedTo
       ? { assignedTo: { id: m.assignedTo.id } }
       : {}),
@@ -2536,9 +2746,15 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
       ...(m.stalledAfter === undefined ? {} : { 'stalled-after': lowerDuration(m.stalledAfter) }),
       ...(m.reportStalls === undefined ? {} : { 'report-stalls': m.reportStalls }),
       ...(m.reportCompleted === undefined ? {} : { 'report-completed': m.reportCompleted }),
+      ...(m.targetAt === undefined ? {} : { 'target-at': DateTime.formatIso(m.targetAt) }),
     },
     children: [
+      ...lowerEscalation(m.escalation),
       ...declaredAdmissionNodes(m),
+      ...(m.milestones ?? []).map(({ id, at }) =>
+        node({ name: 'milestone', args: [id], props: { at: DateTime.formatIso(at) } }),
+      ),
+      ...resourceReferenceNodes(m.resourceReferences),
       ...(m.concurrentRuns === undefined
         ? []
         : [node({ name: 'concurrent-runs', props: { max: m.concurrentRuns } })]),
@@ -2608,6 +2824,7 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
     ...optionalChild({ name: 'name', value: a.name }),
     ...optionalChild({ name: 'description', value: a.description }),
     ...optionalChild({ name: 'principal', value: a.principal?.subject }),
+    ...resourceReferenceNodes(a.resourceReferences),
     ...optionalChild({ name: 'lifecycle', value: a.lifecycle }),
     ...declaredAdmissionNodes(a),
     ...optionalChild({ name: 'host', value: a.host }),

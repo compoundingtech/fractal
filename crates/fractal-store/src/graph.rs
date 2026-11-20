@@ -1539,6 +1539,19 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
+    // Memberless roots need placement in their declaration. Launched roots already
+    // retain resolved placement in MemberSpec; keep their historical revisions stable.
+    if primary.is_none() {
+        let canonical_children = desired
+            .as_object_mut()
+            .expect("canonical node is an object")
+            .entry("children")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("canonical children are an array");
+        canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
+        canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
+    }
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
@@ -1640,11 +1653,14 @@ fn parse_agent(
             },
         )?;
     }
+    // A top-level root may be an inert identity/mail owner. A run-owned agent must
+    // still supply work to execute; declared launches were validated above.
     if context
         .subjects
         .get(&subject)
         .is_some_and(|subject| subject.member.is_none())
         && task_names.is_empty()
+        && context.owner_run.is_some()
     {
         return Err(FractalError::new(
             "missing-agent-launch",
@@ -2061,13 +2077,21 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalE
         observer.set_children(body);
         return parse_structure(&observer, "observer", context);
     }
-    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
+    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty" | "objective" | "github-source" | "github-scope")) {
         return Err(FractalError::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
+            format!("stop requires a full agent, exec, PTY, objective, GitHub source or GitHub scope subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();
+    // These roots retire only their declaration. A run cannot retire fleet measurement/configuration,
+    // and this stop neither deletes historical facts nor changes acquisition-authority receipts.
+    if context.owner_run.is_some() && kind == "objective" {
+        return Err(FractalError::new("objective-inside-mission", "an objective retirement must be at the root"));
+    }
+    if context.owner_run.is_some() && matches!(kind, "github-source" | "github-scope") {
+        return Err(FractalError::new("github-configuration-inside-mission", "GitHub configuration retirement must be at the root"));
+    }
     let local = subject
         .strip_prefix(&format!("{kind}/"))
         .unwrap_or(&subject);
@@ -2212,14 +2236,14 @@ fn driver_member(
     let extra = child_strings(children, "args")?.unwrap_or_default();
     let mut provider = vec![child_string(children, "executable")?.unwrap_or_else(|| name.clone())];
     if name == "claude" {
-        // A typed Claude harness is always the real interactive TUI and always carries st3's
+        // A typed Claude harness is always the real interactive TUI and always carries Fractal's
         // native channel. `dev-channels #true` is retained only so declarations written before
         // the channel became intrinsic continue to parse; opting out would create an agent that
         // cannot receive graph messages, so false is rejected below.
         provider.extend(["--channels".into(), fractal_drivers::claude_channel::FRACTAL_CHANNEL.into()]);
         // The channel wakes the real TUI, while Claude's own lifecycle hooks externalize the
         // resulting turn. Supplying the canonical registration as an additional native settings
-        // source keeps arbitrary user workspaces untouched and gives every typed st seat the
+        // source keeps arbitrary user workspaces untouched and gives every typed Fractal seat the
         // same UserPromptSubmit/Stop state edges.
         provider.extend([
             "--settings".into(),
@@ -4584,6 +4608,43 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_launch_agents_retain_resolved_host_placement() {
+        for (source, expected) in [
+            ("version 2\nagent \"example/owner\" { host \"other\" }", "other"),
+            ("version 2\nhost \"other\" { agent \"example/owner\" {} }", "other"),
+            ("version 2\nagent \"example/owner\" { host \"local\" }", "node"),
+            ("version 2\nagent \"example/owner\" {}", "node"),
+        ] {
+            let intent = parse_intent(source, "node").unwrap();
+            let owner = &intent.subjects["agent/example/owner"];
+            assert!(owner.member.is_none());
+            assert_eq!(
+                canonical_child_value(&owner.desired, "host").and_then(Value::as_str),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn inert_roots_do_not_relax_run_owned_or_declared_launch_validation() {
+        assert_eq!(
+            parse_execution_intent(
+                "version 2\nagent \"owner\" { host \"node\"; }",
+                "node",
+                "run-1",
+            )
+            .unwrap_err()
+            .code,
+            "missing-agent-launch",
+        );
+        assert!(parse_intent(
+            "version 2\nagent \"example/owner\" { host \"node\"; command \"true\"; argv \"false\"; }",
+            "node",
+        )
+        .is_err());
+    }
 
     #[test]
     fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {

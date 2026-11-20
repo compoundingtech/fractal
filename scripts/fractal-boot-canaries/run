@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot canary: a real st3 daemon boots seats of one harness against a token-free stand-in provider.
+"""Boot canary: a real Fractal daemon boots seats of one harness against a token-free stand-in provider.
 
     run BINARY EVIDENCE_DIR HARNESS SCENARIO
 
@@ -11,7 +11,7 @@ step it names. SCENARIO is one of
     restart         the seat is restarted and the new incarnation boots
     daemon-restart  the daemon dies with the seat's provider; the new daemon, whose latest
                     observation of the seat is still the dead predecessor, boots a replacement
-    reexec          the st binary is replaced; the seat's driver re-execs into it and still
+    reexec          the Fractal binary is replaced; the seat's driver re-execs into it and still
                     takes a message
     concurrent      five seats launch at once
     suspend         the booted seat finishes its step and is suspended: no process remains, a
@@ -24,9 +24,11 @@ step it names. SCENARIO is one of
                     through discovery I/O failures, with private, rate-limited warnings.
     idle-hold       Codex/OpenCode make zero hold calls during a real idle window, then deliver
                     fresh mail and retain native consumption across hold, release and expiry.
+    idle-suspend    a quiet seat automatically suspends under the signed fleet feature barrier;
+                    wake-class mail resumes its exact native session and reaches a first turn.
 
-Every seat must, within the time bound, claim its step with its current incarnation and read an
-st message, and none may park in the crash-loop guard. The verdict is in EVIDENCE_DIR/result.json.
+Every seat must, within the time bound, claim its step with its current incarnation and read a
+Fractal message, and none may park in the crash-loop guard. The verdict is in EVIDENCE_DIR/result.json.
 """
 import argparse
 from collections import Counter
@@ -51,7 +53,7 @@ from fractal_test_evidence import register, capture, write_json
 from fractal_events import Events, claim, fields
 
 HARNESSES = ("claude", "codex", "pi", "omp", "opencode")
-SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "ask-sigterm", "ask-sigkill", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
+SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "ask-sigterm", "ask-sigkill", "reexec", "concurrent", "suspend", "idle-suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
 MISSION = "canary/boot"
 RUN_ID = f"{MISSION}/c1"
 LETTERS = "abcde"
@@ -125,7 +127,7 @@ class Node:
         for sub in ("bin", "home", "run", "ws", "state"):
             (root / sub).mkdir(parents=True, exist_ok=True)
         # The seat's driver follows ST3_BIN, so re-pointing this link is how a deploy swaps the
-        # binary. A link, because a debug st3 is hundreds of megabytes and /tmp is a small tmpfs.
+        # binary. A link, because a debug Fractal binary is hundreds of megabytes and /tmp is a small tmpfs.
         self.binary = root / "bin/st3"
         self.binary.symlink_to(binary)
         # The Nix sandbox has no /usr/bin/env and only /bin/sh: the daemon's login shell runs `env -0`
@@ -199,7 +201,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         result = subprocess.run([str(self.binary), "--endpoint", str(self.endpoint), *args], env=self.env,
                                 capture_output=True, text=True, timeout=120)
         if check and result.returncode:
-            raise Failure(f"st {' '.join(args)}: {result.stderr.strip()} {result.stdout.strip()}")
+            raise Failure(f"fractal {' '.join(args)}: {result.stderr.strip()} {result.stdout.strip()}")
         return result.stdout
 
     def json(self, *args):
@@ -389,7 +391,7 @@ class Seats:
 
 
 def driver_processes(node):
-    """The seat's long-lived st processes (driver and channels), by pid and the inode they execute."""
+    """The seat's long-lived Fractal processes (driver and channels), by pid and the inode they execute."""
     rows = {}
     for pid, argv in node.seat_processes():
         if " driver-hook " in argv:
@@ -406,7 +408,7 @@ def driver_processes(node):
 
 
 def check_boundary(node, stopped=False, processes=None):
-    """A fresh seat's processes stay inside st's boundary."""
+    """A fresh seat's processes stay inside Fractal's boundary."""
     if processes is None:
         processes = node.seat_processes(with_environment=True)
     if stopped:
@@ -470,7 +472,7 @@ def native_sessions(node, letter):
 
 
 def stage_symlinked_inventory(node, harness, session):
-    """Make the suspended seat's omp transcript what st stages for an authored one: an
+    """Make the suspended seat's omp transcript what Fractal stages for an authored one: an
     individual-file symlink in the inventory, the file itself kept elsewhere (st2#3021)."""
     if harness != "omp":
         return None
@@ -603,7 +605,7 @@ def suspend_and_resume(node, seats, harness):
              "--summary", "boot canary step done")
 
     def suspend():
-        # The harness settles after its last turn; until its driver reports it quiet, st refuses.
+        # The harness settles after its last turn; until its driver reports it quiet, Fractal refuses.
         result = node.cli("agents", "suspend", subject, "--as", "person/eval", "--timeout", "60s",
                           "--json", check=False)
         try:
@@ -649,7 +651,7 @@ def suspend_and_resume(node, seats, harness):
     if latest != (native, True):
         fail(f"the resumed harness ran {latest}, not session {native} resumed")
     if staged is not None:
-        # omp's session-ID lookup does not follow symlinks, so only the path st checked finds it.
+        # omp's session-ID lookup does not follow symlinks, so only the path Fractal checked finds it.
         started = [row for row in receipts(node, "a") if row.get("event") == "started"]
         if len(started) <= starts_before:
             fail("the resumed omp launch left no start receipt")
@@ -708,6 +710,98 @@ def suspend_and_resume(node, seats, harness):
         fail(f"a failed resume left {json.dumps(shown.get('suspension'))} in state {shown.get('state')}: "
              f"{result.stderr.strip()}")
     seats.timings["suspend:failed-resume-code"] = code
+
+
+def idle_suspend_and_wake(node, seats):
+    """Exercise policy, owner admission, native restore and delivery without a resume command."""
+    subject = seat_subject("a")
+    launched = native_sessions(node, "a")
+    if not launched or not launched[-1][0]:
+        fail("the booted seat has no native session receipt")
+    native = launched[-1][0]
+    work = node.json("work", "show", seats.step("a"))["value"]
+    node.cli("work", "complete", seats.step("a"), "--as", subject,
+             "--incarnation", work["claim_incarnation"], "--summary", "idle canary step done")
+    started = time.monotonic()
+    latest = {}
+
+    def suspended():
+        agent = node.json("agents", "show", subject)["value"]
+        suspension = agent.get("suspension") or {}
+        latest.update({key: agent.get(key) for key in (
+            "state", "residency", "suspension", "delivery", "_status_source",
+            "incarnation_id", "current_session_id",
+        )})
+        if parked(node, subject):
+            fail("the idle canary parked instead of suspending")
+        if agent.get("state") == "suspended" and suspension.get("phase") == "suspended":
+            return agent
+        return None
+
+    try:
+        agent = until(suspended, seats.bound, "policy did not automatically suspend the quiet seat",
+                      lambda: node.daemon.poll() is None or fail("daemon exited during idle suspension"))
+    except Failure as error:
+        fail(f"{error}; last residency snapshot: {json.dumps(latest, sort_keys=True)}")
+    suspension = agent["suspension"]
+    if suspension.get("cause") != "idle" or suspension.get("native_session_id") != native:
+        fail(f"idle suspension did not capture the original session {native}: {suspension}")
+    until(lambda: not node.seat_processes(), 60, "the idle-suspended seat still has live processes")
+    check_boundary(node, stopped=True)
+    seats.timings["idle-suspend:seconds-to-stop"] = round(time.monotonic() - started, 1)
+    before = len(receipts(node, "a"))
+    launches_before = len(native_sessions(node, "a"))
+    woke_at = time.time()
+    sent = node.json("conversations", "send", subject, "--from", "person/eval",
+                     "--subject", "wake idle session", "--body", "boot canary idle wake first turn")["subject"]
+
+    def resumed():
+        agent = node.json("agents", "show", subject)["value"]
+        suspension = agent.get("suspension") or {}
+        latest.update({key: agent.get(key) for key in latest})
+        if parked(node, subject):
+            fail("wake demand parked the idle seat")
+        if suspension.get("phase") == "resumed" and (agent.get("delivery") or {}).get("state") in ("current", "legacy"):
+            return agent
+        return None
+
+    try:
+        agent = until(resumed, seats.bound, "wake-class mail did not resume a channel-ready seat",
+                      lambda: node.daemon.poll() is None or fail("daemon exited during idle wake"))
+    except Failure as error:
+        actions = [row for row in trace(node, subject) if row.get("kind") in (
+            "runtime.action.requested", "runtime.action.succeeded", "runtime.action.failed",
+            "harness.diagnostic", "harness.session-file",
+        )]
+        fail(f"{error}; last residency snapshot: {json.dumps(latest, sort_keys=True)}; "
+             f"native action trace: {json.dumps(actions[-12:], sort_keys=True)}; "
+             f"daemon log: {node.tail('daemon.log')}")
+    if agent["suspension"].get("native_session_id") != native:
+        fail(f"idle wake changed the bound native session: {agent['suspension']}")
+    until(lambda: len(native_sessions(node, "a")) > launches_before, seats.bound,
+          "idle wake produced no native resume receipt")
+    resumed_sessions = native_sessions(node, "a")[launches_before:]
+    if any(session != (native, True) for session in resumed_sessions):
+        fail(f"idle wake started a different or fresh native session: {resumed_sessions}")
+
+    def consumed():
+        rows = receipts(node, "a")[before:]
+        turns = [row for row in rows if row.get("event") == "turn"
+                 and offers(row.get("text", ""), sent)]
+        reads = [row for row in rows if row.get("event") == "read" and row.get("reference") == sent]
+        status = (node.api("/v1/messages/read/" + sent) or {}).get("status")
+        return (turns, reads) if turns and reads and status in ("read", "closed") else None
+
+    turns, reads = until(consumed, seats.bound, "the restored native provider never took the wake message's first turn")
+    if len(turns) != 1 or len(reads) != 1 or native_offer_count(node, sent) != 1:
+        fail(f"idle wake replayed the message: {len(turns)} turns, {len(reads)} reads")
+    seats.timings["idle-suspend:seconds-to-first-turn"] = round(turns[0]["at"] - woke_at, 1)
+    node.idle_suspend_control = {
+        "cause": "idle", "native_session_id": native, "message": sent,
+        "suspended": suspension, "resumed": agent["suspension"],
+        "delivery": agent.get("delivery"), "native_resumes": resumed_sessions,
+        "first_turn": turns[0], "read_receipt": reads[0],
+    }
 
 
 def continued_session(node, label):
@@ -1103,6 +1197,9 @@ def scenario(node, seats, name, scratch, replacement_binary=None):
     if name == "suspend":
         suspend_and_resume(node, seats, node.harness)
         return
+    if name == "idle-suspend":
+        idle_suspend_and_wake(node, seats)
+        return
     if name == "channel-parked":
         claude_channel_parked(node, seats)
         return
@@ -1262,6 +1359,17 @@ def run(args, root, evidence):
     if args.scenario == "access-auto":
         with (root / "config.toml").open("a") as config:
             config.write('access_mode = "auto"\n')
+    if args.scenario == "idle-suspend":
+        if args.harness != "omp":
+            fail("idle-suspend requires the supported omp driver and its native turn receipts")
+        with (root / "config.toml").open("a") as config:
+            config.write('[reconcile]\nidle_suspend_after = "1m"\nidle_resume_concurrency = 2\n')
+        # Fleet creation reads the canonical configuration, rather than `up --config`.
+        # Bootstrap actual signed membership: an unanchored daemon must not bypass the barrier.
+        config_dir = root / "home/.config/st3"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.toml").symlink_to(root / "config.toml")
+        node.cli("fleet", "create", "--no-service", "--dial-out", "--name", "canary")
     count = 5 if args.scenario == "concurrent" else 1
     letters = LETTERS[:count]
     seats = Seats(node, letters, args.bound)
@@ -1276,7 +1384,7 @@ def run(args, root, evidence):
         else:
             node.start()
         source = root / "mission.kdl"
-        source.write_text(mission_source(node, count, args.harness, hold=args.scenario in ("suspend", "claim-socket-denied", "ask-sigterm", "ask-sigkill")))
+        source.write_text(mission_source(node, count, args.harness, hold=args.scenario in ("suspend", "idle-suspend", "claim-socket-denied", "ask-sigterm", "ask-sigkill")))
         node.cli("apply", str(source), "--as", "person/eval")
         node.cli("missions", "start", MISSION, "--id", RUN_ID, "--workspace", str(root / "ws"),
                  "--as", "person/eval")
@@ -1357,6 +1465,7 @@ def run(args, root, evidence):
         return {"verdict": "pass", "harness": args.harness, "scenario": args.scenario,
                 "seconds_to_boot": seats.timings,
                 "idle_delivery_control": getattr(node, "idle_delivery_control", None),
+                "idle_suspend_control": getattr(node, "idle_suspend_control", None),
                 "catalog_files": len(catalogs_after),
                 "harness_record_files": len(records), "observation_spools": len(spools)}
     except (Failure, subprocess.TimeoutExpired) as error:

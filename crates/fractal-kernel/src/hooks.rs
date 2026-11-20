@@ -1,8 +1,8 @@
-//! The lifecycle hook set an st3 seat's harness runs.
+//! The lifecycle hook set a Fractal seat's harness runs.
 //!
 //! Every script execs `"$ST3_BIN" driver-hook NAME`: the st3 binary that launched the seat answers
 //! the hook itself, so no seat looks an `st2` program up on PATH. The set is published beneath
-//! st3's own state directory as an immutable content-addressed directory,
+//! Fractal's own state directory as an immutable content-addressed directory,
 //! `STATE/hooks/sets/sha256-…`, and `$ST_HOOKS` names it. A changed script is a new directory, and
 //! an older directory stays in place, so a running seat keeps the set it started with until it
 //! restarts.
@@ -23,8 +23,8 @@ pub const FILES: [(&str, &[u8]); 4] = [
     ("omp-channel.ts", include_bytes!("../../fractal-daemon/hooks/omp-channel.ts")),
 ];
 
-/// The file that makes a directory an st3 hook set. st2 skips an `$ST_HOOKS` that holds it.
-pub const MANIFEST: &str = fractal_drivers::hooks::ST3_SET_MARKER;
+/// The file that makes a directory a Fractal hook set. st2 skips an `$ST_HOOKS` that holds it.
+pub const MANIFEST: &str = fractal_drivers::hooks::FRACTAL_SET_MARKER;
 const SETS_DIR: &str = "sets";
 
 fn sha256(bytes: &[u8]) -> String {
@@ -51,7 +51,7 @@ pub fn set_id() -> String {
     format!("sha256-{}", sha256(&manifest_bytes()))
 }
 
-/// The hook root beneath an st3 state directory.
+/// The hook root beneath a Fractal state directory.
 pub fn root(state_dir: &Path) -> PathBuf {
     state_dir.join("hooks")
 }
@@ -165,10 +165,10 @@ pub fn ensure_installed(root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The Claude settings every st3 Claude seat carries: each lifecycle event goes to
+/// The Claude settings every Fractal Claude seat carries: each lifecycle event goes to
 /// `claude-observe.sh` and the status line to `claude-statusline.sh`, both in `$ST_HOOKS`.
 ///
-/// No SessionStart context is injected: an st3 seat takes no startup turn, and the native channel
+/// No SessionStart context is injected: a Fractal seat takes no startup turn, and the native channel
 /// delivers its messages. These hooks only externalize Claude's real turn and context state.
 pub fn claude_settings_registration() -> serde_json::Value {
     fn observe(event: &str) -> serde_json::Value {
@@ -188,7 +188,7 @@ pub fn claude_settings_registration() -> serde_json::Value {
             "UserPromptSubmit": observe("UserPromptSubmit"),
             "Stop": observe("Stop"),
             // The permission hook waits while a person may answer from a client (see
-            // `driver_hook::answer_permission_from_st`), past Claude's default hook timeout.
+            // `driver_hook::answer_permission_from_fractal`), past Claude's default hook timeout.
             "PermissionRequest": [{ "hooks": [{
                 "type": "command",
                 "command": "\"$ST_HOOKS/claude-observe.sh\" PermissionRequest",
@@ -250,7 +250,7 @@ pub fn claude_binding(agent_dir: &Path, incarnation: &str) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-/// Whether `text` runs an `st2` program or names a path in st2's state directory. st3 seats must
+/// Whether `text` runs an `st2` program or names a path in st2's state directory. Fractal seats must
 /// never depend on either, because st2 is being removed from every machine.
 pub fn mentions_st2_surface(text: &str) -> bool {
     let command = text
@@ -301,7 +301,7 @@ mod tests {
     fn st2_does_not_mistake_an_st3_set_for_its_hook_root() {
         let root = tempfile::tempdir().unwrap();
         let set = ensure_installed(root.path()).unwrap();
-        assert!(set.join(fractal_drivers::hooks::ST3_SET_MARKER).is_file());
+        assert!(set.join(fractal_drivers::hooks::FRACTAL_SET_MARKER).is_file());
         assert!(!set.join("manifest.json").exists());
     }
 
@@ -315,7 +315,7 @@ mod tests {
             assert!(!mentions_st2_surface(text), "{name} reaches st2:\n{text}");
             assert!(
                 text.contains("exec \"${FRACTAL_BIN-${ST3_BIN-}}\" driver-hook "),
-                "{name} does not hand its event to st3"
+                "{name} does not hand its event to Fractal"
             );
             assert!(!text.contains("command -v"), "{name} looks a program up");
             assert!(!text.contains("boot ritual"), "{name} ships a boot ritual");

@@ -1,4 +1,4 @@
-//! Local phone diagnostics: bounded admission, no graph writes, receipts or replication.
+//! Authenticated phone minute reports, admitted as immutable replicated graph claims.
 use super::client_v0::ClientSession;
 use super::*;
 use smallclaims::windows::{MinuteSummary, histogram_lower_ms, histogram_upper_ms};
@@ -29,16 +29,6 @@ pub struct Validated {
 
 pub fn invalid(message: &'static str) -> ApiError {
     ApiError::bad(FractalError::new("validation-failed", message))
-}
-pub fn unavailable() -> ApiError {
-    ApiError {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        code: "internal".into(),
-        message:
-            "local observation admission or history is unavailable; retry the identical report"
-                .into(),
-        details: Box::default(),
-    }
 }
 
 fn minute(value: &str) -> Result<u64, ApiError> {
@@ -213,6 +203,17 @@ fn validate(report: &ObservationReport, now: u64) -> Result<Vec<Validated>, ApiE
     Ok(out)
 }
 
+pub fn unavailable() -> ApiError {
+    ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "internal".into(),
+        message:
+            "local observation admission or history is unavailable; retry the identical report"
+                .into(),
+        details: Box::default(),
+    }
+}
+
 pub struct Accepted {
     id: String,
     digest: [u8; 32],
@@ -233,25 +234,8 @@ impl Drop for Ticket {
     }
 }
 
-pub async fn report(
-    State(state): State<AppState>,
-    Extension(session): Extension<ClientSession>,
-    body: Result<Json<ObservationReport>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let Some(grant) = session.pairing_grant else {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            code: "forbidden".into(),
-            message: "observations require an authenticated paired session".into(),
-            details: Box::default(),
-        });
-    };
-    let Json(report) = body.map_err(|e| ApiError {
-        status: e.status(),
-        code: "validation-failed".into(),
-        message: "invalid or oversized observation report".into(),
-        details: Box::default(),
-    })?;
+/// Frozen member-local diagnostic compatibility; never a native objective source.
+async fn local_diagnostics(state: AppState, grant: String, report: ObservationReport) -> Result<(), ApiError> {
     let now = client_now_ms() as u64;
     let samples = validate(&report, now)?;
     let bytes = serde_json::to_vec(&report).map_err(ApiError::internal)?;
@@ -271,7 +255,7 @@ pub async fn report(
     })
     .await
     .map_err(|_| unavailable())??;
-    Ok(Json(json!({"accepted":true})))
+    Ok(())
 }
 
 impl Admission {
@@ -420,6 +404,89 @@ fn append_history(dir: &Path, report: &ObservationReport, now: u64) -> std::io::
     Ok(())
 }
 
+fn claims(source: &str, grant: &str, report: &ObservationReport, now: u64) -> Result<Vec<crate::store::observation_minutes::ObservationMinute>, ApiError> {
+    let samples = validate(report, now)?;
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(report).map_err(ApiError::internal)?));
+    Ok(samples.into_iter().map(|sample| crate::store::observation_minutes::ObservationMinute {
+        source: source.into(), pairing_grant: grant.into(), report_id: report.report_id.clone(), report_digest: digest.clone(),
+        target: sample.key.0, carrier: sample.key.1, path: sample.key.2,
+        start_ms: sample.minute.start_ms, count: sample.minute.count, over: sample.minute.over,
+        max_ms: sample.minute.max_ms, buckets: sample.minute.buckets,
+    }).collect())
+}
+
+pub async fn report(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    body: Result<Json<ObservationReport>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(grant) = session.pairing_grant else {
+        return Err(client_v0::forbidden("observations require an authenticated paired session"));
+    };
+    let Json(report) = body.map_err(|error| ApiError {
+        status: error.status(), code: "validation-failed".into(),
+        message: "invalid or oversized observation report".into(), details: Box::default(),
+    })?;
+    let read_store = state.store.clone();
+    let read_grant = grant.clone();
+    let actor = session.authority_actor.clone();
+    let source = blocking_action(move || read_store.observation_source(&read_grant, &actor)).await?;
+    let minutes = claims(&source, &grant, &report, client_now_ms() as u64)?;
+    let write_state = state.clone();
+    let appended = blocking_action(move || write_state.store.accept_observation_minutes(&session.authority_actor, &minutes)).await?;
+    if appended { signal_visible_change(&state); }
+    local_diagnostics(state, grant, report).await?;
+    Ok(Json(json!({"accepted":true})))
+}
+
+/// Attach graph-backed phone populations to the native report. Replicated input reuses
+/// wire validation, including canonical histogram bins and the existing target policy.
+pub(super) fn attach(store: &Store, report: &mut Value, now: u64) -> anyhow::Result<()> {
+    let mut totals = BTreeMap::<String, smallclaims::windows::IntervalSeries>::new();
+    for minute in store.observation_minutes(now)? {
+        if minute.report_digest.len() != 64 || !minute.report_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) { continue; }
+        let Some(start) = chrono::DateTime::from_timestamp_millis(minute.start_ms as i64) else { continue; };
+        let Some(end_ms) = minute.start_ms.checked_add(60_000) else { continue; };
+        let Some(end) = chrono::DateTime::from_timestamp_millis(end_ms as i64) else { continue; };
+        let mut sample = json!({"target":minute.target, "carrier":minute.carrier, "path":minute.path,
+            "interval_start":start.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),
+            "interval_end":end.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)});
+        if minute.target == "ios-live-share" {
+            let Some(live) = minute.count.checked_sub(minute.over) else { continue; };
+            sample["kind"] = json!("live-share");
+            sample["foreground_ms"] = json!(minute.count);
+            sample["live_ms"] = json!(live);
+            if minute.max_ms != 0 || !minute.buckets.is_empty() { continue; }
+        } else {
+            sample["kind"] = json!("latency");
+            sample["count"] = json!(minute.count);
+            sample["over_target"] = json!(minute.over);
+            sample["max_ms"] = json!(minute.max_ms);
+            sample["buckets"] = json!(minute.buckets);
+        }
+        let Ok(wire) = serde_json::from_value::<ObservationReport>(json!({"report_id":minute.report_id,"samples":[sample]})) else { continue; };
+        let Ok(samples) = validate(&wire, now) else { continue; };
+        for sample in samples {
+            let total = totals.entry(sample.key.0).or_default();
+            anyhow::ensure!(total.can_record(&sample.minute), "phone minute aggregate capacity exceeded");
+            total.record(now, &sample.minute);
+        }
+    }
+    if let Some(rows) = report["targets"].as_array_mut() {
+        for row in rows {
+            let Some(target) = row["name"].as_str() else { continue; };
+            if target.starts_with("ios-") {
+                let share = target == "ios-live-share";
+                let windows = totals.get(target).map_or_else(
+                    || smallclaims::windows::IntervalSeries::default().snapshot(now, share),
+                    |series| series.snapshot(now, share),
+                );
+                row["windows"] = windows;
+            }
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +551,168 @@ mod tests {
         share["samples"][0]["live_ms"] = json!(10001);
         assert!(validate(&serde_json::from_value(share).unwrap(), now).is_err());
     }
+    #[tokio::test]
+    async fn observation_paired_session_transport_reader_doctor_and_body_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: Arc::new(
+                Store::open(&root.path().join("graph.db"), "observations-test").unwrap(),
+            ),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0u64).0,
+            node: "observations-test".into(),
+            api_socket: root.path().join("api.sock"),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused"),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
+        let grant = "custom/client/observation-pairing";
+        let credential = "observation-credential";
+        state
+            .store
+            .append_client_operation_claim(&ClaimInput {
+                subject: grant.into(),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/test".into()),
+                fields: BTreeMap::from([
+                    (
+                        "credential_hash".into(),
+                        json!(hex::encode(Sha256::digest(credential.as_bytes()))),
+                    ),
+                    ("session_actor".into(), json!("client/observation-session")),
+                    ("person_id".into(), json!("person/test")),
+                    ("device_id".into(), json!("example-phone-device-key")),
+                    ("scopes".into(), json!([])),
+                    (
+                        "expires_at_unix_ms".into(),
+                        json!(client_now_ms() as u64 + 60_000),
+                    ),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let app = fabric_router(state.clone());
+        let send = |app: Router, token: Option<&str>, wire: Vec<u8>| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/v1/client/observations")
+                .header("content-type", "application/json");
+            if let Some(token) = token {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            app.oneshot(builder.body(Body::from(wire)).unwrap())
+        };
+        let now = client_now_ms() as u64;
+        let r = report_at(now / 60_000 * 60_000 - 60_000);
+        let wire = serde_json::to_vec(&r).unwrap();
+        let index = state.store.index().unwrap();
+        assert_eq!(
+            send(app.clone(), None, wire.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(router(state.clone()), None, wire.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = send(app.clone(), Some(credential), wire.clone())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let accepted: fractal_client::ObservationResponse = serde_json::from_slice(&body).unwrap();
+        assert!(accepted.value.accepted);
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("snapshot").is_none());
+        let first_index = state.store.index().unwrap();
+        assert_eq!(
+            send(app.clone(), Some(credential), wire.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let accepted_index = state.store.index().unwrap();
+        assert!(accepted_index > index);
+        assert_eq!(accepted_index, first_index, "exact endpoint retry appends no claims");
+        assert_eq!(std::fs::read_to_string(history_path(root.path(), 0)).unwrap().lines().count(), 1,
+            "the frozen diagnostic still appends once for an exact retry");
+        let conflicting = mutate(&r, "max_ms", json!(2001));
+        let conflicting = serde_json::to_vec(&conflicting).unwrap();
+        assert_eq!(
+            send(app.clone(), Some(credential), conflicting)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let mut oversized = wire.clone();
+        oversized.resize(MAX_BODY_BYTES + 1, b' ');
+        assert_eq!(
+            send(app.clone(), Some(credential), oversized)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let mut report = request_latency_windows();
+        attach(&state.store, &mut report, now).unwrap();
+        let target = report["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "ios-connect")
+            .unwrap();
+        assert_eq!(target["population"], "client-observed-latencies");
+        assert!(target["windows"]["5m"]["count"].as_u64().unwrap() >= 100);
+        state
+            .store
+            .append_client_operation_claim(&ClaimInput {
+                subject: grant.into(),
+                kind: "custom.client.pairing-revoked".into(),
+                actor: Some("person/test".into()),
+                fields: BTreeMap::new(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert_eq!(
+            send(app, Some(credential), wire).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    #[test]
+    fn observation_reports_batch_disjoint_minutes_but_refuse_repeated_minutes() {
+        let now = client_now_ms() as u64;
+        let start = now / 60_000 * 60_000 - 60_000;
+        let mut r = report_at(start);
+        r.samples.push(report_at(start - 60_000).samples.remove(0));
+        assert_eq!(validate(&r, now).unwrap().len(), 2);
+        r.samples.push(r.samples[0].clone());
+        assert!(validate(&r, now).is_err());
+    }
+
     #[test]
     fn observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance() {
         let root = tempfile::tempdir().unwrap();
@@ -628,167 +857,6 @@ mod tests {
         assert_eq!(std::fs::read(history_path(root.path(), 0)).unwrap(), before);
     }
 
-    #[tokio::test]
-    async fn observation_paired_session_transport_reader_doctor_and_body_limits() {
-        let root = tempfile::tempdir().unwrap();
-        let state = AppState {
-            browser_pairing_login: None,
-            seat_admission: Default::default(),
-            owning_person: None,
-            store: Arc::new(
-                Store::open(&root.path().join("graph.db"), "observations-test").unwrap(),
-            ),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0u64).0,
-            node: "observations-test".into(),
-            api_socket: root.path().join("api.sock"),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: root.path().join("unused"),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-            harness_question_sink: None,
-            assistant_receipts: Default::default(),
-            private_notes: Default::default(),
-        };
-        let grant = "custom/client/observation-pairing";
-        let credential = "observation-credential";
-        state
-            .store
-            .append_client_operation_claim(&ClaimInput {
-                subject: grant.into(),
-                kind: "custom.client.pairing-completed".into(),
-                actor: Some("person/test".into()),
-                fields: BTreeMap::from([
-                    (
-                        "credential_hash".into(),
-                        json!(hex::encode(Sha256::digest(credential.as_bytes()))),
-                    ),
-                    ("session_actor".into(), json!("client/observation-session")),
-                    ("person_id".into(), json!("person/test")),
-                    ("scopes".into(), json!([])),
-                    (
-                        "expires_at_unix_ms".into(),
-                        json!(client_now_ms() as u64 + 60_000),
-                    ),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        let app = fabric_router(state.clone());
-        let send = |app: Router, token: Option<&str>, wire: Vec<u8>| {
-            let mut builder = Request::builder()
-                .method("POST")
-                .uri("/v1/client/observations")
-                .header("content-type", "application/json");
-            if let Some(token) = token {
-                builder = builder.header("authorization", format!("Bearer {token}"));
-            }
-            app.oneshot(builder.body(Body::from(wire)).unwrap())
-        };
-        let now = client_now_ms() as u64;
-        let r = report_at(now / 60_000 * 60_000 - 60_000);
-        let wire = serde_json::to_vec(&r).unwrap();
-        let index = state.store.index().unwrap();
-        assert_eq!(
-            send(app.clone(), None, wire.clone())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            send(router(state.clone()), None, wire.clone())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        let response = send(app.clone(), Some(credential), wire.clone())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES)
-            .await
-            .unwrap();
-        let accepted: fractal_client::ObservationResponse = serde_json::from_slice(&body).unwrap();
-        assert!(accepted.value.accepted);
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.get("snapshot").is_none());
-        assert_eq!(
-            send(app.clone(), Some(credential), wire.clone())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            std::fs::read_to_string(history_path(root.path(), 0))
-                .unwrap()
-                .lines()
-                .count(),
-            1
-        );
-        let conflicting = mutate(&r, "max_ms", json!(2001));
-        let conflicting = serde_json::to_vec(&conflicting).unwrap();
-        assert_eq!(
-            send(app.clone(), Some(credential), conflicting)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::CONFLICT
-        );
-        let mut oversized = wire.clone();
-        oversized.resize(MAX_BODY_BYTES + 1, b' ');
-        assert_eq!(
-            send(app.clone(), Some(credential), oversized)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-        assert_eq!(
-            state.store.index().unwrap(),
-            index,
-            "reports never mutate the graph"
-        );
-        let report = request_latency_windows();
-        let target = report["targets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["name"] == "ios-connect")
-            .unwrap();
-        assert_eq!(target["population"], "client-observed-latencies");
-        assert!(target["windows"]["5m"]["count"].as_u64().unwrap() >= 100);
-        assert!(
-            crate::slo::doctor_lines(&report)
-                .iter()
-                .any(|(name, _, text)| name == "slo/ios-live-share"
-                    && text.contains("client-observed"))
-        );
-        state
-            .store
-            .append_client_operation_claim(&ClaimInput {
-                subject: grant.into(),
-                kind: "custom.client.pairing-revoked".into(),
-                actor: Some("person/test".into()),
-                fields: BTreeMap::new(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        assert_eq!(
-            send(app, Some(credential), wire).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
     #[test]
     fn observation_memory_retention_and_capacity_evict_oldest_ids() {
         let root = tempfile::tempdir().unwrap();
@@ -831,14 +899,141 @@ mod tests {
         assert_eq!(admission.reports.len(), REPORTS);
         assert_eq!(admission.reports.front().unwrap().id, "old-2");
     }
+    fn pairing(store: &Store, grant: &str) {
+        store.append_client_operation_claim(&ClaimInput {
+            subject: grant.into(), kind: "custom.client.pairing-completed".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(json!({
+                "credential_hash":"fixture-credential-digest", "session_actor":"client/example-phone",
+                "person_id":"person/example", "device_id":"example-phone-device-key", "scopes":[], "expires_at_unix_ms":u64::MAX
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn phone_report(store: &Store, now: u64) -> Value {
+        let mut report = request_latency_target_windows();
+        attach(store, &mut report, now).unwrap();
+        report
+    }
+
+    fn target<'a>(report: &'a Value, name: &str) -> &'a Value {
+        report["targets"].as_array().unwrap().iter().find(|row| row["name"] == name).unwrap()
+    }
+
     #[test]
-    fn observation_reports_batch_disjoint_minutes_but_refuse_repeated_minutes() {
-        let now = client_now_ms() as u64;
-        let start = now / 60_000 * 60_000 - 60_000;
-        let mut r = report_at(start);
-        r.samples.push(report_at(start - 60_000).samples.remove(0));
-        assert_eq!(validate(&r, now).unwrap().len(), 2);
-        r.samples.push(r.samples[0].clone());
-        assert!(validate(&r, now).is_err());
+    fn producer_fixture_replicates_reopens_and_evaluates_all_seven_native_rows() {
+        let fixture: ObservationReport = serde_json::from_str(
+            include_str!("../../../../apps/ios/fixtures/observation-minute.json")
+        ).unwrap();
+        let now = minute("2026-11-19T12:01:00.000Z").unwrap();
+        let grant = "custom/client/example-phone-pairing";
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.sqlite");
+        let source = Store::open(&path, "issuer").unwrap();
+        source.bind_fleet("observation-fixture-fleet").unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("observation-fixture-fleet", key.public(), "listening").unwrap();
+        pairing(&source, grant);
+        let stable_source = source.observation_source(grant, "person/example").unwrap();
+        let minutes = claims(&stable_source, grant, &fixture, now).unwrap();
+        assert_eq!(minutes.len(), 7);
+        assert!(source.accept_observation_minutes("person/example", &minutes).unwrap());
+        let accepted_index = source.index().unwrap();
+        assert!(!source.accept_observation_minutes("person/example", &minutes).unwrap());
+        assert_eq!(source.index().unwrap(), accepted_index);
+        let exchange = source.export_replication_exchange("observation-fixture-fleet", &Default::default()).unwrap();
+        drop(source);
+        let source = Store::open(&path, "issuer").unwrap();
+        assert!(!source.accept_observation_minutes("person/example", &minutes).unwrap());
+        let receiver_path = root.path().join("receiver.sqlite");
+        let receiver = Store::open(&receiver_path, "receiver").unwrap();
+        receiver.pin_fleet_anchor(key.public()).unwrap();
+        receiver.receive_replication_exchange("issuer", "observation-fixture-fleet", &exchange).unwrap();
+        receiver.validate_replication_backlog().unwrap();
+        receiver.project_replication_backlog().unwrap();
+        let report = phone_report(&receiver, now);
+        assert_eq!(receiver.observation_minutes(now).unwrap().len(), 7);
+        let received_index = receiver.index().unwrap();
+        assert!(!receiver.accept_observation_minutes("person/example", &minutes).unwrap());
+        assert_eq!(receiver.index().unwrap(), received_index);
+        for sample in &fixture.samples {
+            let name = match sample {
+                ObservationSample::Latency { target, .. } | ObservationSample::LiveShare { target, .. } => target,
+            };
+            let row = target(&report, name);
+            assert_eq!(row["windows"]["1m"]["reported_interval_ms"], 60_000);
+            assert_eq!(row["windows"]["1m"]["complete_coverage"], false);
+            if name != "ios-live-share" {
+                assert_eq!(row["windows"]["1m"]["count"], 1);
+                assert_eq!(row["windows"]["1m"]["max_ms"], 100);
+            }
+        }
+        let share = target(&report, "ios-live-share");
+        assert_eq!(share["windows"]["1m"]["foreground_ms"], 60_000);
+        assert_eq!(share["windows"]["1m"]["live_ms"], 20_000);
+        assert_eq!(share["windows"]["1m"]["over_target"], 40_000);
+        let rows = crate::objectives::rows(&report, &[], now, 0);
+        assert_eq!(rows.iter().filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with("ios-"))).count(), 7);
+        assert_eq!(rows.iter().find(|row| row["id"] == "ios-live-share").unwrap()["status"], "missed");
+        drop(receiver);
+        let receiver = Store::open(&receiver_path, "receiver").unwrap();
+        receiver.pin_fleet_anchor(key.public()).unwrap();
+        assert_eq!(target(&phone_report(&receiver, now), "ios-connect")["windows"], target(&report, "ios-connect")["windows"]);
+        assert!(!receiver.accept_observation_minutes("person/example", &minutes).unwrap());
+        let missing = phone_report(&receiver, now + 60_000);
+        assert_eq!(target(&missing, "ios-connect")["windows"]["1m"]["count"], 0);
+        assert!(target(&missing, "ios-live-share")["windows"]["1m"]["live_share"].is_null());
+        let expired = phone_report(&receiver, now + 3_600_000);
+        let unknown = crate::objectives::rows(&expired, &[], now + 3_600_000, 0);
+        assert!(unknown.iter().filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with("ios-")))
+            .all(|row| row["status"] == "no-data" && row["remaining_percent"].is_null()));
+        let mut changed = minutes.clone();
+        changed[0].count += 1;
+        assert_eq!(receiver.accept_observation_minutes("person/example", &changed).unwrap_err().code, "idempotency-conflict");
+        let mut report_id_conflict = fixture.clone();
+        report_id_conflict.samples.remove(0);
+        let report_id_conflict = claims(&stable_source, grant, &report_id_conflict, now).unwrap();
+        assert_eq!(receiver.accept_observation_minutes("person/example", &report_id_conflict).unwrap_err().code, "idempotency-conflict");
+        let mut overlapping = fixture.clone();
+        overlapping.report_id = "22222222-2222-4222-8222-222222222222".into();
+        assert_eq!(receiver.accept_observation_minutes("person/example", &claims(&stable_source, grant, &overlapping, now).unwrap()).unwrap_err().code, "idempotency-conflict");
+        assert!(receiver.accept_observation_minutes("person/other", &minutes).is_err());
+        assert_eq!(receiver.observation_minutes(now).unwrap().len(), 7);
+    }
+
+    #[test]
+    fn destination_pairing_rotation_preserves_phone_source_and_historical_evidence() {
+        let store = Store::open_memory("member").unwrap();
+        let now = minute("2026-11-19T12:01:00Z").unwrap();
+        let fixture: ObservationReport = serde_json::from_str(include_str!("../../../../apps/ios/fixtures/observation-minute.json")).unwrap();
+        let original = "custom/client/phone-original";
+        let replacement = "custom/client/phone-replacement";
+        pairing(&store, original);
+        pairing(&store, replacement);
+        let source = store.observation_source(original, "person/example").unwrap();
+        assert_eq!(source, store.observation_source(replacement, "person/example").unwrap());
+        let first = claims(&source, original, &fixture, now).unwrap();
+        let retry = claims(&source, replacement, &fixture, now).unwrap();
+        assert!(store.accept_observation_minutes("person/example", &first).unwrap());
+        let accepted = store.index().unwrap();
+        assert!(!store.accept_observation_minutes("person/example", &retry).unwrap());
+        assert_eq!(store.index().unwrap(), accepted);
+        let report = phone_report(&store, now);
+        assert_eq!(target(&report, "ios-connect")["windows"]["1m"]["count"], 1);
+        store.append_client_operation_claim(&ClaimInput {
+            subject: original.into(), kind: "custom.client.pairing-revoked".into(),
+            actor: Some("person/example".into()), fields: BTreeMap::new(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(store.accept_observation_minutes("person/example", &first).is_err());
+        assert!(!store.accept_observation_minutes("person/example", &retry).unwrap());
+        assert_eq!(target(&phone_report(&store, now), "ios-connect")["windows"], target(&report, "ios-connect")["windows"]);
+        let mut changed = fixture.clone();
+        changed.samples.remove(0);
+        let conflict = claims(&source, replacement, &changed, now).unwrap();
+        assert_eq!(store.accept_observation_minutes("person/example", &conflict).unwrap_err().code, "idempotency-conflict");
     }
 }

@@ -140,7 +140,7 @@ type Stash = {
    */
   lastCostUsd?: number;
   label?: string;
-  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; admitted?: boolean; read?: boolean; acceptedAtUnixMs?: number }>;
   /** Todo observation state is fenced by the channel binding, not the extension instance. */
   todoFingerprint?: string;
   todoBranchKey?: string;
@@ -748,10 +748,11 @@ export default function (pi: ExtensionAPI) {
           state.reconnectAttempt = 0;
           await applyLabel(ctx);
           for (const accepted of state.accepted?.values() ?? []) {
-            send({ type: "delivered", meta: accepted.meta });
+            if (!accepted.admitted && !accepted.read) continue;
+            send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
-          send({ type: "ready", ...sessionBinding });
+          send({ type: "ready", inputAcceptanceClock: true, ...sessionBinding });
           // The driver requires ready before accepting observations. Replay before other
           // producers; each retained close follows its original open with the same identity.
           if (state.webAnswers) {
@@ -802,7 +803,8 @@ export default function (pi: ExtensionAPI) {
         const messageId = frame.meta?.messageId;
         if (typeof messageId === "string" && state.accepted?.has(messageId)) {
           const accepted = state.accepted.get(messageId)!;
-          send({ type: "delivered", meta: accepted.meta });
+          if (!accepted.admitted && !accepted.read) return;
+          send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
           if (accepted.read) send({ type: "read", meta: accepted.meta });
           return;
         }
@@ -934,7 +936,7 @@ export default function (pi: ExtensionAPI) {
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       sendFrame({ type: "session", sessionId: nativeSession,
         ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
-      sendFrame({ type: "ready", sessionId: nativeSession });
+      sendFrame({ type: "ready", inputAcceptanceClock: true, sessionId: nativeSession });
       state.todoSession = nativeSession;
       state.todoFingerprint = undefined;
       state.todoBranchKey = undefined;
@@ -1099,6 +1101,10 @@ export default function (pi: ExtensionAPI) {
     toolCallsInFlight().clear();
   };
 
+  // An idle send's promise owns the entire run. Its matching user message_start is
+  // the earlier, truthful admission receipt; never serialize that run behind itself.
+  let pendingAdmission: { content: string; accept: () => void; mismatched?: boolean } | undefined;
+
   // omp injects one queued steer per boundary (its default steering mode is `one-at-a-time`). A
   // second steer released at the same boundary waited through the next model turn and then
   // backgrounded that turn's whole batch (cross-omp-hold-luna-20260927-m), so mail released
@@ -1123,12 +1129,49 @@ export default function (pi: ExtensionAPI) {
       // Not optional-chained: reading a missing idle proof as "idle" would silently turn
       // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
-        await pi.sendUserMessage(content);
+        let accept!: () => void;
+        const started = new Promise<void>((resolve) => { accept = resolve; });
+        let correlated = false;
+        let reported = false;
+        const pending = { content, accept: () => { correlated = true; accept(); }, mismatched: false };
+        const reportFallback = (reason: "content-mismatch" | "no-message-start" | "timeout") => {
+          if (correlated || reported) return;
+          reported = true;
+          first.reply({ type: "admission_fallback", reason, meta: first.meta });
+        };
+        // Observation only: this never releases admission or changes the run/watchdog timeout.
+        const correlationTimer = setTimeout(() => reportFallback("timeout"), 30_000);
+        correlationTimer.unref?.();
+        pendingAdmission = pending;
+        try {
+          // Content transformed by OMP cannot match our event; in that case admission
+          // retains the old await-run behavior rather than inventing a receipt.
+          const run = Promise.resolve(pi.sendUserMessage(content)).then(() => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
+          }).catch((error: unknown) => {
+            reportFallback(pending.mismatched ? "content-mismatch" : "no-message-start");
+            console.error("OMP mailbox run failed:", error);
+            throw error;
+          });
+          await Promise.race([run, started]);
+        } finally {
+          clearTimeout(correlationTimer);
+          if (pendingAdmission === pending) pendingAdmission = undefined;
+        }
       } else {
         await pi.sendUserMessage(content, { deliverAs: first.deliverAs });
       }
+      const acceptedAtUnixMs = Date.now();
       for (const message of messages) {
-        message.reply({ type: "delivered", meta: message.meta });
+        const messageId = message.meta?.messageId;
+        if (typeof messageId === "string") {
+          const accepted = state.accepted?.get(messageId);
+          if (accepted) {
+            accepted.admitted = true;
+            accepted.acceptedAtUnixMs ??= acceptedAtUnixMs;
+          }
+        }
+        message.reply({ type: "delivered", meta: message.meta, acceptedAtUnixMs });
       }
     } catch (error) {
       for (const message of messages) {
@@ -1503,6 +1546,19 @@ export default function (pi: ExtensionAPI) {
       }
       throw error;
     }
+  });
+
+  onWidened("message_start", async (event) => {
+    if (!event || typeof event !== "object" || !("message" in event)) return;
+    const message = event.message;
+    if (!message || typeof message !== "object" || !("role" in message) ||
+      message.role !== "user" || !("content" in message) || !pendingAdmission) return;
+    const text = typeof message.content === "string" ? message.content :
+      Array.isArray(message.content) ? message.content.flatMap((part: unknown) =>
+        part && typeof part === "object" && "type" in part && part.type === "text" &&
+        "text" in part && typeof part.text === "string" ? [part.text] : []).join("\n") : undefined;
+    if (text === pendingAdmission.content) pendingAdmission.accept();
+    else pendingAdmission.mismatched = true;
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this

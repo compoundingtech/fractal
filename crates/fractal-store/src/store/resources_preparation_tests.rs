@@ -48,6 +48,7 @@ fn canonical_snapshot(connection: &Connection, subject: &str) -> Snapshot {
 
 fn assert_parity(transaction: &Transaction<'_>, context: &str) {
     flush(transaction).unwrap();
+    finish_deferred(transaction);
     let incremental: Vec<_> = SUBJECTS
         .iter()
         .map(|subject| {
@@ -1068,10 +1069,9 @@ fn a_delete_that_no_checkpoint_recorded_rebuilds_at_once() {
     transaction.commit().unwrap();
 }
 
-/// A new observation of a subject a trim deferred is folded onto a rebuild of what is present,
-/// not onto the state the deleted claim was still part of.
+/// New observations join a deferred fold, without rebuilding history on the writer.
 #[test]
-fn a_new_claim_on_a_deferred_subject_rebuilds_it_at_once() {
+fn a_new_claim_on_a_deferred_subject_keeps_its_rebuild_deferred() {
     let store = Store::open_memory("example-deferred-new").unwrap();
     let middle = superseded_middle(&store);
     {
@@ -1090,7 +1090,9 @@ fn a_new_claim_on_a_deferred_subject_rebuilds_it_at_once() {
     let body = json!({"fields":{"kind":"custom.example","facts":{"phase":"later"}}});
     append_claim_tx(&transaction, &store.origin, SUBJECTS[0], "resource.observed", None, &body, &[], None).unwrap();
     flush(&transaction).unwrap();
-    assert!(!queued(&transaction, "deferred"), "the new claim's flush rebuilt the subject");
+    assert!(queued(&transaction, "deferred"), "the new claim stays deferred");
+    assert!(preparation_observation(&transaction, SUBJECTS[0]).is_err(), "writers cannot fold history");
+    finish_deferred(&transaction);
     assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
     transaction.commit().unwrap();
 }
@@ -1330,10 +1332,9 @@ proptest! {
     }
 }
 
-/// A subject too long for one budget is staged and resumed in the next transaction; a new claim
-/// on it rebuilds it whole at once and drops the stage, which no later step may resume.
+/// A subject resumes across transactions, including claims still ahead of its cursor.
 #[test]
-fn a_staged_rebuild_resumes_across_transactions_and_a_new_claim_drops_its_stage() {
+fn a_staged_rebuild_preserves_its_prefix_when_a_later_claim_arrives() {
     let store = Store::open_memory("example-staged-resume").unwrap();
     let observation = |phase: usize| json!({"fields":{"kind":"custom.example","facts":{"phase":phase}}});
     let ids: Vec<_> = (0..6).map(|phase| append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed", observation(phase))).collect();
@@ -1360,14 +1361,82 @@ fn a_staged_rebuild_resumes_across_transactions_and_a_new_claim_drops_its_stage(
     {
         let mut writer = store.connection.write();
         let transaction = writer.transaction().unwrap();
-        append_claim_tx(&transaction, &store.origin, SUBJECTS[0], "resource.observed", None, &observation(9), &[], None).unwrap();
+        smallclaims::store::canonical::record_position_tx(&transaction, "later-staged", 100).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hac9e50cf070a owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT 'later-staged',batch_id,subject,'resource.observed',origin,?1,'[]','99'
+             FROM claims WHERE id=?2",
+            params![observation(9).to_string(), ids[5]],
+        ).unwrap();
         flush(&transaction).unwrap();
-        assert!(!staged(&transaction), "the new claim's rebuild dropped the stage");
-        assert!(!queued(&transaction, "deferred"));
+        assert!(staged(&transaction), "a later claim preserves the folded prefix");
+        assert!(queued(&transaction, "deferred"));
+        assert!(preparation_observation(&transaction, SUBJECTS[0]).is_err());
         transaction.commit().unwrap();
     }
-    assert_eq!(step(), (false, false, false), "nothing is left to resume");
+    assert_eq!(step(), (true, true, true), "the resumed walk remains bounded");
+    while step().0 {}
+    assert_eq!(step(), (false, false, false), "the complete fold was published");
     assert_eq!(current_rows(&store.readers.get()), whole_rebuilt_rows(&store));
+}
+
+/// Earlier arrivals may invalidate one prefix, but cannot starve another subject.
+#[test]
+fn repeated_earlier_insertions_do_not_starve_other_deferred_subjects() {
+    let store = Store::open_memory("example-staged-fair").unwrap();
+    for subject in [SUBJECTS[0], SUBJECTS[1]] {
+        for time in ["10", "11", "12"] {
+            append_wire(&store, subject, time, "resource.observed",
+                json!({"fields":{"kind":"custom.example","facts":{"phase":time}}}));
+        }
+    }
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h18bb32aab672 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT subject FROM local_resource_preparation",
+        [],
+    ).unwrap();
+    let mut rejected = 0;
+    let mut converged = false;
+    for attempt in 0..100 {
+        if !super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap() {
+            converged = true;
+            break;
+        }
+        // Each attempt is atomic: a capped subject rolls back only this arrival.
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hbe6d428f7fd6 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT arrival").unwrap();
+        let id = format!("earlier/{:04}", 9999 - attempt);
+        for suffix in ["/a", "/b"] {
+            smallclaims::store::canonical::record_position_tx(&transaction, &format!("{id}{suffix}"), 0).unwrap();
+        }
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h03a49cdca749 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT ?1||suffix,batch_id,subject,'resource.observed','fixture',
+                    '{\"fields\":{\"kind\":\"custom.example\",\"facts\":{\"early\":true}}}','[]','1'
+             FROM (SELECT batch_id,subject FROM claims WHERE subject=?2 LIMIT 1)
+             CROSS JOIN (SELECT '/a' AS suffix UNION ALL SELECT '/b')",
+            params![id, SUBJECTS[0]],
+        ).unwrap();
+        match flush(&transaction) {
+            Ok(()) => transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-he110a500c61b owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "RELEASE arrival").unwrap(),
+            Err(error) => {
+                assert!(error.to_string().contains("not-caught-up"));
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h1bec9034b076 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO arrival; RELEASE arrival").unwrap();
+                rejected += 1;
+            }
+        }
+    }
+    let other_pending: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)",
+        [SUBJECTS[1]], |row| row.get(0),
+    ).unwrap();
+    assert!(!other_pending, "other deferred subjects finish too");
+    assert!(rejected > 0, "the hot subject receives bounded restart backpressure");
+    assert!(converged, "the hot subject publishes despite repeated earlier attempts");
+    assert!(!queued(&transaction, "deferred"));
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
+    assert_eq!(snapshot(&transaction, SUBJECTS[1]), canonical_snapshot(&transaction, SUBJECTS[1]));
+    transaction.rollback().unwrap();
 }
 
 /// A stage is resumed only by the process that made it: opening the store drops it, and the
@@ -1551,4 +1620,153 @@ fn a_staged_rebuild_step_seeks_its_claims_without_scanning_the_subject() {
         "{plan:?}"
     );
     assert!(!plan.iter().any(|step| step.contains("TEMP B-TREE") || step.starts_with("SCAN")), "{plan:?}");
+}
+
+#[test]
+fn one_out_of_order_claim_does_not_rebuild_fifty_thousand_claims_in_its_commit() {
+    use std::time::{Duration, Instant};
+    let store = Store::open_memory("bounded-out-of-order").unwrap();
+    let subject = SUBJECTS[0];
+    let insert_old = |tx: &Transaction<'_>| {
+        smallclaims::store::canonical::record_position_tx(tx, "old", 0).unwrap();
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-hc1dd7ba9842b owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             VALUES('old','fixture',?1,'resource.observed','fixture',
+                    '{\"fields\":{\"kind\":\"fixture\",\"facts\":{\"early\":true}}}','[]','1')",
+            [subject],
+        ).unwrap();
+    };
+    let mut writer = store.connection.write();
+    let tx = writer.transaction().unwrap();
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-h26e68aed92d9 owner=fractal_store::store::resources_preparation_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+         VALUES('fixture','fixture',1,'fixture','1000')", [],
+    ).unwrap();
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-h6fbd24b8b2b9 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<50000)
+         INSERT INTO claim_positions SELECT printf('fixture/%d',i),i FROM seq", [],
+    ).unwrap();
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-hd778a2459382 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<50000)
+         INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+         SELECT printf('fixture/%d',i),'fixture',?1,'resource.observed','fixture',
+                '{\"fields\":{\"kind\":\"fixture\",\"facts\":{\"value\":1}}}','[]','1000' FROM seq",
+        [subject],
+    ).unwrap();
+    super::preparation::rebuild_subject(&tx, subject).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hce3567f716b4 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_pending", []).unwrap();
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-ha3f26143e1d3 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT baseline").unwrap();
+    insert_old(&tx);
+    let started = Instant::now();
+    super::preparation::rebuild_subject(&tx, subject).unwrap();
+    let baseline = started.elapsed();
+    let expected = snapshot(&tx, subject);
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h40465db9f4bb owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO baseline; RELEASE baseline").unwrap();
+    let started = Instant::now();
+    insert_old(&tx);
+    flush(&tx).unwrap();
+    let bounded = started.elapsed();
+    assert!(bounded < Duration::from_millis(100), "admission preparation held {bounded:?}");
+    assert!(preparation_observation(&tx, subject).unwrap_err().to_string().contains("not-caught-up"));
+    tx.commit().unwrap();
+    drop(writer);
+    {
+        let reader = store.readers.get();
+        assert_eq!(snapshot(&reader, subject), expected, "readers fold their own snapshot");
+    }
+    let mut maximum = Duration::ZERO;
+    let mut chunks = 0;
+    loop {
+        let mut writer = store.connection.write();
+        let started = Instant::now();
+        let tx = writer.transaction().unwrap();
+        let more = super::preparation::flush_deferred(&tx, Duration::from_millis(5)).unwrap();
+        tx.commit().unwrap();
+        maximum = maximum.max(started.elapsed());
+        chunks += 1;
+        if !more { break; }
+    }
+    assert!(chunks > 1);
+    assert!(maximum < Duration::from_millis(100), "background hold {maximum:?}");
+    assert_eq!(snapshot(&store.readers.get(), subject), expected);
+    eprintln!("claims=50000 baseline={baseline:?} bounded={bounded:?} chunks={chunks} maximum={maximum:?}");
+}
+
+#[test]
+fn complete_version_one_preparation_is_adopted_without_rebuilding_history() {
+    let store = Store::open_memory("preparation-version-one").unwrap();
+    append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"fixture","facts":{"value":1}}}));
+    let mut writer = store.connection.write();
+    let tx = writer.transaction().unwrap();
+    let expected = snapshot(&tx, SUBJECTS[0]);
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h53182e523b97 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='1' WHERE key='resource_preparation_version'", []).unwrap();
+    tx.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hcff706664447 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER no_preparation_history_rebuild BEFORE DELETE ON local_resource_preparation_claims
+         BEGIN SELECT RAISE(ABORT,'unexpected history rebuild'); END;",
+    ).unwrap();
+    super::preparation::open(&tx).unwrap();
+    assert_eq!(snapshot(&tx, SUBJECTS[0]), expected);
+    let version: String = tx.query_row("SELECT value FROM meta WHERE key='resource_preparation_version'", [], |row| row.get(0)).unwrap();
+    assert_eq!(version, "2");
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn startup_resumes_preparation_left_stale_by_an_interrupted_drain() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("interrupted-preparation.sqlite3");
+    let expected = smallclaims::sqlite::without_deferred_maintenance_for_test(|| {
+        let store = Store::open(&path, "preparation-restart").unwrap();
+        for phase in 0..3 {
+            append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed",
+                json!({"fields":{"kind":"fixture","facts":{"phase":phase}}}));
+        }
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        let expected = snapshot(&tx, SUBJECTS[0]);
+        tx.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h96d569a81f10 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_deferred SELECT subject FROM local_resource_preparation;
+             INSERT INTO local_resource_preparation_stale SELECT subject FROM local_resource_preparation;",
+        ).unwrap();
+        assert!(super::preparation::flush_deferred(&tx, std::time::Duration::ZERO).unwrap());
+        assert!(staged(&tx));
+        assert!(preparation_observation(&tx, SUBJECTS[0]).is_err());
+        tx.commit().unwrap();
+        expected
+    });
+    let store = Store::open(&path, "preparation-restart").unwrap();
+    // Opening the store schedules persisted work without a trim/checkpoint or receive.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "startup drain must finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(snapshot(&store.readers.get(), SUBJECTS[0]), expected);
+}
+
+#[test]
+fn a_local_out_of_order_commit_schedules_preparation_without_replication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("local-preparation.sqlite3");
+    let store = Store::open(&path, "local-preparation").unwrap();
+    append_wire(&store, SUBJECTS[0], "4102444800000", "resource.observed",
+        json!({"fields":{"kind":"fixture","facts":{"latest":true}}}));
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        append_claim_tx(&tx, &store.origin, SUBJECTS[0], "resource.observed", None,
+            &json!({"fields":{"kind":"fixture","facts":{"earlier":true}}}), &[], None).unwrap();
+        // The shared commit finalizer must arrange follow-up after releasing this loan.
+        flush(&tx).unwrap();
+        assert!(preparation_observation(&tx, SUBJECTS[0]).is_err());
+        tx.commit().unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "local commit drain must finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let reader = store.readers.get();
+    assert_eq!(snapshot(&reader, SUBJECTS[0]), canonical_snapshot(&reader, SUBJECTS[0]));
 }

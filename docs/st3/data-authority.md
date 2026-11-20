@@ -21,10 +21,34 @@ subjects, claim fields or wire types, and do not change `STORAGE_VERSION` or
 `LOCAL_STORAGE_SCHEMA`, so registry and local-storage schema digests are unchanged.
 They remain outside `SHARED_TABLES` and the shared projection digest inventory.
 
+`card_actual_revisions` contains disposable member-local invalidation counters for
+in-memory actual-state reductions. Claims, canonical positions and repaired-claim
+membership remain the authority; the counters are neither shared projection rows
+nor replicated state. Reopening starts with empty in-memory reductions, so the
+counter table can be recreated without losing authoritative facts. Source mutation
+triggers maintain it after graph-owned source tables initialize.
+
 `local_runtime_cleanup_settled` is host-local exact-incarnation cleanup authority,
 not a replicated projection. Its receipts survive projection reconstruction and
 remain outside shared logical rows and projection digests. Constructors install
 its empty schema before returning the store, without making run admission decisions.
+
+`shell_environment_scrub_v1` is host-local security migration authority. Its single
+completion marker is read by shell-resource schema initialization to skip a completed
+historical environment scrub. It is written only after rewriting the local rows,
+vacuuming and checkpointing their physical storage. Like local cleanup receipts and
+secret registrations, it is neither a shared projection nor reconstructible from
+claims, and remains outside replication and shared projection digests. Importing
+another host's completion marker would not prove erasure of this database.
+
+`shell_resource_request_cancellations_v1` is host-local resource authority, beside
+`shell_resources_v1` and membership custody. It retains owner-scoped request
+cancellation tombstones for seven days so cancellation before acceptance prevents
+a delayed or retried submission from launching. The authenticated cancellation
+path writes them; shell submission checks and expires them. They are not claims,
+shared projections or rebuildable caches: their authority applies only to the
+runtime owning the request on this host. They stay outside graph replication and
+shared projection digests.
 
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
@@ -34,6 +58,23 @@ Explicit unregistration, pairing revocation/replacement and expiry remove them. 
 or losing this local table loses registrations; recovery requires the phone to register
 again with a valid locally issued pairing, not a graph replay. Full local database backups
 contain these secrets and must remain private; a graph-only backup cannot recover them.
+
+Phone service minutes are durable `custom.client.observation-minute` claims, not
+member-local observations or diagnostic JSONL. The phone persists an exact report
+before upload; paired ingestion atomically records its minute summaries and
+trusted operation receipts. The logical source binds the authenticated person
+and device, independently of the receiving member or a replacement pairing grant.
+Exact retries collapse by source/target/carrier/path/minute. Conflicting replicated
+content for the same minute supplies unknown evidence, not a chosen winner or a
+second population. Native iOS objectives fold these claims fleet-wide; absent
+minutes and absent foreground time are never inferred to be zero or healthy.
+The held client request-latency diagnostic retains its existing local admission,
+JSONL and in-memory phone windows until its separately authorized cutover.
+Those local windows are diagnostic-only and never supply native objective rows
+or doctor verdicts. A replacement pairing on the same process can still meet the
+legacy diagnostic report-scope conflict after the durable graph deduplicates it;
+activation must resolve that boundary rather than interpreting the refusal as
+missing fleet evidence.
 
 ## Large inline values
 
@@ -361,6 +402,7 @@ order from the same admitted claims.
 | `claim_signature_reference_migration` | Local representation progress | Durable phase and keyset cursor for bounded inline-text to reference conversion after authorization bootstrap. Not replicated and not an authorization-readiness gate. |
 | `claim_signature_nonce_uses` | Shared incremental projection | Cryptographically matching key/nonce use per live claim, including non-winning candidates. Invalid signature bytes cannot reserve another key's nonce; deletion invalidates affected dependencies before removing use. |
 | `claim_signatures` | Shared projection | Best candidate under current authority: Verified before Held before Invalid, then normalized signature bytes. Every candidate contributes authority dependencies and matching nonce use, including non-winners. Readers pin one complete legacy or candidate model. |
+| `claim_verdict_dependency_keys`, `claim_verdict_dependency_edges` | Local derived dependency index | Additive integer dictionary (`id`, unique `link`) and edges (`dependency_id`, `claim_id`), with reverse index `claim_verdict_dependency_edges_claim(claim_id, dependency_id)`. Outside shared digests and replay authority. The read-only `claim_verdict_dependency_links(link, claim_id)` view unions legacy links with dictionary-joined edges using `UNION ALL`; invalidation deduplicates claim IDs in canonical claim-ID order, at most 1,024 per page. Reader ceiling is 22, default writer remains 20, and newly recorded dependencies still target `claim_verdict_links`, including when opening version-22 stores. Installation neither converts existing links nor activates production integer writes. |
 | `claim_verdict_fresh`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdicts` | Local cache of shared outcomes | Current-authority candidate fold and dependency work, outside replication digests and rebuilt by `recheck_claim_verdicts`. Links accumulate conservatively per page until claim removal or explicit recheck; completing a judgment does not rewrite its whole dependency set. Property tests compare inventory, selection, verdicts and recomputation across shuffled, split and duplicate delivery. |
 | `claims` | Shared storage, with stated local fields | Shared immutable logical claim bytes/id/subject/kind/actor/predecessors/time. store_index alone is local; system-local/legacy migrated claims must be excluded from logical replicated-source digests. |
 | `coordination_sends` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
@@ -378,7 +420,7 @@ order from the same admitted claims.
 | `glass_heads` | Shared projection | Canonical glass declaration heads derived from admitted claims. |
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
 | `held_keys` | Local | Which principal each key this node holds belongs to, and its delegation chain; the private keys are files in `STATE/keys`. |
-| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry and remain. |
+| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry; cleanup treats them as due and applies the same durable-identity check. |
 | `identity_dirty` | Local cache | Transaction-local naming-fold invalidation marker; excluded from replicated digests and cleared during projection replay. |
 | `identity_heads` | Shared projection | Immutable storage identity, canonical public ID, naming revision and lifecycle availability derived from declaration and naming facts. All columns participate in projection digests and shuffle/restart/checkpoint coverage. |
 | `identity_names` | Shared projection | Reserved historical names and their immutable identity and naming claim. All columns participate in projection digests; replay reconstructs reservations from durable facts. |

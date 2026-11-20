@@ -60,7 +60,7 @@ fn cancellation_apply_with_many_claimants_has_one_selector_commit_allowance() {
     ).unwrap();
     store.apply(&intent, &planned.subject_tokens, "publish-cancel-batch").unwrap();
     let run = store.create_mission_run(&MissionRunRequest {
-        mission: "cancel-batch".into(), revision: None, workspace: ".".into(),
+        mission: "cancel-batch".into(), revision: None, workspace: "/tmp".into(),
         requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
         idempotency_key: "run-cancel-batch".into(),
     }).unwrap();

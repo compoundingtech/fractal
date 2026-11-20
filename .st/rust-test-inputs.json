@@ -44,6 +44,7 @@
     "examples/fractal",
     "fixtures",
     "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/escalation.kdl",
     "packages/fractal/fixtures/pr-landing.kdl",
     "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",
@@ -67,9 +68,11 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "apps/ios/fixtures/observation-minute.json",
     "claude-channel",
     "fixtures/objective-native-rows.json",
-    "scripts/ci-test-paths.rs"
+    "scripts/ci-test-paths.rs",
+    "slo"
    ]
   },
   "fractal-api-mailbox": {

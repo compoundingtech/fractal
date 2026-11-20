@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Prove that a named st instance cannot touch the default install, and that its uninstall is
+# Prove that a named Fractal instance cannot touch the default install, and that its uninstall is
 # complete. Everything happens in a throwaway HOME with a scrubbed environment and without a
-# service manager, so it never reads or changes the machine's real st install or daemon.
+# service manager, so it never reads or changes the machine's real Fractal install or daemon.
 #
-# 1. Start the default st in the throwaway HOME and install its skill, so it has state, a node
+# 1. Start the default Fractal in the throwaway HOME and install its skill, so it has state, a node
 #    identity, a database and skill copies. Stop it.
 # 2. Snapshot the whole HOME: every path, mode, size, symlink target and file hash.
 # 3. Start an instance, install its skill, stop it, and uninstall it.
@@ -21,27 +21,27 @@ set -Eeuo pipefail
 signal_helper="$(cd "$(dirname "$0")/.." && pwd)/script_process.py"
 python3 "$signal_helper" --check-platform
 
-st3="$(readlink -f "$1")"
+fractal="$(readlink -f "$1")"
 pty="$(readlink -f "$2")"
 out="${3:-$(mktemp -d)}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
-home="$(mktemp -d "${TMPDIR:-/var/tmp}/st-instance-home.XXXXXX")"
+home="$(mktemp -d "${TMPDIR:-/var/tmp}/fractal-instance-home.XXXXXX")"
 tools="$(dirname "$home")/$(basename "$home").tools"
 mkdir -p "$tools"
-# st3 finds pty beside itself, so use a copy of st3 that has one beside it.
+# Fractal finds pty beside itself, so use a copy of Fractal that has one beside it.
 cp --reflink=auto "$pty" "$tools/pty"
-cp --reflink=auto "$st3" "$tools/st3"
-st3="$tools/st3"
-# st reads its seats' environment from the account's login shell, which can reset PATH. A profile
-# in the throwaway HOME keeps the tools beside st3 on it, whichever shell the account uses.
+cp --reflink=auto "$fractal" "$tools/st3"
+fractal="$tools/st3"
+# Fractal reads its seats' environment from the account's login shell, which can reset PATH. A profile
+# in the throwaway HOME keeps the tools beside Fractal on it, whichever shell the account uses.
 for profile in .bash_profile .zprofile; do
   printf 'export PATH="%s:$PATH"\n' "$tools" >"$home/$profile"
 done
 trap 'python3 "$signal_helper" all 15 --env "HOME=$home" 2>/dev/null || true; rm -rf "$home" "$tools"' EXIT
 
-# The only environment st sees: no XDG variables, no ST_* variables, no real HOME. The PATH has
-# the tools beside st3 and the directory that holds the system utilities.
+# The only environment Fractal sees: no XDG variables, no ST_* variables, no real HOME. The PATH has
+# the tools beside Fractal and the directory that holds the system utilities.
 system="$(dirname "$(command -v ls)")"
 path="$tools:$system:/usr/bin:/bin"
 snapshot() {
@@ -65,7 +65,7 @@ stop_daemons() {
 {
   echo "== default install"
   default=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
-    HOSTNAME=proofhost "$st3")
+    HOSTNAME=proofhost "$fractal")
   daemon_log=default-daemon.log
   start_daemon "${default[@]}"
   "${default[@]}" skill install >/dev/null
@@ -76,7 +76,7 @@ stop_daemons() {
 
   echo "== instance"
   inst=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
-    HOSTNAME=proofhost "$st3" --instance proof)
+    HOSTNAME=proofhost "$fractal" --instance proof)
   daemon_log=instance-daemon.log
   start_daemon "${inst[@]}"
   test -d "$home/.st-instance/proof/state" && echo "instance state: ok"
@@ -111,7 +111,7 @@ stop_daemons() {
   fi
   # The default install is still there and removes itself completely, with nothing left in HOME.
   "${default[@]}" uninstall --yes --erase-local-graph
-  # The login profiles are the proof's own fixture. Empty directories such as ~/.config or ~/.local/bin are shared parents, not st's files.
+  # The login profiles are the proof's own fixture. Empty directories such as ~/.config or ~/.local/bin are shared parents, not Fractal's files.
   leftovers="$(cd "$home" && find . -mindepth 1 -not -type d \
     -not -path ./.bash_profile -not -path ./.zprofile -print)"
   if [ -n "$leftovers" ]; then

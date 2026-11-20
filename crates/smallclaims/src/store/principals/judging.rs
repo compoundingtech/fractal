@@ -1,5 +1,8 @@
 //! Candidate pages and their dependency accumulator commit together. A page never authorizes
 //! a partial result. Relevant authority changes dirty the cursor in queue_linked_tx.
+//! Completed, unblocked folds retain their result witness but discard their resume-only
+//! cursor and roots digest. Invalidation always restarts them from retained candidates;
+//! their global dependency links remain live regardless of when judgment completed.
 use super::*;
 
 pub(super) fn rank(verdict: &Verdict) -> u8 {
@@ -61,6 +64,78 @@ pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Opt
         )));
     }
     Ok(None)
+}
+
+/// A settled judgment: complete, clean, unblocked, its verdict published, and small enough
+/// that `judge_claim` judges it directly without reading this row. Old and new readers treat a
+/// missing row of such a claim as never paged: `unavailable` sees nothing pending, and a
+/// later requeue inserts a fresh row before judging. So the row is dropped once settled.
+/// The two statements below spell the same predicate; 32 is `CANDIDATE_PAGE`.
+const _: () = assert!(CANDIDATE_PAGE == 32);
+
+/// Drop `claim_id`'s judging row if it is settled. Returns whether it did.
+pub(super) fn discard_settled_tx(connection: &Connection, claim_id: &str) -> Result<bool> {
+    Ok(connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h323477dd058f owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging WHERE claim_id=?1
+             AND complete=1 AND dirty=0 AND blocked=0 AND notified=1 AND candidate_count<=32
+             AND candidate_count=COALESCE((SELECT candidates FROM claim_signature_counts c
+                                           WHERE c.claim_id=claim_signature_judging.claim_id), 0)",
+        )?
+        .execute(/* sqlite-large-value: allow-for-now lv-h8858f9f9045d owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![claim_id])?
+        != 0)
+}
+
+/// Rows the prune looks at in one writer loan, and the time after which it commits early.
+pub const PRUNE_PAGE: usize = 512;
+pub const PRUNE_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+/// The last claim the prune of settled judging rows has passed, or `done`.
+pub(super) const PRUNE_CURSOR: &str = "claim_signature_judging_prune";
+
+/// One page of the prune of settled judging rows that releases before this one kept: walk the
+/// rows in claim order from the cursor and delete each settled one. Returns `(examined,
+/// deleted, finished)`. The cursor only moves forward; a row that settles behind it is dropped
+/// by `discard_settled_tx` when it settles.
+pub(super) fn prune_settled_page_tx(connection: &Connection) -> Result<(usize, usize, bool)> {
+    let mut cursor = super::super::fleet_meta(connection, PRUNE_CURSOR)?.unwrap_or_default();
+    if cursor == "done" {
+        // Once pruned, only pending folds and large ones keep rows, so this reads few rows. A
+        // settled row here was written by an earlier release after a rollback: start over.
+        let left: bool = connection
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM claim_signature_judging
+                 WHERE complete=1 AND dirty=0 AND blocked=0 AND notified=1 AND candidate_count<=32
+                 AND candidate_count=COALESCE((SELECT candidates FROM claim_signature_counts c
+                                               WHERE c.claim_id=claim_signature_judging.claim_id), 0))",
+            )?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h84b85cdb55be owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+        if !left {
+            return Ok((0, 0, true));
+        }
+        cursor = String::new();
+    }
+    let started = std::time::Instant::now();
+    let claims = connection
+        .prepare_cached(
+            "SELECT claim_id FROM claim_signature_judging WHERE claim_id>?1 ORDER BY claim_id LIMIT ?2",
+        )?
+        .query_map(params![cursor, PRUNE_PAGE as i64], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut examined = 0;
+    let mut deleted = 0;
+    let mut last = None;
+    for claim_id in &claims {
+        if examined != 0 && started.elapsed() >= PRUNE_BUDGET {
+            break;
+        }
+        examined += 1;
+        deleted += usize::from(discard_settled_tx(connection, claim_id)?);
+        last = Some(claim_id.as_str());
+    }
+    let finished = claims.len() < PRUNE_PAGE && examined == claims.len();
+    let next = if finished { "done" } else { last.unwrap_or(cursor.as_str()) };
+    super::set_meta_tx(connection, PRUNE_CURSOR, next)?;
+    Ok((examined, deleted, finished))
 }
 
 pub(super) type Judgment = (Verdict, Option<ClaimSignature>);
@@ -134,7 +209,6 @@ pub(super) fn advance(
             best = Some((verdict, text));
         }
     }
-    let through = texts.last().cloned().unwrap_or(last);
     let finished = texts.len() < budget;
     let (best_name, best_reason, best_signature) =
         best.as_ref()
@@ -145,15 +219,24 @@ pub(super) fn advance(
                     Some(signature.as_str()),
                 )
             });
-    let through = if through.is_empty() {
-        references::SignatureValue::Text(&through)
+    // Only unfinished or blocked folds can resume from this cursor. Completed
+    // judgments restart from canonical candidates when dirtied; retaining their
+    // final full signature and roots digest duplicates evidence indefinitely.
+    let cold = finished && !blocked;
+    let through = if cold {
+        ""
     } else {
-        references::write_value(connection, claim_id, &through, true)?
+        texts.last().map_or(last.as_str(), String::as_str)
+    };
+    let through = if through.is_empty() {
+        references::SignatureValue::Text(through)
+    } else {
+        references::write_value(connection, claim_id, through, true)?
     };
     let best_signature = best_signature
         .map(|text| references::write_value(connection, claim_id, text, true))
         .transpose()?;
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec805028307d owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h070bbbc92435 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc47520fe1f56 owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6,roots_digest=CASE WHEN ?8 THEN '' ELSE roots_digest END WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h2a77ab38ae8d owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id,cold])?;
     if !finished {
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?

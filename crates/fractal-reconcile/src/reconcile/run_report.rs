@@ -116,10 +116,11 @@ fn is_held(step: &StepRunView) -> bool {
     step.claimant.is_some() && matches!(step.status.as_str(), "claimed" | "working")
 }
 
-/// Whether a run is still working, so that silence means something. A run in cleanup is ending,
-/// and a run that waits for the run before it has not started.
+/// Whether a run is still working, so that silence means something. Terminal status wins over
+/// its phase or remaining step readiness. Cleanup is ending; a predecessor wait has not started.
 fn can_stall(run: &MissionRunView) -> bool {
-    matches!(run.phase.as_str(), "normal" | "revision-draining" | "final")
+    !crate::store::is_terminal_run_state(&run.status)
+        && matches!(run.phase.as_str(), "normal" | "revision-draining" | "final")
         && !run.steps.iter().any(|step| {
             step.step == crate::mission::AFTER_RUN_STEP && step.status != "completed"
         })
@@ -129,7 +130,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Linked child runs do the parent's work. Follow their indexed parent-step links and
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
-    fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
+    pub(super) fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
         let mut activity = run_activity(run).max(self.held_progress(run)?);
         let mut pending = run
             .steps

@@ -93,7 +93,7 @@ export const lower = (
   // Preserve their text and order in both the declaration and every worker turn.
   const constraints = mission.constraints ?? []
   const policy = constraints.length === 0 ? '' : `\n\nConstraints:\n${constraints.join('\n')}`
-  for (const key of ['finally', 'completion', 'gates', 'lanes', 'reportStalls', 'reportCompleted', 'observers', 'subscriptions'] as const) {
+  for (const key of ['finally', 'completion', 'gates', 'lanes', 'reportStalls', 'reportCompleted', 'observers', 'subscriptions', 'targetAt', 'milestones'] as const) {
     if (mission[key] !== undefined) refuse(options.id, key)
   }
   const steps = mission.steps.map((step) => {

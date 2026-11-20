@@ -132,6 +132,9 @@ impl OtlpExporter {
         if let Some(metrics) = otlp_hook_metrics(&self.node, &batch) {
             self.send(&self.metrics_url, &metrics).await?;
         }
+        if let Some(metrics) = otlp_omp_admission_fallback_metrics(&self.node, &batch) {
+            self.send(&self.metrics_url, &metrics).await?;
+        }
         if let Some(metrics) = otlp_usage_metrics(&self.node, &batch) {
             self.send(&self.metrics_url, &metrics).await?;
         }
@@ -194,7 +197,7 @@ pub async fn run<S: ObservationSource>(store: Arc<S>, exporter: OtlpExporter) {
                 backoff = Duration::from_secs(1);
                 if outcome.skipped > 0 {
                     eprintln!(
-                        "st3: {} local observations were trimmed before OpenTelemetry export",
+                        "fractal: {} local observations were trimmed before OpenTelemetry export",
                         outcome.skipped
                     );
                 }
@@ -203,7 +206,7 @@ pub async fn run<S: ObservationSource>(store: Arc<S>, exporter: OtlpExporter) {
                 }
             }
             Err(error) => {
-                eprintln!("st3: OpenTelemetry export failed: {error:#}");
+                eprintln!("fractal: OpenTelemetry export failed: {error:#}");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
@@ -264,6 +267,15 @@ pub fn otlp_logs(node: &str, batch: &[ClaimRecord]) -> Value {
                 // A diagnostic says how bad it is and which code it is: a collector filters on both.
                 if let Some(code) = fields["code"].as_str() {
                     attributes.push(attribute("st3.code", json!({ "stringValue": code })));
+                }
+                if fields["code"] == "omp-channel-admission-fallback" {
+                    for (name, key) in [("reason", "st3.reason"), ("message_id", "st3.message_id")] {
+                        if let Some(value) = fields[name].as_str() {
+                            attributes.push(attribute(
+                                key, json!({"stringValue": value}),
+                            ));
+                        }
+                    }
                 }
                 let (severity, number) = match fields["severity"].as_str() {
                     Some("warning") => ("WARN", 13),
@@ -647,6 +659,44 @@ pub fn otlp_hook_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
             }],
         }]}]}),
     )
+}
+
+/// Idle handoff/batch fallbacks, not individual messages in a concatenated prompt. Only the
+/// bounded reason is a metric label; seat, incarnation and first-message ID remain in logs.
+pub fn otlp_omp_admission_fallback_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
+    let mut counts = BTreeMap::<&str, u64>::new();
+    for observation in batch {
+        let fields = &observation.body["fields"];
+        if observation.kind != "harness.diagnostic"
+            || fields["code"] != "omp-channel-admission-fallback"
+            || fields["driver"] != "omp"
+        {
+            continue;
+        }
+        if let Some(reason @ ("content-mismatch" | "no-message-start" | "timeout")) =
+            fields["reason"].as_str()
+        {
+            *counts.entry(reason).or_default() += 1;
+        }
+    }
+    if counts.is_empty() {
+        return None;
+    }
+    let started = (batch.first()?.accepted_at_unix_ms * 1_000_000)
+        .saturating_sub(1).to_string();
+    let ended = (batch.last()?.accepted_at_unix_ms * 1_000_000).to_string();
+    let points = counts.into_iter().map(|(reason, count)| json!({
+        "startTimeUnixNano": started, "timeUnixNano": ended, "asInt": count.to_string(),
+        "attributes": [attribute("reason", json!({"stringValue": reason}))],
+    })).collect::<Vec<_>>();
+    Some(json!({"resourceMetrics": [{
+        "resource": resource(node, DAEMON_SERVICE),
+        "scopeMetrics": [{"scope": {"name": "st"}, "metrics": [{
+            "name": "omp_channel_admission_fallback_total", "unit": "1",
+            "description": "OMP idle handoff/batch admissions awaiting the run without a matching message_start",
+            "sum": {"aggregationTemporality": 1, "isMonotonic": true, "dataPoints": points},
+        }]}],
+    }]}))
 }
 
 pub fn hook_span(observation: &ClaimRecord) -> Option<Value> {

@@ -82,6 +82,15 @@ def tracked_files():
     return sorted(set(Path(path.decode()) for path in paths.split(b"\0") if path))
 
 
+def shared_system_directory(match, line):
+    """Recognize the exact case-sensitive macOS shared directory, not a home."""
+    if not match.group(0).startswith("/Users/") or match.group(1) != "Shared":
+        return False
+    # Whitespace and quotes can be part of a quoted or escaped path. Inspect the
+    # whole remaining line rather than trusting either as a path terminator.
+    return re.search(r"""/\.\.(?=/|[\s"'`<>]|$)""", line[match.end():]) is None
+
+
 def findings(path, content):
     name = path.as_posix()
     if PRIVATE_CONFIGURATION_REPO.search(name):
@@ -99,7 +108,7 @@ def findings(path, content):
         if host.search(line):
             reasons.append("real host name")
         for match in HOME.finditer(line):
-            if match.group(1) not in EXAMPLE_HOMES:
+            if match.group(1) not in EXAMPLE_HOMES and not shared_system_directory(match, line):
                 reasons.append("personal home path")
         for match in PERSON.finditer(line):
             compound = line[max(0, match.start() - 4):match.end()] == PERSON_PROSE_COMPOUND
