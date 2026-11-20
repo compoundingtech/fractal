@@ -18839,6 +18839,9 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        if frame["type"] == "admission_fallback" {
+            return Ok(state.accept_admission_fallback(subject, &frame));
+        }
         if frame["type"] == "delivered"
             && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
                 == Some(state.incarnation.as_str())
@@ -18997,6 +19000,9 @@ struct PiChannelResume {
     #[serde(default)]
     retry_after_ms: BTreeMap<String, u64>,
     failed_diagnostics: BTreeSet<String>,
+    /// First-message IDs of observed idle handoff/batch fallbacks, retained across reexec.
+    #[serde(default)]
+    admission_fallbacks_seen: BTreeSet<String>,
     // Historical resume-wire name: either idle or an explicit handoff-ready proof opens delivery.
     first_idle_seen: bool,
     frame_sequence: u64,
@@ -19011,6 +19017,33 @@ struct PiChannelResume {
 }
 
 impl PiChannelResume {
+    fn accept_admission_fallback(&mut self, subject: &str, frame: &Value) -> bool {
+        let Some(reason @ ("content-mismatch" | "no-message-start" | "timeout")) =
+            frame["reason"].as_str()
+        else {
+            return false;
+        };
+        if self.incarnation.is_empty()
+            || frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                != Some(self.incarnation.as_str())
+            || frame.pointer("/meta/identity").and_then(Value::as_str)
+                != Some(subject.strip_prefix("agent/").unwrap_or(subject))
+        {
+            return false;
+        }
+        let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+        else {
+            return false;
+        };
+        if !self.admission_fallbacks_seen.insert(message.to_owned()) {
+            return false;
+        }
+        // Never retain the wire frame: it can contain prompt content or unrelated metadata.
+        self.pending.admission_fallbacks.insert(message.to_owned(), reason.to_owned());
+        true
+    }
+
     fn record_input_attempt(&self, message: &str) -> Result<()> {
         let dir = self.pending.input_source_dir.as_deref()
             .context("native input source has no durable journal")?;
@@ -19209,6 +19242,9 @@ struct PiFamilyReports {
     input_source_dir: Option<PathBuf>,
     #[serde(default)]
     input_source_ready: bool,
+    /// One fallback per idle handoff/batch, identified by its first message, not every member.
+    #[serde(default)]
+    admission_fallbacks: BTreeMap<String, String>,
 }
 
 impl PiFamilyReports {
@@ -19221,6 +19257,14 @@ impl PiFamilyReports {
         session: &str,
     ) -> Result<()> {
         let source_cut = u64::try_from(current_unix_ms()?)?;
+        while let Some((message, reason)) = self.admission_fallbacks.first_key_value()
+            .map(|(message, reason)| (message.clone(), reason.clone()))
+        {
+            let _: ClaimRecord = client.post("/v1/claims",
+                &omp_channel_admission_fallback_claim(subject, incarnation, &message, &reason),
+            ).await?;
+            self.admission_fallbacks.remove(&message);
+        }
         if let Some((status, sequence)) = self.state.clone() {
             let _: ClaimRecord = client
                 .post(
@@ -19394,6 +19438,30 @@ impl PiFamilyReports {
             }
         }
         Ok(())
+    }
+}
+
+/// Content-free observation, not a failed delivery: awaiting the run remains the hook's owner.
+fn omp_channel_admission_fallback_claim(
+    subject: &str, incarnation: &str, message: &str, reason: &str,
+) -> ClaimInput {
+    ClaimInput {
+        subject: subject.into(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("code".into(), json!("omp-channel-admission-fallback")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("message_id".into(), json!(message)),
+            ("reason".into(), json!(reason)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        // The first observed reason wins even if the same handoff frame is replayed.
+        idempotency_key: Some(format!(
+            "omp-channel-admission-fallback:{subject}:{incarnation}:{message}"
+        )),
     }
 }
 
