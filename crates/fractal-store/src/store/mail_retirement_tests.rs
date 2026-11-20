@@ -106,8 +106,18 @@ fn closed_agent_mail_retires_a_week_after_it_closes_and_the_rest_stays() {
     assert_eq!(retire_all(&store, now_ms() + 6 * DAY_MS), (0, 0));
     assert_eq!(claims(&store), before);
 
+    let durability = |store: &Store| -> (i64, i64) {
+        let writer = store.connection.write();
+        (
+            writer.query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap(),
+            writer.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0)).unwrap(),
+        )
+    };
+    let ordinary = durability(&store);
     let (threads, deleted) = retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS);
     assert_eq!((threads, deleted), (2, agents.len() + daemon.len()));
+    // Retirement commits without waiting on the disk; the next message send commits as before.
+    assert_eq!(durability(&store), ordinary);
     let gone: BTreeSet<String> = agents.iter().chain(&daemon).cloned().collect();
     assert_eq!(retired(&store), gone, "each deleted claim is retired, and nothing else");
     let kept: BTreeSet<String> = to_person.iter().chain(&from_person).chain(&open).cloned().collect();
@@ -119,6 +129,8 @@ fn closed_agent_mail_retires_a_week_after_it_closes_and_the_rest_stays() {
     let indexed = indexed(&store);
     assert!(!indexed.contains("message/agents") && !indexed.contains("message/daemon"), "{indexed:?}");
     assert!(indexed.contains("message/to-person") && indexed.contains("message/open"));
+    store.append_claim(&sent("message/after", SENDER, RECIPIENT, Vec::new())).unwrap();
+    assert_eq!(durability(&store), ordinary);
 }
 
 #[test]

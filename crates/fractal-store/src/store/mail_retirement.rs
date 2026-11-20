@@ -98,6 +98,7 @@ impl Store {
         } else {
             (after, false)
         };
+        warm(&self.readers.get(), &judged);
         let connection = self.connection.write_background();
         let started = Instant::now();
         let mut done = super::database_size::committing_without_fsync(&connection, || {
@@ -224,6 +225,51 @@ fn delete_thread(
     }
     done.threads += 1;
     Ok(true)
+}
+
+/// Claims a hold can reach, at about 4 ms each in a 40 ms budget, with room to spare.
+const WARM_CLAIMS: usize = 24;
+
+/// Read, before the writer hold, the rows that deleting the first claims judged will touch, so
+/// the hold finds their pages cached. On a 57 GB member most deletes took 3–8 ms, but the
+/// signature cleanup (`principals::forget_claim_tx`) sometimes took 100–390 ms for one claim:
+/// every plan is an index search, so it was waiting on cold pages across the signature tables.
+/// Only a hint: a table this build lacks, or any other error, is skipped.
+fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
+    const BY_CLAIM: [&str; 9] = [
+        "replica_records",
+        "claim_signatures",
+        "claim_signature_candidates",
+        "claim_signature_nonce_uses",
+        "claim_signature_judging",
+        "claim_verdicts",
+        "claim_verdict_links",
+        "claim_verdict_dependency_edges",
+        "claim_signature_originals",
+    ];
+    let read = |sql: &str, id: &str| -> rusqlite::Result<()> {
+        let mut statement = connection.prepare_cached(sql)?;
+        let mut rows = statement.query([id])?;
+        while rows.next()?.is_some() {}
+        Ok(())
+    };
+    let claims = judged.iter().flat_map(|(_, _, judgement)| match judgement {
+        Judgement::Retire(claims) => claims.as_slice(),
+        _ => &[],
+    });
+    for (id, ..) in claims.take(WARM_CLAIMS) {
+        for table in BY_CLAIM {
+            let _ = read(&format!("SELECT * FROM {table} WHERE claim_id=?1"), id);
+        }
+        // The claims that share a nonce with this one, whose judging the delete marks dirty.
+        let _ = read(
+            "SELECT judging.* FROM claim_signature_nonce_uses AS n
+             CROSS JOIN claim_verdict_dependency_links AS l ON l.link='nonce:'||n.key||'|'||n.nonce
+             JOIN claim_signature_judging AS judging ON judging.claim_id=l.claim_id
+             WHERE n.claim_id=?1",
+            id,
+        );
+    }
 }
 
 /// The rule's answer for the thread `subject`.

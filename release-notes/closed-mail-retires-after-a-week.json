@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Rolling back to the previous release keeps working: it reads the smaller store, its retired ledger is the same authority and refuses the retired IDs (verified by the fleet test above). Retired mail does not come back on a rollback; a member that must keep it sets [trim] mail = false before upgrading."
+    "detail": "Rolling back to the previous release keeps working: it reads the smaller store, its retired ledger is the same authority and refuses the retired IDs (verified by the fleet test above). Retired mail does not come back on a rollback; a member that must keep it sets [trim] mail = false before upgrading. Retirement steps and free-page steps commit at synchronous=NORMAL with no checkpoint inside the commit; the pragmas are put back around exactly those commits, on error too, so every other write keeps the member's own level. A crash or power loss can lose only the last retirement steps since the writer's previous ordinary commit; their claims are still there and the next pass retires them again."
   }
 }
