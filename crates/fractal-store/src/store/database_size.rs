@@ -98,6 +98,59 @@ pub const FREE_PAGE_CHUNK: u64 = 128;
 // The literal in `release_free_pages` spells this chunk.
 const _: () = assert!(FREE_PAGE_CHUNK == 128);
 
+/// Run `work`, whose commits redo themselves after a crash (giving free pages back, retiring
+/// closed mail), without waiting on the disk at commit, then restore the connection's settings.
+/// On a busy host the waits took most of a 100 ms hold:
+/// - synchronous=NORMAL skips the WAL fsync. In WAL mode it is corruption-safe; the writer's
+///   next FULL commit fsyncs the WAL and these frames with it, and a crash before then loses
+///   only work the next pass does again.
+/// - wal_autocheckpoint=0 leaves copying the WAL into the database (and its fsync) to the
+///   daemon's checkpoint thread, which runs off the writer queue every few seconds.
+///
+/// Neither can change inside a transaction, so `work` begins and commits its own. Both are put
+/// back before this returns, on success, on an error and on a panic alike, so the writer's next
+/// ordinary commit runs at the member's own level.
+pub(crate) fn committing_without_fsync<T>(connection: &Connection, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let mut restore = RestoreDurability {
+        connection,
+        level: connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+        automatic: connection.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))?,
+        armed: true,
+    };
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+    let done = work();
+    // An error restoring wins over the work's result: the writer must not stay at NORMAL.
+    restore.now()?;
+    done
+}
+
+/// Puts a connection's synchronous level and checkpoint threshold back.
+struct RestoreDurability<'a> {
+    connection: &'a Connection,
+    level: i64,
+    automatic: i64,
+    armed: bool,
+}
+
+impl RestoreDurability<'_> {
+    fn now(&mut self) -> Result<()> {
+        self.armed = false;
+        self.connection.pragma_update(None, "wal_autocheckpoint", self.automatic)?;
+        self.connection.pragma_update(None, "synchronous", self.level)?;
+        Ok(())
+    }
+}
+
+impl Drop for RestoreDurability<'_> {
+    // Only on an early return or a panic; the ordinary path restores with `now`.
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.now();
+        }
+    }
+}
+
 impl Store {
     /// Give up to [`FREE_PAGE_CHUNK`] free pages back to the filesystem in one short write, and
     /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
@@ -114,11 +167,12 @@ impl Store {
             return Ok(0);
         }
         // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
-        let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
-        let mut steps = statement.query([])?;
-        while steps.next()?.is_some() {}
-        drop(steps);
-        drop(statement);
+        committing_without_fsync(&connection, || {
+            let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
+            let mut steps = statement.query([])?;
+            while steps.next()?.is_some() {}
+            Ok(())
+        })?;
         Ok(before.saturating_sub(free()?))
     }
 
@@ -290,6 +344,41 @@ mod tests {
             )
             .unwrap();
         pragma(store, "freelist_count")
+    }
+
+    /// The writer's synchronous level and checkpoint threshold.
+    fn durability(store: &Store) -> (i64, i64) {
+        let writer = store.connection.write();
+        (
+            writer.query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap(),
+            writer.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn giving_pages_back_leaves_the_writer_at_its_own_durability() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
+        let before = durability(&store);
+        assert_eq!(before.0, 2, "a member commits at FULL");
+        free_some_pages(&store);
+        assert_eq!(store.release_free_pages().unwrap(), FREE_PAGE_CHUNK);
+        assert_eq!(durability(&store), before);
+        // Work that fails part way puts both back too.
+        {
+            let writer = store.connection.write();
+            let failed = committing_without_fsync(&writer, || -> Result<()> {
+                let inside: (i64, i64) = (
+                    writer.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+                    writer.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))?,
+                );
+                assert_eq!(inside, (1, 0), "NORMAL, and no checkpoint at commit");
+                writer.execute_batch("BEGIN; CREATE TABLE half_done(x); ROLLBACK;")?;
+                anyhow::bail!("refused part way")
+            });
+            assert!(failed.is_err());
+        }
+        assert_eq!(durability(&store), before);
     }
 
     #[test]

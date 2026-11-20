@@ -174,6 +174,14 @@ describe('graph lowering golden parity', () => {
 
 describe('typed compile refusals', () => {
   it.each([
+    ['targetAt', { targetAt: '2030-01-01T00:00:00Z' }],
+    ['milestones', { milestones: [{ id: 'release', at: '2030-01-01T00:00:00Z' }] }],
+  ] as const)('refuses %s instead of silently losing mission date metadata', (construct, fields) => {
+    const graph = Fractal.mission({ meta, ...base, ...fields, steps: [{ id: 'work', agentless: true }] })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ _tag: 'GraphCompileRefusal', construct }))
+  })
+
+  it.each([
     ['waitFor', { waitFor: Fractal.pinMission({ subject: diamond(), revision: 'a'.repeat(64) }) }], ['watch', { watch: {} }], ['observer', { observer: {} }],
     ['Timing', { timing: { _tag: 'Calendar', at: '09:00', timezone: 'UTC' } }],
     ['Review', { review: [{ _tag: 'Subject', subject: 'resource/example' }] }],

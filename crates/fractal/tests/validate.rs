@@ -82,6 +82,25 @@ fn authoring_package_matches_the_declarations_sdk_mission() {
 }
 
 #[test]
+fn typescript_escalation_fixture_preserves_native_delivery_contract() {
+    use fractal_store::model::{EscalationAction, EscalationClock, EscalationOverride, EscalationState};
+    let source = include_str!("../../../packages/fractal/fixtures/escalation.kdl");
+    let intent = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let mission = &intent.missions["example/escalation"];
+    let EscalationOverride::Replace { policies } = &mission.escalation else { panic!("missing mission ladder") };
+    assert_eq!(policies[0].clock, EscalationClock::SinceProgress);
+    assert_eq!(policies[0].state, EscalationState::Running);
+    assert_eq!(policies[0].stages[0].after_ms, 1_800_000);
+    assert_eq!(policies[0].stages[1].after_ms, 86_400_000);
+    assert_eq!(policies[0].stages[0].action, EscalationAction::Notify("agent/example/reporter".into()));
+    assert_eq!(policies[0].stages[1].action, EscalationAction::Ask("person/reviewer".into()));
+    let EscalationOverride::Replace { policies } = &mission.steps["work"].escalation else { panic!("missing step ladder") };
+    assert_eq!(policies[0].clock, EscalationClock::SinceEntered);
+    assert_eq!(policies[0].state, EscalationState::Ready);
+    assert_eq!(mission.steps["muted"].escalation, EscalationOverride::Disable);
+}
+
+#[test]
 fn authoring_package_fixtures_parse_as_declarations() {
     for (name, source, missions) in [
         (

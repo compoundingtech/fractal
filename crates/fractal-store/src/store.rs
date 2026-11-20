@@ -329,6 +329,9 @@ pub mod wake_demand;
 pub mod message_marks;
 pub mod mail_input_acceptance;
 pub mod mail_delivery_source;
+pub mod mail_retirement;
+#[cfg(test)]
+mod mail_retirement_tests;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -419,6 +422,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod escalation;
 pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
@@ -857,7 +861,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfecc739717ae owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9d1b1deb0cb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1282,6 +1286,10 @@ BEGIN
     DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
+CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
+    run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS capabilities (
     secret_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -1915,6 +1923,8 @@ pub struct SubjectCache {
 }
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
+/// Dependency invalidation is cheaper to discard than to read an unbounded claim backlog.
+const SUBJECT_CACHE_DELTA_ROWS: usize = 4096;
 
 /// One subject's reduction, read at snapshot `read_at`, so it holds from there on. The claims
 /// mode is part of the answer: a summary reduction and a full one are cached side by side.
@@ -5765,7 +5775,18 @@ impl Store {
             let conflicts = connection
                 .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h021ae8b69609 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
-            if conflicts != cache.conflicts {
+            let populated = !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
+                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
+                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty();
+            // Probe only the store-index B-tree, before reading any claim bodies. Clearing
+            // these rebuildable entries does no eager reductions: a roster page rebuilds
+            // only its selected subjects, even if every subsequent interval overflows too.
+            let overflow = populated && connection.prepare_cached(
+                "SELECT count(*) FROM (SELECT 1 FROM claims WHERE store_index>?1
+                 AND store_index<=?2 LIMIT ?3)",
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-hc80bf6e28816 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
+                |row| row.get::<_, usize>(0))? > SUBJECT_CACHE_DELTA_ROWS;
+            if conflicts != cache.conflicts || overflow {
                 cache.views.clear();
                 cache.serving_views.clear();
                 cache.statuses.clear();
@@ -5774,9 +5795,7 @@ impl Store {
                 cache.card_statuses.clear();
                 cache.serving_card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
-                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
-                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
+            } else if populated {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
