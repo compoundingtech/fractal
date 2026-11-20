@@ -135,10 +135,41 @@ After admission the host creates a per-execution workspace at `<slot-root>/<job-
 exports it as `FRACTAL_JOB_WORKSPACE`, and uses it as the default working directory.
 An explicit shell `--cwd` must remain within the admitted slot root; otherwise launch refuses
 with `darwin-custody-cwd`. Workspace cleanup follows confirmed retirement; a cleanup or ACL
-failure reports the leftover rather than claiming it was removed. Source trees, toolchain
-inputs and output destinations must already be accessible to the dedicated user. Admission
-does not make an operator's home directory readable or broaden its ACLs. A build caller whose
-inputs are inaccessible must arrange an accessible source/output layout before cutover.
+failure reports the leftover rather than claiming it was removed.
+
+Source access is an operator-provisioned, read-only ACL on a configured repository/worktree
+store for every slot user. The caller's home receives only a non-inheriting `search` ACE:
+this permits traversal to the store without listing or reading the home. The store grants
+`list,search,readattr,readextattr,readsecurity` (including file `read`) with
+`file_inherit,directory_inherit`, covering both existing descendants and new children.
+All worktrees in that store are readable by every slot; this is an accepted source visibility
+trade-off, not per-repository isolation. The provisioner reconciles its own ACEs without
+duplicating them or removing unrelated ACLs, and revokes grants when a slot is retired.
+Admission itself does not edit home or source ACLs. Symlinks outside the configured store
+need separately provisioned read access; the provisioner must not follow them recursively.
+
+Payload writes belong in `FRACTAL_JOB_WORKSPACE`, not the source store. Recommended settings:
+
+```sh
+export GIT_OPTIONAL_LOCKS=0
+export CARGO_TARGET_DIR="$FRACTAL_JOB_WORKSPACE/target"
+export XDG_CACHE_HOME="$FRACTAL_JOB_WORKSPACE/cache"
+export TMPDIR="$FRACTAL_JOB_WORKSPACE/tmp"
+mkdir -p "$CARGO_TARGET_DIR" "$XDG_CACHE_HOME" "$TMPDIR"
+```
+
+Read-only Git inspection can otherwise try to refresh the index. Mutating Git operations
+(checkout, commit, fetch, submodule initialization) require a job-local writable checkout;
+`GIT_OPTIONAL_LOCKS=0` does not make them read-only. Git may also reject the different source
+owner: if needed, pass `-c safe.directory=<exact-approved-worktree>` for that invocation,
+never trust every directory globally. Cargo may write `Cargo.lock` in the source tree:
+use `--locked` for an existing lockfile or a job-local checkout. Tools that insist on
+in-tree output (`target/`, `node_modules/.cache`, generated files, test snapshots, or package
+installation) need explicit workspace output/cache flags or a job-local source copy.
+`XDG_CACHE_HOME` alone does not redirect every tool. The login-less slot identity has no
+writable user home; do not rely on the caller's home caches or credentials. These allow ACEs
+grant no write permissions; operators must also ensure no pre-existing mode/group/ACL
+grant independently gives a slot write access to the store.
 
 Provisioned roots are owned by the slot user with group `staff` and mode `2770`;
 the slot user's primary group is `nobody`. Cross-UID access uses inherited ACLs, not
