@@ -164,7 +164,8 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
     runs-on:
       [
-        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 3
     permissions:

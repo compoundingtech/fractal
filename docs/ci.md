@@ -127,7 +127,8 @@ Node setup is already explicit. The moved web aggregator installs pinned Node
 on owned runners only when uncovered relevant receipts need validation.
 CI-script tests, Home Manager evaluation and real web execution retain their existing
 hosted placement. The picker, eight evidence gates and compatibility archive producers
-instead use the existing ephemeral `namespace-profile-linux-x86-64` profile directly,
+instead use the same ephemeral `nscloud-ubuntu-24.04-amd64-8x16-with-features` shape
+as required PR stages,
 at priority 1 for merge groups and 2 otherwise. None depends on picker output.
 These are the complete prerequisite paths for the fast-lane required checks
 `linux-test-build`, `linux-clippy` and `linux-fleet-compat`; unrelated hosted jobs,

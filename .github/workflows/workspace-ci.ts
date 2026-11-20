@@ -24,10 +24,6 @@ export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run
  */
 export const controlLinuxRunner = "${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '[\"ci1-priority\"]' || '[\"ubuntu-latest\"]') }}"
 
-/** Ephemeral Namespace prerequisites must not wait for hosted admission or the pool they select. */
-export const prerequisiteLinuxRunner = [
-  "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
-] as const
 /**
  * The Linux gate's stage jobs. On 2026-10-03 the shape label `nscloud-ubuntu-24.04-amd64-16x32`
  * stopped getting runners at about 12:10Z, and the profile allows only about five runners at
@@ -38,6 +34,12 @@ const linuxStageShape = 'nscloud-ubuntu-24.04-amd64-8x16-with-features'
 /** All non-merge Linux work retains one class; merge groups have the first queue class. */
 export const linuxStageRunner = [
   `${linuxStageShape};job.priority=${linuxJobPriority}`,
+  'namespace-features:github.run-id=${{ github.run_id }}',
+] as const
+
+/** Prerequisites use the same provisioned ephemeral shape as required PR stages, without picker output. */
+export const prerequisiteLinuxRunner = [
+  `${linuxStageShape};job.priority=\${{ github.event_name == 'merge_group' && 1 || 2 }}`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
 // Optional load benchmarks follow required PR checks, merge groups and releases.
