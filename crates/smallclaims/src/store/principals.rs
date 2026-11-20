@@ -1253,7 +1253,6 @@ impl ClaimSigner {
     }
 }
 
-/// One page of [`Store::prune_settled_signature_judgments`].
 /// One loan of the orphan verdict-link sweep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkSweep {
@@ -1265,6 +1264,7 @@ pub struct LinkSweep {
     pub held: std::time::Duration,
 }
 
+/// One page of [`Store::prune_settled_signature_judgments`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct JudgingPrune {
     pub examined: usize,
