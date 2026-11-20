@@ -326,9 +326,6 @@ fn membership_state_tracks_same_count_edits_and_is_not_checkpoint_authority() {
     assert_eq!(store.ordered_membership_state(CONTAINER).unwrap().changed_index,
         restored.changed_index + 11);
     assert_eq!(layout_digests(&store), digests);
-    let directory = tempfile::tempdir().unwrap();
-    let (_, proof) = store.plan_checkpoint(now_ms() + 1, directory.path()).unwrap();
-    assert!(proof.passed, "local frontier values must not affect checkpoint witnesses");
 }
 
 #[test]
@@ -364,9 +361,6 @@ fn lifecycle_frontier_survives_projection_rebuild_and_heal() {
     let edited = store.ordered_membership_state(CONTAINER).unwrap();
     assert_eq!(edited.live_count, restored.live_count);
     assert!(edited.changed_index > restored.changed_index);
-    let directory = tempfile::tempdir().unwrap();
-    let (_, proof) = store.plan_checkpoint(now_ms() + 1, directory.path()).unwrap();
-    assert!(proof.passed, "rebuild watermark is not shared checkpoint authority");
 }
 
 
@@ -737,9 +731,7 @@ fn repaired_membership_original_retracts_omitted_pairs_and_shared_revision() {
         assert!(target.replay_replication_graph().map(|()| true).unwrap());
         assert_eq!(layout_digests(target), digests);
     }
-    let directory = tempfile::tempdir().unwrap();
-    let (plan, proof) = source.plan_checkpoint(now_ms() + 1, directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&source.checkpoint_sealed_set(now_ms() + 1).unwrap());
     source.apply_checkpoint_drop("checkpoint/repaired-memberships", &plan.envelopes, &plan.claims).unwrap();
     assert_eq!(layout_digests(&source), digests);
     // Receipt cleanup cannot resurrect repaired authority during a later rebuild.
@@ -876,9 +868,7 @@ fn retained_claim_member_repair_refreshes_lifecycle_without_changing_its_pair() 
         assert_eq!(membership_digests(target), digests);
         assert_eq!(head(target, member), retained);
     }
-    let directory = tempfile::tempdir().unwrap();
-    let (plan, proof) = receiver.plan_checkpoint(now_ms() + 1, directory.path()).unwrap();
-    assert!(proof.passed, "checkpoint replay witness must agree with incremental lifecycle repair");
+    let plan = crate::store::checkpoint::plan_drops(&receiver.checkpoint_sealed_set(now_ms() + 1).unwrap());
     receiver.apply_checkpoint_drop("checkpoint/retained-member-repair", &plan.envelopes, &plan.claims).unwrap();
     assert_eq!(membership_digests(&receiver), digests);
     assert_eq!(lifecycle(&receiver, member), (true, replacement.id));
@@ -1191,9 +1181,7 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
             assert_eq!(&head(target, member), expected);
         }
     }
-    let directory = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(now_ms() + 1, directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(now_ms() + 1).unwrap());
     assert!(plan.claims.iter().any(|claim| claim.kind == "daemon.diagnostic"), "the checkpoint must actually trim unrelated history");
     assert!(plan.claims.iter().all(|claim| claim.kind != "ordered-membership.edited" && claim.kind != "arrangement.edited"));
     let authority = store.replication_inventory().unwrap().digest;
@@ -1361,9 +1349,7 @@ fn placement_migration_checkpoint_and_replay_preserve_hidden_original_winners() 
         store.append_as_older_build_for_test(&noise).unwrap();
     }
     let before = layout_digests(&store);
-    let directory = tempfile::tempdir().unwrap();
-    let (plan, proof) = store.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
-    assert!(proof.passed);
+    let plan = crate::store::checkpoint::plan_drops(&store.checkpoint_sealed_set(now_ms()+1).unwrap());
     assert!(plan.claims.iter().any(|claim| claim.kind == "daemon.diagnostic"));
     assert!(plan.claims.iter().all(|claim| !matches!(claim.kind.as_str(), "arrangement.edited" | "ordered-membership.edited")));
     store.apply_checkpoint_drop("checkpoint/migration", &plan.envelopes, &plan.claims).unwrap();
@@ -1423,9 +1409,6 @@ fn placement_migration_empty_container_dependency_tracks_edits_and_retirement() 
         assert_eq!(lifecycle(&store, CONTAINER), (!retired,changed.id));
         assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
         let before = layout_digests(&store);
-        let directory = tempfile::tempdir().unwrap();
-        let (_, proof) = store.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
-        assert!(proof.passed);
         assert_eq!(layout_digests(&store), before);
         store.rebuild_claim_projections().unwrap();
         assert_eq!(layout_digests(&store), before);
@@ -1473,14 +1456,10 @@ fn placement_migration_inactive_legacy_union_does_not_limit_version_two_folder_e
     let before = layout_digests(&left);
     left.rebuild_claim_projections().unwrap();
     assert_eq!(layout_digests(&left), before);
-    let directory = tempfile::tempdir().unwrap();
-    let (_, proof) = left.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
-    assert!(proof.passed);
 }
 
 #[test]
 fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_refuse_comparison_and_verification() {
-    use smallclaims::store::checkpoint_agreement::{CheckpointContext, SealTerms, seal_difference};
     let legacy = Store::open_memory("migration-rules21").unwrap();
     let modern = Store::open_memory("migration-rules22").unwrap();
     modern.graph.capture_divergences(true);
@@ -1518,23 +1497,6 @@ fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_
     let rules25 = hex::encode(digest.finalize());
     assert_eq!(checkpoint_rules::RULES_VERSION, 26);
     assert_ne!(rules25, checkpoint_rules::rules_digest());
-    let terms26 = SealTerms {
-        cut_unix_ms: now_ms(),
-        participants: BTreeSet::from([legacy.origin.clone(), modern.origin.clone()]),
-        sealed_digest: "a".repeat(64),
-        rules_digest: checkpoint_rules::rules_digest(),
-    };
-    let terms25 = SealTerms { rules_digest: rules25, ..terms26.clone() };
-    assert_eq!(seal_difference(&terms26, &terms25), "rules");
-    let directory = tempfile::tempdir().unwrap();
-    let context = CheckpointContext { now_unix_ms: now_ms(), configured_peers: vec![legacy.origin.clone()],
-        scratch: directory.path().to_owned(), reviewer: "person/ada".into() };
-    let before = modern.index().unwrap();
-    let mut actions = Vec::new();
-    // Mismatched rules must return before reading a seal row or running a proof.
-    modern.graph.verify_checkpoint("checkpoint/mixed-migration-rules", &terms25, 0, &context, &mut actions).unwrap();
-    assert!(actions.is_empty());
-    assert_eq!(modern.index().unwrap(), before);
 }
 
 #[test]

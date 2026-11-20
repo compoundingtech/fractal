@@ -519,7 +519,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
+            | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -902,9 +902,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
         .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
-        .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
-        .route("/v1/checkpoint/status", get(replication::checkpoint_status))
-        .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
         .route("/v1/faults/dismiss", post(records::dismiss_fault))
@@ -925,14 +922,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication_worker_status),
         )
         .route(
-            "/v1/internal/replication/checkpoint",
-            post(replication::replication_checkpoint_manifest),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-need",
-            post(replication::replication_checkpoint_need),
-        )
-        .route(
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
@@ -943,11 +932,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
-        )
-        .route(
-            "/v1/internal/replication/checkpoint-adopt",
-            post(replication::replication_checkpoint_adopt)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
@@ -9676,12 +9660,16 @@ pub(crate) fn doctor_workers(read_limit: usize) -> usize {
 
 type DoctorWork<'a> = Box<dyn FnOnce() -> Result<Vec<DoctorCheck>, ApiError> + Send + 'a>;
 
-fn checkpoint_doctor_check(status: &crate::store::CheckpointStatusView) -> DoctorCheck {
+fn trim_doctor_check(status: &crate::store::TrimStatusView) -> DoctorCheck {
     let blocking = status.blocking_summary();
     DoctorCheck {
-        name: "checkpoint".into(),
+        name: "trim".into(),
         status: if blocking.is_some() { "warn" } else { "pass" }.into(),
-        message: blocking.unwrap_or_else(|| "no checkpoint is pending".into()),
+        message: blocking.unwrap_or_else(|| match (&status.trimmed, status.trims) {
+            (_, false) => "trimming is off ([trim] local = false)".into(),
+            (Some(cut), true) => format!("trimming on its own; newest trimmed cut {cut}"),
+            (None, true) => "trimming on its own; no cut trimmed yet".into(),
+        }),
     }
 }
 
@@ -10549,13 +10537,10 @@ fn doctor_report_within(
         }
         Ok(checks)
     });
-    if state.fleet_id.is_some() {
-        checks.check("checkpoint", || {
-            let status = state.store.checkpoint_status(client_now_ms(), &replication_peer_names(state))
-                .map_err(ApiError::internal)?;
-            Ok(vec![checkpoint_doctor_check(&status)])
-        });
-    }
+    checks.check("trim", || {
+        let status = state.store.trim_status().map_err(ApiError::internal)?;
+        Ok(vec![trim_doctor_check(&status)])
+    });
     checks.check("first-readiness", || {
         Ok(vec![first_readiness_scheduler_check(&state.store, &state.node)])
     });
@@ -10738,9 +10723,6 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
 
-#[cfg(test)]
-#[path = "api/checkpoint_plan_tests.rs"]
-mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
@@ -10918,7 +10900,6 @@ async fn refuse_while_leaving(
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
     if mutating && !allowed && state.store.fleet_leaving().unwrap_or(false) {

@@ -66,7 +66,6 @@ fn cli_inventory_capture_helper() {
 mod codex_bootstrap;
 mod command_recorder;
 mod completion_shells;
-mod convergence;
 mod daemon_bench;
 mod daemon_cost;
 mod daemon_load;

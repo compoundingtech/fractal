@@ -923,16 +923,6 @@ fn unsupported_checkpoint_fails_before_copy_or_history_work_and_preserves_ready_
     check(&n);
     let before = semantic_tokens(&n);
     let cut = source_cut(&n.store.readers.get()).unwrap();
-    let temp = tempfile::tempdir().unwrap();
-    let scratch = temp.path().join("must-not-be-created");
-    assert!(
-        n.store
-            .plan_checkpoint(0, &scratch)
-            .unwrap_err()
-            .to_string()
-            .contains("ivm-checkpoint-unavailable")
-    );
-    assert!(!scratch.exists());
     assert!(
         n.store
             .apply_checkpoint_drop("checkpoint/fixture", &[], &[])
@@ -948,19 +938,6 @@ fn unsupported_checkpoint_fails_before_copy_or_history_work_and_preserves_ready_
         plan.rules_digest,
         "smallclaims.ivm.checkpoint-unavailable.v1"
     );
-    let copy = temp.path().join("must-not-be-opened.sqlite3");
-    assert!(
-        smallclaims::store::checkpoint::prove_on_copy(
-            &*n.runtime,
-            &copy,
-            &smallclaims::store::checkpoint::SealedSet::default(),
-            &plan
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("ivm-checkpoint-unavailable")
-    );
-    assert!(!copy.exists());
     assert_eq!(semantic_tokens(&n), before);
     assert_eq!(source_cut(&n.store.readers.get()).unwrap(), cut);
     check(&n);
@@ -1004,7 +981,7 @@ fn checkpoint_state_rows(n: &Node) -> BTreeMap<String, Vec<Vec<String>>> {
 }
 
 #[test]
-fn direct_checkpoint_sealing_refuses_unavailable_runtime_but_explicit_backup_remains_available() {
+fn direct_checkpoint_capture_refuses_unavailable_runtime() {
     let n = ordinary();
     append_raw(&n, desired_body("a", Some("amber")));
     check(&n);
@@ -1033,57 +1010,8 @@ fn direct_checkpoint_sealing_refuses_unavailable_runtime_but_explicit_backup_rem
             .to_string()
             .contains("ivm-checkpoint-unavailable")
     );
-    assert!(
-        n.store
-            .checkpoint_sealed_identities(cut, None)
-            .unwrap_err()
-            .to_string()
-            .contains("ivm-checkpoint-unavailable")
-    );
     assert_eq!(checkpoint_state_rows(&n), before);
     assert_eq!(semantic_tokens(&n), tokens);
-    // Backup is a general explicit snapshot operation, not checkpoint proof or restore.
-    assert!(
-        n.store
-            .checkpoint_status(cut, &[])
-            .unwrap_err()
-            .to_string()
-            .contains("ivm-checkpoint-unavailable")
-    );
-    assert!(
-        n.store
-            .checkpoint_manifest_need()
-            .unwrap_err()
-            .to_string()
-            .contains("ivm-checkpoint-unavailable")
-    );
-    assert_eq!(checkpoint_state_rows(&n), before);
-    // Inspect the resulting raw DB without Store::open or any projection lifecycle callback.
-    let temp = tempfile::tempdir().unwrap();
-    let copy = temp.path().join("explicit-backup.sqlite3");
-    n.store.copy_store_to(&copy).unwrap();
-    let raw =
-        Connection::open_with_flags(&copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(
-        raw.query_row("SELECT COUNT(*) FROM claims", [], |r| r.get::<_, u64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        raw.query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r
-            .get::<_, u64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        rows(&raw, "desired-by-host"),
-        rows(&n.store.readers.get(), "desired-by-host")
-    );
-    assert_eq!(
-        source_cut(&raw).unwrap(),
-        source_cut(&n.store.readers.get()).unwrap()
-    );
-    assert_eq!(checkpoint_state_rows(&n), before);
     check(&n);
 }
 
@@ -1153,20 +1081,11 @@ fn interrupted_trim_resume_and_checkpoint_step_fail_without_touching_persisted_s
             .to_string()
             .contains("ivm-checkpoint-unavailable")
     );
-    assert!(
-        n.store
-            .apply_stable_checkpoints(&[], std::path::Path::new("unused-checkpoint-scratch"), &mut actions)
-            .unwrap_err()
-            .to_string()
-            .contains("ivm-checkpoint-unavailable")
-    );
     let temp = tempfile::tempdir().unwrap();
     let scratch = temp.path().join("no-checkpoint-work");
     let context = CheckpointContext {
         now_unix_ms: manifest.cut_unix_ms,
-        configured_peers: vec![],
         scratch: scratch.clone(),
-        reviewer: "person/fixture".into(),
     };
     assert!(
         n.store
@@ -1188,38 +1107,28 @@ fn direct_trim_and_resume_override_fail_before_tombstone_state_or_frontier_mutat
     let manifest = checkpoint_drop_fixture(&n);
     let before = checkpoint_state_rows(&n);
     let tokens = semantic_tokens(&n);
-    for exact in [false, true] {
-        let mut actions = Vec::new();
-        assert!(
-            n.store
-                .trim_checkpoint(
-                    &manifest.checkpoint,
-                    manifest.cut_unix_ms,
-                    "unavailable",
-                    &manifest.envelopes,
-                    &manifest.claims,
-                    exact,
-                    &mut actions
-                )
-                .unwrap_err()
-                .to_string()
-                .contains("ivm-checkpoint-unavailable")
-        );
-        assert!(actions.is_empty());
-        assert_eq!(checkpoint_state_rows(&n), before);
-    }
+    let mut actions = Vec::new();
+    assert!(
+        n.store
+            .trim_checkpoint(
+                &manifest.checkpoint,
+                manifest.cut_unix_ms,
+                "unavailable",
+                &manifest.envelopes,
+                &manifest.claims,
+                &mut actions
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("ivm-checkpoint-unavailable")
+    );
+    assert!(actions.is_empty());
+    assert_eq!(checkpoint_state_rows(&n), before);
     assert!(
         n.store
             .resume_checkpoints("person/fixture", "reviewed")
             .unwrap_err()
             .message
-            .contains("ivm-checkpoint-unavailable")
-    );
-    assert!(
-        n.store
-            .forget_tombstones_for_tests()
-            .unwrap_err()
-            .to_string()
             .contains("ivm-checkpoint-unavailable")
     );
     assert_eq!(checkpoint_state_rows(&n), before);
@@ -1228,32 +1137,17 @@ fn direct_trim_and_resume_override_fail_before_tombstone_state_or_frontier_mutat
 }
 
 #[test]
-fn manifest_adoption_restore_and_unverified_entry_fail_before_certificate_scan_or_mutation() {
+fn checkpoint_restore_fails_before_mutation() {
     let n = ordinary();
     let manifest = checkpoint_drop_fixture(&n);
     let before = checkpoint_state_rows(&n);
     let tokens = semantic_tokens(&n);
-    // The failure is the unavailable runtime contract, before certificate interpretation,
-    // rather than a substitute not-stable or success-looking empty action response.
-    assert!(
-        n.store
-            .adopt_checkpoint(&manifest)
-            .unwrap_err()
-            .message
-            .contains("ivm-checkpoint-unavailable")
-    );
+    // The failure is the unavailable runtime contract, before anything is recorded.
     assert!(
         n.store
             .restore_checkpoint_history(&manifest)
             .unwrap_err()
             .message
-            .contains("ivm-checkpoint-unavailable")
-    );
-    assert!(
-        n.store
-            .adopt_checkpoint_unverified_for_tests(&manifest)
-            .unwrap_err()
-            .to_string()
             .contains("ivm-checkpoint-unavailable")
     );
     assert_eq!(checkpoint_state_rows(&n), before);

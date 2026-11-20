@@ -1,40 +1,20 @@
-//! Agreement on checkpoints: which writers take part, the seal, the verification, and when a
-//! checkpoint is stable. Nothing here deletes anything; a stable checkpoint is what a trim may
-//! act on.
-//!
-//! Sections 2 and 3 of `doc/fleet/smalltalk/checkpoint-design`. Participants and stability are
-//! pure functions of the claims a node holds, like the membership fold: every node that holds
-//! the same claims reaches the same answer, whatever order they arrived in.
+//! The checkpoint worker: one pass of a member's own trim, its phase, and the person's word that
+//! lets a stopped trim go on. Members agree on no checkpoint with one another; each plans and
+//! trims its own daily cut (`checkpoint_trim.rs`). The `checkpoint.*` claim kinds older builds
+//! wrote are still admitted, and nothing here writes them.
 
-use super::checkpoint::{
-    CheckpointProof, SealedIdentities, checkpoint_name, newest_due_cut,
-};
-use super::checkpoint_staging::{StagedPlan, StagedSet};
 use super::*;
 
-pub const CHECKPOINT_SEALED: &str = "checkpoint.sealed";
-pub const CHECKPOINT_VERIFIED: &str = "checkpoint.verified";
-pub const CHECKPOINT_EXCUSED: &str = "checkpoint.excused";
-
-/// The version of this agreement protocol, carried in every seal and verification.
-pub const CHECKPOINT_PROTOCOL: u64 = 1;
-
 pub const DAY_MS: u128 = 86_400_000;
-
-/// A checkpoint that is still not stable this long after it became due asks a person to act.
-pub const CHECKPOINT_ATTENTION_AFTER_MS: u128 = 3 * DAY_MS;
-
-/// A changed proof input may be attempted ten minutes after the last failed proof. An input
-/// already proved unsafe is never attempted again, even after this backoff or a restart.
-pub const CHECKPOINT_PROOF_BACKOFF_MS: u128 = 10 * 60 * 1_000;
 
 #[cfg(feature = "test-support")]
 thread_local! {
     static TEST_CHECKPOINT_IDENTITY: std::cell::Cell<Option<(&'static str, &'static str)>> = const { std::cell::Cell::new(None) };
 }
 
-/// Pin proof identity for a simulation, so failed-proof diagnostics do not change its
-/// claim inputs when the test executable is rebuilt. Production keeps its real identity.
+/// Pin build identity for a simulation, so what names the build (inventories, staged sets,
+/// answers checks) does not change when the test executable is rebuilt. Production keeps its
+/// real identity.
 /// The guard restores the enclosing thread's identity, including during unwinding.
 #[cfg(feature = "test-support")]
 #[must_use = "keep the guard alive throughout the simulation"]
@@ -77,8 +57,8 @@ fn simulation_identity_is_scoped_to_its_thread_and_restores_on_unwind() {
     assert_eq!(checkpoint_build(), real_build);
 }
 
-/// The build a seal or verification names, so status can say which build holds a checkpoint up.
-/// `CARGO_PKG_VERSION` alone is the same on every node today.
+/// The build this member names in its inventory and answers checks. `CARGO_PKG_VERSION` alone
+/// is the same on every node today.
 pub fn checkpoint_build() -> String {
     #[cfg(feature = "test-support")]
     if let Some((build, _)) = TEST_CHECKPOINT_IDENTITY.with(std::cell::Cell::get) {
@@ -90,341 +70,32 @@ pub fn checkpoint_build() -> String {
 }
 
 /// One admitted `checkpoint.*` claim. Lists of them are in canonical order.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CheckpointClaim {
-    pub id: String,
-    pub kind: String,
-    pub subject: String,
-    /// The writer (origin) of the claim.
-    pub writer: String,
-    pub actor: Option<String>,
-    pub fields: serde_json::Map<String, Value>,
-}
-
-impl CheckpointClaim {
-    pub fn text(&self, name: &str) -> Option<&str> {
-        self.fields.get(name).and_then(Value::as_str)
-    }
-
-    pub fn number(&self, name: &str) -> Option<u128> {
-        self.fields
-            .get(name)
-            .and_then(Value::as_u64)
-            .map(u128::from)
-    }
-
-    pub fn names(&self, name: &str) -> Option<BTreeSet<String>> {
-        self.fields
-            .get(name)?
-            .as_array()?
-            .iter()
-            .map(|value| value.as_str().map(str::to_owned))
-            .collect()
-    }
-
-    /// The cut, when the claim's subject names the same checkpoint as its field.
-    pub fn cut(&self) -> Option<u128> {
-        let cut = self.number("cut_unix_ms")?;
-        (checkpoint_name(cut) == self.subject).then_some(cut)
-    }
-
-    pub fn seal_terms(&self) -> Option<SealTerms> {
-        if self.kind != CHECKPOINT_SEALED {
-            return None;
-        }
-        Some(SealTerms {
-            cut_unix_ms: self.cut()?,
-            participants: self.names("participants")?,
-            sealed_digest: self.text("sealed_digest")?.to_owned(),
-            rules_digest: self.text("rules_digest")?.to_owned(),
-        })
-    }
-
-    pub fn verified_terms(&self) -> Option<VerifiedTerms> {
-        if self.kind != CHECKPOINT_VERIFIED {
-            return None;
-        }
-        Some(VerifiedTerms {
-            cut_unix_ms: self.cut()?,
-            participants: self.names("participants")?,
-            sealed_digest: self.text("sealed_digest")?.to_owned(),
-            rules_digest: self.text("rules_digest")?.to_owned(),
-            drop_digest: self.text("drop_digest")?.to_owned(),
-            retained_digest: self.text("retained_digest")?.to_owned(),
-            graph_digest: self.text("graph_digest")?.to_owned(),
-            reader_digest: self.text("reader_digest")?.to_owned(),
-        })
-    }
-
-    pub fn is_checkpoint_work(&self) -> bool {
-        self.kind == CHECKPOINT_SEALED || self.kind == CHECKPOINT_VERIFIED
-    }
-}
-
-/// What every participant's newest seal must carry before any of them verifies.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SealTerms {
-    pub cut_unix_ms: u128,
-    pub participants: BTreeSet<String>,
-    pub sealed_digest: String,
-    pub rules_digest: String,
-}
-
-/// What a verification certifies. A certificate needs every participant's to be identical.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct VerifiedTerms {
-    pub cut_unix_ms: u128,
-    pub participants: BTreeSet<String>,
-    pub sealed_digest: String,
-    pub rules_digest: String,
-    pub drop_digest: String,
-    pub retained_digest: String,
-    pub graph_digest: String,
-    pub reader_digest: String,
-}
-
-/// A stable checkpoint: one verification from each participant, all naming exactly those
-/// participants and carrying identical digests.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Certificate {
-    pub checkpoint: String,
-    pub terms: VerifiedTerms,
-    /// Each participant's `checkpoint.verified` claim.
-    pub verifications: BTreeMap<String, String>,
-}
-
-/// Writers a person has excused and that have published no seal or verification since, in
-/// canonical order. A writer that comes back and seals ends its own excusal. An excusal that
-/// is not a person's counts for nothing.
-pub fn excused_writers(claims: &[CheckpointClaim]) -> BTreeSet<String> {
-    excused_writers_with_rules(claims, None)
-}
-
-/// The runtime's excusals end only when a returning writer can seal or verify with the same
-/// rules. A stale build's checkpoint work remains visible but cannot resume participation.
-pub fn excused_writers_for_rules(
-    claims: &[CheckpointClaim],
-    rules_digest: &str,
-) -> BTreeSet<String> {
-    excused_writers_with_rules(claims, Some(rules_digest))
-}
-
-fn excused_writers_with_rules(
-    claims: &[CheckpointClaim],
-    rules_digest: Option<&str>,
-) -> BTreeSet<String> {
-    let mut excused = BTreeSet::new();
-    for claim in claims {
-        if claim.kind == CHECKPOINT_EXCUSED {
-            let by_person = claim
-                .actor
-                .as_deref()
-                .is_some_and(|actor| actor.starts_with("person/"));
-            if by_person && let Some(writer) = claim.text("writer") {
-                excused.insert(writer.to_owned());
-            }
-        } else if excused.contains(&claim.writer)
-            && claim.is_checkpoint_work()
-            && rules_digest.is_none_or(|rules| {
-                claim.seal_terms().is_some_and(|terms| {
-                    terms.rules_digest == rules && terms.participants.contains(&claim.writer)
-                }) || claim.verified_terms().is_some_and(|terms| {
-                    terms.rules_digest == rules && terms.participants.contains(&claim.writer)
-                })
-            })
-        {
-            excused.remove(&claim.writer);
-        }
-    }
-    excused
-}
-
-/// The participants of a checkpoint: every writer this node has heard of, less those that left
-/// the fleet and those a person excused. `known` holds the writers of envelopes and tombstones,
-/// configured peers and members. Writers any checkpoint claim names as participants are added
-/// here, so the set only grows as claims arrive.
-pub fn participants(
-    known: &BTreeSet<String>,
-    left: &BTreeSet<String>,
-    claims: &[CheckpointClaim],
-) -> BTreeSet<String> {
-    let excused = excused_writers(claims);
-    participants_with_excusals(known, left, claims, &excused)
-}
-
-/// Participant selection for a runtime whose rules must match a returning writer's work.
-pub fn participants_for_rules(
-    known: &BTreeSet<String>,
-    left: &BTreeSet<String>,
-    claims: &[CheckpointClaim],
-    rules_digest: &str,
-) -> BTreeSet<String> {
-    let excused = excused_writers_for_rules(claims, rules_digest);
-    participants_with_excusals(known, left, claims, &excused)
-}
-
-fn participants_with_excusals(
-    known: &BTreeSet<String>,
-    left: &BTreeSet<String>,
-    claims: &[CheckpointClaim],
-    excused: &BTreeSet<String>,
-) -> BTreeSet<String> {
-    let named = claims
-        .iter()
-        .filter(|claim| claim.is_checkpoint_work())
-        .filter_map(|claim| claim.names("participants"))
-        .flatten();
-    known
-        .iter()
-        .cloned()
-        .chain(named)
-        .filter(|writer| !left.contains(writer) && !excused.contains(writer))
-        .collect()
-}
-
-/// Each writer's newest seal of `checkpoint`.
-pub fn newest_seals(claims: &[CheckpointClaim], checkpoint: &str) -> BTreeMap<String, SealTerms> {
-    let mut seals = BTreeMap::new();
-    for claim in claims.iter().filter(|claim| claim.subject == checkpoint) {
-        if let Some(terms) = claim.seal_terms() {
-            seals.insert(claim.writer.clone(), terms);
-        }
-    }
-    seals
-}
-
-/// Each writer's first verification of `checkpoint`, with its claim ID. A node verifies a
-/// checkpoint at most once, so any later one is ignored.
-pub fn first_verifications(
-    claims: &[CheckpointClaim],
-    checkpoint: &str,
-) -> BTreeMap<String, (String, VerifiedTerms)> {
-    let mut verifications = BTreeMap::new();
-    for claim in claims.iter().filter(|claim| claim.subject == checkpoint) {
-        if let Some(terms) = claim.verified_terms() {
-            verifications
-                .entry(claim.writer.clone())
-                .or_insert((claim.id.clone(), terms));
-        }
-    }
-    verifications
-}
-
-/// Every certificate of `checkpoint`. Without excusals there is at most one (section 3 of the
-/// design). When people excused each side of a partition there can be two, and a node adopts
-/// every one.
-pub fn certificates(claims: &[CheckpointClaim], checkpoint: &str) -> Vec<Certificate> {
-    let mut groups: BTreeMap<VerifiedTerms, BTreeMap<String, String>> = BTreeMap::new();
-    for (writer, (id, terms)) in first_verifications(claims, checkpoint) {
-        groups.entry(terms).or_default().insert(writer, id);
-    }
-    groups
-        .into_iter()
-        .filter_map(|(terms, mut verifications)| {
-            verifications.retain(|writer, _| terms.participants.contains(writer));
-            let complete = !terms.participants.is_empty()
-                && terms
-                    .participants
-                    .iter()
-                    .all(|writer| verifications.contains_key(writer));
-            complete.then(|| Certificate {
-                checkpoint: checkpoint.to_owned(),
-                terms,
-                verifications,
-            })
-        })
-        .collect()
-}
-
-/// Every stable checkpoint, by cut, with its certificates.
-pub fn stable_checkpoints(claims: &[CheckpointClaim]) -> BTreeMap<u128, Vec<Certificate>> {
-    let checkpoints = claims
-        .iter()
-        .filter(|claim| claim.kind == CHECKPOINT_VERIFIED)
-        .map(|claim| claim.subject.as_str())
-        .collect::<BTreeSet<_>>();
-    checkpoints
-        .into_iter()
-        .filter_map(|checkpoint| {
-            let certificates = certificates(claims, checkpoint);
-            let cut = certificates.first()?.terms.cut_unix_ms;
-            Some((cut, certificates))
-        })
-        .collect()
-}
-
-/// The certificate every node applies for a cut. Without excusals a cut has one. When people
-/// excused each side of a partition and both sides certified the cut, every node applies the
-/// one with the most participants, then the smallest drop digest. It is a pure function of the
-/// certificates, so every node picks the same one, and a node that applied the other side's
-/// adopts this one's manifest in its place.
-pub fn chosen_certificate(certificates: &[Certificate]) -> Option<&Certificate> {
-    certificates.iter().min_by(|left, right| {
-        right
-            .terms
-            .participants
-            .len()
-            .cmp(&left.terms.participants.len())
-            .then_with(|| left.terms.drop_digest.cmp(&right.terms.drop_digest))
-            .then_with(|| left.terms.cmp(&right.terms))
-    })
-}
 
 /// What one pass of checkpoint work needs from outside the store.
 #[derive(Clone, Debug)]
 pub struct CheckpointContext {
     pub now_unix_ms: u128,
-    /// Names of the peers in `config.toml`. Each is a writer this node knows of.
-    pub configured_peers: Vec<String>,
-    /// A directory for the proof's copy of the store.
+    /// A directory for the trim's staged set.
     pub scratch: PathBuf,
-    /// The person asked to act when a checkpoint waits too long.
-    pub reviewer: String,
 }
 
 /// What one pass of checkpoint work did.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum CheckpointAction {
-    Sealed {
-        checkpoint: String,
-        sealed_digest: String,
-        participants: BTreeSet<String>,
-    },
-    Verified {
-        checkpoint: String,
-        drop_digest: String,
-        dropped_claims: usize,
-    },
-    ProofFailed {
-        checkpoint: String,
-        mismatches: Vec<String>,
-    },
-    AttentionRequested {
-        checkpoint: String,
-        waiting_for: BTreeSet<String>,
-    },
-    AttentionWithdrawn {
-        attention: String,
-    },
     Trimmed {
         checkpoint: String,
         envelopes: usize,
         claims: usize,
     },
-    /// The newest stable checkpoint needs a manifest from a peer before this node goes on.
-    ManifestNeeded {
-        checkpoint: String,
-        cut_unix_ms: u128,
-    },
-    /// A trim stopped because deleting would change the graph. Nothing is sealed until a person
-    /// looks.
+    /// A trim stopped because deleting would change the graph, or its plan would drop the
+    /// newest claim of a subject and kind. No trim runs until a person looks.
     TrimGraphChanged {
         checkpoint: String,
     },
-    /// A trim stopped before its end: a local trim deleted the day's claims (`[trim]
-    /// daily_claims`) and goes on the next day, or a trim could not restart the WAL (`TrimWal`)
-    /// and goes on at the next step. The cut stays `trimming`. The counts are this step's.
+    /// A trim stopped before its end: it deleted the day's claims (`[trim] daily_claims`) and
+    /// goes on the next day, or it could not restart the WAL (`TrimWal`) and goes on at the next
+    /// step. The cut stays `trimming`. The counts are this step's.
     TrimDeferred {
         checkpoint: String,
         envelopes: usize,
@@ -434,49 +105,41 @@ pub enum CheckpointAction {
     SweptTrimmedClaimRows {
         rows: usize,
     },
-    /// This node holds envelopes from before the cut that it has not validated, so it neither
-    /// seals nor proves the checkpoint until they are. Every pass that holds back says so, with
-    /// the oldest such envelope, so a node whose envelopes never validate does not stall every
-    /// checkpoint silently.
-    HeldBack {
-        checkpoint: String,
-        pending: u64,
-        oldest_writer: String,
-        oldest_sequence: u64,
-    },
 }
 
-/// Envelopes from before a cut that this node holds but has not validated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HeldEnvelopes {
-    pub pending: u64,
-    pub oldest_writer: String,
-    pub oldest_sequence: u64,
-}
-
-/// `st replication checkpoint status`: the newest stable checkpoint and the one being agreed.
+/// What a member's own trim is doing: the newest cut it trimmed, whether a trim stopped and
+/// waits for a person, and the worker's phase.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointStatusView {
+pub struct TrimStatusView {
     pub node: String,
-    pub newest_stable: Option<Certificate>,
-    /// The newest checkpoint this node trimmed or adopted.
+    /// `[trim] local`: whether this member trims at all.
+    pub trims: bool,
+    /// The newest cut this member trimmed.
     pub trimmed: Option<String>,
     /// A trim stopped because the graph would change, and waits for a person.
     pub halted: bool,
-    pub pending: Option<PendingCheckpointView>,
-    pub participants: BTreeSet<String>,
-    pub excused: BTreeSet<String>,
-    pub left: BTreeSet<String>,
-    /// Each participant's revision advertised at its last daemon start, when available.
-    /// Display metadata only; this may differ from the build named by a checkpoint seal.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub machine_version: BTreeMap<String, String>,
-    /// Latest local verification attempt, including phases completed before a failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
-    /// Process-local worker evidence, never part of checkpoint agreement.
+    /// Process-local worker evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<CheckpointWorker>,
+}
+
+impl TrimStatusView {
+    /// Why trimming here waits for a person or failed, if it does.
+    pub fn blocking_summary(&self) -> Option<String> {
+        let failed = self.worker.as_ref().and_then(|worker| worker.error.as_ref());
+        if !self.halted && failed.is_none() {
+            return None;
+        }
+        let mut details = Vec::new();
+        if self.halted {
+            details.push("a trim stopped because the graph would change; \
+                `fractal replication checkpoint resume` goes on once a person looked".to_owned());
+        }
+        if let (Some(worker), Some(error)) = (&self.worker, failed) {
+            details.push(format!("phase={:?} failed: {error}", worker.phase));
+        }
+        Some(format!("{}: {}", self.node, details.join("; ")))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,18 +152,6 @@ pub enum CheckpointPhase {
     Rebuild,
     CatchingUp,
     LocalTrim,
-    ApplyStable,
-    Manifest,
-    Halted,
-    Idle,
-    Left,
-    HeldEnvelopes,
-    Capture,
-    Seal,
-    AwaitSeals,
-    Verify,
-    ProofFailed,
-    AwaitVerifications,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,154 +162,12 @@ pub struct CheckpointWorker {
     pub error: Option<String>,
 }
 
-impl CheckpointStatusView {
-    /// Bounded diagnostic using only status metadata; never computes an envelope digest.
-    pub fn blocking_summary(&self) -> Option<String> {
-        if self.pending.is_none() && !self.halted
-            && !self.worker.as_ref().is_some_and(|worker|
-                worker.error.is_some() || worker.phase == CheckpointPhase::Disabled)
-        {
-            return None;
-        }
-        let mut details = Vec::new();
-        if let Some(worker) = &self.worker {
-            if worker.phase == CheckpointPhase::Disabled {
-                details.push("disabled by config on 1 node (local); peer config unknown".into());
-            }
-            details.push(format!("{} phase={:?}{}", self.node, worker.phase,
-                worker.error.as_ref().map(|error| format!(" failed: {error}")).unwrap_or_default()));
-        } else {
-            details.push(format!("{} phase=unknown (worker evidence unavailable)", self.node));
-        }
-        if self.halted {
-            details.push(format!("{} phase=trim (halted: graph would change)", self.node));
-        }
-        if let Some(pending) = &self.pending {
-            for participant in &pending.unsealed {
-                details.push(format!("{participant} phase=seal (no seal)"));
-            }
-            for (participant, difference) in &pending.disagreeing {
-                details.push(format!("{participant} phase=seal (different {difference})"));
-            }
-            if pending.unsealed.is_empty() && pending.disagreeing.is_empty() {
-                for participant in self.participants.difference(&pending.verified) {
-                    details.push(format!("{participant} phase=verify (no verification)"));
-                }
-            }
-            for (participant, difference) in &pending.verifications_differ {
-                details.push(format!("{participant} phase=verify (different {difference})"));
-            }
-        }
-        Some(format!("{}; newest stable {}: {}",
-            self.pending.as_ref().map(|pending| pending.checkpoint.as_str()).unwrap_or("no checkpoint pending"),
-            self.newest_stable.as_ref().map(|stable| stable.checkpoint.as_str()).unwrap_or("none"),
-            details.join("; ")))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingCheckpointView {
-    pub checkpoint: String,
-    pub cut_unix_ms: u128,
-    pub due_at_unix_ms: u128,
-    /// Warm local terms, or this node's last published seal. Absent until either is available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terms: Option<SealTerms>,
-    /// Whether the local digest is warm/verified, rather than only last published or unknown.
-    #[serde(default)]
-    pub local_digest_state: String,
-    /// Participants whose newest seal matches `terms`.
-    pub sealed: BTreeSet<String>,
-    /// Participants with a seal that differs, and how.
-    pub disagreeing: BTreeMap<String, String>,
-    /// Participants with no seal of this checkpoint.
-    pub unsealed: BTreeSet<String>,
-    /// Participants that verified, and whether their digests match each other.
-    pub verified: BTreeSet<String>,
-    pub verifications_agree: bool,
-    /// When verifications disagree: each participant whose verification differs from this
-    /// node's, or from the first in canonical order when this node has not verified, and how.
-    #[serde(default)]
-    pub verifications_differ: BTreeMap<String, String>,
-    /// The build each participant's newest seal names.
-    pub builds: BTreeMap<String, String>,
-}
-
 /// A person's word that a trim which stopped because the graph would change may be left as it
-/// is, so checkpoints go on.
+/// is, so trimming goes on.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointResumeRequest {
     pub reason: String,
     pub actor: String,
-}
-
-/// A person's request that checkpoints stop waiting for an unreachable writer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CheckpointExcuseRequest {
-    pub writer: String,
-    pub reason: String,
-    pub actor: String,
-}
-
-pub fn seal_difference(ours: &SealTerms, theirs: &SealTerms) -> String {
-    let mut differences = Vec::new();
-    if ours.sealed_digest != theirs.sealed_digest {
-        differences.push("sealed envelopes");
-    }
-    if ours.participants != theirs.participants {
-        differences.push("participants");
-    }
-    if ours.rules_digest != theirs.rules_digest {
-        differences.push("rules");
-    }
-    differences.join(", ")
-}
-
-pub fn verification_difference(ours: &VerifiedTerms, theirs: &VerifiedTerms) -> String {
-    [
-        (ours.participants != theirs.participants, "participants"),
-        (
-            ours.sealed_digest != theirs.sealed_digest,
-            "sealed envelopes",
-        ),
-        (ours.rules_digest != theirs.rules_digest, "rules"),
-        (ours.drop_digest != theirs.drop_digest, "drops"),
-        (
-            ours.retained_digest != theirs.retained_digest,
-            "retained claims",
-        ),
-        (ours.graph_digest != theirs.graph_digest, "graph"),
-        (ours.reader_digest != theirs.reader_digest, "reader answers"),
-    ]
-    .into_iter()
-    .filter_map(|(differs, name)| differs.then_some(name))
-    .collect::<Vec<_>>()
-    .join(", ")
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct FailedProofInputs {
-    inputs: BTreeSet<String>,
-    last_failed_at_unix_ms: u128,
-    #[serde(default)]
-    last_mismatches: Vec<String>,
-}
-
-impl FailedProofInputs {
-    fn in_backoff(&self, now_unix_ms: u128) -> bool {
-        !self.inputs.is_empty()
-            && now_unix_ms < self.last_failed_at_unix_ms.saturating_add(CHECKPOINT_PROOF_BACKOFF_MS)
-    }
-}
-
-#[test]
-fn legacy_proof_failure_metadata_keeps_retry_refusal_without_mismatch_detail() {
-    let failures: FailedProofInputs = serde_json::from_value(json!({
-        "inputs": ["failed-input"], "last_failed_at_unix_ms": 100
-    })).unwrap();
-    assert!(failures.last_mismatches.is_empty());
-    assert!(failures.in_backoff(101));
-    assert!(failures.inputs.contains("failed-input"));
 }
 
 /// Release labels can be just the package version. Hash the actual running code once, rather
@@ -698,321 +207,12 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
 /// Envelope identities cover immutable claim content, but not admission state or the
 /// materialized tombstones left by earlier trims. Include that closure and canonical claim
 /// order as well as the plan. A build change may fix reader/projection semantics without
-/// changing the drop rules. Rowids, live projections and later claims are not proof inputs.
-fn proof_input_digest(staged: &StagedSet, plan: &StagedPlan) -> Result<String> {
-    let _phase = super::checkpoint_accounting::Phase::start("input_digest", "checkpoint.input_digest");
-    staged.proof_input_digest(plan, checkpoint_executable_digest()?, &checkpoint_build(), CHECKPOINT_PROTOCOL)
-}
-
-/// The agent that asks for attention about checkpoints on this node.
 
 impl Store {
-    /// Every admitted `checkpoint.*` claim, in canonical order.
-    pub fn checkpoint_claims(&self) -> Result<Vec<CheckpointClaim>> {
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he39b0f08fa41 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
-             WHERE claims.kind IN ('{CHECKPOINT_SEALED}', '{CHECKPOINT_VERIFIED}',
-                                   '{CHECKPOINT_EXCUSED}')
-               AND NOT EXISTS (SELECT 1 FROM replica_records records
-                               WHERE records.claim_id=claims.id AND records.state != 'valid')
-             ORDER BY {CANONICAL_ORDER}"
-        ))?;
-        let claims = statement
-            .query_map([], claim_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(claims
-            .into_iter()
-            .map(|claim| CheckpointClaim {
-                fields: claim
-                    .body
-                    .get("fields")
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default(),
-                id: claim.id,
-                kind: claim.kind,
-                subject: claim.subject,
-                writer: claim.origin,
-                actor: claim.actor,
-            })
-            .collect())
-    }
-
-    /// Every writer this node has heard of: the writers of the envelopes and tombstones it
-    /// holds, itself, its configured peers, and every member of the membership fold.
-    pub fn checkpoint_known_writers(
-        &self,
-        configured_peers: &[String],
-    ) -> Result<BTreeSet<String>> {
-        self.checkpoint_known_writers_with_membership(configured_peers, &self.fleet_membership()?)
-    }
-
-    fn checkpoint_known_writers_with_membership(
-        &self, configured_peers: &[String], membership: &crate::fleet::Membership,
-    ) -> Result<BTreeSet<String>> {
-        let mut known = {
-            let connection = self.readers.get();
-            // Both primary keys start with the writer, so step from one writer to the next with
-            // a seek each. A DISTINCT reads every envelope's index entry instead, which on a large
-            // node is hundreds of megabytes a call.
-            connection
-                .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h0c33f43323e7 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ "WITH RECURSIVE
-                         replica(writer) AS (
-                             SELECT MIN(writer) FROM replica_envelopes
-                             UNION ALL
-                             SELECT (SELECT MIN(writer) FROM replica_envelopes
-                                     WHERE writer>replica.writer)
-                             FROM replica WHERE replica.writer IS NOT NULL
-                         ),
-                         checkpoint(writer) AS (
-                             SELECT MIN(writer) FROM checkpoint_envelopes
-                             UNION ALL
-                             SELECT (SELECT MIN(writer) FROM checkpoint_envelopes
-                                     WHERE writer>checkpoint.writer)
-                             FROM checkpoint WHERE checkpoint.writer IS NOT NULL
-                         )
-                     SELECT writer FROM replica WHERE writer IS NOT NULL
-                     UNION SELECT writer FROM checkpoint WHERE writer IS NOT NULL",
-                )?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<BTreeSet<_>>>()?
-        };
-        known.insert(self.origin.clone());
-        known.extend(configured_peers.iter().cloned());
-        known.extend(
-            membership
-                .incarnations()
-                .map(|incarnation| incarnation.name.clone()),
-        );
-        Ok(known)
-    }
-
-    /// Writers that left the fleet: every incarnation ended with a drained `leave`. A removal
-    /// does not count; see section 3 of the design.
-    pub fn checkpoint_left_writers(&self) -> Result<BTreeSet<String>> {
-        Ok(Self::checkpoint_left_writers_from_membership(&self.fleet_membership()?))
-    }
-
-    fn checkpoint_left_writers_from_membership(membership: &crate::fleet::Membership) -> BTreeSet<String> {
-        let names = membership
-            .incarnations()
-            .map(|incarnation| incarnation.name.clone())
-            .collect::<BTreeSet<_>>();
-        names
-            .into_iter()
-            .filter(|name| {
-                matches!(
-                    membership.state(name),
-                    crate::fleet::MemberState::Ended(incarnation)
-                        if incarnation.ended.as_deref() == Some("left")
-                )
-            })
-            .collect()
-    }
-
-    pub fn checkpoint_participants(
-        &self,
-        claims: &[CheckpointClaim],
-        configured_peers: &[String],
-    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        self.checkpoint_participants_with_membership(claims, configured_peers, &self.fleet_membership()?)
-    }
-
-    fn checkpoint_participants_with_membership(
-        &self, claims: &[CheckpointClaim], configured_peers: &[String], membership: &crate::fleet::Membership,
-    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        let known = self.checkpoint_known_writers_with_membership(configured_peers, membership)?;
-        let left = Self::checkpoint_left_writers_from_membership(membership);
-        Ok((
-            participants_for_rules(
-                &known,
-                &left,
-                claims,
-                &self.runtime.checkpoint_rules_digest(),
-            ),
-            left,
-        ))
-    }
-
-    /// Record that this node sealed or verified a checkpoint. From here on it never writes a
-    /// batch or claim dated before the cut; see `write_time`.
-    pub fn record_checkpoint_state(
-        &self,
-        checkpoint: &str,
-        cut_unix_ms: u128,
-        state: &str,
-        sealed: &SealedIdentities,
-        drop_digest: Option<&str>,
-    ) -> Result<()> {
-        self.runtime.checkpoint_preflight()?;
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h7470bc661492 owner=smallclaims::store::checkpoint_agreement TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
-                                     drop_digest, updated_at_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET state=excluded.state, seal_rowid=excluded.seal_rowid,
-                 sealed_digest=excluded.sealed_digest, drop_digest=excluded.drop_digest,
-                 updated_at_unix_ms=excluded.updated_at_unix_ms",
-            params![
-                checkpoint,
-                i64::try_from(cut_unix_ms)?,
-                state,
-                sealed.seal_rowid,
-                sealed.digest,
-                drop_digest,
-                i64::try_from(now_ms())?,
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    /// Idempotency keys are fleet-wide, and two nodes can seal or verify with identical fields,
-    /// so every key names this node.
-    pub fn append_checkpoint_claim(
-        &self,
-        checkpoint: &str,
-        kind: &str,
-        fields: BTreeMap<String, Value>,
-        key: String,
-    ) -> Result<()> {
-        self.runtime.checkpoint_preflight()?;
-        self.append_claim(&ClaimInput {
-            subject: checkpoint.to_owned(),
-            kind: kind.to_owned(),
-            actor: None,
-            fields,
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
-        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-        Ok(())
-    }
-
-    pub fn publish_seal(
-        &self,
-        checkpoint: &str,
-        terms: &SealTerms,
-        sealed: &SealedIdentities,
-        replaces: Option<&str>,
-    ) -> Result<()> {
-        // The floor first: the seal itself, and everything after it, is dated at or after the
-        // cut, even on a clock that runs days slow.
-        self.record_checkpoint_state(checkpoint, terms.cut_unix_ms, "sealed", sealed, None)?;
-        self.append_checkpoint_claim(
-            checkpoint,
-            CHECKPOINT_SEALED,
-            BTreeMap::from([
-                ("cut_unix_ms".into(), json!(terms.cut_unix_ms)),
-                ("participants".into(), json!(terms.participants)),
-                ("sealed_digest".into(), json!(terms.sealed_digest)),
-                ("sealed_count".into(), json!(sealed.count)),
-                ("rules_digest".into(), json!(terms.rules_digest)),
-                ("checkpoint_protocol".into(), json!(CHECKPOINT_PROTOCOL)),
-                ("build".into(), json!(checkpoint_build())),
-            ]),
-            format!(
-                "checkpoint-sealed:{}:{checkpoint}:{}:{}",
-                self.origin,
-                terms_key(terms),
-                replaces.unwrap_or("first")
-            ),
-        )
-    }
-
-    pub fn publish_verification(
-        &self,
-        checkpoint: &str,
-        terms: &SealTerms,
-        plan: &StagedPlan,
-        proof: &CheckpointProof,
-    ) -> Result<()> {
-        self.append_checkpoint_claim(
-            checkpoint,
-            CHECKPOINT_VERIFIED,
-            BTreeMap::from([
-                ("cut_unix_ms".into(), json!(terms.cut_unix_ms)),
-                ("participants".into(), json!(terms.participants)),
-                ("sealed_digest".into(), json!(terms.sealed_digest)),
-                ("rules_digest".into(), json!(terms.rules_digest)),
-                ("drop_digest".into(), json!(plan.drop_digest)),
-                ("dropped_envelopes".into(), json!(plan.dropped_envelopes)),
-                ("dropped_claims".into(), json!(plan.dropped_claims)),
-                ("retained_digest".into(), json!(plan.retained_digest)),
-                ("graph_digest".into(), json!(proof.graph_digest)),
-                ("reader_digest".into(), json!(proof.reader_digest)),
-                ("checkpoint_protocol".into(), json!(CHECKPOINT_PROTOCOL)),
-                ("build".into(), json!(checkpoint_build())),
-            ]),
-            format!("checkpoint-verified:{}:{checkpoint}", self.origin),
-        )
-    }
-
-    fn checkpoint_failed_proof_inputs(&self, checkpoint: &str) -> Result<FailedProofInputs> {
-        let detail: Option<String> = self.readers.get().query_row(
-            "SELECT detail FROM checkpoints WHERE id=?1",
-            [checkpoint],
-            |row| row.get(0),
-        ).optional()?;
-        let detail: Value = serde_json::from_str(detail.as_deref().unwrap_or("{}"))?;
-        detail.get("proof_failures").cloned()
-            .map(serde_json::from_value).transpose()
-            .map(|failures| failures.unwrap_or_default())
-            .map_err(Into::into)
-    }
-
-    fn record_failed_checkpoint_proof(
-        &self,
-        checkpoint: &str,
-        staged: &StagedSet,
-        plan: &StagedPlan,
-        input_digest: String,
-        failed_at_unix_ms: u128,
-        mismatches: &[String],
-    ) -> Result<()> {
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        let detail: Option<String> = transaction.query_row(
-            "SELECT detail FROM checkpoints WHERE id=?1",
-            [checkpoint],
-            |row| row.get(0),
-        ).optional()?;
-        let mut detail: Value = serde_json::from_str(detail.as_deref().unwrap_or("{}"))?;
-        let mut failures: FailedProofInputs = detail.get("proof_failures").cloned()
-            .map(serde_json::from_value).transpose()?.unwrap_or_default();
-        failures.inputs.insert(input_digest);
-        failures.last_failed_at_unix_ms = failures.last_failed_at_unix_ms.max(failed_at_unix_ms);
-        failures.last_mismatches = mismatches.to_vec();
-        detail.as_object_mut().ok_or_else(|| anyhow::anyhow!("checkpoint detail is not an object"))?
-            .insert("proof_failures".into(), serde_json::to_value(failures)?);
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hb8994accebf5 owner=smallclaims::store::checkpoint_agreement TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
-                                     drop_digest, detail, updated_at_unix_ms)
-             VALUES (?1, ?2, 'sealed', ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET detail=excluded.detail,
-                 updated_at_unix_ms=excluded.updated_at_unix_ms",
-            params![
-                checkpoint,
-                i64::try_from(staged.cut_unix_ms)?,
-                staged.seal_rowid,
-                plan.sealed_digest,
-                plan.drop_digest,
-                detail.to_string(),
-                i64::try_from(now_ms())?,
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    /// One pass of checkpoint work: seal the newest due checkpoint, or verify it once every
-    /// participant's seal matches. A node that is catching up with a peer does nothing, since
-    /// what it holds before the cut is still changing. Call it after exchanges and every few
-    /// minutes. The proof copies the store and replays it, so run it off the request path.
+    /// One pass of checkpoint work: finish a trim a crash or the daily cap left, then trim this
+    /// member's own due cut. A node that is catching up with a peer does nothing, since what it
+    /// holds before the cut is still changing. Call it after exchanges and every few minutes,
+    /// off the request path.
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
         self.checkpoint_worker_phase(CheckpointPhase::Sweep);
         let result = self.checkpoint_step_inner(context);
@@ -1066,142 +266,8 @@ impl Store {
         Ok(actions)
     }
 
-    /// The envelopes dated before `cut` that this node holds but has not validated, pending or
-    /// degraded, whose claims are therefore not admitted here: how many, and the oldest. None
-    /// when there are none.
-    pub fn unvalidated_envelopes_before(&self, cut: u128) -> Result<Option<HeldEnvelopes>> {
-        let cut = i64::try_from(cut)?;
-        // One statement, so it needs no snapshot of its own: a waiting seal pass runs it every
-        // few minutes, and the identity-reuse test bounds what such a pass costs.
-        Ok(self
-            .readers
-            .get()
-            .query_row(
-                "SELECT COUNT(*) OVER (), writer, sequence FROM replica_envelopes
-                 WHERE receipt_state IN ('pending','degraded')
-                   AND CAST(accepted_at_unix_ms AS INTEGER) < ?1
-                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER), writer, sequence LIMIT 1",
-                [cut],
-                |row| {
-                    Ok(HeldEnvelopes {
-                        pending: row.get(0)?,
-                        oldest_writer: row.get(1)?,
-                        oldest_sequence: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
-    pub fn verify_checkpoint(
-        &self,
-        checkpoint: &str,
-        terms: &SealTerms,
-        seal_rowid: i64,
-        context: &CheckpointContext,
-        actions: &mut Vec<CheckpointAction>,
-    ) -> Result<()> {
-        self.runtime.checkpoint_preflight()?;
-        self.checkpoint_worker_phase(CheckpointPhase::Verify);
-        if terms.rules_digest != self.runtime.checkpoint_rules_digest() {
-            // Verification is for these seal terms, never a different build's drop rules.
-            // The normal step publishes replacement terms before attempting proof again.
-            self.checkpoint_worker_error("verification rules differ from the running build".into());
-            return Ok(());
-        }
-        let failures = self.checkpoint_failed_proof_inputs(checkpoint)?;
-        if failures.in_backoff(context.now_unix_ms) {
-            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
-            self.checkpoint_worker_error(format!("proof retry backoff; last recorded mismatches: {}",
-                failures.last_mismatches.join("; ")));
-            return Ok(());
-        }
-        let _completion = super::checkpoint_completion::Completion::outer();
-        let _accounting = super::checkpoint_accounting::Scope::start(&self.checkpoint_verify_latest, checkpoint);
-        let staged = self.checkpoint_staged_set(terms.cut_unix_ms, Some(seal_rowid), &context.scratch)?;
-        let plan = self.plan_staged_checkpoint(&staged)?;
-        if plan.sealed_digest != terms.sealed_digest {
-            // Something before the cut arrived since the seal; the next pass seals again.
-            self.checkpoint_worker_phase(CheckpointPhase::AwaitSeals);
-            return Ok(());
-        }
-        // A checkpoint with no failures needs no failure identity unless its proof fails.
-        let input_digest = if failures.inputs.is_empty() {
-            None
-        } else {
-            Some(proof_input_digest(&staged, &plan)?)
-        };
-        if input_digest.as_ref().is_some_and(|input| failures.inputs.contains(input)) {
-            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
-            self.checkpoint_worker_error(format!("proof input previously failed; last recorded mismatches: {}",
-                failures.last_mismatches.join("; ")));
-            return Ok(());
-        }
-        let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
-        let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
-        if !proof.passed {
-            self.checkpoint_worker_phase(CheckpointPhase::ProofFailed);
-            self.checkpoint_worker_error(format!("proof mismatches: {}", proof.mismatches.join("; ")));
-            let input_digest = match input_digest {
-                Some(input) => input,
-                None => proof_input_digest(&staged, &plan)?,
-            };
-            self.append_claim(&ClaimInput {
-                subject: format!("daemon/{}", self.origin),
-                kind: "daemon.diagnostic".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("severity".into(), json!("error")),
-                    ("code".into(), json!("checkpoint-proof-failed")),
-                    (
-                        "reason".into(),
-                        json!(format!(
-                            "dropping {} claims before {checkpoint} would change {} (proof input {input_digest})",
-                            plan.dropped_claims,
-                            proof.mismatches.join("; ")
-                        )),
-                    ),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!(
-                    "checkpoint-proof-failed:{}:{checkpoint}:{}",
-                    self.origin, input_digest
-                )),
-            })
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-            self.record_failed_checkpoint_proof(
-                checkpoint, &staged, &plan, input_digest, context.now_unix_ms, &proof.mismatches,
-            )?;
-            actions.push(CheckpointAction::ProofFailed {
-                checkpoint: checkpoint.to_owned(),
-                mismatches: proof.mismatches,
-            });
-            return Ok(());
-        }
-        self.record_checkpoint_state(
-            checkpoint,
-            terms.cut_unix_ms,
-            "verified",
-            &SealedIdentities {
-                digest: plan.sealed_digest.clone(),
-                count: plan.sealed_envelopes,
-                seal_rowid: staged.seal_rowid,
-            },
-            Some(&plan.drop_digest),
-        )?;
-        self.publish_verification(checkpoint, terms, &plan, &proof)?;
-        actions.push(CheckpointAction::Verified {
-            checkpoint: checkpoint.to_owned(),
-            drop_digest: plan.drop_digest.clone(),
-            dropped_claims: plan.dropped_claims,
-        });
-        self.checkpoint_worker_phase(CheckpointPhase::AwaitVerifications);
-        Ok(())
-    }
-
-    /// Whether a trim stopped because the graph would change. Checkpoints then wait for a
-    /// person; see `resume_checkpoints`.
+    /// Whether a trim stopped because the graph would change. Trimming then waits for a person;
+    /// see `resume_checkpoints`.
     pub fn checkpoint_halted(&self) -> Result<bool> {
         Ok(self
             .readers
@@ -1216,13 +282,12 @@ impl Store {
     }
 
     /// A person looked at a trim that stopped because the graph would change. The rows stay
-    /// as they are, and checkpoints go on from the next one.
+    /// as they are, and trimming goes on from the next cut.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), FractalError> {
         self.resume_checkpoints_allowing(actor, reason, None)
     }
 
-    /// As [`Self::resume_checkpoints`], and on a member that trims locally `agent` may resume
-    /// too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
+    /// As [`Self::resume_checkpoints`], and on a member that trims `agent` may resume too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
     /// stop is the safety decision, so no other agent may.
     pub fn resume_checkpoints_allowing(
         &self,
@@ -1255,112 +320,9 @@ impl Store {
         Ok(())
     }
 
-    /// What `st replication checkpoint status` shows.
-    pub fn checkpoint_status(
-        &self,
-        now_unix_ms: u128,
-        configured_peers: &[String],
-    ) -> Result<CheckpointStatusView> {
-        self.runtime.checkpoint_preflight()?;
-        let claims = self.checkpoint_claims()?;
-        let stable = stable_checkpoints(&claims);
-        let newest_stable = stable
-            .iter()
-            .next_back()
-            .and_then(|(_, certificates)| certificates.first().cloned());
-        let (mut participants, left) = self.checkpoint_participants_with_membership(
-            &claims, configured_peers, &self.fleet_membership_sealed()?,
-        )?;
-        participants.insert(self.origin.clone());
-        let cut = newest_due_cut(now_unix_ms);
-        let pending = (cut > 0
-            && newest_stable
-                .as_ref()
-                .is_none_or(|stable| stable.terms.cut_unix_ms < cut))
-        .then(|| -> Result<PendingCheckpointView> {
-            let checkpoint = checkpoint_name(cut);
-            let verified = first_verifications(&claims, &checkpoint);
-            let seals = newest_seals(&claims, &checkpoint);
-            let cached_digest = if verified.contains_key(&self.origin) {
-                None
-            } else {
-                self.checkpoint_cached_sealed_digest(cut)?
-            };
-            let local_digest_state = if verified.contains_key(&self.origin) || cached_digest.is_some() {
-                "ready"
-            } else {
-                "unavailable"
-            }.into();
-            // Once this node verified, its seal round is over: seals compare with the terms it
-            // verified, not with a rules digest a later build of this node carries.
-            let terms = match verified.get(&self.origin) {
-                Some((_, ours)) => Some(SealTerms {
-                    cut_unix_ms: ours.cut_unix_ms,
-                    participants: ours.participants.clone(),
-                    sealed_digest: ours.sealed_digest.clone(),
-                    rules_digest: ours.rules_digest.clone(),
-                }),
-                None => cached_digest.map(|sealed_digest| SealTerms {
-                    cut_unix_ms: cut,
-                    participants: participants.clone(),
-                    sealed_digest,
-                    rules_digest: self.runtime.checkpoint_rules_digest(),
-                }).or_else(|| seals.get(&self.origin).cloned()),
-            };
-            let reference = verified
-                .get(&self.origin)
-                .or_else(|| verified.values().next())
-                .map(|(_, terms)| terms.clone());
-            let verifications_differ = verified
-                .iter()
-                .filter_map(|(writer, (_, theirs))| {
-                    let ours = reference.as_ref()?;
-                    (theirs != ours)
-                        .then(|| (writer.clone(), verification_difference(ours, theirs)))
-                })
-                .collect();
-            let builds = claims
-                .iter()
-                .filter(|claim| claim.subject == checkpoint && claim.kind == CHECKPOINT_SEALED)
-                .filter_map(|claim| Some((claim.writer.clone(), claim.text("build")?.to_owned())))
-                .collect();
-            Ok(PendingCheckpointView {
-                due_at_unix_ms: cut + 2 * DAY_MS,
-                sealed: participants
-                    .iter()
-                    .filter(|writer| terms.as_ref().is_some_and(|terms| seals.get(*writer) == Some(terms)))
-                    .cloned()
-                    .collect(),
-                disagreeing: participants
-                    .iter()
-                    .filter_map(|writer| {
-                        let terms = terms.as_ref()?;
-                        let theirs = seals.get(writer)?;
-                        (theirs != terms)
-                            .then(|| (writer.clone(), seal_difference(terms, theirs)))
-                    })
-                    .collect(),
-                unsealed: participants
-                    .iter()
-                    .filter(|writer| !seals.contains_key(*writer))
-                    .cloned()
-                    .collect(),
-                verifications_agree: verified
-                    .values()
-                    .map(|(_, terms)| terms)
-                    .collect::<BTreeSet<_>>()
-                    .len()
-                    <= 1,
-                verifications_differ,
-                verified: verified.keys().cloned().collect(),
-                builds,
-                checkpoint,
-                cut_unix_ms: cut,
-                terms,
-                local_digest_state,
-            })
-        })
-        .transpose()?;
+
+    /// What `fractal doctor` reports of this member's trim.
+    pub fn trim_status(&self) -> Result<TrimStatusView> {
         let trimmed = self
             .readers
             .get()
@@ -1370,62 +332,12 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(CheckpointStatusView {
+        Ok(TrimStatusView {
             node: self.origin.clone(),
-            newest_stable,
+            trims: self.trims_locally(),
             trimmed,
             halted: self.checkpoint_halted()?,
-            pending,
-            excused: excused_writers_for_rules(&claims, &self.runtime.checkpoint_rules_digest()),
-            participants,
-            left,
-            machine_version: BTreeMap::new(),
-            verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
             worker: self.checkpoint_worker.lock().unwrap_or_else(PoisonError::into_inner).clone(),
-        })
-    }
-
-    /// A person excuses an unreachable writer, so checkpoints stop waiting for it. This fences
-    /// nothing: whatever the writer wrote while away still replicates when it returns, and its
-    /// next seal ends the excusal.
-    pub fn excuse_checkpoint_writer(
-        &self,
-        request: &CheckpointExcuseRequest,
-    ) -> Result<ClaimRecord, FractalError> {
-        let actor = normalize_actor(&request.actor, "person");
-        if !actor.starts_with("person/") {
-            return Err(FractalError::new(
-                "invalid-checkpoint-excusal",
-                "only a person can excuse a writer from checkpoints",
-            ));
-        }
-        if request.writer.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(FractalError::new(
-                "invalid-checkpoint-excusal",
-                "an excusal needs a writer and a reason",
-            ));
-        }
-        if request.writer == self.origin {
-            return Err(FractalError::new(
-                "invalid-checkpoint-excusal",
-                "a node cannot excuse itself; excuse it from another machine",
-            ));
-        }
-        self.append_claim(&ClaimInput {
-            // One subject per excused writer, from its name, which a person typed.
-            subject: format!(
-                "checkpoint-excusal/{}",
-                &hex::encode(Sha256::digest(request.writer.as_bytes()))[..16]
-            ),
-            kind: CHECKPOINT_EXCUSED.into(),
-            actor: Some(actor),
-            fields: BTreeMap::from([
-                ("writer".into(), json!(request.writer)),
-                ("reason".into(), json!(request.reason)),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
         })
     }
 
@@ -1455,16 +367,9 @@ impl Store {
     }
 }
 
-pub fn terms_key(terms: &SealTerms) -> String {
-    let mut digest = Sha256::new();
-    digest.update(serde_json::to_vec(terms).expect("seal terms serialize"));
-    hex::encode(digest.finalize())
-}
-
 /// The accepted time of a new batch or claim by `origin`: the clock, but never before the cut
-/// of a checkpoint this node has sealed, and never before `origin`'s newest batch. A seal
-/// promises the other participants that nothing this node writes afterwards is dated before its
-/// cut. Folds read claims in canonical order, which starts with the accepted time, so a writer
+/// of a checkpoint this node has recorded, and never before `origin`'s newest batch, so nothing
+/// this node writes afterwards is dated before a cut it trimmed. Folds read claims in canonical order, which starts with the accepted time, so a writer
 /// whose clock stepped back would otherwise date its new claims before its older ones.
 /// `temp.write_clock` shifts or fixes the clock for a simulation; see
 /// `Store::set_write_clock_offset` and `Store::set_write_clock_at`.

@@ -1,6 +1,4 @@
-//! Trimming: deleting what the newest stable checkpoint drops, and adopting a checkpoint this
-//! node did not verify from a peer's manifest. Sections 6 and 8 of
-//! `doc/fleet/smalltalk/checkpoint-design`.
+//! Trimming: deleting what this member's own daily cut drops (`docs/st3/checkpoints.md`).
 //!
 //! Tombstones go first, in chunks, with the checkpoint marked `recording`; once every one is
 //! recorded it is marked `trimming`. Deletions follow in chunks, each its own transaction. A
@@ -11,13 +9,10 @@
 
 use super::checkpoint::stage_times::{StageTimes, timing_deletes};
 use super::checkpoint::{
-    CheckpointManifest, ClaimTombstone, EnvelopeTombstone, checkpoint_name, delete_dropped_rows_tx,
-    record_checkpoint_tombstones_tx, verify_checkpoint_manifest,
+    CheckpointManifest, ClaimTombstone, EnvelopeTombstone, check_checkpoint_manifest, checkpoint_name,
+    delete_dropped_rows_tx, record_checkpoint_tombstones_tx,
 };
-use super::checkpoint_agreement::{
-    Certificate, CheckpointAction, CheckpointClaim, certificates, chosen_certificate,
-    stable_checkpoints,
-};
+use super::checkpoint_agreement::CheckpointAction;
 use super::*;
 use crate::replication::InventoryCheckpoint;
 
@@ -237,15 +232,6 @@ pub enum TrimFault {
     DropNewest,
 }
 
-/// The newest stable checkpoint, when this node cannot trim it from its own plan. A peer that
-/// trimmed it serves its manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointManifestNeed {
-    pub checkpoint: String,
-    pub cut_unix_ms: u128,
-    pub drop_digest: String,
-}
-
 pub fn local_checkpoint(
     connection: &Connection,
     checkpoint: &str,
@@ -259,26 +245,10 @@ pub fn local_checkpoint(
         .optional()?)
 }
 
-/// Whether this node has applied the certificate with `drop_digest` for the cut, or anything
-/// newer, or set the cut aside. A node that applied the other side's certificate for the same
-/// cut has not applied this one.
-pub fn applied(connection: &Connection, cut_unix_ms: u128, drop_digest: &str) -> Result<bool> {
-    Ok(connection
-        .query_row(
-            "SELECT 1 FROM checkpoints
-             WHERE (state='trimmed'
-                    AND (cut_unix_ms > ?1 OR (cut_unix_ms = ?1 AND drop_digest = ?2)))
-                OR (state IN ('set-aside', 'graph-changed') AND cut_unix_ms >= ?1)
-             LIMIT 1",
-            params![i64::try_from(cut_unix_ms)?, drop_digest],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-/// Delete every tombstone that is not among `envelopes` and `claims`.
-pub fn keep_only_tombstones_tx(
+/// Delete every tombstone that is not among `envelopes` and `claims`, as an older build's
+/// adoption of a manifest did. Tests of what that left behind call it.
+#[cfg(test)]
+pub(crate) fn keep_only_tombstones_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
@@ -322,31 +292,14 @@ pub fn keep_only_tombstones_tx(
     Ok(())
 }
 
-/// How this node applies the newest stable checkpoint.
-pub enum Application {
-    /// It already did.
-    Done,
-    /// It verified the certificate every node applies, so it trims from its own plan.
-    OwnPlan {
-        checkpoint: String,
-        certificate: Box<Certificate>,
-        seal_rowid: i64,
-    },
-    /// It adopts the certificate's manifest from a peer.
-    Manifest(CheckpointManifestNeed),
-}
-
 /// Tombstones a trim reads at most this many at a time.
 const TOMBSTONE_READ_PAGE: usize = 256;
 
-/// The tombstones a trim records: a manifest's in memory, or this node's own staged plan.
+/// The tombstones a trim records: a drop held in memory, or this node's own staged plan.
 trait Tombstones {
     fn counts(&self) -> (usize, usize);
     fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>>;
     fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>>;
-    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
-        None
-    }
 }
 
 impl Tombstones for (&[EnvelopeTombstone], &[ClaimTombstone]) {
@@ -360,10 +313,6 @@ impl Tombstones for (&[EnvelopeTombstone], &[ClaimTombstone]) {
 
     fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>> {
         Ok(self.1.iter().skip(after).take(limit).cloned().collect())
-    }
-
-    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
-        Some((self.0, self.1))
     }
 }
 
@@ -568,100 +517,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn newest_application(&self, claims: &[CheckpointClaim]) -> Result<Option<Application>> {
-        let stable = stable_checkpoints(claims);
-        let Some((cut, certificates)) = stable.into_iter().next_back() else {
-            return Ok(None);
-        };
-        let certificate = chosen_certificate(&certificates)
-            .expect("a stable checkpoint has a certificate")
-            .clone();
-        let checkpoint = checkpoint_name(cut);
-        let connection = self.readers.get();
-        if applied(&connection, cut, &certificate.terms.drop_digest)? {
-            return Ok(Some(Application::Done));
-        }
-        if certificate.verifications.contains_key(&self.origin)
-            && let Some((state, Some(seal_rowid))) = local_checkpoint(&connection, &checkpoint)?
-            && state != "plan-changed"
-        {
-            return Ok(Some(Application::OwnPlan {
-                checkpoint,
-                certificate: Box::new(certificate),
-                seal_rowid,
-            }));
-        }
-        Ok(Some(Application::Manifest(CheckpointManifestNeed {
-            checkpoint,
-            cut_unix_ms: cut,
-            drop_digest: certificate.terms.drop_digest,
-        })))
-    }
-
-    /// Finish a trim a crash interrupted, then apply the newest stable checkpoint if this node
-    /// has not: trim it from its own plan when it verified the certificate every node applies,
-    /// or report that it needs that certificate's manifest. Until it is applied, this node must
-    /// not verify a newer checkpoint, because every node trims the same checkpoints in the same
-    /// order.
-    pub fn apply_stable_checkpoints(
-        &self,
-        claims: &[CheckpointClaim],
-        scratch: &Path,
-        actions: &mut Vec<CheckpointAction>,
-    ) -> Result<Option<CheckpointManifestNeed>> {
-        self.runtime.checkpoint_preflight()?;
-        self.finish_interrupted_trims(actions)?;
-        match self.newest_application(claims)? {
-            None | Some(Application::Done) => Ok(None),
-            Some(Application::Manifest(need)) => Ok(Some(need)),
-            Some(Application::OwnPlan {
-                checkpoint,
-                certificate,
-                seal_rowid,
-            }) => {
-                let _completion = super::checkpoint_completion::Completion::outer();
-                let cut = certificate.terms.cut_unix_ms;
-                // The staged plan this node verified, when its store-index cut still holds: the
-                // file's identity fixes the epoch, rules and executable, so a repair, a late
-                // envelope or a rules change since makes it capture and plan again. A plan that
-                // differs from the certificate every participant verified is never trimmed.
-                let (staged, plan) = {
-                    let _span = crate::profile::span("trim.capture_plan");
-                    let staged = self.checkpoint_staged_set(cut, Some(seal_rowid), scratch)?;
-                    let plan = self.plan_staged_checkpoint(&staged)?;
-                    (staged, plan)
-                };
-                if plan.sealed_digest == certificate.terms.sealed_digest
-                    && plan.drop_digest == certificate.terms.drop_digest
-                {
-                    self.trim_staged_checkpoint(&checkpoint, &staged, &plan, actions)?;
-                    staged.remove()?;
-                    return Ok(None);
-                }
-                staged.remove()?;
-                // Its own rows no longer give the drop it verified, so it adopts the manifest
-                // from a peer like a node that did not take part. Tombstones a trim interrupted
-                // while recording go first: nothing reads them until the trim finishes, and
-                // they must not outlive the plan they came from.
-                self.forget_recording_tombstones(&checkpoint)?;
-                self.set_checkpoint_state(&checkpoint, cut, "plan-changed")?;
-                self.checkpoint_diagnostic(
-                    "checkpoint-trim-plan-changed",
-                    &format!(
-                        "this node no longer plans the drop it verified for {checkpoint}; it \
-                         adopts the manifest from a peer instead"
-                    ),
-                    &checkpoint,
-                )?;
-                Ok(Some(CheckpointManifestNeed {
-                    checkpoint,
-                    cut_unix_ms: cut,
-                    drop_digest: certificate.terms.drop_digest,
-                }))
-            }
-        }
-    }
-
     /// Finish every trim a crash interrupted after its tombstones committed (`trimming`). A
     /// checkpoint still `recording` is not committed and stays as it is.
     pub(crate) fn finish_interrupted_trims(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
@@ -757,21 +612,6 @@ impl Store {
         staged.remove()
     }
 
-    /// The newest stable checkpoint this node needs a manifest for, if any. The replication
-    /// worker asks when a peer advertises a checkpoint this node has not applied, and fetches
-    /// the manifest from a peer that applied this one. A member that trims locally needs none.
-    pub fn checkpoint_manifest_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        self.runtime.checkpoint_preflight()?;
-        if self.trims_locally() {
-            return Ok(None);
-        }
-        let claims = self.checkpoint_claims()?;
-        Ok(match self.newest_application(&claims)? {
-            Some(Application::Manifest(need)) => Some(need),
-            _ => None,
-        })
-    }
-
     /// The newest checkpoint this node has trimmed or adopted, as its inventory advertises it.
     pub fn trimmed_checkpoint(&self) -> Result<Option<InventoryCheckpoint>> {
         Ok(self
@@ -792,33 +632,18 @@ impl Store {
             .optional()?)
     }
 
-    /// Adopt a stable checkpoint from a peer's manifest. The whole manifest is checked against
-    /// the drop digest every participant of the chosen certificate verified before anything
-    /// from it is stored. Afterwards this node's tombstones are exactly the manifest's, so it
-    /// goes on like every node that applied the same certificate.
-    pub fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>, FractalError> {
-        self.runtime.checkpoint_preflight().map_err(internal)?;
-        if self.trims_locally() {
-            return Err(FractalError::new(
-                "trim-is-local",
-                "this member trims locally ([trim] local), so it adopts no checkpoint manifest",
-            ));
-        }
-        self.adopt_checkpoint_checked(manifest, true)
-    }
-
-    /// Initialize checkpoint history in a fresh offline restore after admitting its claim log.
-    /// The source may have learned a newer certificate without applying it yet; its recorded
-    /// tombstones still belong to the older certified manifest. This never replaces existing
-    /// checkpoint state, and verifies the manifest through the same certificate path as sync.
+    /// Initialize checkpoint history in a fresh offline restore after admitting its claim log:
+    /// record the archived tombstones (their triggers add the retired ledger's rows), mark the
+    /// cut `trimming`, and delete what the restored log still holds of them, as the source's
+    /// own trim did. The member restores its own backup, so nothing but the manifest's shape is
+    /// checked. This never replaces existing checkpoint state.
     pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
     ) -> Result<Vec<CheckpointAction>, FractalError> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight().map_err(internal)?;
+        let drop_digest = check_checkpoint_manifest(manifest)?;
         let occupied: bool = self
             .readers
             .get()
@@ -836,113 +661,37 @@ impl Store {
                 "checkpoint restore requires empty checkpoint state",
             ));
         }
-        self.adopt_checkpoint_checked(manifest, false)
-    }
-
-    fn adopt_checkpoint_checked(
-        &self,
-        manifest: &CheckpointManifest,
-        require_newest: bool,
-    ) -> Result<Vec<CheckpointAction>, FractalError> {
-        let _completion = super::checkpoint_completion::Completion::outer();
-        self.runtime.checkpoint_preflight().map_err(internal)?;
-        let claims = self.checkpoint_claims().map_err(internal)?;
-        // Adoption replaces every tombstone this node holds, so only the newest stable
-        // checkpoint may be adopted: an older manifest lacks the newer drops.
-        if require_newest
-            && stable_checkpoints(&claims)
-                .keys()
-                .next_back()
-                .is_some_and(|newest| *newest > manifest.cut_unix_ms)
+        let checkpoint = manifest.checkpoint.as_str();
         {
-            return Err(FractalError::new(
-                "checkpoint-superseded",
-                format!(
-                    "`{}` is older than the newest stable checkpoint here; a node adopts only \
-                     the newest",
-                    manifest.checkpoint
-                ),
-            ));
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction().map_err(internal)?;
+            start_local_walk_tx(&transaction, checkpoint).map_err(internal)?;
+            record_checkpoint_tombstones_tx(&transaction, checkpoint, &manifest.envelopes, &manifest.claims)
+                .map_err(internal)?;
+            transaction
+                .execute(
+                    /* sqlite-large-value: allow-for-now lv-h0000000000000 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
+                     VALUES (?1, ?2, 'trimming', ?3, ?4, ?5)",
+                    params![
+                        checkpoint,
+                        i64::try_from(manifest.cut_unix_ms).map_err(internal)?,
+                        drop_digest,
+                        json!({"envelopes": manifest.envelopes.len(), "claims": manifest.claims.len()}).to_string(),
+                        i64::try_from(now_ms()).map_err(internal)?
+                    ],
+                )
+                .map_err(internal)?;
+            transaction.commit().map_err(internal)?;
         }
-        let certificates = certificates(&claims, &manifest.checkpoint);
-        let Some(certificate) = chosen_certificate(&certificates) else {
-            return Err(FractalError::new(
-                "checkpoint-not-stable",
-                format!(
-                    "`{}` is not stable on this node; it adopts a checkpoint once it holds \
-                     every participant's verification",
-                    manifest.checkpoint
-                ),
-            ));
-        };
-        if certificate.terms.cut_unix_ms != manifest.cut_unix_ms {
-            return Err(FractalError::new(
-                "checkpoint-manifest-invalid",
-                "the manifest's cut is not the certified one",
-            ));
-        }
-        verify_checkpoint_manifest(manifest, &certificate.terms.drop_digest)?;
-        let mut actions = Vec::new();
-        let done = applied(
-            &self.readers.get(),
-            manifest.cut_unix_ms,
-            &certificate.terms.drop_digest,
-        )
-        .map_err(internal)?;
-        if done {
-            return Ok(actions);
-        }
-        self.trim_checkpoint(
-            &manifest.checkpoint,
-            manifest.cut_unix_ms,
-            &certificate.terms.drop_digest,
-            &manifest.envelopes,
-            &manifest.claims,
-            true,
-            &mut actions,
-        )
-        .map_err(internal)?;
-        Ok(actions)
-    }
-
-    /// A deliberate bug for the convergence suite: adopt a manifest without checking it
-    /// against its certificate. Nothing else calls it.
-    #[doc(hidden)]
-    pub fn adopt_checkpoint_unverified_for_tests(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
-        self.runtime.checkpoint_preflight()?;
-        let claims = self.checkpoint_claims()?;
-        let certificates = certificates(&claims, &manifest.checkpoint);
-        let certificate = chosen_certificate(&certificates)
-            .ok_or_else(|| anyhow::anyhow!("{} is not stable here", manifest.checkpoint))?;
-        let mut actions = Vec::new();
-        self.trim_checkpoint(
-            &manifest.checkpoint,
-            manifest.cut_unix_ms,
-            &certificate.terms.drop_digest,
-            &manifest.envelopes,
-            &manifest.claims,
-            true,
-            &mut actions,
-        )?;
-        Ok(actions)
-    }
-
-    /// A deliberate bug for the convergence suite: forget every tombstone, as a trim that
-    /// deleted rows without keeping tombstones would. Returns how many it forgot. Nothing else
-    /// calls it.
-    #[doc(hidden)]
-    pub fn forget_tombstones_for_tests(&self) -> Result<usize> {
-        self.runtime.checkpoint_preflight()?;
-        let forgotten = {
-            let connection = self.connection.write();
-            connection.execute(/* sqlite-large-value: allow-for-now lv-h5875e9ada089 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_envelopes", [])?
-                + connection.execute(/* sqlite-large-value: allow-for-now lv-h093f16c5a2a5 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_claims", [])?
-        };
         self.replica_rows_changed();
-        Ok(forgotten)
+        // A restore is not a day's trim: what is left of the cut is deleted whole.
+        let cap = self.local_trim_daily_claims();
+        self.trim_locally_at_most(u64::MAX);
+        let mut actions = Vec::new();
+        let finished = self.finish_trim(checkpoint, &mut actions);
+        self.trim_locally_at_most(cap);
+        finished.map_err(internal)?;
+        Ok(actions)
     }
 
     /// Delete the tombstones of `checkpoint` while it is `recording`, in chunks of
@@ -1042,15 +791,9 @@ impl Store {
         Ok(())
     }
 
-    /// Record every tombstone and mark the checkpoint `trimming` in one transaction, then
-    /// delete. The clamp's floor comes with the row, so nothing this node writes afterwards is
-    /// dated before the cut.
-    ///
-    /// With `exact`, as in adoption, `envelopes` and `claims` are every tombstone through the
-    /// checkpoint, and any other tombstone this node holds goes. That happens only on a node
-    /// that applied the other side's certificate for a cut both sides of a partition certified.
-    /// Its identities leave the inventory, and peers that kept those envelopes send them again.
-    #[allow(clippy::too_many_arguments)]
+    /// Record every tombstone of a drop held in memory, in chunks with the cut `recording`, mark
+    /// it `trimming`, then delete. The clamp's floor comes with the row, so nothing this node
+    /// writes afterwards is dated before the cut.
     pub fn trim_checkpoint(
         &self,
         checkpoint: &str,
@@ -1058,10 +801,9 @@ impl Store {
         drop_digest: &str,
         envelopes: &[EnvelopeTombstone],
         claims: &[ClaimTombstone],
-        exact: bool,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
-        self.trim_checkpoint_from(checkpoint, cut_unix_ms, drop_digest, &(envelopes, claims), exact, actions)
+        self.trim_checkpoint_from(checkpoint, cut_unix_ms, drop_digest, &(envelopes, claims), actions)
     }
 
     /// `trim_checkpoint` from this node's own staged plan, read a page at a time.
@@ -1072,7 +814,7 @@ impl Store {
         plan: &super::checkpoint_staging::StagedPlan,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
-        self.trim_checkpoint_from(checkpoint, plan.cut_unix_ms, &plan.drop_digest, &(staged, plan), false, actions)
+        self.trim_checkpoint_from(checkpoint, plan.cut_unix_ms, &plan.drop_digest, &(staged, plan), actions)
     }
 
     /* sqlite-large-value-flow: allow-for-now flow-h39d714b2bc13 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn trim_checkpoint_from(
@@ -1081,7 +823,6 @@ impl Store {
         cut_unix_ms: u128,
         drop_digest: &str,
         tombstones: &dyn Tombstones,
-        exact: bool,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
         let _completion = super::checkpoint_completion::Completion::work();
@@ -1105,90 +846,72 @@ impl Store {
             )?;
             Ok(())
         };
-        // Recording, in either branch, through the `trimming` mark; finish_trim's spans follow.
+        // Recording, through the `trimming` mark; finish_trim's spans follow.
         let record = crate::profile::span("trim.record");
-        if exact {
-            // Adoption replaces every other tombstone, so it stays one transaction.
-            let (envelopes, claims) = tombstones
-                .slices()
-                .ok_or_else(|| anyhow::anyhow!("an exact trim needs its manifest in memory"))?;
+        {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
-            keep_only_tombstones_tx(&transaction, envelopes, claims)?;
-            record_checkpoint_tombstones_tx(&transaction, checkpoint, envelopes, claims)?;
-            mark(&transaction, "trimming")?;
-            transaction.commit()?;
-        } else {
-            {
-                let mut connection = self.connection.write();
-                let transaction = connection.transaction()?;
-                mark(&transaction, "recording")?;
-                if self.trims_locally() {
-                    start_local_walk_tx(&transaction, checkpoint)?;
-                }
-                transaction.commit()?;
-            }
-            // Recording again changes nothing, so a restart records what is missing. The
-            // tombstones are read a page at a time, outside the writer.
-            let (envelope_count, claim_count) = tombstones.counts();
-            let (mut envelope, mut claim, mut chunks) = (0, 0, 0);
-            let mut envelope_page: std::collections::VecDeque<EnvelopeTombstone> = Default::default();
-            let mut claim_page: std::collections::VecDeque<ClaimTombstone> = Default::default();
-            while envelope < envelope_count || claim < claim_count {
-                if envelope < envelope_count && envelope_page.is_empty() {
-                    envelope_page.extend(tombstones.envelope_page(envelope, TOMBSTONE_READ_PAGE)?);
-                } else if envelope >= envelope_count && claim_page.is_empty() {
-                    claim_page.extend(tombstones.claim_page(claim, TOMBSTONE_READ_PAGE)?);
-                }
-                anyhow::ensure!(
-                    !envelope_page.is_empty() || !claim_page.is_empty(),
-                    "the tombstones of {checkpoint} ended before their count"
-                );
-                let mut connection = self.connection.write_background();
-                let held_since = std::time::Instant::now();
-                let transaction = connection.transaction()?;
-                let started = std::time::Instant::now();
-                let (envelope_before, claim_before) = (envelope, claim);
-                while started.elapsed() < TRIM_CHUNK_BUDGET
-                    && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
-                {
-                    if let Some(next) = envelope_page.pop_front() {
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[next], &[])?;
-                        envelope += 1;
-                    } else if let Some(next) = claim_page.pop_front() {
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &[next])?;
-                        claim += 1;
-                    }
-                    self.pause_for_trim_row_cost();
-                }
-
-                let committing = std::time::Instant::now();
-                transaction.commit()?;
-                let held = held_since.elapsed();
-                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0, None);
-                drop(connection);
-                chunks += 1;
-                self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
-                self.pause_trim_chunk(held);
-            }
-            let mut connection = self.connection.write();
-            let transaction = connection.transaction()?;
-            mark(&transaction, "trimming")?;
+            mark(&transaction, "recording")?;
+            start_local_walk_tx(&transaction, checkpoint)?;
             transaction.commit()?;
         }
+        // Recording again changes nothing, so a restart records what is missing. The
+        // tombstones are read a page at a time, outside the writer.
+        let (envelope_count, claim_count) = tombstones.counts();
+        let (mut envelope, mut claim, mut chunks) = (0, 0, 0);
+        let mut envelope_page: std::collections::VecDeque<EnvelopeTombstone> = Default::default();
+        let mut claim_page: std::collections::VecDeque<ClaimTombstone> = Default::default();
+        while envelope < envelope_count || claim < claim_count {
+            if envelope < envelope_count && envelope_page.is_empty() {
+                envelope_page.extend(tombstones.envelope_page(envelope, TOMBSTONE_READ_PAGE)?);
+            } else if envelope >= envelope_count && claim_page.is_empty() {
+                claim_page.extend(tombstones.claim_page(claim, TOMBSTONE_READ_PAGE)?);
+            }
+            anyhow::ensure!(
+                !envelope_page.is_empty() || !claim_page.is_empty(),
+                "the tombstones of {checkpoint} ended before their count"
+            );
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let started = std::time::Instant::now();
+            let (envelope_before, claim_before) = (envelope, claim);
+            while started.elapsed() < TRIM_CHUNK_BUDGET
+                && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
+            {
+                if let Some(next) = envelope_page.pop_front() {
+                    record_checkpoint_tombstones_tx(&transaction, checkpoint, &[next], &[])?;
+                    envelope += 1;
+                } else if let Some(next) = claim_page.pop_front() {
+                    record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &[next])?;
+                    claim += 1;
+                }
+                self.pause_for_trim_row_cost();
+            }
+
+            let committing = std::time::Instant::now();
+            transaction.commit()?;
+            let held = held_since.elapsed();
+            self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0, None);
+            drop(connection);
+            chunks += 1;
+            self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+            self.pause_trim_chunk(held);
+        }
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        mark(&transaction, "trimming")?;
+        transaction.commit()?;
         drop(record);
         self.replica_rows_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
         self.finish_trim(checkpoint, actions)
     }
 
-    /// A member that trims locally walks only `checkpoint`'s own tombstones: from where its walk
-    /// stopped, or else from the first of them, found once on a reader outside the writer (a cut
-    /// an older build recorded). A cut with none starts past the end and is done at once.
-    fn local_walk(&self, checkpoint: &str) -> Result<Option<LocalWalk>> {
-        if !self.trims_locally() {
-            return Ok(None);
-        }
+    /// A trim walks only `checkpoint`'s own tombstones: from where its walk stopped, or else
+    /// from the first of them, found once on a reader outside the writer (a cut an older build
+    /// recorded). A cut with none starts past the end and is done at once.
+    fn local_walk(&self, checkpoint: &str) -> Result<LocalWalk> {
         let connection = self.readers.get();
         let saved: Option<String> = connection
             .query_row("SELECT value FROM meta WHERE key=?1", [local_walk_key(checkpoint)], |row| row.get(0))
@@ -1209,7 +932,7 @@ impl Store {
                 (start("checkpoint_envelopes")?, start("checkpoint_claims")?)
             }
         };
-        Ok(Some(LocalWalk { checkpoint: checkpoint.to_owned(), envelope, claim }))
+        Ok(LocalWalk { checkpoint: checkpoint.to_owned(), envelope, claim })
     }
 
     /// Delete every row a tombstone stands for, in chunks, then mark the checkpoint trimmed.
@@ -1232,16 +955,15 @@ impl Store {
         let mut chunks = 0;
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
-        let mut cursor = TrimCursor { local: self.local_walk(checkpoint)?, ..TrimCursor::default() };
-        // A local walk deletes at most the day's claims left; a shared checkpoint's trim is not
-        // capped.
+        let mut cursor = TrimCursor { envelopes_done: false, walk: self.local_walk(checkpoint)? };
+        // A trim deletes at most the day's claims left.
         let day = self.trim_day.load(Ordering::Relaxed);
-        let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
+        let mut left = self.local_trim_left_today()?;
         let mut views = TrimViews::new(self);
         let mut wal = TrimWalState::default();
         let delete = crate::profile::span("trim.delete");
         loop {
-            if left == Some(0) || !self.trim_wal_allows(&mut wal, &mut pause)? {
+            if left == 0 || !self.trim_wal_allows(&mut wal, &mut pause)? {
                 // The cut stays `trimming`, and the next step goes on from here: the next day's
                 // after the day's cap, the next one after a WAL that would not restart. What its
                 // deletes deferred is rebuilt now, so a deferral outlasts no run.
@@ -1282,7 +1004,7 @@ impl Store {
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
             while steps < most
                 && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET)
-                && left.is_none_or(|left| (claims.len() as u64) < left)
+                && (claims.len() as u64) < left
             {
                 let Some((envelope, envelope_claims)) = stages.time("walk", || next_trim_rows(&transaction, &mut cursor))? else {
                     break;
@@ -1338,7 +1060,8 @@ impl Store {
                 });
                 return Ok(());
             }
-            if let Some(walk) = &cursor.local {
+            {
+                let walk = &cursor.walk;
                 transaction
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
@@ -1361,7 +1084,7 @@ impl Store {
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
-            left = left.map(|left| left.saturating_sub(claims.len() as u64));
+            left = left.saturating_sub(claims.len() as u64);
             chunks += 1;
             if let Some(hook) = self.trim_chunk_hook.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
                 hook(chunks);
@@ -1517,17 +1240,14 @@ impl Store {
     }
 }
 
-/// Where a trim goes on from: the last envelope tombstone it read, then the last claim tombstone
-/// whose envelope was already gone. Each is read once, however many chunks the trim takes.
-#[derive(Default)]
+/// Where a trim goes on from: its walk through the cut's envelope tombstones, then its claim
+/// tombstones. Each is read once, however many chunks the trim takes.
 struct TrimCursor {
-    envelope: (String, i64, String),
     envelopes_done: bool,
-    claim: String,
-    local: Option<LocalWalk>,
+    walk: LocalWalk,
 }
 
-/// Where a member that trims locally has got in its own cut's tombstones. They were recorded
+/// Where a trim has got in its own cut's tombstones. They were recorded
 /// after every earlier checkpoint's, so the walk goes by rowid from the first of them and never
 /// visits the older ones. It is kept in `meta` with each chunk, so a restart goes on from it.
 #[derive(Debug, Default)]
@@ -1562,41 +1282,7 @@ fn next_trim_rows(
     cursor: &mut TrimCursor,
 ) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
-        let envelope = match &mut cursor.local {
-            Some(walk) => next_local_envelope(transaction, walk)?,
-            None => {
-                let envelope = transaction
-                    .prepare_cached(
-                        "SELECT tombstone.writer, tombstone.sequence, tombstone.envelope_hash,
-                                tombstone.accepted_at_unix_ms
-                         FROM checkpoint_envelopes AS tombstone
-                         WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
-                               > (?1, ?2, ?3)
-                         ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
-                         LIMIT 1",
-                    )?
-                    .query_row(
-                        /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
-                        |row| {
-                            Ok(EnvelopeTombstone {
-                                writer: row.get(0)?,
-                                sequence: row.get(1)?,
-                                envelope_hash: row.get(2)?,
-                                accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                            })
-                        },
-                    )
-                    .optional()?;
-                if let Some(envelope) = &envelope {
-                    cursor.envelope = (
-                        envelope.writer.clone(),
-                        i64::try_from(envelope.sequence)?,
-                        envelope.envelope_hash.clone(),
-                    );
-                }
-                envelope
-            }
-        };
+        let envelope = next_local_envelope(transaction, &mut cursor.walk)?;
         if let Some(envelope) = envelope {
             let held: bool = transaction.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM replica_envelopes
@@ -1621,25 +1307,7 @@ fn next_trim_rows(
         }
         cursor.envelopes_done = true;
     }
-    let claim = match &mut cursor.local {
-        Some(walk) => next_local_claim(transaction, walk)?,
-        None => {
-            let claim = transaction
-                .prepare_cached(
-                    "SELECT tombstone.id, tombstone.operation_id, tombstone.subject, tombstone.kind FROM checkpoint_claims AS tombstone
-                     WHERE tombstone.id > ?1
-                     ORDER BY tombstone.id LIMIT 1",
-                )?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h71bb2b8a8c50 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
-                    Ok(deletable_claim(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .optional()?;
-            if let Some(claim) = &claim {
-                cursor.claim = claim.id.clone();
-            }
-            claim
-        }
-    };
+    let claim = next_local_claim(transaction, &mut cursor.walk)?;
     Ok(match claim {
         Some(claim) => {
             let held: bool = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?

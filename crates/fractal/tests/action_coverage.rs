@@ -3297,7 +3297,6 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["fleet", "invites"],
         vec!["replication", "status"],
         vec!["replication", "invalid"],
-        vec!["replication", "checkpoint", "status"],
         vec!["rules", "ls"],
         vec!["rules", "audit"],
         vec!["repair", "dry-run"],
