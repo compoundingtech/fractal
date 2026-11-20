@@ -752,24 +752,40 @@ pub fn is_update(ask: &ClaimRecord) -> bool {
 
 /// Adds person responses to a step view: the responses to asks this attempt made, as
 /// constraints and as data, or a person ask's own response as data.
+/// Seek ask origins through the durable expression index before reading resolution history;
+/// the source subjects also admit an ask's own responses, including asks without an origin.
 pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "WITH RECURSIVE sources(subject,attempt) AS (
+    enrich_responses_with_sql(connection, view, RESPONSES_SQL)
+}
+
+const RESPONSES_SQL: &str = "WITH RECURSIVE sources(subject,attempt) AS (
           SELECT ?1,?2 UNION
           SELECT json_extract(carried.body,'$.fields.source_step_run'),
             coalesce(json_extract(carried.body,'$.fields.source_attempt'),sources.attempt)
-          FROM sources JOIN claims carried ON carried.subject=sources.subject
+          FROM sources CROSS JOIN claims carried INDEXED BY claims_subject_kind_index
+          ON carried.subject=sources.subject
             AND carried.kind='step-run.carried'
             AND json_extract(carried.body,'$.fields.attempt')=sources.attempt
+        ), candidates(subject) AS (
+          SELECT subject FROM sources
+          UNION
+          SELECT request.subject FROM sources
+          CROSS JOIN claims request INDEXED BY claims_person_ask_origin_index
+          WHERE request.kind='work.person-asked'
+            AND json_extract(request.body,'$.fields.origin_step')=sources.subject
+            AND json_extract(request.body,'$.fields.origin_attempt')=sources.attempt
         )
         SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
           EXISTS(SELECT 1 FROM sources WHERE sources.subject=json_extract(request.body,'$.fields.origin_step')), resolution.kind,
-          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution LEFT JOIN claims request
+          json_extract(request.body,'$.fields.deadline_unix_ms')
+        FROM candidates CROSS JOIN claims resolution INDEXED BY claims_subject_kind_index
+        LEFT JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
-        WHERE resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
+        WHERE resolution.subject=candidates.subject
+          AND resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
           AND (resolution.kind!='work.person-override' OR (
             json_extract(resolution.body,'$.fields.episode')=request.id
             AND resolution.actor=json_extract(request.body,'$.fields.person')
@@ -786,8 +802,14 @@ pub fn enrich_responses(
               (json_extract(resolution.body,'$.fields.attempt')=sources.attempt
                OR (resolution.kind='work.person-override'
                  AND json_extract(request.body,'$.fields.attempt')=sources.attempt))))
-        ORDER BY CANONICAL_ASC(resolution)",
-    ))?;
+        ORDER BY CANONICAL_ASC(resolution)";
+
+fn enrich_responses_with_sql(
+    connection: &Connection,
+    view: &mut StepRunView,
+    sql: &str,
+) -> rusqlite::Result<()> {
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c2bec39d0b7 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(sql))?;
     let responses = query
         .query_map(params![view.subject, view.attempt], |row| {
             Ok((
@@ -1260,6 +1282,89 @@ mod standing_responses_tests {
         assert_eq!(kept.iter().map(|response| response.0).collect::<Vec<_>>(), ["override-latest"]);
     }
 
+    fn response_connection() -> super::Connection {
+        let connection = super::Connection::open_in_memory().unwrap();
+        connection.execute_batch("
+            CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
+            CREATE TABLE claims(id TEXT UNIQUE,store_index INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT,subject TEXT,kind TEXT,actor TEXT,body TEXT,accepted_at_unix_ms TEXT,
+                origin TEXT NOT NULL DEFAULT 'member-alder',predecessors TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE claim_positions(claim_id TEXT,position INTEGER);
+            CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+            CREATE INDEX claims_subject_kind_index ON claims(subject,kind);
+        ").unwrap();
+        // Install the production index instead of independently maintaining a test index.
+        let index = super::super::SCHEMA.split(';').find(|statement|
+            statement.contains("CREATE INDEX IF NOT EXISTS claims_person_ask_origin_index")
+        ).expect("person ask origin index is installed on store open");
+        connection.execute_batch(index).unwrap();
+        connection
+    }
+
+    #[test]
+    fn carried_response_enrichment_does_not_read_unrelated_history() {
+        use super::*;
+        let connection = response_connection();
+        connection.execute_batch("
+            CREATE INDEX claims_kind_index ON claims(kind);
+            INSERT INTO batches VALUES('selected','member-alder',1);
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms) VALUES
+                ('carry','selected','new','step-run.carried',
+                 '{\"fields\":{\"attempt\":2,\"source_step_run\":\"old\",\"source_attempt\":1}}','1'),
+                ('answer','selected','old','work.person-done',
+                 '{\"fields\":{\"attempt\":1,\"summary\":\"kept\"}}','2'),
+                ('boundary','selected','zz-boundary','step-run.carried','{\"fields\":{}}','3');
+        ").unwrap();
+        // Seed a key above the measured subjects in both populations. Without it,
+        // the small fixture ends its index range at EOF, while the grown fixture
+        // executes one extra IdxGT to reject the next subject. Compare the same
+        // range-boundary path, retaining exact VM equality rather than a tolerance.
+        let sql = canonical_sql(RESPONSES_SQL);
+        let measure = || {
+            let mut query = connection.prepare(&sql).unwrap();
+            let subjects = query.query_map(params!["new", 2], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(subjects, ["old"]);
+            query.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let before = measure();
+        connection.execute_batch("
+            INSERT INTO batches VALUES('noise','member-alder',2);
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms)
+            SELECT 'carry/'||i,'noise','unrelated/'||i,'step-run.carried',
+                '{\"fields\":{\"attempt\":2,\"source_step_run\":\"elsewhere\"}}','3' FROM n;
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+            INSERT INTO claims(id,batch_id,subject,kind,body,accepted_at_unix_ms)
+            SELECT 'answer/'||i,'noise','unrelated/'||i,'work.person-done',
+                '{\"fields\":{\"attempt\":1}}','4' FROM n;
+        ").unwrap();
+        let after = measure();
+        assert_eq!(before, after, "unrelated carried and response history must not increase VM work");
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map(params!["new", 2], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains(
+            "SEARCH carried USING INDEX claims_subject_kind_index (subject=? AND kind=?)"
+        )), "{plan:?}");
+    }
+
+    fn enrich_equivalent(connection: &super::Connection, view: &mut super::StepRunView) {
+        use super::*;
+        // Reconstruct the previous global scan without indexed candidate selection.
+        let (sources, candidates_and_select) = RESPONSES_SQL.split_once("), candidates(subject) AS (").unwrap();
+        let (_, select) = candidates_and_select.split_once("\n        SELECT resolution.subject").unwrap();
+        let legacy_sql = format!("{sources})\n        SELECT resolution.subject{select}")
+            .replace("FROM candidates CROSS JOIN claims resolution INDEXED BY claims_subject_kind_index",
+                "FROM claims resolution")
+            .replace("WHERE resolution.subject=candidates.subject\n          AND resolution.kind",
+                "WHERE resolution.kind");
+        let mut legacy = view.clone();
+        enrich_responses_with_sql(connection, &mut legacy, &legacy_sql).unwrap();
+        enrich_responses(connection, view).unwrap();
+        assert_eq!(serde_json::to_value(&*view).unwrap(), serde_json::to_value(legacy).unwrap());
+    }
+
     #[test]
     fn override_projection_converges_for_reordered_history_and_fences_invalid_links() {
         use super::*;
@@ -1294,14 +1399,7 @@ mod standing_responses_tests {
         ];
         for reverse in [false, true] {
             // Independent retained-history readers model opposite replication arrival orders.
-            let connection = Connection::open_in_memory().unwrap();
-            connection.execute_batch("
-                CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
-                CREATE TABLE claims(id TEXT UNIQUE,store_index INTEGER PRIMARY KEY AUTOINCREMENT,
-                    batch_id TEXT,subject TEXT,kind TEXT,actor TEXT,body TEXT,accepted_at_unix_ms TEXT);
-                CREATE TABLE claim_positions(claim_id TEXT,position INTEGER);
-                CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
-            ").unwrap();
+            let connection = response_connection();
             for index in 0..history.len() {
                 let index = if reverse { history.len() - 1 - index } else { index };
                 let (id, kind, actor, at, fields) = &history[index];
@@ -1319,11 +1417,102 @@ mod standing_responses_tests {
                     "agentless":false,"worker_reported":true,"readiness_epoch":1,
                     "created_at_unix_ms":1,"updated_at_unix_ms":1_000
                 })).unwrap();
-                enrich_responses(&connection, &mut view).unwrap();
+                enrich_equivalent(&connection, &mut view);
                 assert_eq!(view.person_answers.len(), 1);
                 assert_eq!(view.person_answers[0].summary, "Latest");
                 assert_eq!(view.status, "completed", "an override must not reopen the origin");
             }
+        }
+    }
+
+    #[test]
+    fn indexed_responses_match_global_scan_across_carried_attempts_and_deadlines() {
+        use super::*;
+        let history = [
+            ("carry-new", "new", "step-run.carried", 1, json!({
+                "attempt":3,"source_step_run":"middle","source_attempt":2
+            })),
+            // An omitted source_attempt inherits the carried attempt.
+            ("carry-middle", "middle", "step-run.carried", 2, json!({
+                "attempt":2,"source_step_run":"old"
+            })),
+            // A cycle must terminate and must not duplicate a response.
+            ("carry-cycle", "old", "step-run.carried", 3, json!({
+                "attempt":2,"source_step_run":"new","source_attempt":3
+            })),
+            ("carry-other-attempt", "new", "step-run.carried", 4, json!({
+                "attempt":4,"source_step_run":"unrelated","source_attempt":1
+            })),
+            ("ask", "ask-step", "work.person-asked", 10, json!({
+                "attempt":1,"origin_step":"old","origin_attempt":2,"deadline_unix_ms":1000
+            })),
+            ("default", "ask-step", "work.person-done", 1000, json!({
+                "attempt":1,"episode":"ask","resolved_by":"deadline","summary":"Default"
+            })),
+            ("before", "ask-step", "work.person-done", 999, json!({
+                "attempt":1,"summary":"Before cutoff"
+            })),
+            ("late", "ask-step", "work.person-done", 1001, json!({
+                "attempt":1,"summary":"Late"
+            })),
+            ("other-ask", "other", "work.person-asked", 11, json!({
+                "attempt":1,"origin_step":"old","origin_attempt":1
+            })),
+            ("other-answer", "other", "work.person-done", 12, json!({
+                "attempt":1,"summary":"Other attempt"
+            })),
+            // A self response needs neither an ask row nor an origin.
+            ("orphan", "orphan-step", "work.person-cancelled", 13, json!({
+                "attempt":2,"summary":"Cancelled without request"
+            })),
+            ("no-origin", "self", "work.person-asked", 14, json!({"attempt":2})),
+            ("self-answer", "self", "work.person-done", 15, json!({
+                "attempt":2,"summary":"Own answer"
+            })),
+        ];
+        for (reverse, before_at) in [(false, 999), (true, 999), (false, 1000), (true, 1000)] {
+            let connection = response_connection();
+            for index in 0..history.len() {
+                let index = if reverse { history.len() - 1 - index } else { index };
+                let (id, subject, kind, at, fields) = &history[index];
+                let at = if *id == "before" { before_at } else { *at };
+                connection.execute("INSERT INTO batches VALUES(?1,'member-alder',?2)",
+                    params![id, index as i64]).unwrap();
+                connection.execute(
+                    "INSERT INTO claims(id,batch_id,subject,kind,actor,body,accepted_at_unix_ms)
+                     VALUES(?1,?1,?2,?3,'agent/requester',?4,?5)",
+                    params![id, subject, kind, json!({"fields":fields}).to_string(), at.to_string()],
+                ).unwrap();
+            }
+            let standing = Some(if before_at < 1000 { "Before cutoff" } else { "Default" });
+            for (subject, attempt, summary) in [
+                ("new", 3, standing),
+                ("middle", 2, standing),
+                ("old", 2, standing),
+                ("ask-step", 1, standing),
+                ("old", 1, Some("Other attempt")),
+                ("orphan-step", 2, Some("Cancelled without request")),
+                ("self", 2, Some("Own answer")),
+                ("new", 1, None),
+                ("missing", 1, None),
+            ] {
+                let mut view: StepRunView = serde_json::from_value(json!({
+                    "subject":subject,"run":"mission-run/example","generation":"generation/example",
+                    "step":"ask","definition_hash":"definition","status":"completed","attempt":attempt,
+                    "agentless":false,"worker_reported":true,"readiness_epoch":1,
+                    "created_at_unix_ms":1,"updated_at_unix_ms":1000
+                })).unwrap();
+                enrich_equivalent(&connection, &mut view);
+                assert_eq!(view.person_answers.iter().map(|answer| answer.summary.as_str()).collect::<Vec<_>>(),
+                    summary.into_iter().collect::<Vec<_>>(), "{subject} attempt {attempt}");
+            }
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", canonical_sql(RESPONSES_SQL)))
+                .unwrap().query_map(params!["new", 3], |row| row.get::<_, String>(3))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert!(plan.iter().any(|line| line.contains("SEARCH request USING INDEX claims_person_ask_origin_index")),
+                "{plan:?}");
+            assert!(plan.iter().any(|line| line.contains("SEARCH resolution USING INDEX claims_subject_kind_index")),
+                "{plan:?}");
         }
     }
 }

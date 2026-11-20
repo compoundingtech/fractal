@@ -1299,6 +1299,33 @@
         "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
+      "st hosts launch-freeze clear": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st hosts launch-freeze set": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st hosts launch-freeze show": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st hosts ls": {
         "actor": "none",
         "accepts_person": false,
@@ -1875,6 +1902,15 @@
         "actor_environment": null,
         "ignores_actor": true
       },
+      "st replication archive-candidates": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st replication checkpoint excuse": {
         "actor": "optional",
         "accepts_person": true,
@@ -1992,13 +2028,22 @@
         "actor_environment": null,
         "ignores_actor": false
       },
-      "st resources exec": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+      "st resources cancel": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
-        "actor_environment": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st resources exec": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
       "st resources hold": {
@@ -2010,13 +2055,31 @@
         "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
-      "st resources ls": {
+      "st resources in-member": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,
         "as_role": "none",
         "alternate_actor_option": null,
         "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st resources ls": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st resources member-scope": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
       "st resources release": {
@@ -2029,12 +2092,12 @@
         "ignores_actor": false
       },
       "st resources show": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
-        "actor_environment": null,
+        "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
       "st rules audit": {
@@ -2478,7 +2541,25 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st slo ingest-roll": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st slo ls": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st slo roll-intent": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,

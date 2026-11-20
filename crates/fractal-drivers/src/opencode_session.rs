@@ -1721,7 +1721,7 @@ impl Delivery {
         // Archive is the recipient agent's act and the only settlement authority. An entry whose
         // file left the inbox releases ownership here; this pump never moves a file itself.
         self.ledger
-            .prune(|filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
+            .prune(self.control.incarnation().as_deref(), |filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
         // Continue receipt read-back for an existing attempt. No new input can pass
         // `send` while held.
         if self.control.held() && self.ledger.entries().is_empty() {
@@ -1757,7 +1757,7 @@ impl Delivery {
             .binding()
             .is_some_and(|binding| binding != target)
         {
-            self.ledger.rebind(&target)?;
+            self.ledger.rebind(&target, self.control.incarnation().as_deref())?;
         }
         // Fail closed. An unreadable ledger holds and surfaces instead of guessing, and it never
         // refused to start: a driver that will not start delivers nothing at all. The
@@ -1795,9 +1795,7 @@ impl Delivery {
             filename: head.filename.clone(),
             binding: target.clone(),
             correlation: delivery_ledger::Correlation::native(message_id.clone()),
-            // Read-back is a durable query, not a live frame, so a pre-crash attempt is
-            // reconcilable without an incarnation token.
-            incarnation: None,
+            incarnation: self.control.incarnation(),
         })?;
         let text = ding::poke_text(&self.catalog_root, &self.this_host, &self.identity, &head);
         self.send(client, &entry, &text, diagnostics)
@@ -1862,6 +1860,14 @@ impl Delivery {
         if self.control.held() {
             return Ok(());
         }
+        // A retry was authorized by native absence; bind the actual new POST, not its
+        // predecessor's read-back, to this runtime's receipt authority.
+        self.ledger.begin(delivery_ledger::Begin {
+            filename: entry.filename.clone(),
+            binding: entry.binding.clone(),
+            correlation: entry.correlation.clone(),
+            incarnation: self.control.incarnation(),
+        })?;
         self.next_attempt = Instant::now() + DELIVERY_RETRY;
         let payload = json!({
             "messageID": entry.correlation.value,
@@ -1989,9 +1995,23 @@ pub fn consumed_delivery_paths(
     identity: &str,
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
+    Ok(delivery_receipts(session_dir, identity, runtime_id)?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
+        .map(|entry| entry.filename)
+        .collect())
+}
+
+/// Validated durable evidence; acceptance clocks are never inferred from consumption.
+pub fn delivery_receipts(
+    session_dir: &Path,
+    identity: &str,
+    runtime_id: &str,
+) -> Result<delivery_ledger::ReceiptSnapshot> {
     let path = session_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(BTreeSet::new());
+        return Ok(delivery_ledger::ReceiptSnapshot::default());
     }
     let owner = identity.to_owned();
     let ledger = delivery_ledger::Ledger::open(
@@ -2004,12 +2024,7 @@ pub fn consumed_delivery_paths(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("OpenCode delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger
-        .entries()
-        .iter()
-        .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
-        .map(|entry| entry.filename.clone())
-        .collect())
+    Ok(ledger.receipt_snapshot())
 }
 
 #[cfg(test)]
@@ -2473,6 +2488,8 @@ mod tests {
         let client = Client::new(server.port, "pw");
         let state_path = tmp.path().join("state/delivery-ledger.json");
         let (mut delivery, filename) = delivery_fixture(tmp.path(), state_path.clone());
+        let SessionControl::Graph(gate) = &delivery.control;
+        gate.bind_incarnation("runtime-acceptance-fixture");
 
         server.read_back_error.store(true, Ordering::SeqCst);
         delivery.pump(&client);
@@ -2482,6 +2499,11 @@ mod tests {
             Some(delivery_ledger::Phase::TransportAccepted),
             "the POST landed; nothing yet proves the server holds it"
         );
+        let first_acceptance = reopen_ledger(&state_path).entry(&filename)
+            .unwrap().input_acceptances.clone();
+        assert_eq!(first_acceptance.len(), 1);
+        assert_eq!(first_acceptance[0].incarnation, "runtime-acceptance-fixture");
+        assert!(first_acceptance[0].accepted_at_unix_ms > 0);
 
         // While the read-back stays indeterminate, no pass may re-POST.
         delivery.pump(&client);
@@ -2497,6 +2519,8 @@ mod tests {
             "a recovered read-back proves storage, not consumption"
         );
         assert_eq!(server.posts.lock().unwrap().len(), 1);
+        assert_eq!(reopen_ledger(&state_path).entry(&filename)
+            .unwrap().input_acceptances, first_acceptance);
     }
 
     #[test]

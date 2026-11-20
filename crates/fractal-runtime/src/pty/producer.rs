@@ -197,6 +197,75 @@ impl PtyRuntime {
         &self, directory: &Path, ownership: &mut ProducerOwnership,
         observe_scope: impl Fn(&str) -> Result<Option<crate::ScopeRetirementProof>>,
     ) -> Result<bool> {
+        // Only an ended boot generation makes live server checks unnecessary.
+        // Current-boot and identityless producers must still prove live closure,
+        // even when a syntactically valid durable closure is already present.
+        match File::open(directory.join("closure.json")) {
+            Ok(file) => {
+                let closure: ClosureRecord = serde_json::from_reader(file)?;
+                if let ClosureRecord::Current(closure) = closure {
+                    anyhow::ensure!(closure.version == 1 && !closure.publication_pending,
+                        "invalid producer closure");
+                    let (work, servers) = closure.scopes.split_first()
+                        .context("empty producer closure")?;
+                    work.validate(&ownership.scope)?;
+                    for server in servers {
+                        let pid = server.unit.strip_suffix(".scope")
+                            .and_then(|unit| unit.rsplit_once('-'))
+                            .and_then(|(_, pid)| pid.parse::<u32>().ok())
+                            .filter(|pid| *pid > 0)
+                            .context("invalid closed server scope")?;
+                        server.validate_ending(
+                            &crate::server_unit(&ownership.runtime_id, pid), true)?;
+                    }
+                    let current_boot = pty_core::registry::read_boot_id();
+                    let mut all_old_boot = current_boot.is_some();
+                    let mut server_count = 0;
+                    for entry in std::fs::read_dir(directory)? {
+                        let entry = entry?;
+                        let name = entry.file_name();
+                        let name = name.to_str().context("non-UTF8 producer entry")?;
+                        if matches!(name, "owner.json" | "closure.json") { continue; }
+                        let pid: u32 = name.strip_prefix("server-")
+                            .and_then(|name| name.strip_suffix(".json"))
+                            .context("partial or unknown producer entry")?.parse()?;
+                        anyhow::ensure!(pid > 0, "invalid server PID");
+                        let record: ServerRecord =
+                            serde_json::from_reader(File::open(entry.path())?)?;
+                        let unit = match &record {
+                            ServerRecord::Identity(server) => {
+                                anyhow::ensure!(server.version == 1 && server.pid == pid
+                                    && server.start_token > 0 && !server.boot_id.is_empty(),
+                                    "invalid server identity");
+                                all_old_boot &= current_boot.as_ref()
+                                    .is_some_and(|boot| boot != &server.boot_id);
+                                &server.unit
+                            }
+                            ServerRecord::Scope(unit) => {
+                                all_old_boot = false;
+                                unit
+                            }
+                        };
+                        anyhow::ensure!(*unit == crate::server_unit(&ownership.runtime_id, pid),
+                            "server scope identity changed");
+                        anyhow::ensure!(servers.iter().any(|proof| proof.unit == *unit),
+                            "producer closure omits server scope");
+                        server_count += 1;
+                    }
+                    if all_old_boot && server_count > 0 {
+                        if ownership.publication_pending {
+                            ownership.publication_pending = false;
+                            durable_json(&directory.join("owner.json"), ownership)?;
+                        }
+                        return Ok(true);
+                    }
+                }
+                // Legacy closure records lack the complete publication marker;
+                // retain their existing live-evidence reconciliation.
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let Some(work) = observe_scope(&ownership.scope)? else { return Ok(false); };
         let mut proofs = vec![work];
         let mut vanished = false;
@@ -301,6 +370,124 @@ impl PtyRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_producer_closure_survives_old_boot_and_repairs_owner_crash_gap() {
+        for pending_owner in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = PtyRuntime::new(root.path().join("registry"));
+            let directory = runtime.producer_directory("worker", "op");
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut owner = ProducerOwnership {
+                version: 1, runtime_id: "worker".into(), operation: "op".into(),
+                scope: "st3-worker-op.scope".into(), launcher_acknowledged: true,
+                publication_pending: pending_owner,
+            };
+            durable_json(&directory.join("owner.json"), &owner).unwrap();
+            durable_json(&directory.join("server-123.json"), &ServerOwnership {
+                version: 1, unit: crate::server_unit("worker", 123), pid: 123,
+                start_token: 1, boot_id: "linux:previous-boot".into(),
+            }).unwrap();
+            let proof = |unit| crate::ScopeRetirementProof {
+                version: 1, unit, load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            };
+            let closure = ProducerClosure {
+                version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
+                scopes: vec![proof(owner.scope.clone()), proof(crate::server_unit("worker", 123))],
+            };
+            durable_json(&directory.join("closure.json"), &closure).unwrap();
+            let before = std::fs::read(directory.join("closure.json")).unwrap();
+            for _ in 0..2 {
+                assert!(runtime.reconcile_producer(&directory, &mut owner, |_| {
+                    panic!("a durable closure must not re-probe live scopes or old boot identity")
+                }).unwrap());
+                assert!(!owner.publication_pending);
+                let persisted: ProducerOwnership = serde_json::from_reader(
+                    File::open(directory.join("owner.json")).unwrap()).unwrap();
+                assert!(!persisted.publication_pending);
+                assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), before);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn current_boot_live_server_rejects_forged_or_incomplete_closure() {
+        let pid = std::process::id();
+        let token = crate::process_start_token(pid).unwrap();
+        for include_server in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = PtyRuntime::new(root.path().join("registry"));
+            let directory = startup_fixture(&runtime, "live-start", pid, token);
+            let mut owner: ProducerOwnership =
+                serde_json::from_reader(File::open(directory.join("owner.json")).unwrap()).unwrap();
+            let original = std::fs::read(directory.join("owner.json")).unwrap();
+            let proof = |unit| crate::ScopeRetirementProof {
+                version: 1, unit, load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            };
+            let mut scopes = vec![proof(owner.scope.clone())];
+            if include_server {
+                scopes.push(proof(crate::server_unit("worker", pid)));
+            }
+            durable_json(&directory.join("closure.json"), &ProducerClosure {
+                version: 1, reason: ClosureReason::ScopesClosed,
+                publication_pending: false, scopes,
+            }).unwrap();
+            let original_closure = std::fs::read(directory.join("closure.json")).unwrap();
+            let result = runtime.reconcile_producer(&directory, &mut owner,
+                |unit| Ok(Some(proof(unit.into()))));
+            assert!(!matches!(result, Ok(true)),
+                "a forged closure cannot authorize either producer-closure gate");
+            assert!(owner.publication_pending);
+            assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), original);
+            assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), original_closure);
+            assert!(crate::process_generation_alive(pid, token).unwrap());
+        }
+    }
+
+    #[test]
+    fn invalid_durable_producer_closure_never_authorizes_completion() {
+        for invalid in ["pending", "version", "empty", "wrong-work", "wrong-server", "populated", "corrupt"] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = PtyRuntime::new(root.path().join("registry"));
+            let directory = runtime.producer_directory("worker", "op");
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut owner = ProducerOwnership {
+                version: 1, runtime_id: "worker".into(), operation: "op".into(),
+                scope: "st3-worker-op.scope".into(), launcher_acknowledged: true,
+                publication_pending: false,
+            };
+            durable_json(&directory.join("owner.json"), &owner).unwrap();
+            let original = std::fs::read(directory.join("owner.json")).unwrap();
+            let proof = |unit| crate::ScopeRetirementProof {
+                version: 1, unit, load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            };
+            let mut closure = ProducerClosure {
+                version: 1, reason: ClosureReason::RuntimeVanished, publication_pending: false,
+                scopes: vec![proof(owner.scope.clone()), proof(crate::server_unit("worker", 123))],
+            };
+            match invalid {
+                "pending" => closure.publication_pending = true,
+                "version" => closure.version = 2,
+                "empty" => closure.scopes.clear(),
+                "wrong-work" => closure.scopes[0].unit = "st3-other.scope".into(),
+                "wrong-server" => closure.scopes[1].unit = crate::server_unit("other", 123),
+                "populated" => closure.scopes[1].active_state = "active".into(),
+                _ => {}
+            }
+            durable_json(&directory.join("closure.json"), &closure).unwrap();
+            if invalid == "corrupt" {
+                std::fs::write(directory.join("closure.json"), b"{").unwrap();
+            }
+            assert!(runtime.reconcile_producer(&directory, &mut owner, |_| {
+                panic!("malformed durable authority must fail closed")
+            }).is_err(), "{invalid}");
+            assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), original);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     fn startup_fixture(runtime: &PtyRuntime, operation: &str, pid: u32, token: u64) -> PathBuf {
@@ -414,7 +601,7 @@ mod tests {
             let runtime = PtyRuntime::new(root.path().join("registry"));
             let mut owner = ProducerOwnership {
                 version: 1, runtime_id: "worker".into(), operation: "op".into(),
-                scope: "work.scope".into(), launcher_acknowledged: true,
+                scope: "st3-work.scope".into(), launcher_acknowledged: true,
                 publication_pending: true,
             };
             let directory = runtime.producer_directory("worker", "op");
@@ -488,7 +675,7 @@ mod tests {
         runtime.acknowledge_launcher(&mut ownership, false).unwrap();
         drop(lock);
         // A missing scope and free spawn lock cannot close a crash-before-ack.
-        let error = runtime.spawn_checked(
+        let error = runtime.clone().with_launch_operation(Some(crate::LaunchOperation(operation.clone()))).spawn_checked(
             id, &Launch::Argv(vec!["true".into()]), root.path(),
             &BTreeMap::from([("ST3_START_OPERATION".into(), operation.clone())]),
             None, &BTreeMap::from([("st3.start-operation".into(), operation.clone())]),

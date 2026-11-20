@@ -26,6 +26,7 @@ import {
   genieSetupSteps,
   nixCacheStep,
   linuxRunner,
+  requiredLinuxRunner,
   linuxStageJob as namespaceStageJob,
   evidenceStageJob,
   evidenceEnvironment,
@@ -409,7 +410,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...requiredLinuxRunner, ...linuxStageRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
@@ -521,6 +522,27 @@ fi`,
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         { name: 'Prove Home Manager activation ownership and rollback',
           run: 'nix build .#checks.x86_64-linux.hm-module-eval --no-link --print-build-logs' },
+      ],
+    },
+    // Exercise the actual Nix package link, not only Cargo in a development shell:
+    // cargoSetupHook can otherwise override rusqlite's bundled SQLite feature.
+    'bundled-sqlite-packages': {
+      name: 'bundled-sqlite-packages',
+      ...afterPickRunner,
+      'runs-on': requiredLinuxRunner,
+      'timeout-minutes': 90,
+      steps: [
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }).slice(0, queue ? 1 : undefined),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        {
+          name: 'Record effective bundled SQLite derivation environment',
+          run: `nix derivation show .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter |
+  jq '.derivations | to_entries | map({derivation: .key, env: (.value.env | {pname, dontCargoUseSystemLibs, LIBSQLITE3_SYS_USE_PKG_CONFIG, buildInputs})})'`,
+        },
+        {
+          name: 'Build bundled SQLite packages, including fractal-migrate',
+          run: 'nix build --no-link --print-build-logs .#checks.x86_64-linux.bundled-sqlite-env .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter',
+        },
       ],
     },
     // The CI scripts' own self-tests that read only the files this check's skip-policy entry declares (scripts/ci-script-tests runs them in a
@@ -693,7 +715,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     }),
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval'],
+      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and must not queue behind the work it summarizes.
@@ -746,6 +768,11 @@ exit 1`,
           name: 'Require fixture-only HM activation proof to pass',
           env: { HM_RESULT: '${{ needs.hm-module-eval.result }}' },
           run: 'test "$HM_RESULT" = success',
+        },
+        {
+          name: 'Require bundled SQLite package links to pass',
+          env: { SQLITE_RESULT: '${{ needs.bundled-sqlite-packages.result }}' },
+          run: 'test "$SQLITE_RESULT" = success',
         },
       ],
     },
@@ -967,6 +994,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
   }),
 }, {
   "hm-module-eval": "Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.",
+  "bundled-sqlite-packages": "Uses the runner's Nix store and declared read-only binary caches; no separate Actions build cache.",
   "swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
 )
 }

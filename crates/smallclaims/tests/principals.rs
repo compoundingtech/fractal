@@ -69,22 +69,22 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 
 #[test]
 fn storage_version_follows_the_reviewed_migration_order() {
-    // Runtime operations used 19 and signatures used 20. Thread privacy adds reader floor 21.
-    // Complete serving privacy used 22; causal metadata readers require version 23.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 23);
+    // The graph's reader-first default remains independent of application privacy.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+    assert_eq!(fractal_storage_version::THREAD_PRIVACY_STORAGE_VERSION, 23);
 }
 
 #[test]
-fn versions_20_through_22_open_at_version_23_and_retain_history() {
-    for previous in [20_u32, 21, 22] {
+fn activated_storage_versions_retain_their_header_and_history() {
+    for previous in [20_u32, 21, 22, 23] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let store = Store::open(&path, "node", Arc::new(Plain)).unwrap();
         let original = note(&store, None, "pre-thread-reader history");
         drop(store);
 
-        // These reader floors do not change the logical graph schema or claim format.
-        // Model each prior header, including published main's version 20.
+        // Plain graph stores preserve explicit format/privacy headers; only the
+        // application runtime raises its privacy floor.
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.pragma_update(None, "user_version", previous).unwrap();
         drop(connection);
@@ -95,7 +95,7 @@ fn versions_20_through_22_open_at_version_23_and_retain_history() {
             .get()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 23, "opening reader floor {previous}");
+        assert_eq!(version, previous, "opening explicit version {previous}");
         let retained = reopened
             .latest_claim(&original.subject, Some(&original.kind))
             .unwrap()
@@ -104,6 +104,64 @@ fn versions_20_through_22_open_at_version_23_and_retain_history() {
         assert_eq!(retained.body, original.body);
         assert_eq!(retained.predecessors, original.predecessors);
     }
+}
+
+#[test]
+fn signature_reference_reader_precedes_the_default_writer_format() {
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+    assert_eq!(fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION, 23);
+}
+
+#[test]
+fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    let member = key();
+    let store = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    store.set_node_key(member.clone()).unwrap();
+    let claim = note(&store, None, "reader-first fixture");
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    assert_eq!(verdict(&store, &claim), Verdict::Verified);
+    {
+        let connection = store.connection.write();
+        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 20);
+        for table in ["claim_signatures", "claim_signature_sources"] {
+            let types: i64 = connection.query_row(&format!("SELECT count(*) FROM {table} WHERE typeof(signature)!='text'"), [], |row| row.get(0)).unwrap();
+            assert_eq!(types, 0, "{table} must stay readable by the previous release");
+        }
+        assert_eq!(connection.query_row("SELECT count(*) FROM claim_signature_originals", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+    assert!(!store.signature_migration().unwrap().references_pending);
+    drop(store);
+    // An explicitly activated v21 fixture keeps its marker and converts text
+    // losslessly. Application privacy stores also activate it, fenced at v23.
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+    let reader = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while reader.signature_migration().unwrap().references_pending {
+        assert!(std::time::Instant::now() < deadline);
+        reader.advance_signature_migration().unwrap();
+    }
+    reader.set_node_key(member).unwrap();
+    reader.judge_claims(true).unwrap();
+    assert_eq!(verdict(&reader, &claim), Verdict::Verified);
+    {
+        let connection = reader.connection.write();
+        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
+        assert_eq!(connection.query_row("SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1", [&claim.id], |row| row.get::<_,String>(0)).unwrap(), "blob");
+    }
+    let later = note(&reader, None, "future writer fixture");
+    seal(&reader);
+    reader.judge_claims(true).unwrap();
+    assert_eq!(verdict(&reader, &later), Verdict::Verified);
+    drop(reader);
+    let reopened = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+    assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
+    assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
+    drop(reopened);
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 24).unwrap();
+    assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 
 fn key() -> Arc<MemberKey> {
@@ -890,6 +948,7 @@ fn nonce_inventory_transition(online: bool, snapshot_overlap: bool, remove_earli
             remove_candidate_schema(&connection);
             old_roots = principal_physical_roots(&connection, false);
         } else {
+            inline_signature_facade_for_old_fixture(&connection);
             connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
         }
         let cached: String = connection
@@ -1111,6 +1170,7 @@ fn first_open_untrusted_carrier_cannot_displace_verified_person() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1179,7 +1239,7 @@ fn assert_candidate_inventory(target: &Store, fixture: &SignatureCarriers) {
     for (signature, key, nonce) in rows {
         let writers = connection
             .prepare(
-                "SELECT writer FROM claim_signature_sources WHERE claim_id=?1 AND signature=?2",
+                "SELECT writer FROM claim_signature_sources s WHERE claim_id=?1 AND (signature=?2 OR signature=(SELECT reference FROM claim_signature_originals o WHERE o.claim_id=s.claim_id AND o.signature=?2))",
             )
             .unwrap()
             .query_map(rusqlite::params![fixture.claim.id, signature], |row| {
@@ -1466,6 +1526,7 @@ fn opening_an_old_store_recovers_signatures_resumes_and_exposes_corruption() {
                 [&fixture.claim.id],
             )
             .unwrap();
+        inline_signature_facade_for_old_fixture(&connection);
         connection
             .execute_batch(
                 "DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_migration;",
@@ -1615,7 +1676,7 @@ fn large_candidate_judging_commits_pages_and_resumes_after_a_persisted_fault() {
     let seen = cursors.clone();
     let watched = claim.id.clone();
     let observer=store.connection.observe_commits(move |connection| {
-        let partial=connection.query_row("SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
+        let partial=connection.query_row("SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
         if let Some(cursor)=partial && !cursor.is_empty() && !state.swap(true,Ordering::SeqCst) {
             seen.lock().unwrap().push(cursor);
             connection.execute("UPDATE claim_signature_judging SET best_verdict='corrupt-fixture' WHERE claim_id=?1",[&watched]).unwrap();
@@ -1640,7 +1701,7 @@ fn large_candidate_judging_commits_pages_and_resumes_after_a_persisted_fault() {
     let connection = store.readers.get();
     let resumed: String = connection
         .query_row(
-            "SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1",
+            "SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1",
             [&claim.id],
             |row| row.get(0),
         )
@@ -1724,7 +1785,7 @@ fn a_new_candidate_before_the_judging_cursor_restarts_the_accumulator() {
     let changed = Arc::new(AtomicBool::new(false));
     let once = changed.clone();
     let observer=store.connection.observe_commits(move |connection| {
-        let partial=connection.query_row("SELECT last_signature FROM claim_signature_judging WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
+        let partial=connection.query_row("SELECT CASE typeof(last_signature) WHEN 'blob' THEN (SELECT signature FROM claim_signature_originals o WHERE o.claim_id=j.claim_id AND o.reference=j.last_signature) ELSE last_signature END FROM claim_signature_judging j WHERE claim_id=?1 AND complete=0",[&watched],|row|row.get::<_,String>(0)).optional().unwrap();
         if let Some(cursor)=partial && !cursor.is_empty() && !once.swap(true,Ordering::SeqCst) {
             assert!(serde_json::to_string(&added).unwrap()<cursor);
             store_claim_signature_tx(connection,&watched,&added).unwrap();
@@ -1871,8 +1932,24 @@ fn a_removed_root_holds_its_dependents_before_their_requeue_page() {
 
 #[test]
 fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
+    cold_dependency_revocation(false, false);
+}
+
+#[test]
+fn compact_dependencies_reopen_cold_results_and_hold_revoked_dependents_past_one_page() {
+    cold_dependency_revocation(true, false);
+}
+
+#[test]
+fn mixed_duplicate_dependencies_preserve_canonical_invalidation_pages() {
+    cold_dependency_revocation(true, true);
+}
+
+fn cold_dependency_revocation(compact: bool, mixed: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
     let anchor = key();
-    let store = Store::open_memory("studio", Arc::new(Plain)).unwrap();
+    let store = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
     store.set_node_key(anchor.clone()).unwrap();
     store.set_write_clock_at(100).unwrap();
     let first = note(&store, Some("person/ada"), "first");
@@ -1904,9 +1981,94 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
         .collect::<Vec<_>>();
     seal(&store);
     store.judge_claims(true).unwrap();
+    let mut saved_bytes = 0_u64;
     for claim in &after {
         assert_eq!(verdict(&store, claim), Verdict::Verified);
+        let connection = store.readers.get();
+        let (cursor, roots, complete, dirty, blocked): (String, String, bool, bool, bool) =
+            connection.query_row(
+                "SELECT last_signature,roots_digest,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1",
+                [&claim.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).unwrap();
+        assert!(cursor.is_empty() && roots.is_empty(), "completed result must be cold");
+        assert!(complete && !dirty && !blocked);
+        saved_bytes += connection.query_row(
+            "SELECT length(CAST(MAX(signature) AS BLOB))+(SELECT length(content_digest) FROM claim_signature_judging WHERE claim_id=?1) FROM claim_signature_candidates WHERE claim_id=?1",
+            [&claim.id], |row| row.get::<_, u64>(0),
+        ).unwrap();
     }
+    eprintln!(
+        "cold judging fixture: {} completed delegated claims; {saved_bytes} logical bytes saved; {} bytes/claim; at fixture rate {}/day: {saved_bytes} bytes/day",
+        after.len(), saved_bytes / after.len() as u64, after.len(),
+    );
+    {
+        let connection = store.connection.write();
+        assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 20);
+        for table in ["claim_verdict_dependency_keys", "claim_verdict_dependency_edges"] {
+            assert_eq!(connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap(), 0, "the default writer must not activate integer dependencies");
+        }
+    }
+    let store = if compact {
+        {
+            let mut connection = store.connection.write();
+            let old_bytes = dependency_physical_bytes(&connection, &["claim_verdict_links"]);
+            let edge_count: u64 = connection.query_row("SELECT count(*) FROM claim_verdict_links", [], |row| row.get(0)).unwrap();
+            let old_logical: u64 = connection.query_row("SELECT sum(length(CAST(link AS BLOB))+length(CAST(claim_id AS BLOB))) FROM claim_verdict_links", [], |row| row.get(0)).unwrap();
+            let tx = connection.transaction().unwrap();
+            // Model a later writer atomically replacing every legacy edge, not a dual-write
+            // fixture which could hide a missing compact reader behind the legacy copy.
+            tx.execute_batch(
+                "INSERT INTO claim_verdict_dependency_keys(link) SELECT DISTINCT link FROM claim_verdict_links;
+                 INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id)
+                 SELECT k.id,l.claim_id FROM claim_verdict_links l JOIN claim_verdict_dependency_keys k ON k.link=l.link;
+                 DELETE FROM claim_verdict_links;
+                 PRAGMA user_version=22;",
+            ).unwrap();
+            tx.commit().unwrap();
+            let compact_bytes = dependency_physical_bytes(&connection, &["claim_verdict_dependency_keys", "claim_verdict_dependency_edges"]);
+            let keys: u64 = connection.query_row("SELECT count(*) FROM claim_verdict_dependency_keys", [], |row| row.get(0)).unwrap();
+            let compact_edges: u64 = connection.query_row("SELECT count(*) FROM claim_verdict_dependency_edges", [], |row| row.get(0)).unwrap();
+            assert_eq!(compact_edges, edge_count);
+            assert_eq!(connection.query_row("SELECT count(*) FROM claim_verdict_links", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+            let compact_logical: u64 = connection.query_row(
+                "SELECT (SELECT sum(length(CAST(link AS BLOB))+8) FROM claim_verdict_dependency_keys)
+                      +(SELECT sum(8+length(CAST(claim_id AS BLOB))) FROM claim_verdict_dependency_edges)",
+                [], |row| row.get(0),
+            ).unwrap();
+            let saved = old_bytes as i64 - compact_bytes as i64;
+            let synthetic_completions_per_day = 10_000_u64;
+            eprintln!(
+                "dependency fixture: {} signed cold completions, {edge_count} edges, {keys} dictionary keys; SQLite dbstat occupied table+ALL-index bytes legacy={old_bytes}, compact={compact_bytes}, saved={saved}; logical field bytes (integer IDs modeled as 8 bytes; excludes index duplication/record encoding) legacy={old_logical}, compact={compact_logical}; explicit synthetic {synthetic_completions_per_day} completions/day normalization: {:.2} occupied bytes/completion, {:.2} occupied bytes/day saved; not a fleet estimate",
+                after.len(), saved as f64 / after.len() as f64,
+                saved as f64 * synthetic_completions_per_day as f64 / after.len() as f64,
+            );
+            assert!(compact_bytes < old_bytes, "include dictionary UNIQUE and reverse-index btrees in the comparison");
+            if mixed {
+                connection.execute_batch(
+                    "INSERT INTO claim_verdict_links(link,claim_id)
+                     SELECT k.link,e.claim_id FROM claim_verdict_dependency_edges e
+                     JOIN claim_verdict_dependency_keys k ON k.id=e.dependency_id;",
+                ).unwrap();
+                assert_eq!(connection.query_row("SELECT count(*) FROM claim_verdict_dependency_links", [], |row| row.get::<_, u64>(0)).unwrap(), 2 * edge_count, "the UNION ALL reader deliberately exposes duplicate physical edges");
+            }
+        }
+        drop(store);
+        let reopened = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+        assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 22);
+        reopened.set_node_key(anchor.clone()).unwrap();
+        for claim in &after {
+            assert_eq!(verdict(&reopened, claim), Verdict::Verified, "reopening must read compact-only cold authority");
+            assert!(reopened.readers.get().query_row("SELECT complete=1 AND dirty=0 AND blocked=0 AND last_signature='' AND roots_digest='' FROM claim_signature_judging WHERE claim_id=?1", [&claim.id], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        reopened
+    } else {
+        store
+    };
+    let expected_page: Vec<String> = store.readers.get().prepare(
+        "SELECT DISTINCT claim_id FROM claim_verdict_dependency_links WHERE link=?1 ORDER BY claim_id LIMIT 1024",
+    ).unwrap().query_map([format!("key:person/ada|{}", device.key)], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(expected_page.len(), 1024);
     // The real signature arrives: the revocation counts, and its requeue queues one page now.
     attach(
         &store,
@@ -1921,6 +2083,10 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(cursor, *expected_page.last().unwrap(), "duplicates must not consume the 1024 distinct-ID page or change canonical ordering");
+    for id in &expected_page {
+        assert!(page_queued(&connection, id), "the entire first distinct-ID page must be queued");
+    }
     let waiting = after
         .iter()
         .filter(|claim| claim.id > cursor && !page_queued(&connection, &claim.id))
@@ -1945,6 +2111,27 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
     }
     assert_eq!(verdict(&store, &first), Verdict::Verified);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    assert_eq!(store.readers.get().query_row("SELECT count(*) FROM claim_verdict_dependency_edges", [], |row| row.get::<_, u64>(0)).unwrap(), 0, "explicit recheck clears compact edges and the dormant writer rebuilds only legacy edges");
+    let later = note(&store, None, "reader-only release still writes legacy dependencies");
+    seal(&store);
+    store.judge_claims(true).unwrap();
+    assert_eq!(verdict(&store, &later), Verdict::Verified);
+    assert!(store.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_links WHERE claim_id=?1)", [&later.id], |row| row.get::<_, bool>(0)).unwrap());
+    assert_eq!(store.readers.get().query_row("SELECT count(*) FROM claim_verdict_dependency_edges", [], |row| row.get::<_, u64>(0)).unwrap(), 0);
+    assert_eq!(store.readers.get().pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), if compact { 22 } else { 20 });
+}
+
+/// `dbstat.pgsize` counts occupied SQLite pages, not file size, freelist bytes, or
+/// logical payload. Discover indexes by table ownership so implicit UNIQUE btrees
+/// and explicit reverse indexes are both included.
+fn dependency_physical_bytes(connection: &rusqlite::Connection, tables: &[&str]) -> u64 {
+    tables.iter().map(|table| {
+        connection.query_row(
+            "SELECT coalesce(sum(pgsize),0) FROM dbstat WHERE name IN
+             (SELECT name FROM sqlite_schema WHERE tbl_name=?1 AND type IN ('table','index'))",
+            [table], |row| row.get::<_, u64>(0),
+        ).unwrap()
+    }).sum()
 }
 
 #[test]
@@ -1988,7 +2175,9 @@ fn migration_commits_claim_offsets_inside_a_large_authenticated_envelope() {
         target.bind_fleet(FLEET).unwrap();
         target.pin_fleet_anchor(anchor.public()).unwrap();
         receive_carriers(&target, &exchange);
-        target.connection.write().execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
+        let connection = target.connection.write();
+        inline_signature_facade_for_old_fixture(&connection);
+        connection.execute_batch("DELETE FROM claim_signature_candidates; DELETE FROM claim_signature_nonce_uses; DELETE FROM claim_signature_judging; DELETE FROM claim_signature_migration;").unwrap();
     }
     let target = Store::open(&path, "birch", Arc::new(Plain)).unwrap();
     while target.signature_migration().unwrap().phase == "legacy" {
@@ -2597,9 +2786,18 @@ fn candidate_judging_never_rewrites_the_whole_dependency_set_in_one_commit() {
     }
 }
 
+/// An older store's facade contains inline text, not new-format references to
+/// candidates that these fixtures are about to remove.
+fn inline_signature_facade_for_old_fixture(connection: &rusqlite::Connection) {
+    connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+}
+
 /// Reconstruct the actual pre-upgrade schema, not only a missing migration control row.
 /// Immutable claims and authenticated carriers and the first-carried cache remain intact.
 fn remove_candidate_schema(connection: &rusqlite::Connection) {
+    inline_signature_facade_for_old_fixture(connection);
+    connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
+    connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
     connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);

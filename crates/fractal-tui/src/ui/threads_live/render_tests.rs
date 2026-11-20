@@ -101,7 +101,7 @@ fn capture_mount(name: &str, threads: &Threads, pane: &Pane, width: u16) {
     let area = ratatui::layout::Rect::new(0, 0, width, doc.lines.len().max(1) as u16);
     let mut screen = ratatui::buffer::Buffer::empty(area);
     for (row, line) in doc.lines.iter().enumerate() {
-        screen.set_line(0, row as u16, line, width);
+        screen.set_line(0, row as u16, &line.to_ratatui(), width);
     }
     capture(name, &screen);
 }

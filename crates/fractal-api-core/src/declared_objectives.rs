@@ -38,6 +38,9 @@ use crate::store::objective_series::time_ms;
 mod budget;
 pub(crate) use budget::{BudgetEvidence, classify_budget};
 
+#[path = "declared_github_objectives.rs"]
+mod github;
+
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
 /// Open samples over target an explanation names; the rest are counted.
@@ -273,6 +276,10 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
             *entry = Tracked::new(&declaration);
         }
         let name = declaration.name();
+        if entry.objective.as_ref().is_ok_and(|objective| objective.declarable() &&
+            matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_))) {
+            continue;
+        }
         if let Ok(objective) = &entry.objective
             && let Indicator::Native { objective: source } = &objective.indicator
         {
@@ -385,6 +392,25 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
         };
         entry.ids = judged;
         rows.extend(produced);
+    }
+    Ok(rows)
+}
+
+/// Source-backed objectives use only the committed domain projection, never the generic
+/// earliest-claim-wins interval/count cache. The state directory belongs to the caller.
+pub fn github_rows(store: &Store, state_dir: &std::path::Path, now: u64) -> anyhow::Result<Vec<Value>> {
+    let declared = store.declared_objectives()?;
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = Vec::new();
+    for declaration in declared {
+        let entry = tracked.entry(declaration.subject.clone()).or_insert_with(|| Tracked::new(&declaration));
+        if entry.revision != declaration.revision { *entry = Tracked::new(&declaration); }
+        let Ok(objective) = &entry.objective else { continue; };
+        if !objective.declarable() || !matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_)) { continue; }
+        let row = github::row(store, state_dir, objective, &declaration.revision, now);
+        entry.ids = if objective.on_breach.is_some() { BTreeSet::from([objective.name.clone()]) } else { BTreeSet::new() };
+        rows.push(row);
     }
     Ok(rows)
 }

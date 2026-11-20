@@ -31,12 +31,14 @@ fractal-kernel = { path = "../fractal-kernel" }
 fractal-client = { path = "../fractal-client", features = ["trace-propagation"] }
 fractal-schema = { path = "../fractal-schema" }
 fractal-drivers = { path = "../fractal-drivers" }
+fractal-telemetry = { path = "../fractal-telemetry" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 tower = { version = "0.5", features = ["util"] }
 tar = "0.4"
+url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 

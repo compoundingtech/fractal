@@ -136,8 +136,9 @@ only its pending successor, so the newest pending source starts after the active
 finishes. PR release validation replaces its own obsolete head; independent tag/manual
 identities remain intact. A cancelled pending run is not evidence of active-run
 cancellation; the run-level concurrency state distinguishes them. Required PR checks
-use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
-priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
+use priority 2, including the required `bundled-sqlite-packages` package-link check;
+that check retains priority 1 for merge groups. Optional benchmarks, main upkeep
+and manual Workspace work use priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
 and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
 existing artifacts and need no build runner. Priorities order waiting jobs, without
 preempting active jobs or reserving capacity. PR picking, Namespace shapes/affinity, tests
@@ -218,8 +219,15 @@ A failed-jobs-only rerun can inherit the earlier successful producer output; its
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
 target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
 and dependency boundary, and builds the gateway binary with its standalone production features.
-Its Cargo JSON and binary hash are retained alongside the archive; the VM does not substitute
-the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
+Its Cargo JSON and compressed binary hash are retained alongside the archive; the VM does not substitute
+the workspace-unified test binary. Manifest version 3 carries the gateway as `sekrets-st3.gz`;
+consumers verify its compressed bytes before decompressing outside the upload directory.
+Nextest uses its supported Zstandard level 10 to compress repeated code and symbol
+names more densely without changing archive contents. All executable symbols are
+retained for panic backtraces; local compiler profiles are unchanged. The outer artifact
+ZIP uses storage-only mode because both large payloads are already compressed.
+No build caches, incremental directories or raw gateway copy belong in this transfer.
+A failed producer explicitly fails consumer checks and the gate.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
 Manifest/fixture paths
@@ -1549,10 +1557,42 @@ nix flake check --no-build
 The same input supplies `otelite`, so updating its pin changes the collector used by
 release-integration and the default shell.
 
+`nix.yml` also publishes the exact `packages.x86_64-linux.fractal` output on protected
+main pushes and main-only manual dispatch. This separate hosted Linux job does not
+enable the disabled persistent-store verification job or occupy merge-serving workers.
+Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
+`FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
+Only the main publication step receives the write token; PRs never execute it.
+The producer pushes the output closure; Cachix may omit dependencies already available
+from `cache.nixos.org`. Verification first requires the exact output in the owned cache,
+then enumerates its local closure and checks the whole batch against `cache.nixos.org`.
+One authenticated owned-cache batch checks the remainder. `nix-store --check-validity
+--print-invalid` reports missing members; any path still missing fails publication.
+This uses at most three remote commands regardless of closure size, and local
+availability alone never satisfies the remote proof. Private-cache queries use
+the same cache-scoped token through a job-temporary, owner-only netrc containing only
+the named cache host; an exit trap removes it on success or failure. The exact
+source/output/cache receipt and enumerated closure manifest are retained as
+`fractal-native-publication`. Consumers must configure
+read access and trust for that same cache through their fleet cache-client declarations;
+no consumer should substitute an unrelated installed binary when this output is absent.
+
+Each publication has a commit-keyed job concurrency group with cancellation disabled;
+there is no workflow-wide group that can replace another commit's pending publisher.
+For backfills, dispatch `nix.yml` on `main` with the required `sha` input set to a full
+40-character commit SHA. Checkout uses that exact SHA at depth one; the guard fetches
+the remaining main history explicitly with `--no-tags --unshallow`, avoiding evidence
+tags. Before Nix
+setup or any token-bearing step, the guard checks the SHA syntax, verifies checkout
+identity, fetches current `origin/main`, and requires the SHA to be its ancestor.
+The build and receipt use this validated SHA, not the dispatch event's main-tip SHA.
+Dispatches from other branches, scheduled events, and PRs cannot publish. This lane
+does not add a required check or merge-queue job.
+
 | Workflow | What it runs |
 | --- | --- |
 | `fleet.yml` | Workspace CI on pull requests, merge groups and manual dispatch; required checks use the selected source and evidence policy. |
-| `nix.yml` | Defines the persistent-store Nix release check. Its job is disabled in the generated workflow; schedule or manual dispatch does not qualify a native check. |
+| `nix.yml` | Publishes the exact Linux native package closure on main pushes or main-only dispatch. The separate persistent-store release check remains disabled; publication is not a native check qualification. |
 | `release-fractal.yml` | Release archives on main pushes, tags, dispatch and relevant PRs. Linux builds use the selected owned priority pool outside PR validation; macOS and installer/assembly/publish jobs use their declared hosted runners. This workflow is separate from required merge checks. |
 | `debug-assertions-daily.yml` | Scheduled and manually dispatched test coverage with dev/test debug assertions enabled; reports failures through its daily issue. |
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |

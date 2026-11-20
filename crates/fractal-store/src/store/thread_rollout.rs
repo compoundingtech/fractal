@@ -143,7 +143,7 @@ mod tests {
         }).unwrap();
         assert!(store.pairing_completion_is_trusted(&paired, now_ms()).unwrap());
         drop(store);
-        // The logical schema and stored claim formats are unchanged by this release.
+        // The logical claim schema and signed bytes survive the privacy/format upgrade.
         // Exercise the normal accepted open range, including published main's version 20.
         // This does not manufacture trust for an ambiguous old pairing record.
         Connection::open(&path).unwrap().pragma_update(None,"user_version",previous).unwrap();
@@ -157,6 +157,66 @@ mod tests {
         assert_eq!(upgraded.operation_claim("retained-message").unwrap().unwrap().id,message.id);
         assert!(upgraded.pairing_completion_is_trusted(&paired,now_ms()).unwrap());
         assert!(!upgraded.pairing_completion_is_revoked(&paired).unwrap());
+        }
+    }
+
+    #[test]
+    fn privacy_floor_activates_reference_writers_only_for_application_stores() {
+        use smallclaims::fleet::MemberKey;
+        use smallclaims::principal::Verdict;
+
+        for previous in [None, Some(20_u32), Some(21), Some(22)] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("claims.sqlite3");
+            if let Some(previous) = previous {
+                let plain = smallclaims::store::Store::open(
+                    &path, "writer", Arc::new(smallclaims::store::runtime::Plain),
+                ).unwrap();
+                assert_eq!(plain.readers.get().pragma_query_value(
+                    None, "user_version", |row| row.get::<_, u32>(0),
+                ).unwrap(), 20, "nonprivacy stores retain the reader-first default");
+                drop(plain);
+                Connection::open(&path).unwrap()
+                    .pragma_update(None, "user_version", previous).unwrap();
+            }
+
+            let store = Store::open(&path, "writer").unwrap();
+            let version = store.readers.get().pragma_query_value(
+                None, "user_version", |row| row.get::<_, u32>(0),
+            ).unwrap();
+            assert_eq!(version, 23);
+            // This is the shipped main reader's version guard (max22), not the
+            // current reader's max23 guard. It must refuse this application DB.
+            assert!((10..=22).contains(&20));
+            assert!(!(10..=22).contains(&version));
+
+            store.graph.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+            let message = store.append_claim(&ClaimInput {
+                subject: "message/privacy-format".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/owner".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "person/owner", "to": "agent/reviewer",
+                    "content": "Signed reference survives reopen", "status": "sent",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.graph.replication_snapshot().unwrap();
+            store.graph.judge_claims(true).unwrap();
+            assert_eq!(store.graph.claim_verdict(&message.id).unwrap(), Verdict::Verified);
+            assert_eq!(store.readers.get().query_row(
+                "SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1",
+                [&message.id], |row| row.get::<_, String>(0),
+            ).unwrap(), "blob");
+            drop(store);
+
+            let reopened = Store::open(&path, "writer").unwrap();
+            assert_eq!(reopened.graph.claim_verdict(&message.id).unwrap(), Verdict::Verified);
+            assert_eq!(reopened.graph.claim_by_id(&message.id).unwrap().unwrap().body, message.body);
+            assert_eq!(reopened.readers.get().query_row(
+                "SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1",
+                [&message.id], |row| row.get::<_, String>(0),
+            ).unwrap(), "blob");
         }
     }
 

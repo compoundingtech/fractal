@@ -39,7 +39,7 @@ public struct SignalBoard: Sendable, Equatable {
 
     private static let daemonIDs: Set<String> = [
       "person-read", "person-read/remote", "person-read-fresh", "projection-fresh", "write-ack",
-      "terminal-attach", "sql-statement", "writer-hold", "cpu", "cpu/idle", "database",
+      "terminal-attach", "sql-statement", "writer-hold", "cpu", "cpu/idle", "database", "database-archive",
     ]
   }
 
@@ -80,7 +80,7 @@ public struct SignalBoard: Sendable, Equatable {
       var missedCount = 0
       for member in members where member.tone != .quiet && member.status != "no-data" {
         measuredCount += 1
-        if member.status == "missed" { missedCount += 1 }
+        if member.status == "missed" || member.status == "exhausted" { missedCount += 1 }
         if let previous = worst {
           let moreSpent = definition.id == "spend" && member.tone == previous.tone
             && (member.remainingPercent ?? .infinity) < (previous.remainingPercent ?? .infinity)

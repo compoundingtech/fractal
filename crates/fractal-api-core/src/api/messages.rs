@@ -3,6 +3,20 @@ use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
 
+pub(super) fn is_message_path(path: &str) -> bool {
+    path.strip_prefix("/v1/messages")
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
+pub(super) fn attribution_error() -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "foreign-agent-actor".into(),
+        message: "message attribution must match the authenticated caller".into(),
+        details: Box::default(),
+    }
+}
+
 fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError> {
     crate::store::identities::resolve_reference_conn(
         &store.readers.get(), &normalize_message_party(party),

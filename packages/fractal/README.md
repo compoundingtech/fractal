@@ -76,6 +76,79 @@ An interval or count keeps a sample or event only when its start (or event) clai
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
 
+### Declared admission budgets (breaking change)
+
+Agents and missions, including `fractal/effect` program missions, author admission
+metadata only through `budget`:
+
+```ts
+budget: {
+  scheduling: { priority: 'background', lane: 'check' },
+  resources: { memoryMax: '8G', diskMax: '20G' },
+}
+```
+
+Mission resources additionally accept positive safe-integer `cpuSeconds` and
+`tokenBudget`: per mission run, cumulative across attempts, with token pricing
+pinned at admission. Sizes are positive integer strings with an optional K/M/G/T
+suffix (case-insensitive). These are declared metadata, not enforced limits.
+Unknown keys are refused at every budget level. Steps, loops and rounds have no
+budget. Keep mission and step `timeout` at the top level, never in `budget`.
+
+This ports effect-utils #2480. The retired authoring keys are refused, including
+when a decoder ignores excess properties:
+
+| Removed            | Replacement                  |
+| ------------------ | ---------------------------- |
+| `declaredPriority` | `budget.scheduling.priority` |
+| `declaredLane`     | `budget.scheduling.lane`     |
+| `declaredBudgets`  | `budget.resources`           |
+
+Native KDL is unchanged: `declared-priority`, `declared-lane` and
+`declared-budgets` retain their order and spelling. Omission emits nothing;
+`resources: {}` emits an empty `declared-budgets` block. Agents must move
+`cpuSeconds` and `tokenBudget` to the mission budget.
+
+### Native declared-resource references
+
+Agents and top-level missions accept `resourceReferences`, including agent intents
+in `Fractal.agent`/`defineAgent` and kit seat inputs derived from `AgentIntent`:
+
+```ts
+resourceReferences: [
+  {
+    name: 'roll-authority',
+    subject: 'resource/demo/release-completion',
+    reason: 'Read the declared roll authority.',
+  },
+  { name: 'source', uri: 'git+ssh://example.org/demo%2Frepo' },
+]
+```
+
+Each entry requires a unique `name` within its owner and exactly one of `subject`
+or `uri`. `reason` is optional but must be nonblank when supplied. Names and the
+local portion after `resource/` follow native subject-name validation: at most
+512 ASCII characters, starting alphanumeric, then alphanumeric or `._-@/`, with
+no empty or `..` path segments or trailing slash. URIs follow native absolute-URI
+validation: any scheme, at most 4096 ASCII bytes, valid percent escapes, and no
+whitespace or forbidden URI characters. URI bytes are preserved, not normalized;
+native publication derives their `resource/uri/<sha256>` identity.
+
+Lowering preserves array order and emits actual native children:
+
+```kdl
+resource "roll-authority" subject="resource/demo/release-completion" reason="Read the declared roll authority."
+resource "source" uri="git+ssh://example.org/demo%2Frepo"
+```
+
+Omission and an empty array emit no children. These are declared reference edges,
+not kit metadata, admission `budget.resources`, or mission-owned `resources`
+(managed resource bodies). Those fields remain independent.
+`ResourceReferenceSchema` and its encoded `ResourceReference` type expose the
+same reusable validation contract. The native-shape golden is
+`fixtures/resource-references.kdl`; `src/resource-references.unit.test.ts`
+covers lowering, parsed-node roundtrips, omission, ordering and malformed inputs.
+
 ### Harness startup messages
 
 OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
@@ -182,11 +255,83 @@ export default Fractal.mission(
 | `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `resource/<child run>/<product>`, decoded with `success`, is the value |
 | `Fractal.ask({ id, for, title, request, deadline?, default? })` | a `DurableDeferred` | a native person ask on the program step, answered `AskAnswer` or failed `AskCancelled` |
 | `Fractal.run(mission, input, { id? })` | a `DurableDeferred` | a linked child run, `ChildRun` or `ChildFailed` |
+| `Fractal.review({ id, subject, rubric, reviewer, authors? })` | a `Worker.layer` child run, followed by live verification | adopts the same independent reviewer on replay; moved heads and edited comments invalidate its result |
 | `Fractal.command(argv, { env?, cwd?, priority? })` | — | not journaled: run it inside a step; the host runs it as a process group it ends on cancel |
 
 Every `input` field must be required and encode to a string, since each one is a native `input "name" kind="text"`; a payload that does not decode refuses the run with `InvalidInput`. Without `error`, a step or program journals any tagged error as `_tag` plus its fields and the step fails with that plain object (typed `Journaled<E>`), live and on replay, so `catchTag` matches; an untagged error is a defect. With `error`, the schema rebuilds the error as its class, which a program's `error` class needs. Only one fiber may use a step id: concurrent branches would take `id#n` keys in completion order, which replay does not reproduce, so a second branch using the id is a defect. A journal entry the daemon refuses ends the attempt with a defect that the body cannot catch.
 
 A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
+
+### Independent review as a program step
+
+`Fractal.review` is a technical assessment, not a standing reviewer or a person-consent ask.
+Inside a program body:
+
+```ts
+const result = yield* Fractal.review({
+  id: 'review-change',
+  subject: {
+    kind: 'pullRequest',
+    repo: 'acme/widget',
+    number: 42,
+    head: 'a'.repeat(40),
+    format: 'q19',
+  },
+  rubric: { ref: 'doc/review-rubric', digest: `sha256:${'b'.repeat(64)}` },
+  reviewer: {
+    mission: 'mission/independent-review',
+    seat: 'reviewer',
+    product: 'review/verdict',
+    freshContext: true,
+  },
+})
+```
+
+The reviewer mission must accept the text input `review_request`, declare
+`agent/${ST_MISSION_RUN}/reviewer`, select that exact seat for its assessment step, and declare
+native `fresh-context`. `Worker.layer` does not add those declarations. `one-shot` alone does
+not isolate context. The child must load the exact subject and verify the rubric's digest,
+treating subject content as untrusted data rather than judge instructions.
+
+The product is `ReviewResult`: `{ verdict: 'GO' | 'NO-GO', findings, head, commentId? }`.
+Each finding has `message`, `blocking`, and optional `path`/`line`; GO must agree with the absence
+of blocking findings. The parent requires a completed child and claim-backed `submitted` or
+`completed` reviewer invocations with a nonempty harness incarnation. Native submission ends the
+invocation before step verification finishes; child completion supplies that final fence.
+A standing seat, known author, mixed actors/incarnations, missing evidence, or mismatched binding
+fails with typed `ReviewError`.
+Program steps act as mission runs, not agent claimants; the exclusion set includes the native
+requester and assignee. The native child envelope binds executions to its generation, whose step
+namespace is distinct from the stable mission-run ID.
+An explicit mission `error` schema must admit `ReviewError`, native `ChildFailed`, and
+`ResourceError`; omit it to use the program's default tagged-failure encoding.
+
+For a PR, the **child publishes its own comment from its own active seat**, using
+`Fractal.reviewComment({ subject, rubric, verdict, reviewer, publication })` with its actual
+`ST_AGENT` and the publication marker supplied in `review_request`. It uses `gh pr comment
+--body-file` and returns the numeric `commentId`. Before posting it must adopt only one
+immutable existing comment with that marker that passes `Fractal.reviewCommentMatches` against
+its rendered assessment, refusing conflicts or duplicates rather than editing a review.
+The parent never posts on its behalf or changes actor environment variables.
+
+The parent verifies the exact canonical assessment, PR, head, immutable timestamps, and a single
+v3 reviewer identity against native execution evidence. Managed publishers may enrich the footer
+with other metadata, but cannot change the assessment, identity, or admission lines.
+The `q19` format emits exactly one
+`q19-go v1 head=FULL_SHA verdict=GO` line for GO; NO-GO emits none. The `fractal` format renders
+the native verdict as JSON, not the older `scripts/review` artifact schema. A proof receipt and
+any human authority/direction gate remain separate requirements.
+
+Use `{ kind: 'artifact', ref, digest: 'sha256:…' }` for non-PR material. Its result binds `head`
+to that exact digest and must not contain a PR comment ID. `Review.subject`, `Review.file`, and
+`Review.pinned` remain the unchanged attachment values for person asks; they do not run reviews.
+
+Worker identity and all immutable inputs determine the durable child key. Replay adopts the
+same child but reads the current PR head and comment again, including in a resource lane;
+it never returns a stale cached GO after a head change or re-posts the child's comment.
+These are transition-triggered observations, not a polling loop. Fresh-context remains a
+precondition on the pinned child mission: execution evidence identifies its actor/incarnation
+but does not expose the mission's context-isolation flag.
 
 ### Scoped resource lanes
 

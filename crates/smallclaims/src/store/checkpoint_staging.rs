@@ -486,6 +486,7 @@ impl StagedSet {
     ) -> Result<Self> {
         let connect = || -> Result<Connection> {
             let staging = Connection::open(path)?;
+            crate::sqlite::census_files::register(&staging);
             // The file is a cache of the store: a crash may lose the last page, never corrupt
             // what was committed, and a lost file is captured again.
             staging.execute_batch(/* sqlite-large-value: allow-for-now lv-h2b1120fcc098 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!(

@@ -27,6 +27,7 @@ python3 scripts/sccache-shell-env-test --offline
 parallel_tests \
   compat-baseline-test ci-compat-archive-test \
   ios-release-delivery-test \
+  commission-cpu-quiet-reference-test \
   ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test ci-namespace-usage-test \
   ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \
   ci-queue-watch-test check-main-ci-test ci-perf-cache-test ci-perf-slot-test ci-perf-scope-test \

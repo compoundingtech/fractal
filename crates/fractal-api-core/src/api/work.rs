@@ -514,6 +514,8 @@ pub async fn publish_work_mission(
             format!("step `{}` does not declare produces-mission", step.step),
         ))
     })?;
+    let expected_mission =
+        crate::mission::resolve_produced_mission(expected_mission, &run.id).map_err(ApiError::bad)?;
 
     let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
     if initial.missions.len() != 1 {
@@ -589,7 +591,7 @@ pub async fn publish_work_mission(
             &step.subject,
             &actor,
             request.incarnation.as_deref(),
-            expected_mission,
+            &expected_mission,
             mission,
             &format!("{}:bind", request.idempotency_key),
         )

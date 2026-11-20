@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep manual suspension conversion replayable after resume",
+  "replay": {"status": "changed", "detail": "Suspend requests resolve the original conversion receipt by its durable request key before consulting current seat state. Replaying a completed conversion after resume cannot create a new suspend."},
+  "schema": {"status": "changed", "detail": "Adds an idempotent partial index over existing manual-conversion request keys. No authoritative data rewrite, table migration, or schema-version transition; existing receipts populate the index on open."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or claim-registry change."},
+  "compatibility": {"status": "none", "detail": "No new claim fields or client contract. The index reads existing conversion receipts and is ignored by older readers."},
+  "downtime": {"status": "none", "detail": "No interruption beyond ordinary restart; index creation reads existing runtime action receipts."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "changed", "detail": "Conversion idempotency survives both successful resume and store reopen, while preserving the existing suspend-lineage lookup."}
+}

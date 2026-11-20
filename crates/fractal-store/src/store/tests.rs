@@ -12946,6 +12946,91 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
 }
 
 #[test]
+fn runtime_heartbeats_do_not_make_a_quiet_live_session_productive() {
+    let subject = "agent/node.quiet".to_owned();
+    let mut seats = LocalSeats::default();
+    assert!(seats.fold_runtime(subject.clone(), r#"{"status":"running","incarnation_id":"one"}"#).unwrap());
+    seats.harness.insert(subject.clone(), (Some("one".into()), true, Some(0)));
+    assert!(!seats.busy(0));
+    for fields in [
+        r#"{"status":"running","incarnation_id":"one"}"#,
+        r#"{"status":"running"}"#,
+    ] {
+        assert!(!seats.fold_runtime(subject.clone(), fields).unwrap(), "{fields}");
+        assert!(!seats.busy(0), "{fields}");
+    }
+    seats.harness.insert(subject.clone(), (Some("one".into()), false, Some(0)));
+    assert!(seats.busy(0), "productive work still excludes idle eligibility");
+    seats.harness.insert(subject.clone(), (Some("one".into()), true, Some(0)));
+    assert!(seats.fold_runtime(subject, r#"{"status":"running","incarnation_id":"two"}"#).unwrap());
+    assert!(seats.busy(0), "a new incarnation needs its own quiet evidence");
+}
+
+#[test]
+fn local_seats_busy_expires_quiet_evidence_after_harness_publisher_loss() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let at = now_ms() as u64;
+    let runtime = ClaimInput {
+        subject: "agent/node.e".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("inc-1")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    store.append_claim(&runtime).unwrap();
+    let quiet = harness_state("agent/node.e", "idle", at);
+    store.append_latest_observation(&quiet, u128::from(at)).unwrap();
+    let from = (at / MINUTE + 1) * MINUTE;
+    let (busy, carried) = store.local_seats_busy(from, from + MINUTE, None).unwrap();
+    assert!(!busy, "fresh matching quiet evidence allows idle eligibility");
+    // The runtime remains alive, but its work-state publisher has stopped.
+    store.append_claim(&runtime).unwrap();
+    let stale = at + fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64;
+    assert!(store.local_seats_busy(stale, stale + MINUTE, Some(carried)).unwrap().0);
+    assert!(store.local_seats_busy(stale, stale + MINUTE, None).unwrap().0, "reconstruction must also expire source evidence");
+    // Receiving an old quiet report again cannot renew its source freshness.
+    store.append_latest_observation(&quiet, u128::from(stale)).unwrap();
+    assert!(store.local_seats_busy(stale + MINUTE, stale + 2 * MINUTE, None).unwrap().0);
+}
+
+#[test]
+fn local_seats_busy_preserves_expired_evidence_gaps_before_a_fresh_replacement() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/node.e".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("inc-1")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let stale_ms = fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64;
+    let from = now_ms() as u64 + stale_ms;
+    // Quiet at the opening boundary, but expires ten milliseconds into the minute.
+    let old = harness_state("agent/node.e", "idle", from - stale_ms + 10);
+    store.append_latest_observation(&old, u128::from(from - 1)).unwrap();
+    let (_, carried) = store.local_seats_busy(from - MINUTE, from, None).unwrap();
+    // A newly admitted quiet observation covers the closing boundary, not the preceding gap.
+    let fresh = harness_state("agent/node.e", "idle", from + 50_000);
+    store.append_latest_observation(&fresh, u128::from(from + 50_000)).unwrap();
+    for carried in [None, Some(carried)] {
+        assert!(store.local_seats_busy(from, from + MINUTE, carried).unwrap().0,
+            "fresh endpoints cannot prove the expired work-state interval was quiet");
+    }
+}
+
+#[test]
 fn a_claims_acceptance_time_is_read_from_the_store_once() {
     let store = Store::open_memory("node").unwrap();
     let observe = |n: usize| {
@@ -13690,4 +13775,53 @@ fn thread_creation_conflict_does_not_disclose_an_unestablished_owner() {
     for person in ["person/avery", "person/robin", "person/other"] {
         assert_eq!(summary(&left, person, thread).err().unwrap().code, "thread-unavailable");
     }
+}
+
+#[test]
+fn shared_step_timing_history_reuses_revision_but_refolds_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("timing.db"), "fixture").unwrap();
+    let subject = "step-run/timing/step";
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_claim(&serde_json::from_value(json!({
+            "subject": subject, "kind": kind, "actor": "daemon/runtime",
+            "fields": fields, "evidence": [],
+            "expected_subject": null, "idempotency_key": null
+        })).unwrap()).unwrap()
+    };
+    let claim = append(subject, "work.claimed", json!({"attempt": 1}));
+    let connection = store.readers.get();
+    let first = shared_step_timing_events(&connection, subject).unwrap();
+    let second = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    let at = claim.accepted_at_unix_ms;
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 10, true).unwrap().elapsed,
+        10,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, true).unwrap().elapsed,
+        20,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 2, at + 20, true).unwrap().elapsed,
+        0,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, false).unwrap().started,
+        None,
+    );
+    append("step-run/timing/other", "work.progress", json!({"attempt": 1}));
+    assert!(Arc::ptr_eq(
+        &first, &shared_step_timing_events(&connection, subject).unwrap(),
+    ));
+    append(subject, "work.progress", json!({"attempt": 1}));
+    let changed = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(!Arc::ptr_eq(&first, &changed));
+    assert_eq!(changed.len(), first.len() + 1);
+    assert_eq!(step_timing_events(&connection, subject).unwrap(), *changed);
+    let transaction = connection.unchecked_transaction().unwrap();
+    let transactional = shared_step_timing_events(&transaction, subject).unwrap();
+    assert!(!Arc::ptr_eq(&changed, &transactional));
+    assert_eq!(*changed, *transactional);
 }

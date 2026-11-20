@@ -48,12 +48,24 @@ pub enum Indicator {
     Divergence,
     /// Work that starts and stops in claims, one sample per subject.
     Interval(Box<Interval>),
+    /// Corrected normalized GitHub facts, never raw claim intervals.
+    GithubMergedCount(Github),
+    GithubReadyToMerged(Github),
     /// Events in claims per hour, one per subject.
     Count(Box<Count>),
     Ratio(Box<Ratio>),
     Gauge(Box<Gauge>),
     /// Fleet-owned response binding to an existing built-in row; all measurements are inherited.
     Native { objective: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Github {
+    pub source: String,
+    pub roster: String,
+    pub timezone: String,
+    pub as_of_watermark: bool,
+    pub measured_only: bool,
 }
 
 impl Indicator {
@@ -69,6 +81,8 @@ impl Indicator {
             Self::Divergence => "divergence",
             Self::Interval(_) => "interval",
             Self::Count(_) => "count",
+            Self::GithubMergedCount(_) => "github-merged-count",
+            Self::GithubReadyToMerged(_) => "github-ready-to-merged",
             Self::Ratio(_) => "ratio",
             Self::Gauge(_) => "gauge",
             Self::Native { .. } => "native",
@@ -266,7 +280,16 @@ impl Objective {
     /// Fleet claim indicators and native owner bindings live under a namespaced name so they
     /// never replace built-in telemetry definitions.
     pub fn declarable(&self) -> bool {
-        matches!(self.indicator, Indicator::Interval(_) | Indicator::Count(_) | Indicator::Ratio(_) | Indicator::Gauge(_) | Indicator::Native { .. }) && self.name.contains('/')
+        matches!(
+            self.indicator,
+            Indicator::Interval(_)
+                | Indicator::Count(_)
+                | Indicator::GithubMergedCount(_)
+                | Indicator::GithubReadyToMerged(_)
+                | Indicator::Ratio(_)
+                | Indicator::Gauge(_)
+                | Indicator::Native { .. }
+        ) && self.name.contains('/')
     }
 }
 
@@ -294,6 +317,11 @@ pub fn valid_word(word: &str) -> bool {
 /// One or more words joined by `/`: `cpu`, `ops/change-rollout`.
 pub fn valid_name(name: &str) -> bool {
     name.len() <= 128 && name.split('/').all(valid_word)
+}
+
+/// Built-in row segments also contain underscore-joined words, such as `writer_hold`.
+fn valid_native_name(name: &str) -> bool {
+    name.len() <= 128 && name.split('/').all(|segment| segment.split('_').all(valid_word))
 }
 
 fn error(name: &str, message: impl std::fmt::Display) -> FractalError {
@@ -429,6 +457,28 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         }
     };
     Ok(match kind {
+        "github-merged-count" | "github-ready-to-merged" => {
+            allow(&["source", "roster", "timezone", "cut", "measurement"])?;
+            let source = single("source")?;
+            let roster = single("roster")?;
+            let timezone = single("timezone")?;
+            if source.trim().is_empty() || roster.trim().is_empty() || timezone.trim().is_empty() {
+                return Err(fail("GitHub source, roster and timezone must be nonempty".into()));
+            }
+            let as_of_watermark = match single("cut")?.as_str() {
+                "now" => false,
+                "watermark" => true,
+                _ => return Err(fail("GitHub cut must be now or watermark".into())),
+            };
+            let measured_only = match single("measurement")?.as_str() {
+                "only" => true,
+                "targeted" => false,
+                _ => return Err(fail("GitHub measurement must be only or targeted".into())),
+            };
+            let config = Github { source, roster, timezone, as_of_watermark, measured_only };
+            if kind == "github-merged-count" { Indicator::GithubMergedCount(config) }
+            else { Indicator::GithubReadyToMerged(config) }
+        }
         "latency" => {
             allow(&["path"])?;
             let paths = strings("path")?;
@@ -478,7 +528,7 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         "native" => {
             allow(&["objective"])?;
             let objective = single("objective")?;
-            if !valid_name(&objective) {
+            if !valid_native_name(&objective) {
                 return Err(fail("native objective must name a well-formed built-in row".into()));
             }
             Indicator::Native { objective }
@@ -864,6 +914,29 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         }
     }
     let kind = objective.indicator.kind();
+    if let Indicator::GithubMergedCount(config) | Indicator::GithubReadyToMerged(config) = &objective.indicator {
+        if objective.window.is_some() {
+            return Err(fail("GitHub indicators own their rolling hour and calendar windows".into()));
+        }
+        if objective.budget.is_some() {
+            return Err(fail("GitHub indicators own their measurement policy and take no `budget`".into()));
+        }
+        if config.measured_only {
+            if !objective.targets.is_empty() || objective.on_breach.is_some() {
+                return Err(fail("measurement only has neither targets nor on-breach".into()));
+            }
+            return Ok(());
+        }
+        if matches!(objective.indicator, Indicator::GithubReadyToMerged(_)) {
+            return Err(fail("ready-to-merged is measured-only until latency policy is approved".into()));
+        }
+        if objective.targets.len() != 1 || !objective.targets.iter().all(|target| {
+            target.stat == "per-hour" && matches!(target.bound, Bound::Min(value) if value.is_finite() && value > 0.0)
+        }) {
+            return Err(fail("targeted GitHub merged count needs one per-hour minimum".into()));
+        }
+        return Ok(());
+    }
     let stat_bound = |target: &Target| -> bool {
         let within = matches!(target.bound, Bound::Within(ms) if ms > 0);
         let max = |integer: bool, zero: bool| match target.bound {

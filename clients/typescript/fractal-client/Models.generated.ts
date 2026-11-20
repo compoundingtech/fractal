@@ -156,6 +156,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  residency?: (AgentResidency | null);
   resources?: Array<DeclaredResource>;
   rollout?: {
 
@@ -200,6 +201,7 @@ export type AgentDeclaration = {
   accountable?: string;
   declared_admission?: DeclaredAdmission;
   id: Id;
+  idle_suspend?: "never" | "member";
   kdl: string;
   revision: string;
   revisions: Array<string>;
@@ -397,6 +399,13 @@ export type AgentRepository = {
   workspaces: Array<string>;
 };
 
+export type AgentResidency = {
+  due_at: string | null;
+  eligible_since: string | null;
+  policy: string;
+  refusal_reason: string | null;
+};
+
 export type AgentResumeParameters = {
   agent: Id;
   host?: string;
@@ -453,10 +462,12 @@ export type AgentSuspendParameters = {
 export type AgentSuspension = {
   action: "suspend" | "resume";
   blocking: Array<string>;
+  cause?: string | null;
   code?: string | null;
   harness?: string | null;
   host?: string | null;
   incarnation_id?: string | null;
+  mode?: string | null;
   native_session_id?: string | null;
   operation_id: string;
   phase: 

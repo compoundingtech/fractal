@@ -1812,7 +1812,7 @@ impl Ui {
             }
             spans.push(Span::styled(label, style));
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), area.width);
         self.draw_list_as(
             buf,
             Rect {
@@ -2587,7 +2587,7 @@ impl Ui {
             if x + width > area.x + area.width {
                 break;
             }
-            buf.set_line(x, area.y, &line, width);
+            self.draw_line(buf, x, area.y, &line, width);
             self.hit(Rect { x, width, ..area }, hit);
             x += width + 2;
         }
@@ -2831,7 +2831,7 @@ impl Ui {
                 self.hit(rect, hit);
             }
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
         let width = selector_width;
         let x = area.x + left_width;
@@ -3265,7 +3265,7 @@ impl Ui {
             Span::styled(palette.query.clone(), theme::text().bg(theme::MANTLE)),
             Span::styled("▏", theme::fg(theme::ACCENT).bg(theme::MANTLE)),
         ]);
-        buf.set_line(rect.x + 1, rect.y + 1, &input, rect.width - 2);
+        self.draw_line(buf, rect.x + 1, rect.y + 1, &input, rect.width - 2);
         let matches = self.matches(palette);
         let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
         let mut current = None;
@@ -3342,7 +3342,7 @@ impl Ui {
         self.frame.borrow_mut().palette_top = top;
         for (offset, (index, line)) in rows.iter().skip(top).take(list_height).enumerate() {
             let y = rect.y + 2 + offset as u16;
-            buf.set_line(rect.x + 1, y, line, rect.width - 2);
+            self.draw_line(buf, rect.x + 1, y, line, rect.width - 2);
             if let Some(index) = index {
                 self.hit(
                     Rect {
@@ -5553,6 +5553,36 @@ mod tests {
         view.stale = None;
         ui.effects.clear();
         ui
+    }
+
+    #[test]
+    fn details_preview_enter_is_scoped_and_expanded_text_scrolls() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = terminal_details_fixture();
+        let agent = "agent/example/atlas/builder";
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        let row = agents.iter_mut().find(|row| row.id == agent).unwrap();
+        row.details.goal = Some("A long goal with enough prose to fill the details pane. ".repeat(100));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.is_empty());
+        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == KeyCode::Enter));
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ui.terminal_details_have_focus());
+        ui.effects.clear();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::CONTROL);
+        assert!(ui.details_expanded.is_empty(), "modified Enter retains its existing scope");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.contains_key(agent));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::PageDown, KeyModifiers::NONE);
+        let key = format!("details:{agent}");
+        assert!(ui.conversation_state.panes.borrow().get(&key).is_some_and(|state| state.top > 0));
+        assert!(ui.effects.is_empty(), "details never forward Enter or scrolling to the terminal");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.details_expanded.contains_key(agent));
     }
 
     #[test]
@@ -10424,7 +10454,7 @@ mod tests {
             agent: shell.clone(),
             title: "shell".into(),
             name: "shell".into(),
-            lines: vec![ratatui::text::Line::from("$ echo in the shell")],
+            lines: vec![Line::from("$ echo in the shell")],
             cursor: None,
             stale: None,
             ended: None,

@@ -633,8 +633,8 @@ pub fn run(context: Context) -> Result<()> {
     ui.auto_images =
         picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks;
     ui.picker = Some(picker);
-    // Clickable addresses (OSC 8) where the terminal draws images, as kitty and its kin do.
-    let hyperlinks = super::attach::graphics_terminal();
+    // Hyperlinks are independent of the terminal's graphics protocol.
+    let hyperlinks = super::hyperlinks::supported(&std::env::var("TERM").unwrap_or_default());
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let started = Instant::now();
@@ -2569,8 +2569,8 @@ fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
 }
 
 /// A terminal screen as styled lines, the way the old screens drew it.
-fn screen_lines(screen: &fractal_client::TerminalScreen) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::text::{Line, Span};
+fn screen_lines(screen: &fractal_client::TerminalScreen) -> Vec<fractal_conversation_ui::text::Line<'static>> {
+    use fractal_conversation_ui::text::{Line, Span};
     screen
         .lines
         .iter()
@@ -5654,7 +5654,7 @@ mod tests {
         serde_json::from_value(envelope["value"].clone()).unwrap()
     }
 
-    fn plain(line: &ratatui::text::Line) -> String {
+    fn plain(line: &fractal_conversation_ui::text::Line) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())

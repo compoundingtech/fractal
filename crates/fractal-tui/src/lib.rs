@@ -1494,58 +1494,6 @@ mod tests {
         );
     }
 
-    // Exercise the real key handler and inspect the actions sent to a fake daemon.
-    fn terminal_test_client() -> (Client, std::thread::JoinHandle<serde_json::Value>) {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::os::unix::net::UnixListener;
-
-        let path = std::env::temp_dir().join(format!("fractal-tui-{}.sock", uuid::Uuid::now_v7()));
-        let listener = UnixListener::bind(&path).unwrap();
-        let client = Client::unix_as(&path, "person/test");
-        let server = std::thread::spawn(move || {
-            let mut action = serde_json::Value::Null;
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let post = line.starts_with("POST ");
-                let mut length = 0;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                reader.read_exact(&mut body).unwrap();
-                let mut response: serde_json::Value = serde_json::from_str(include_str!(
-                    "../../../docs/st3/client-v0/fixtures/terminal-screen.json"
-                ))
-                .unwrap();
-                if post {
-                    action = serde_json::from_slice(&body).unwrap();
-                    response["value"] = serde_json::json!({
-                        "kind": "action-result", "action_id": action["id"],
-                        "operation_id": "operation/test", "status": "completed",
-                        "affected_ids": [], "snapshot_id": response["snapshot"]["id"]
-                    });
-                }
-                let body = response.to_string();
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            }
-            std::fs::remove_file(path).unwrap();
-            action
-        });
-        (client, server)
-    }
 
     #[test]
     fn terminal_fence_uses_owner_sequence_for_relayed_screen() {

@@ -1,8 +1,7 @@
-//! `/v1/plugins/github/*`: the GitHub plugin's read API (docs/st3/plugins.md). The member that
-//! polls a repository answers from its plugin mirror. Any other member relays the read to it
-//! through the client read relay, once that member advertises the plugin. When the poller runs
-//! an older build, cannot be reached, or has no mirror of the repository yet, the member answers
-//! from its own graph instead and says so in `source`, so an answer is never silently stale.
+//! `/v1/plugins/github/*`: normalized PR fields come from canonical capture when configured.
+//! The operational mirror (or graph) still supplies titles, checks, heads and other supplemental
+//! fields. Unconfigured repositories retain the existing poller relay behavior. A configured
+//! capture that is still replaying or lacks coverage never silently answers from legacy facts.
 
 use super::*;
 use axum::http::HeaderMap;
@@ -198,6 +197,26 @@ async fn answer(
         "observer": found.observer,
         "poller": poller_host,
     });
+    if matches!(read, Read::Pulls { .. } | Read::Pull(_)) {
+        let store = state.store.clone();
+        let directory = state.state_dir.clone();
+        let resource = found.resource.clone();
+        let locator = locator.clone();
+        let canonical_read = read.clone();
+        let canonical = blocking_action(move || {
+            Ok(canonical_body(&store, &directory, &resource, &locator, &canonical_read))
+        }).await??;
+        if let Some(body) = canonical {
+            envelope["source"] = json!({
+                "kind": "canonical",
+                "host": client_host_id(&here),
+                "complete": true,
+                "supplemental": "local-mirror-or-graph",
+            });
+            merge(&mut envelope, body);
+            return Ok(Json(envelope));
+        }
+    }
     let polled_here = found.member.as_deref() == Some(here.as_str());
     let fallback = |reason: String, relay_error: Option<Value>| {
         let store = state.store.clone();
@@ -343,6 +362,102 @@ fn from_mirror(mirror: &GithubPluginStore, resource: &str, read: &Read) -> anyho
     })
 }
 
+fn canonical_body(
+    store: &Store,
+    directory: &std::path::Path,
+    resource: &str,
+    locator: &str,
+    read: &Read,
+) -> Result<Option<Value>, ApiError> {
+    let internal = |error: anyhow::Error| ApiError::bad(internal_error(error));
+    let (state, number, limit) = match read {
+        Read::Pulls { state, limit } => (state.as_deref(), None, *limit),
+        Read::Pull(number) => (None, Some(*number), 1),
+        _ => return Ok(None),
+    };
+    let Some(snapshot) = crate::reconcile::github_capture::repository_pull_requests(
+        store, directory, locator, state, number, limit,
+    ).map_err(internal)? else { return Ok(None) };
+    if !snapshot.complete {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "github-capture-incomplete".into(),
+            message: "canonical GitHub capture is replaying or has no complete authoritative PR coverage; retry after acquisition".into(),
+            details: Box::default(),
+        });
+    }
+    let mirror = GithubPluginStore::shared(directory).map_err(internal)?;
+    let filled = mirror.filled(resource).map_err(internal)?;
+    let mut rows = Vec::with_capacity(snapshot.pulls.len());
+    for pull in snapshot.pulls {
+        let supplemental = if filled {
+            mirror.item(resource, pull.number).map_err(internal)?
+                .filter(|item| item["kind"] == "vcs.pull-request")
+        } else { None };
+        let supplemental = match supplemental {
+            Some(item) => item,
+            None => from_graph(store, resource, &Read::Pull(pull.number))
+                .map_err(internal)?["pull"].take(),
+        };
+        rows.push(canonical_item(resource, &pull, supplemental));
+    }
+    Ok(Some(match read {
+        Read::Pull(_) => json!({"pull": rows.pop()}),
+        _ => json!({"pulls": rows.into_iter().map(|mut item| {
+            let facts = match item["facts"].take() {
+                Value::Object(facts) => facts,
+                _ => Default::default(),
+            };
+            let claim = match item["claim"].take() {
+                Value::String(claim) => Some(claim),
+                _ => None,
+            };
+            github_plugin_store::summary(
+                item["subject"].as_str().unwrap_or_default(),
+                facts,
+                claim,
+                item["observed_at_unix_ms"].as_i64(),
+            )
+        }).collect::<Vec<_>>()}),
+    }))
+}
+
+/// Preserve the plugin's operational wire shape, replacing only fields capture actually owns.
+fn canonical_item(
+    resource: &str,
+    pull: &fractal_schema::github_capture::PullRequestFact,
+    supplemental: Value,
+) -> Value {
+    use fractal_schema::github_capture::PullRequestState;
+    let mut item = match supplemental {
+        Value::Object(item) => item,
+        _ => Default::default(),
+    };
+    item.insert("subject".into(), json!(format!("{resource}/pull-request/{}", pull.number)));
+    item.insert("kind".into(), json!("vcs.pull-request"));
+    item.insert("number".into(), json!(pull.number));
+    item.entry("claim").or_insert(Value::Null);
+    let facts = item.entry("facts").or_insert_with(|| json!({}));
+    if !facts.is_object() { *facts = json!({}); }
+    let facts = facts.as_object_mut().unwrap();
+    facts.insert("number".into(), json!(pull.number));
+    facts.insert("author".into(), json!(pull.author_login));
+    facts.insert("state".into(), json!(if pull.state == PullRequestState::Open { "open" } else { "closed" }));
+    facts.insert("draft".into(), json!(pull.is_draft));
+    facts.insert("merged".into(), json!(pull.state == PullRequestState::Merged));
+    for (field, millis) in [
+        ("created_at", Some(pull.created_at_ms)),
+        ("closed_at", pull.closed_at_ms),
+        ("merged_at", pull.merged_at_ms),
+    ] {
+        facts.insert(field.into(), millis.and_then(|value| i64::try_from(value).ok())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|value| json!(value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
+            .unwrap_or(Value::Null));
+    }
+    Value::Object(item)
+}
+
 /// The same read from this member's graph: the item facts it recorded (from step 3b of the plugin
 /// store, their compact fields) and the `github.event` claims it holds. Heads it never kept are
 /// unknown: `heads` is null.
@@ -427,6 +542,77 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let mut body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, body.get_mut("value").map(Value::take).unwrap_or(body))
+    }
+
+    /// Golden for the existing plugin protocol, not the client-v0 generated contract.
+    #[test]
+    fn canonical_pull_wire_compatibility_golden() {
+        use fractal_schema::github_capture::{PullRequestFact, PullRequestState};
+        let canonical = PullRequestFact {
+            id: "PR_canonical".into(), repository_id: "R_canonical".into(), number: 7,
+            author_login: Some("ada".into()), state: PullRequestState::Merged, is_draft: false,
+            created_as_draft: Some(false), created_at_ms: 1_000,
+            closed_at_ms: Some(3_000), merged_at_ms: Some(3_000),
+        };
+        let full = canonical_item("resource/github/acme/garden", &canonical, json!({
+            "subject": "resource/github/acme/garden/pull-request/7",
+            "kind": "vcs.pull-request", "number": 7, "claim": "operational-claim",
+            "observed_at_unix_ms": 4000,
+            "facts": {
+                "number": 7, "author": "old-author", "state": "open", "draft": true,
+                "merged": false, "merged_at": "stale", "title": "Garden paths",
+                "url": "https://github.com/acme/garden/pull/7", "head_sha": "abc",
+                "required_checks": {"state": "pass"}, "checks": [{"name": "build"}]
+            }
+        }));
+        assert_eq!(full, json!({
+            "subject": "resource/github/acme/garden/pull-request/7",
+            "kind": "vcs.pull-request", "number": 7, "claim": "operational-claim",
+            "observed_at_unix_ms": 4000,
+            "facts": {
+                "number": 7, "author": "ada", "state": "closed", "draft": false,
+                "merged": true, "created_at": "1970-01-01T00:00:01.000Z",
+                "closed_at": "1970-01-01T00:00:03.000Z", "merged_at": "1970-01-01T00:00:03.000Z",
+                "title": "Garden paths", "url": "https://github.com/acme/garden/pull/7",
+                "head_sha": "abc", "required_checks": {"state": "pass"}, "checks": [{"name": "build"}]
+            }
+        }));
+        let summary = github_plugin_store::summary(
+            full["subject"].as_str().unwrap(), full["facts"].as_object().unwrap().clone(),
+            Some("operational-claim".into()), Some(4000),
+        );
+        assert_eq!(json!({"pulls": [summary]}), json!({"pulls": [{
+            "subject": "resource/github/acme/garden/pull-request/7", "number": 7,
+            "author": "ada", "state": "closed", "draft": false, "merged": true,
+            "title": "Garden paths", "url": "https://github.com/acme/garden/pull/7",
+            "head_sha": "abc", "required_checks_state": "pass",
+            "claim": "operational-claim", "observed_at_unix_ms": 4000
+        }]}));
+        let absent = canonical_item("resource/github/acme/garden", &canonical, Value::Null);
+        assert!(absent["facts"].get("title").is_none(), "capture does not invent operational details");
+        assert!(absent["claim"].is_null(), "a mirror claim is not canonical provenance");
+        assert_eq!(absent, json!({
+            "subject": "resource/github/acme/garden/pull-request/7",
+            "kind": "vcs.pull-request", "number": 7, "claim": null,
+            "facts": {
+                "number": 7, "author": "ada", "state": "closed", "draft": false, "merged": true,
+                "created_at": "1970-01-01T00:00:01.000Z",
+                "closed_at": "1970-01-01T00:00:03.000Z", "merged_at": "1970-01-01T00:00:03.000Z"
+            }
+        }));
+        for state in [PullRequestState::Open, PullRequestState::Closed] {
+            let canonical = PullRequestFact {
+                state, author_login: None, closed_at_ms: None, merged_at_ms: None,
+                ..canonical.clone()
+            };
+            let projected = canonical_item("resource/github/acme/garden", &canonical, full.clone());
+            assert_eq!(projected["facts"]["state"], if state == PullRequestState::Open { "open" } else { "closed" });
+            assert_eq!(projected["facts"]["merged"], false);
+            assert_eq!(projected["facts"]["author"], Value::Null);
+            assert_eq!(projected["facts"]["closed_at"], Value::Null);
+            assert_eq!(projected["facts"]["merged_at"], Value::Null);
+            assert_eq!(projected["facts"]["checks"], full["facts"]["checks"], "operational details survive");
+        }
     }
 
     fn observe(store: &Store, number: u64, facts: Value) -> String {

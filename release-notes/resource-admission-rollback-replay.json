@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Withhold unsupported admission observation replay during rollback while retaining authoritative custody.",
+  "replay": {
+    "status": "changed",
+    "detail": "Authority startup withholds unsupported-class observations and leaves coverage incomplete. Recovery refusal observations require signed resource_recovery_observations support from every active reader."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No additional schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No additional rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No additional compatibility change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional downtime change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No additional manual change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No additional recovery change."
+  }
+}

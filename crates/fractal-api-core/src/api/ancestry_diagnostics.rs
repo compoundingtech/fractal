@@ -83,7 +83,7 @@ impl RequestDiagnostic {
     fn line(&self, decision: Decision, suppressed: u64) -> String {
         let worker = (decision == Decision::VerifiedWorker)
             .then_some((self.connector_pid, self.connector_generation));
-        format!("st3: local caller ancestry unavailable level={} connector_pid={:?} connector_generation={:?} method={} route={:?} decision={decision:?} worker={worker:?} pid={:?} reason={} detail={:?} suppressed={suppressed}",
+        format!("fractal: local caller ancestry unavailable level={} connector_pid={:?} connector_generation={:?} method={} route={:?} decision={decision:?} worker={worker:?} pid={:?} reason={} detail={:?} suppressed={suppressed}",
             decision.level(), self.connector_pid, self.connector_generation, self.method,
             self.route, self.cause.pid, self.cause.reason_code(), self.cause.reason)
     }
@@ -132,7 +132,7 @@ impl Limiter {
     fn flush_dropped(&mut self, lines: &mut Vec<String>) {
         if self.dropped != 0 {
             lines.push(format!(
-                "st3: local caller ancestry unavailable level=warn event=global-cap-summary dropped={}", self.dropped));
+                "fractal: local caller ancestry unavailable level=warn event=global-cap-summary dropped={}", self.dropped));
             self.dropped = 0;
         }
     }

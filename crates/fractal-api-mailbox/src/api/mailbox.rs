@@ -30,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/mailbox/acceptance-frontier", post(acceptance_frontier))
         .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
@@ -39,6 +40,61 @@ pub struct ReceiptRequest {
     receipt: Receipt,
     #[serde(default)]
     native_receipt: Option<crate::conversation_delivery::NativeReceipt>,
+    #[serde(default)]
+    input_acceptance: Option<InputAcceptance>,
+}
+
+#[derive(serde::Deserialize)]
+struct InputAcceptance {
+    accepted_at_unix_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AcceptanceFrontierRequest {
+    #[serde(flatten)]
+    fence: Fence,
+    observed_through_unix_ms: u64,
+}
+
+/// A native producer's sealed, drained source cut. It is not a per-message lifecycle event.
+pub async fn acceptance_frontier(
+    State(state): State<AppState>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    Json(mut request): Json<AcceptanceFrontierRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    request.fence = storage_fence(&state, request.fence)?;
+    authorize(&request.fence, peer.as_ref().map(|peer| &peer.0))?;
+    if request.fence.component != "delivery" {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance-frontier",
+            "only the delivery component publishes acceptance frontiers")));
+    }
+    let peer = peer.expect("authorize checked the native peer").0;
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request.fence),
+    ).await.map_err(ApiError::internal)?;
+    let checked_state = state.clone();
+    let ((record, changed), _) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &request.fence, &peer, None, || {
+            if checked_state.store.has_mailbox_lease(&request.fence)? {
+                authority::with_authority(&checked_state, &request.fence, &peer, || {}, |owner, validate| {
+                    validate()?;
+                    if !checked_state.store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    checked_state.store.record_mail_acceptance_frontier(
+                        &request.fence, request.observed_through_unix_ms,
+                    )
+                })
+            } else {
+                checked_state.store.record_mail_acceptance_frontier(
+                    &request.fence, request.observed_through_unix_ms,
+                )
+            }
+        })
+    }).await?;
+    if changed { signal_local_change(&state); }
+    Ok(Json(record))
 }
 
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
@@ -299,11 +355,11 @@ pub async fn receipt(
     request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
-        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
+        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read" | "accepted")
     {
         return Err(ApiError::bad(FractalError::new(
             "invalid-mailbox-receipt",
-            "only the delivery component can publish staged, delivered or read",
+            "only the delivery component can publish staged, delivered, read or accepted",
         )));
     }
     if payload.native_receipt.as_ref().is_some_and(|proof| !proof.valid())
@@ -312,6 +368,10 @@ pub async fn receipt(
     {
         return Err(ApiError::bad(FractalError::new("invalid-native-receipt",
             "a native record identity requires a Claude consumption receipt")));
+    }
+    if (request.lifecycle == "accepted") != payload.input_acceptance.is_some() {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance",
+            "accepted requires an input acceptance timestamp; other lifecycle receipts cannot carry one")));
     }
     let input = ClaimInput {
         subject: request.message.clone(),
@@ -366,6 +426,15 @@ pub async fn receipt(
         };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
+                if let Some(acceptance) = &payload.input_acceptance {
+                    validate()?;
+                    if !store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    return store.record_mail_input_acceptance(
+                        &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+                    );
+                }
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -376,6 +445,10 @@ pub async fn receipt(
                 store.append_native_mailbox_receipt_outcome(&input, &request.fence,
                     payload.native_receipt.as_ref())
             })?
+        } else if let Some(acceptance) = &payload.input_acceptance {
+            store.record_mail_input_acceptance(
+                &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+            )?
         } else if stream.is_some() {
             record_stream()?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
@@ -406,6 +479,7 @@ fn record_stream_receipt(
     input: &ClaimInput,
     native: Option<&crate::conversation_delivery::NativeReceipt>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
+    check_suspension_receipt(store, fence, &input.kind)?;
     if input.kind == "message.staged" && !store.rollout_message_allowed(message)? {
         return Err(FractalError::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
     }
@@ -422,6 +496,34 @@ fn record_stream_receipt(
     Ok((crate::store::messages_shard::lifecycle_receipt(
         &store.graph.origin, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
     ), appended))
+}
+
+fn check_suspension_receipt(store: &Store, fence: &Fence, kind: &str) -> Result<(), FractalError> {
+    if matches!(kind, "message.staged" | "message.delivered")
+        && crate::suspension::current(store, &fence.subject)
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+            .is_some_and(|hold| hold.holds_seat())
+    {
+        return Err(FractalError::new(
+            "seat-suspended",
+            "delivery waits for the seat's native resume and channel readiness",
+        ));
+    }
+    Ok(())
+}
+
+/// Keep suspension separate from silent release: resume is not itself a waking message.
+/// The raw snapshot retains all identities so a runtime phase change can offer them without
+/// losing the pending-wake projection to a premature staged receipt.
+fn release_mailbox_offer(store: &Store, fence: &Fence, messages: &mut Vec<MessageView>) -> anyhow::Result<()> {
+    if crate::suspension::current(store, &fence.subject)?
+        .is_some_and(|hold| hold.holds_seat())
+    {
+        messages.clear();
+    } else {
+        crate::silent::release(messages);
+    }
+    Ok(())
 }
 
 type Snapshot = (
@@ -1163,7 +1265,9 @@ async fn stream_with_timers_inner<F, S, H>(
             subscription.messages(&subjects);
             // Held mail stays admitted to this stream, so the next waking message releases it
             // without another read; until then the seat is offered none of it.
-            crate::silent::release(&mut messages);
+            if release_mailbox_offer(&state.store, &fence, &mut messages).is_err() {
+                return;
+            }
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {
                 if send(&mut socket, &Frame::Mailbox { messages })
@@ -2594,6 +2698,127 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn suspension_keeps_wake_indexed_until_resumed_offer_and_receipt() {
+        use crate::suspension;
+        for cause in ["idle", "manual"] {
+            let store = Store::open_memory("node").unwrap();
+            let intent = crate::parse_intent(
+                "version 2\nagent \"eval.worker\" { command \"true\"; }", "node",
+            ).unwrap();
+            store.apply(&intent, &BTreeMap::from([("agent/eval.worker".into(), Vec::new())]), "fixture").unwrap();
+            crate::store::mailbox_tests::ready(&store, "current");
+            let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "current", "delivery")).unwrap();
+            let declaration = store.suspension_lineage_at(&fence.subject, None).unwrap().pop().unwrap();
+            let append = |subject: &str, kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: kind.into(), actor: Some(fence.subject.clone()),
+                    fields: serde_json::from_value(fields).unwrap(), evidence,
+                    expected_subject: None, idempotency_key: key,
+                }).unwrap()
+            };
+            let mut cursor = store.mailbox_wake_cursor().unwrap();
+            let frontier = suspension::mailbox_intake_frontier(&store, &fence.subject).unwrap();
+            let suspend = append(&fence.subject, "runtime.action.requested",
+                json!({"action":"suspend", "cause":cause, "incarnation_id":"current"}),
+                vec![declaration.clone()], None);
+            append("message/wake", "message.sent",
+                json!({"from":"person/avery","to":fence.subject,"content":"Please continue","status":"sent"}),
+                vec![], None);
+            let receipt_input = |kind: &str| ClaimInput {
+                subject: "message/wake".into(), kind: kind.into(), actor: Some(fence.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!(kind.strip_prefix("message.").unwrap())),
+                    ("recipient".into(), json!(fence.subject))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            // Deterministic interleaving: the intake snapshot precedes quiescing, while its
+            // receipt commits after the request. The existing writer fence must reject it.
+            for kind in ["message.staged", "message.delivered"] {
+                let error = crate::store::append_claim_with_commit_context(
+                    &store.graph, &receipt_input(kind), Some(&fence), None, None, None,
+                    crate::store::ClaimCommitContext {
+                        mailbox_intake_frontier: Some(frontier), ..Default::default()
+                    },
+                ).unwrap_err();
+                assert_eq!(error.code, "seat-suspension-changed");
+            }
+            let since = client_now_ms();
+            let through = store.index().unwrap();
+            let mut recovery = MailRecovery::default();
+            let mut policies = std::collections::BTreeSet::new();
+            let mut order = MailboxOrder::new();
+            let mut previous = None;
+            let mut check_held = |expected_phase: &str| {
+                assert_eq!(suspension::current(&store, &fence.subject).unwrap().unwrap().phase, expected_phase);
+                let (mark, snapshot, updated, _) = update_snapshot(
+                    &store, &fence, raw_snapshot, previous.take(), (since, through),
+                    &mut recovery, &mut policies, &mut order,
+                ).unwrap();
+                assert!(updated, "runtime.action phase changes must invalidate the snapshot");
+                assert!(snapshot.0.is_some(), "suspension must not hide seat/status frames");
+                assert_eq!(snapshot.1.len(), 1, "retain raw pending identities across hold phases");
+                let mut offered = snapshot.1.clone();
+                release_mailbox_offer(&store, &fence, &mut offered).unwrap();
+                assert!(offered.is_empty());
+                for kind in ["message.staged", "message.delivered"] {
+                    assert_eq!(check_suspension_receipt(&store, &fence, kind).unwrap_err().code, "seat-suspended");
+                    assert_eq!(store.append_mailbox_receipt_outcome(&receipt_input(kind), &fence).unwrap_err().code,
+                        "seat-suspended", "the actual graph writer must reject held intake");
+                }
+                assert!(check_suspension_receipt(&store, &fence, "message.read").is_ok());
+                assert_eq!(store.wake_demand(&fence.subject).unwrap().oldest.unwrap().subject, "message/wake");
+                let (next, dependencies, _) = store.mailbox_wake_batch(cursor).unwrap();
+                assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Subject(fence.subject.clone())));
+                cursor = next;
+                previous = Some((mark, snapshot));
+            };
+            check_held("quiescing");
+            // The initial request already holds intake, before the owner stops anything.
+            // Add a phase receipt after cursor capture to exercise reactive invalidation.
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"suspend"}),
+                vec![suspend.id.clone()], Some(suspension::suspend_snapshot_key(&suspend.id)));
+            check_held("snapshotting");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"suspend"}),
+                vec![suspend.id.clone()], Some(suspension::suspend_completed_key(&suspend.id)));
+            check_held("suspended");
+            assert_eq!(store.claims_for(&fence.subject, Some("runtime.action.requested")).unwrap().len(), 1,
+                "neither idle nor manual mailbox delivery creates an automatic resume request");
+            let resume = append(&fence.subject, "runtime.action.requested", json!({"action":"resume"}),
+                vec![declaration, suspend.id.clone()], None);
+            check_held("restoring");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume","incarnation_id":"current"}),
+                vec![resume.id.clone()], Some(suspension::resume_started_key(&resume.id)));
+            check_held("verifying");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume"}),
+                vec![resume.id.clone()], Some(suspension::resume_completed_key(&resume.id)));
+            let (_, snapshot, updated, _) = update_snapshot(
+                &store, &fence, raw_snapshot, previous, (since, through),
+                &mut recovery, &mut policies, &mut order,
+            ).unwrap();
+            assert!(updated);
+            let mut offered = snapshot.1;
+            release_mailbox_offer(&store, &fence, &mut offered).unwrap();
+            assert_eq!(offered.len(), 1);
+            assert!(store.wake_demand(&fence.subject).unwrap().oldest.is_some(),
+                "offering itself must not consume pending wake demand");
+            check_suspension_receipt(&store, &fence, "message.staged").unwrap();
+            store.append_mailbox_receipt_outcome(&ClaimInput {
+                subject: "message/wake".into(), kind: "message.staged".into(),
+                actor: Some(fence.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!("staged")), ("recipient".into(), json!(fence.subject))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }, &fence).unwrap();
+            assert!(store.wake_demand(&fence.subject).unwrap().oldest.is_none());
+            // Resume with no independent waking mail must retain the silent-only rule.
+            let mut silent = offered;
+            // Person messages always wake, even with a silent tag; model an ordinary agent FYI.
+            silent[0].from = "agent/peer".into();
+            silent[0].tags = vec![crate::silent::SILENT_TAG.into()];
+            release_mailbox_offer(&store, &fence, &mut silent).unwrap();
+            assert!(silent.is_empty());
+        }
     }
 
     fn age_expired(database: &Path, subject: &str) {
@@ -4233,6 +4458,7 @@ mod tests {
         crate::store::mailbox_tests::ready(&source, "session-1");
         let request = || ReplicationReceiveRequest {
             carrier: Default::default(),
+            authenticated_member_key: None,
             peer: "source".into(),
             fleet_id: FLEET.into(),
             exchange: source

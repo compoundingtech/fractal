@@ -114,7 +114,13 @@ pub async fn doctor(
             ),
         });
     }
-    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
+    let slo_store = reader_store.clone();
+    let slo_report = blocking_store(move || {
+        let mut report = request_latency_windows();
+        super::client_observations::attach(&slo_store, &mut report, client_now_ms() as u64)?;
+        Ok(report)
+    }).await?;
+    for (name, status, message) in crate::slo::doctor_lines(&slo_report) {
         report.checks.push(DoctorCheck {
             name,
             status: status.into(),
@@ -520,9 +526,41 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     Ok(Json(body))
 }
 
+/// Append immutable roll evidence and wake the same projections as other native writes.
+pub async fn ingest_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_completion::ingest(&store, receipt, client_now_ms() as u64)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+pub async fn observe_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_observer::observe(&store, &receipt.claim_id)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct RollIntentQuery { pub run: String }
+
+pub async fn roll_intent(
+    State(state): State<AppState>, Query(query): Query<RollIntentQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    Ok(Json(blocking_store(move || crate::roll_source::intent_context(&store, &query.run)).await?))
+}
+
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
 pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
-    let mut rows = slo_rows(store)?;
+    let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
+    let mut rows = slo_rows(store, domain)?;
     rows.extend(crate::readiness_slo::current(store));
     add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
     add_tones(&mut rows);
@@ -750,6 +788,39 @@ pub async fn desired_batch(
     }
     let store = state.store.clone();
     blocking_store(move || store.desired_batch(&request)).await.map(Json)
+}
+
+/// Only write-time materializations and filesystem metadata of registered open connections.
+pub async fn storage_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    blocking_store(move || {
+        let store = &state.store;
+        let observation_trim = store.storage_census.snapshot();
+        let messages = crate::store::messages_shard::shard(store).map(|shard| {
+            Ok::<_, anyhow::Error>(json!({
+                "since_unix_ms": shard.append_census_since()?,
+                "per_kind": shard.append_census()?,
+            }))
+        }).transpose()?;
+        Ok(json!({
+            "node": state.node,
+            "sampled_at_unix_ms": client_now_ms(),
+            "byte_unit": "UTF-8 claim body bytes; excludes envelopes, indexes and SQLite amplification",
+            "checkpoint_enabled": store.storage_census.checkpoint_enabled(),
+            "local_trim_enabled": store.trims_locally(),
+            "graph": {
+                "since_unix_ms": store.append_census_since()?,
+                "per_kind": store.append_census()?,
+            },
+            "messages": messages,
+            "local_observations": crate::store::storage_census::append_counters(store)?,
+            "pin_sample_state": if observation_trim.pin_sample.is_some() { "sampled" } else { "unavailable" },
+            "observation_trim": observation_trim,
+            "pin_scope": "observations older than the last successful trim's retention cutoff",
+            "files_scope": "currently open Fractal-owned SQLite connections and their WAL/SHM sidecars; logical file lengths",
+            "not_covered": ["driver-owned harness spools"],
+            "files": smallclaims::sqlite::census_files::snapshot()?,
+        }))
+    }).await.map(Json)
 }
 
 pub async fn status(

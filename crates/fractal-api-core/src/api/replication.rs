@@ -413,6 +413,7 @@ async fn replication_receive_inner(
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
+            request.authenticated_member_key.as_deref(),
         )?;
         if store
             .observes_transport_to(&request.peer)
@@ -716,6 +717,7 @@ pub async fn shard_replication_receive(
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
+            request.authenticated_member_key.as_deref(),
         )?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)
