@@ -1842,6 +1842,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "darwin_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let environment = BTreeMap::from([("ST3_START_OPERATION".into(), "prepared-operation".into())]);
         let authorized = std::cell::Cell::new(false);
@@ -2266,13 +2267,15 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "fixture".into(), capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
             "logical", &crate::Launch::Shell("exit 0".into()),
             root.path(), &std::env::vars().collect(), &policy, &|| Ok(()),
         ).unwrap();
+        // Retirement is judged on the exited generation; a still-running launcher is plain `Ok(false)`.
+        runtime.wait_for_exit("logical", &generation.generation_id).unwrap();
         assert!(runtime.retired_if("logical", &generation.generation_id).is_err());
         assert!(runtime.spawn_in_lane_checked(
             "logical", &crate::Launch::Shell("touch replacement".into()),
