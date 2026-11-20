@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop owned resource executions when mission steps are cancelled or fail",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "No client schema, code generation or persisted format changes."},
+  "rules": {"status": "changed", "detail": "The execution host matches native run, step and attempt ownership during shell reconciliation. Failed, cancelled and superseded attempts request cancellation through the existing generation-fenced process-group SIGTERM path, with SIGKILL retirement after the existing five-second grace period. Finally steps remain eligible until their own attempt ends."},
+  "compatibility": {"status": "changed", "detail": "Mission cleanup now includes owned shell resource executions as well as desired runtime declarations. It waits for shell exit, custody retirement and terminal receipt publication rather than abandoning those executions at the runtime cleanup deadline. Step-declared drivers retain the existing exact-stop, terminate-request and kill-deadline path."},
+  "downtime": {"status": "none", "detail": "No migration; behavior changes when the reconciler is restarted."},
+  "manual": {"status": "none", "detail": "No new commands or settings."},
+  "recovery": {"status": "changed", "detail": "Active shell reconciliation also cancels executions whose owning attempt has already ended, including after restart. Existing cancellation offsets and terminal receipts remain authoritative."}
+}

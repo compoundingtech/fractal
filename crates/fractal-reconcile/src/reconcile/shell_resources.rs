@@ -12,6 +12,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 tracing::warn!(execution = %execution.command.id, %error, "retaining newer-class execution until the execution host is upgraded");
                 continue;
             }
+            if !execution.cancel && self.store.shell_resource_owner_cancelled(&execution.command.lane.owner)? {
+                self.store.cancel_shell_resource(&execution.command.id)?;
+                execution.cancel = true;
+            }
             if let Err(error) = self.drive_shell_resource(&mut execution) {
                 let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
                     .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
@@ -36,11 +40,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if execution.started_at.is_none() {
                     execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(&execution, now);
                 }
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
                 execution.command.environment.clear();
             }
-            if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
+            if self.store.update_shell_resource(&execution)? {
+                self.incremental.touch(&format!("shell-resources:{}", execution.command.lane.owner.run));
+                self.signal_changed();
+            }
         }
         Ok(())
     }
