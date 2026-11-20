@@ -121,7 +121,7 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     assert_eq!(reopened.connection.write().pragma_query_value(None, "user_version", |row| row.get::<_,u32>(0)).unwrap(), 21);
     assert_eq!(verdict(&reopened, &claim), Verdict::Verified);
     drop(reopened);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 23).unwrap();
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", fractal_storage_version::MAX_SUPPORTED_STORAGE_VERSION + 1).unwrap();
     assert!(Store::open(&path, "studio", Arc::new(Plain)).is_err());
 }
 
