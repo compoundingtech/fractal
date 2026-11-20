@@ -28,7 +28,10 @@ Graph mail is the exception to `durable` on a member that trims locally (`[trim]
 its `message.*` claims are deleted and their IDs join the retired set
 (`crates/fractal-store/src/store/mail_retirement.rs`). Person threads (from or to a `person/`)
 and any thread another claim cites are kept forever. The rule reads only the claims, so every such
-member retires the same threads without coordination, and a retired ID is never sent back. Each
+member retires the same threads without coordination, and a retired ID is never sent back. A
+thread whose closed claim arrived before its sent claim waits on a short list and is judged again
+once the sent claim is there. On by default for such members (Factory, 2026-11-20); retired mail
+does not come back on a rollback. Each
 writer hold deletes for at most 40 ms and rests four times as long; the pages go back as below.
 Mail in the messages shard is not touched.
 

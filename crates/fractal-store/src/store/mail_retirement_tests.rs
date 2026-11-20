@@ -158,12 +158,12 @@ fn a_step_stops_at_its_budget_and_the_next_finishes_the_thread() {
     let cursor = |store: &Store| -> Option<String> {
         store.readers.get().query_row("SELECT value FROM meta WHERE key=?1", [CURSOR], |row| row.get(0)).optional().unwrap()
     };
-    assert_eq!(cursor(&store), None);
+    assert_eq!(cursor(&store).as_deref(), Some("0"), "the cursor waits before the cut thread");
     // A store reopened (a restart) resumes from the committed cursor and finishes both.
     drop(store);
     let store = member(&dir.path().join("claims.sqlite3"), true);
     assert_eq!(retire_all(&store, later), (2, first.len() + second.len() - 1));
-    assert!(cursor(&store).is_some());
+    assert_ne!(cursor(&store).as_deref(), Some("0"));
     assert_eq!(retired(&store), first.iter().chain(&second).cloned().collect());
 }
 
@@ -188,5 +188,32 @@ fn a_thread_the_budget_cuts_keeps_its_closed_claim_until_the_rest_goes() {
         assert!(steps < 20);
     }
     assert!(!claims(&store).contains(&closed));
+    assert_eq!(retired(&store), ids.into_iter().collect());
+}
+
+#[test]
+fn a_thread_closed_before_its_sent_claim_arrives_retires_once_it_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    let ids = thread(&store, "message/late", SENDER, RECIPIENT, true);
+    // A member that received the lifecycle ahead of the sent claim: hold the sent row back.
+    {
+        let writer = store.connection.write();
+        writer.execute_batch(/* sqlite-large-value: allow-for-now lv-h83c3f2a081d3 owner=fractal_store::store::mail_retirement_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE held AS SELECT * FROM claims WHERE subject='message/late' AND kind='message.sent'").unwrap();
+        writer.execute(/* sqlite-large-value: allow-for-now lv-hd1bf57d459d7 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&ids[0]]).unwrap();
+    }
+    let later = now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS;
+    assert_eq!(retire_all(&store, later), (0, 0), "its people are unknown yet");
+    let deferred: String = store
+        .readers
+        .get()
+        .query_row("SELECT value FROM meta WHERE key=?1", [crate::store::mail_retirement::DEFERRED], |row| row.get(0))
+        .unwrap();
+    assert_eq!(deferred, r#"["message/late"]"#);
+    // The sent claim arrives after the cursor passed the closed claim.
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h7740f7cc9409 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims SELECT * FROM held; DROP TABLE held").unwrap();
+    // The deferred thread is judged again and retires, as on a member that stored the claims in
+    // sending order.
+    assert_eq!(retire_all(&store, later), (1, 4));
     assert_eq!(retired(&store), ids.into_iter().collect());
 }

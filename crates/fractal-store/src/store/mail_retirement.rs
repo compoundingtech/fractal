@@ -27,8 +27,16 @@ pub const HOLD_BUDGET: Duration = Duration::from_millis(40);
 /// been judged. Only a judged thread moves it, so a stop part way through resumes there.
 pub const CURSOR: &str = "mail_retirement_closed_through";
 
-/// Closed claims judged per step, ahead of the writer hold.
-const CANDIDATES: i64 = 16;
+/// `meta`: the subjects of closed threads judged before their sent claim arrived, as a JSON
+/// array. Their people are unknown until it does, so later steps judge them again, and a member
+/// that stored the same claims in another order reaches the same answer.
+pub const DEFERRED: &str = "mail_retirement_deferred";
+
+/// Closed claims, and deferred threads, judged per step ahead of the writer hold.
+const CANDIDATES: usize = 16;
+
+/// While this many threads wait for their sent claim the cursor waits too, so the list stays small.
+const DEFERRED_MAX: usize = 1024;
 
 /// What one step did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -43,10 +51,15 @@ pub struct MailRetirement {
     pub more: bool,
 }
 
-/// One thread the rule retires: its claims, the closed claim last, so a step that stops part
-/// way leaves the closed claim and the next step finds the rest.
-struct Thread {
-    claims: Vec<(String, Option<String>, String)>,
+/// The rule's answer for one thread.
+enum Judgement {
+    /// Its claims in deletion order: the sent and then the closed claims last, so a step that
+    /// stops part way leaves both, and the next step finds and judges the thread again.
+    Retire(Vec<(String, Option<String>, String)>),
+    /// A person's thread, a cited one, or one already gone.
+    Keep,
+    /// Closed, but its sent claim has not arrived: judge it again later.
+    Defer,
 }
 
 impl Store {
@@ -62,86 +75,142 @@ impl Store {
         // Citations live in claim bodies; the cache answers who cites a thread without reading them.
         self.catch_up_local_trim_citations()?;
         let cutoff = now_ms.saturating_sub(RETAIN_AFTER_CLOSE_MS);
-        let (judged_through, threads, more) = self.judge_closed_threads(cutoff)?;
+        let (after, mut deferred) = self.retirement_progress()?;
+        // Deferred threads first, the oldest first; one still deferred goes to the back.
+        let mut judged: Vec<(Option<i64>, String, Judgement)> = Vec::new();
+        {
+            let connection = self.readers.get();
+            for subject in deferred.iter().take(CANDIDATES) {
+                judged.push((None, subject.clone(), judge_thread(&connection, subject)?));
+            }
+        }
+        let rejudged = judged.len();
+        let (judged_through, more) = if deferred.len() < DEFERRED_MAX {
+            self.judge_closed_threads(after, cutoff, &mut judged)?
+        } else {
+            (after, false)
+        };
         let mut done = MailRetirement { more, ..MailRetirement::default() };
         let mut connection = self.connection.write_background();
         let started = Instant::now();
         let transaction = connection.transaction()?;
-        let mut cursor = None;
-        'threads: for (closed_index, thread) in &threads {
-            if let Some(thread) = thread {
-                let mut finishing = false;
-                for (id, operation_id, kind) in &thread.claims {
-                    // At least one delete a hold, so a slow store still makes progress. Once the
-                    // sent claim goes, the closed claims follow in the same hold: judging a thread
-                    // reads both, and a closed claim left without its sent claim would stay.
-                    finishing |= kind == "message.sent";
-                    if !finishing && done.claims > 0 && started.elapsed() >= budget {
-                        done.more = true;
-                        break 'threads;
+        let mut cursor = after;
+        let mut still_deferred = Vec::new();
+        let mut cut = false;
+        for (closed_index, subject, judgement) in &judged {
+            // Once the budget runs out, a deferred thread keeps its place in the list and a new
+            // one waits behind the cursor for the next step.
+            let finished = !cut
+                && match judgement {
+                    Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
+                    Judgement::Keep => true,
+                    Judgement::Defer => {
+                        still_deferred.push(subject.clone());
+                        true
                     }
-                    delete_dropped_rows_tx(&transaction, &[], &[tombstone(id, operation_id.clone())])?;
-                    done.claims += 1;
+                };
+            if !finished {
+                cut = true;
+                if closed_index.is_none() {
+                    still_deferred.push(subject.clone());
                 }
-                done.threads += 1;
+            } else if let Some(index) = closed_index {
+                cursor = *index;
             }
-            cursor = Some(*closed_index);
         }
-        let cursor = match (cursor, done.more) {
-            // Every judged thread finished: the cursor may pass all of them.
-            (Some(_), false) => Some(judged_through),
-            (cursor, _) => cursor,
-        };
-        if let Some(cursor) = cursor {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h3caa5ecf593d owner=fractal_store::store::mail_retirement TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-                params![CURSOR, cursor.to_string()],
-            )?;
+        if cut {
+            done.more = true;
+        } else {
+            cursor = cursor.max(judged_through);
         }
+        let mut seen = std::collections::BTreeSet::new();
+        deferred = deferred.split_off(rejudged.min(deferred.len()));
+        deferred.extend(still_deferred);
+        deferred.retain(|subject| seen.insert(subject.clone()));
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hf3a8ffdc82a1 owner=fractal_store::store::mail_retirement TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
+            params![CURSOR, cursor.to_string(), DEFERRED, serde_json::to_string(&deferred)?],
+        )?;
         transaction.commit()?;
         done.hold = started.elapsed();
         Ok(done)
     }
 
-    /// The next closed threads after the cursor, each judged by the rule: `Some` to retire,
-    /// `None` to keep. Stops before the first closed claim younger than `cutoff`. Returns the
-    /// store index judged through, the threads, and whether more old enough to judge remain.
-    #[allow(clippy::type_complexity)]
-    fn judge_closed_threads(&self, cutoff: u64) -> Result<(i64, Vec<(i64, Option<Thread>)>, bool)> {
+    /// The cursor and the deferred threads, as the last step left them.
+    fn retirement_progress(&self) -> Result<(i64, Vec<String>)> {
         let connection = self.readers.get();
-        let after: i64 = connection
-            .query_row("SELECT value FROM meta WHERE key=?1", [CURSOR], |row| row.get::<_, String>(0))
-            .optional()?
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
+        let read = |key: &str| -> Result<Option<String>> {
+            Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0)).optional()?)
+        };
+        let after = read(CURSOR)?.and_then(|value| value.parse().ok()).unwrap_or(0);
+        let deferred = read(DEFERRED)?.and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default();
+        Ok((after, deferred))
+    }
+
+    /// Judge the next closed threads after `after`, appending each to `judged` with its closed
+    /// claim's store index. Stops before the first closed claim younger than `cutoff`. Returns
+    /// the store index judged through and whether more old enough to judge remain.
+    fn judge_closed_threads(
+        &self,
+        after: i64,
+        cutoff: u64,
+        judged: &mut Vec<(Option<i64>, String, Judgement)>,
+    ) -> Result<(i64, bool)> {
+        let connection = self.readers.get();
         let closed: Vec<(i64, String, String)> = connection
             .prepare_cached(
                 "SELECT store_index, subject, accepted_at_unix_ms FROM claims INDEXED BY claims_kind_index
                  WHERE kind='message.closed' AND store_index>?1 ORDER BY store_index LIMIT ?2",
             )?
-            .query_map(params![after, CANDIDATES], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map(params![after, CANDIDATES as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let full = closed.len() as i64 == CANDIDATES;
-        let mut judged = Vec::new();
+        let full = closed.len() == CANDIDATES;
         let mut through = after;
-        let mut seen = std::collections::BTreeSet::new();
         for (index, subject, accepted) in closed {
             // Closed claims arrive in roughly the order they close; the first one too young ends
             // this step's judging, and the next step starts there again.
             if accepted.parse::<u64>().map_or(true, |accepted| accepted > cutoff) {
-                return Ok((through, judged, false));
+                return Ok((through, false));
             }
             through = index;
-            // A thread with two closed claims is judged once.
-            let thread = if seen.insert(subject.clone()) { judge_thread(&connection, &subject)? } else { None };
-            judged.push((index, thread.map(|claims| Thread { claims })));
+            // A thread with two closed claims, or already judged this step, is judged once.
+            let judgement = if judged.iter().any(|(_, seen, _)| *seen == subject) {
+                Judgement::Keep
+            } else {
+                judge_thread(&connection, &subject)?
+            };
+            judged.push((Some(index), subject, judgement));
         }
-        Ok((through, judged, full))
+        Ok((through, full))
     }
 }
 
-/// The thread's claims in deletion order when the rule retires it, else `None`.
-fn judge_thread(connection: &Connection, subject: &str) -> Result<Option<Vec<(String, Option<String>, String)>>> {
+/// Delete a thread's claims inside the hold. Answers whether the whole thread went; `false`
+/// when the budget ran out first. Once the sent claim goes the closed claims follow in the
+/// same hold, since judging a thread reads both.
+fn delete_thread(
+    transaction: &Transaction<'_>,
+    claims: &[(String, Option<String>, String)],
+    started: Instant,
+    budget: Duration,
+    done: &mut MailRetirement,
+) -> Result<bool> {
+    let mut finishing = false;
+    for (id, operation_id, kind) in claims {
+        finishing |= kind == "message.sent";
+        // At least one delete a hold, so a slow store still makes progress.
+        if !finishing && done.claims > 0 && started.elapsed() >= budget {
+            return Ok(false);
+        }
+        delete_dropped_rows_tx(transaction, &[], &[tombstone(id, operation_id.clone())])?;
+        done.claims += 1;
+    }
+    done.threads += 1;
+    Ok(true)
+}
+
+/// The rule's answer for the thread `subject`.
+fn judge_thread(connection: &Connection, subject: &str) -> Result<Judgement> {
     let claims: Vec<(String, Option<String>, String, Option<String>, Option<String>)> = connection
         .prepare_cached(
             "SELECT id, json_extract(body,'$._operation.id'), kind,
@@ -151,13 +220,16 @@ fn judge_thread(connection: &Connection, subject: &str) -> Result<Option<Vec<(St
         )?
         .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    // Without its sent claim a thread's people are unknown; keep it.
+    if claims.is_empty() {
+        return Ok(Judgement::Keep);
+    }
+    // Without its sent claim a thread's people are unknown: wait for it.
     let Some((_, _, _, from, to)) = claims.iter().find(|(_, _, kind, _, _)| kind == "message.sent") else {
-        return Ok(None);
+        return Ok(Judgement::Defer);
     };
     let person = |party: &Option<String>| party.as_deref().is_some_and(|party| party.starts_with("person/"));
     if person(from) || person(to) {
-        return Ok(None);
+        return Ok(Judgement::Keep);
     }
     let own: std::collections::BTreeSet<&str> = claims.iter().map(|(id, ..)| id.as_str()).collect();
     let mut citers = connection.prepare_cached(
@@ -171,18 +243,16 @@ fn judge_thread(connection: &Connection, subject: &str) -> Result<Option<Vec<(St
             .iter()
             .any(|citer| !own.contains(citer.as_str()));
         if cited_from_outside {
-            return Ok(None);
+            return Ok(Judgement::Keep);
         }
     }
     let mut ordered: Vec<_> = claims.into_iter().map(|(id, operation, kind, _, _)| (id, operation, kind)).collect();
-    // The sent and then the closed claims go last: a step cut part way leaves both, and they
-    // are what finds and judges the thread again.
     ordered.sort_by_key(|(_, _, kind)| match kind.as_str() {
         "message.sent" => 1,
         "message.closed" => 2,
         _ => 0,
     });
-    Ok(Some(ordered))
+    Ok(Judgement::Retire(ordered))
 }
 
 fn tombstone(id: &str, operation_id: Option<String>) -> ClaimTombstone {

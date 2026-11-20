@@ -365,9 +365,11 @@ impl CheckpointConfig {
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
 /// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped. `mail = false` keeps closed graph mail
-/// on a member that trims locally; otherwise such a member retires closed agent and daemon
-/// mail a week after it closes, at its own paced rate (`daily_claims` does not apply).
+/// that drops more goes on the next day where it stopped. A member that trims locally also
+/// retires closed agent and daemon graph mail a week after it closes, at its own paced rate
+/// (`daily_claims` does not apply); `mail = false` keeps it. On by default for such members by
+/// Factory's decision of 2026-11-20 (every current member trims locally), replacing its
+/// 2026-10-30 "keep all messages forever" for non-person mail; person threads are always kept.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
