@@ -30,6 +30,7 @@
     ".github/workflows",
     "AGENTS.md",
     "CLAUDE.md",
+    "claude-channel",
     "clients",
     "docs/st3/action-coverage.json",
     "docs/st3/actor-contract.json",

@@ -755,7 +755,10 @@ pub fn resolve_policy(
 }
 
 /// Top-level subject families a set namespace can claim.
-const NAMESPACE_KINDS: [&str; 4] = ["agent/", "schedule/", "subscription/", "mission/"];
+const NAMESPACE_KINDS: [&str; 7] = [
+    "agent/", "schedule/", "subscription/", "mission/",
+    "objective/", "github-source/", "github-scope/",
+];
 
 /// The set's source enforcement; a set without a policy is `off`.
 pub fn enforcement(view: &View) -> Enforce {
@@ -1561,6 +1564,13 @@ pub fn plan_tx(
         matches!(s.kind.as_str(), "objective" | "github-source" | "github-scope")
     }) || known.values()
         .any(|m| matches!(m.kind.as_str(), "objective" | "github-source" | "github-scope"));
+    // Native membership alone did not teach older source-enforcement readers these namespaces.
+    let native_policy = policy.as_ref().is_some_and(|policy| {
+        policy.namespaces.iter().chain(&policy.unmanaged_allow).any(|glob| {
+            ["objective/", "github-source/", "github-scope/"].iter()
+                .any(|kind| glob.starts_with(kind))
+        })
+    });
     // Older daemons drop revisions carrying a policy (the receipt hash covers it) or
     // subscription members, and ignore debt.
     let source_enforcement = policy.is_some()
@@ -1599,6 +1609,12 @@ pub fn plan_tx(
         if native_roots && !advertised("owned_set_native_roots")? {
             blockers.push(format!(
                 "host/{} has not advertised owned-set native root support; upgrade before activation",
+                member.name
+            ));
+        }
+        if native_policy && !advertised("owned_set_native_policy")? {
+            blockers.push(format!(
+                "host/{} has not advertised owned-set native source policy support; upgrade before activation",
                 member.name
             ));
         }

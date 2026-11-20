@@ -13,6 +13,10 @@ const RUN: &str = "mission-run/example/follow-fixture";
 const RUN_PATH: &str = "/v1/mission-runs/mission-run%2Fexample%2Ffollow-fixture";
 const TREE_PATH: &str =
     "/v1/mission-runs/tree?root=mission-run%2Fexample%2Ffollow-fixture&limit=50";
+const SOURCE_PATH: &str =
+    "/v1/claims?subject=mission%2Fexample%2Ffollow-fixture%40fixture&kind=mission.provenance&order=asc&limit=1";
+const CREATED_PATH: &str =
+    "/v1/claims?subject=mission-run%2Fexample%2Ffollow-fixture&kind=mission-run.created&order=asc&limit=1";
 
 enum Reply {
     Value(Value),
@@ -188,12 +192,12 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
         )
         .await;
         assert_refusal(&output, 0);
-        for path in [RUN_PATH, TREE_PATH] {
+        for path in [RUN_PATH, TREE_PATH, SOURCE_PATH, CREATED_PATH] {
             let mut script = vec![
                 ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
                 (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
             ];
-            if path == RUN_PATH {
+            if path != TREE_PATH {
                 script.push((
                     TREE_PATH.into(),
                     Reply::Value(json!({
@@ -203,6 +207,16 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
                         "frontier": 0,
                     })),
                 ));
+            }
+            if path == RUN_PATH || path == CREATED_PATH {
+                script.push((SOURCE_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+            }
+            if path == RUN_PATH {
+                script.push((CREATED_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
                 script.push((
                     "/v1/events/page?after=10&wait=true&timeout_ms=30000".into(),
                     Reply::Value(json!({
@@ -231,6 +245,12 @@ async fn mission_follow_preserves_terminal_exit_codes_and_json_output() {
             if !json_output {
                 script.push((TREE_PATH.into(), Reply::Value(json!({
                     "runs":[running], "has_more":false, "next_cursor":null, "frontier":10,
+                }))));
+                script.push((SOURCE_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+                script.push((CREATED_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
                 }))));
             }
             script.extend([
