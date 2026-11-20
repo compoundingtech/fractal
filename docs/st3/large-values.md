@@ -1034,6 +1034,30 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+
+### Escalation restart scheduling
+
+`fractal_store::store::escalation` owns the restart index writes
+`lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
+`lv-h6232d25a79e0`. The restart index stores only run and origin identifiers,
+never policy text, messages, or ask bodies. Its key is removed when the terminal
+ladder has no remaining deadline.
+
+Clock metadata is rebuildable from canonical receipts: subject and claim IDs,
+canonical sortable key, normalized state, accepted time and explicit wait deadline.
+Change capture stores only local integer arrival indexes and drains transactionally.
+Each receipt changes at most its own and its next status's transition bit.
+The three indexed `LIMIT 1` clock lookups avoid history replay during evaluation.
+Startup backfills existing clock-bearing receipts once; explicit replay rebuilds
+the projection. Deletion and correction repair neighboring transition boundaries.
+These are work bounds, not byte-size proofs: variable identifiers and sortable
+keys remain inline. The owner's `chunk-or-reference-variable-columns`,
+`bound-or-reference-values-and-reclamation`, `prepare-body-and-predecessor-values`
+and `trace-statement-and-value-representation` obligations cover those values,
+one-time backfill/rebuild and reclamation. A reference conversion must preserve
+canonical episode identity, paused-clock anchors and terminal restart scheduling.
+The parent schema site is `lv-hc9d1b1deb0cb`.
+
 ### Shell request identity and cancellation (#6762)
 
 The `fractal_store::store::shell_resources` maintainer owns

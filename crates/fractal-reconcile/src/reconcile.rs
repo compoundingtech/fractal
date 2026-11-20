@@ -65,6 +65,7 @@ pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
+mod escalation;
 pub mod start_spacing;
 pub mod program;
 mod program_faults;
@@ -11468,7 +11469,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .flatten()
                 .map(|observation| observation.status)
         });
-        let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        let mut ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        for id in self.store.escalation_run_ids(&self.host)? {
+            if !ids.contains(&id) { ids.push(id); }
+        }
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -11571,8 +11575,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
-    /// the last pass listed the active runs.
+    /// Evaluate one run and remember what it read. `active_only` leaves terminal execution
+    /// alone, but still evaluates escalation deadlines committed with its transition.
     fn evaluate_one_mission_run(
         &self,
         id: &str,
@@ -11589,7 +11593,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
                     smallclaims::touched::note_read(|| subject.clone());
-                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    let (run, mut mission) = self.store.mission_run_for_evaluation(id)?;
                     // Eager cancellation (§6): a program step that left its attempt in this run's
                     // latest transition stops now, with its child runs and asks, before an
                     // inactive run returns below. Then what the run's programs wait on is started
@@ -11599,16 +11603,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                         engine.release_left(&run)?;
                         settled = self.settle_program_waits(engine, &run)?;
                     }
-                    if active_only
-                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
-                    {
-                        return Ok(false);
-                    }
                     active_generations.insert(run.generation.clone());
                     active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
                     // From the view the evaluation started with: a write it makes changes subjects
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
+                    if mission.is_none() && run.steps.is_empty() {
+                        let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
+                        mission = self.store.mission_spec(mission_id, Some(&run.revision))?;
+                    }
+                    if let Some(definition) = mission.as_ref() {
+                        match self.escalate_run(&run, definition, now_ms()) {
+                            Ok(escalation_due) => {
+                                due = [due, escalation_due].into_iter().flatten().min();
+                                self.close_fault(&run.subject, "escalation", "all due stages delivered")?;
+                            }
+                            Err(error) => self.record_fault(&run.subject, "escalation", Err(error))?,
+                        }
+                    }
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
                     // Telling a run's reporter never holds the run back or fails it.
                     match self.report_choice(&run.subject).and_then(|choice| match choice {
                         run_report::ReportChoice::Named(report) => {
@@ -11768,14 +11785,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
         if !unseen.is_empty() {
-            // Another host's run, or one that already ended, is not this host's to evaluate.
-            let active = self
-                .store
-                .active_mission_run_ids_for_origin(&self.host)?
-                .into_iter()
+            // Terminal runs with pending escalation discovery belong to this host too.
+            let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
+            eligible.extend(self.store.escalation_run_ids(&self.host)?);
+            let eligible = eligible.into_iter()
                 .map(|id| format!("mission-run/{id}"))
                 .collect::<BTreeSet<_>>();
-            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+            changed_runs.extend(unseen.into_iter().filter(|subject| eligible.contains(subject)));
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
