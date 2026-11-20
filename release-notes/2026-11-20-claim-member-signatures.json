@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta keys claim_member_signature_cursor (signing pass) and claim_member_signature_pending_cursor (settling waiting signatures). No storage version change. Only an authenticated fleet peer can add waiting rows, and only with signatures that verify; the 30-day expiry is what bounds them, so a peer sending signatures for claims that never arrive costs at most a month of rows."
+    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta keys claim_member_signature_cursor (signing pass) and claim_member_signature_pending_cursor (settling waiting signatures). No storage version change. A signature waits only under a key this member's membership has known (the anchor or any incarnation's); a made-up key is dropped. At most 50,000 signatures from one peer and 200,000 in all wait at once: past that a signature is refused, counted in `fractal replication status` (claim_signatures_refused) and in telemetry (st.replication.claim_signatures.refused), and logged; none that waits is evicted."
   },
   "rules": {
     "status": "none",

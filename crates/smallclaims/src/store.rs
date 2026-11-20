@@ -8408,7 +8408,7 @@ impl Store {
         drop(sync);
         // The writers' signatures of the claims the exchange carries, kept once they verify
         // (`member_signatures`); a failure here costs only signatures a later exchange brings.
-        if let Err(error) = self.receive_claim_member_signatures(&input.claim_member_signatures) {
+        if let Err(error) = self.receive_claim_member_signatures(relay, &input.claim_member_signatures) {
             eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
         }
         Ok(ReplicationReceipt {
@@ -10675,6 +10675,7 @@ impl Store {
         }
         Ok(ReplicationStatus {
             configured,
+            claim_signatures_refused: self.claim_member_signatures_refused()?,
             fleet_id: fleet_id.map(str::to_owned),
             health: self.replication_health(configured)?,
             authority_digest: snapshot.authority_digest.clone(),

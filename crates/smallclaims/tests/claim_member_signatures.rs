@@ -121,13 +121,13 @@ fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
     };
     // Altered bytes do not verify.
     let forged = ClaimMemberSignature { signature: other.sign(b"something else"), ..genuine.clone() };
-    assert_eq!(birch.receive_claim_member_signatures(&[unadmitted, foreign.clone(), forged]).unwrap(), 0);
+    assert_eq!(birch.receive_claim_member_signatures("peer", &[unadmitted, foreign.clone(), forged]).unwrap(), 0);
     assert_eq!(signed(&birch), signed(&alder), "no signature was added beside the genuine ones");
 
     // A signature for a claim not held yet waits, and is dropped once the claim turns out to be
     // another writer's.
     let cedar = node("cedar", None, &key);
-    assert_eq!(cedar.receive_claim_member_signatures(&[foreign]).unwrap(), 0);
+    assert_eq!(cedar.receive_claim_member_signatures("peer", &[foreign]).unwrap(), 0);
     sync(&alder, &cedar);
     while cedar.promote_claim_member_signatures().unwrap() > 0 {}
     assert_eq!(
@@ -183,19 +183,28 @@ fn only_a_key_membership_admits_counts_and_waiting_signatures_never_hide_later_o
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(birch.receive_claim_member_signatures(&[fresh_signature("cedar", cedar_sequence, &cedar_claim)]).unwrap(), 0);
+    assert_eq!(birch.receive_claim_member_signatures("peer", &[fresh_signature("cedar", cedar_sequence, &cedar_claim)]).unwrap(), 0);
     birch.promote_claim_member_signatures().unwrap();
     assert!(birch.claim_member_signatures_for(&[cedar_claim]).unwrap().is_empty(), "an unkeyed writer's signature is not kept");
 
-    // A made-up writer's signatures for claims that never arrive wait, more than a page of them,
-    // all sorting before alder's claim. They never hide alder's genuine signature, which waits
+    // Signatures under alder's known key for claims that never arrive wait, more than a page of
+    // them, all sorting before alder's genuine claim. They never hide alder's genuine signature, which waits
     // until alder's claim arrives and is then kept.
     let invented: Vec<ClaimMemberSignature> = (0..600)
-        .map(|n| fresh_signature("dogwood", 1, &format!("{:064x}", n)))
+        .map(|n| {
+            let claim = format!("{:064x}", n);
+            ClaimMemberSignature {
+                signature: key.sign(&claim_signature_message(FLEET, "alder", 1, &claim)),
+                claim_id: claim,
+                writer: "alder".into(),
+                sequence: 1,
+                member_key: key.public().to_owned(),
+            }
+        })
         .collect();
     assert!(invented.iter().all(|signature| signature.claim_id < genuine.claim_id));
-    birch.receive_claim_member_signatures(&invented).unwrap();
-    assert_eq!(birch.receive_claim_member_signatures(std::slice::from_ref(&genuine)).unwrap(), 0);
+    birch.receive_claim_member_signatures("peer", &invented).unwrap();
+    assert_eq!(birch.receive_claim_member_signatures("peer", std::slice::from_ref(&genuine)).unwrap(), 0);
     assert_eq!(waiting(&birch), 601);
     sync(&alder, &birch);
     for _ in 0..4 {
@@ -207,3 +216,4 @@ fn only_a_key_membership_admits_counts_and_waiting_signatures_never_hide_later_o
         assert!(birch.claim_member_signatures_for(&[signature.claim_id.clone()]).unwrap().is_empty());
     }
 }
+

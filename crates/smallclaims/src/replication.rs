@@ -316,6 +316,9 @@ pub struct ReplicaRecordView {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReplicationStatus {
     pub configured: bool,
+    /// Waiting claim signatures refused for the per-peer or total cap (`member_signatures`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claim_signatures_refused: u64,
     pub fleet_id: Option<String>,
     /// Current-daemon worker heartbeat and exchange evidence, never stored envelope counts.
     #[serde(default)]
