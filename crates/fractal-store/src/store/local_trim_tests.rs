@@ -333,6 +333,55 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
     assert_eq!(full.envelopes.len(), snapshot.inventory.envelopes.len());
 }
 
+/// A member that received another's released envelopes as signed claims (`signed_claims`) holds
+/// them as released with rowids below zero, so its own cut's capture counts them as sealed and
+/// trims their claims as it would those of envelopes it holds.
+#[test]
+fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let alder = declared(Store::open_memory("alder").unwrap(), false);
+    alder.pin_fleet_anchor(key.public()).unwrap();
+    alder.set_member_key(Some(key.clone())).unwrap();
+    alder.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
+    for n in 0..40 {
+        apply(&alder, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    alder.replication_snapshot().unwrap();
+    while !alder.sign_own_claims().unwrap().done {}
+    while !alder.release_envelopes(0).unwrap().done {}
+    let count = |store: &Store, sql: &str| -> i64 { store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-ha80fdc3a19b9 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap() };
+    assert!(count(&alder, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") > 30);
+    let birch = declared(Store::open_memory("birch").unwrap(), true);
+    birch.pin_fleet_anchor(key.public()).unwrap();
+    for _ in 0..16 {
+        // birch asks as the worker does: with its listing of each range that differs from alder's.
+        let summary = alder.export_replication_summary(TEST_FLEET).unwrap().inventory;
+        let remote = birch.export_replication_exchange(TEST_FLEET, &summary).unwrap().inventory;
+        let exchange = alder.export_replication_exchange(TEST_FLEET, &remote).unwrap();
+        if exchange.envelopes.is_empty() && exchange.signed_envelopes.is_empty() {
+            break;
+        }
+        birch.receive_replication_exchange(&alder.origin, TEST_FLEET, &exchange).unwrap();
+        birch.validate_replication_backlog().unwrap();
+        birch.project_replication_backlog().unwrap();
+    }
+    let received = count(&birch, "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'");
+    assert!(received > 30, "{received}");
+    assert_eq!(count(&birch, "SELECT COUNT(*) FROM released_envelopes WHERE original_rowid >= 0"), 0);
+    let digest = birch.replication_snapshot().unwrap().authority_digest.clone();
+    let before = answers(&birch, context.now_unix_ms);
+    assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
+    assert_eq!(answers(&birch, context.now_unix_ms), before, "the readers answer the same");
+    assert_eq!(claims_of(&birch, "observer.observed"), 2, "the newest of each observer stays");
+    assert_eq!(count(&birch, "SELECT COUNT(*) FROM checkpoint_envelopes JOIN released_envelopes USING(writer, sequence, envelope_hash)"), 0);
+    let snapshot = birch.replication_snapshot().unwrap();
+    assert_eq!(snapshot.authority_digest, digest, "every identity is still listed");
+    let (full, _) = smallclaims::store::full_compact_replication_inventory(&birch.readers.get()).unwrap();
+    assert_eq!((&snapshot.inventory.digest, &snapshot.inventory.payloadless), (&full.digest, &full.payloadless));
+}
+
 /// A local cut that deletes in many chunks leaves the roster's generation alone until its run
 /// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
 /// roster's fold before it could publish, all through a run.

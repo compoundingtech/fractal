@@ -29,7 +29,7 @@ pub const ENVELOPE_RELEASE: bool = false;
 /// `original_rowid` is the envelope's `replica_envelopes` rowid, so a capture bounded by a seal row
 /// (`row_id <= ?`) sees a released envelope exactly where it saw the stored one. A released
 /// envelope was validated and admitted (`receipt_state` 'validated').
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4f885dc5dbb7 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1a70733fac43 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS released_envelopes (
     writer TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -321,13 +321,13 @@ pub(crate) fn kept_kind(claim: &ClaimRecord) -> bool {
 fn release_tx(tx: &Connection, rowid: i64, envelope: &ReplicaEnvelopeId, signature: &(String, String)) -> Result<bool> {
     let kept = tx
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-hf6c7e0f4d53c owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
+            /* sqlite-large-value: allow-for-now lv-h142d7315e7f0 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
                  accepted_at_unix_ms, batch_id, original_rowid, released_at_unix_ms, member_key,
                  envelope_signature)
              SELECT writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms, batch_id, rowid, ?2, ?3, ?4
              FROM replica_envelopes WHERE rowid=?1",
         )?
-        .execute(/* sqlite-large-value: allow-for-now lv-h5ae5cf1b36cc owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![rowid, i64::try_from(now_ms())?, signature.0, signature.1])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h0ce03c2888da owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![rowid, i64::try_from(now_ms())?, signature.0, signature.1])?;
     if kept == 0 {
         return Ok(false);
     }
@@ -337,7 +337,7 @@ fn release_tx(tx: &Connection, rowid: i64, envelope: &ReplicaEnvelopeId, signatu
         ("replica_records", " AND claim_id IS NOT NULL"),
     ] {
         tx.prepare_cached(&format!(
-            /* sqlite-large-value: allow-for-now lv-h5e86b51b796f owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3{which}"
+            /* sqlite-large-value: allow-for-now lv-hdf79f9e15419 owner=smallclaims::store::envelope_release TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3{which}"
         ))?
         .execute(/* sqlite-large-value: allow-for-now lv-hb7a4188d5c54 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash])?;
     }

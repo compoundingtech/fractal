@@ -26,6 +26,30 @@ pub const SIGNED_ENVELOPE_LIMIT: usize = 256;
 /// lacks. Each costs a lookup; what lies past it is found by a later exchange.
 const RELEASED_CANDIDATE_LIMIT: usize = 65_536;
 
+/// A released envelope's identity, its writer's envelope signature, and its batch header.
+const HEADER_SQL: &str = "SELECT released.previous_hash, released.accepted_at_unix_ms, released.member_key,
+        released.envelope_signature, batches.id, batches.origin, batches.replica_sequence,
+        batches.previous_hash, batches.hash, batches.accepted_at_unix_ms
+     FROM released_envelopes AS released JOIN batches ON batches.id=released.batch_id
+     WHERE released.writer=?1 AND released.sequence=?2 AND released.envelope_hash=?3";
+
+/// The claims of batch `?1` held here, with their positions, in position order.
+static CLAIMS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT {CLAIM_COLUMNS}, positions.position
+         FROM claims INDEXED BY claims_batch_index
+         JOIN claim_positions AS positions ON positions.claim_id=claims.id
+         WHERE claims.batch_id=?1 ORDER BY positions.position"
+    )
+});
+
+/// Claim `?1`'s writer signature, by the envelope's key `?2` when it has one.
+const WRITER_SIGNATURE_SQL: &str = "SELECT member_key, signature FROM claim_member_signatures
+     WHERE claim_id=?1 ORDER BY member_key<>?2, member_key LIMIT 1";
+
+/// A received released identity's rowid: one below the lowest, and below zero.
+const RECEIVED_ROWID_SQL: &str = "SELECT MIN(0, COALESCE(MIN(original_rowid), 0)) - 1 FROM released_envelopes";
+
 /// What signed-claim exchanges found since this process started.
 #[derive(Debug, Default)]
 pub struct Tally {
@@ -41,7 +65,7 @@ pub struct Tally {
 pub fn blob_bytes(connection: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {
     Ok(connection
         .prepare_cached("SELECT bytes FROM blobs WHERE hash=?1")?
-        .query_row([hash], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-he37575a9da8f owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ [hash], |row| row.get(0))
         .optional()?)
 }
 
@@ -154,30 +178,16 @@ impl Store {
     pub fn signed_envelopes(&self, ids: &[ReplicaEnvelopeId]) -> Result<Vec<SignedEnvelope>> {
         let connection = self.readers.get();
         let authoritative = retired::authoritative(&connection)?;
-        let mut header = connection.prepare_cached(
-            "SELECT released.previous_hash, released.accepted_at_unix_ms, released.member_key,
-                    released.envelope_signature, batches.id, batches.origin, batches.replica_sequence,
-                    batches.previous_hash, batches.hash, batches.accepted_at_unix_ms
-             FROM released_envelopes AS released JOIN batches ON batches.id=released.batch_id
-             WHERE released.writer=?1 AND released.sequence=?2 AND released.envelope_hash=?3",
-        )?;
-        let mut claims = connection.prepare_cached(&format!(
-            "SELECT {CLAIM_COLUMNS}, positions.position
-             FROM claims INDEXED BY claims_batch_index
-             JOIN claim_positions AS positions ON positions.claim_id=claims.id
-             WHERE claims.batch_id=?1 ORDER BY positions.position"
-        ))?;
-        let mut writer_signature = connection.prepare_cached(
-            "SELECT member_key, signature FROM claim_member_signatures WHERE claim_id=?1
-             ORDER BY member_key<>?2, member_key LIMIT 1",
-        )?;
+        let mut header = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-heddd98173c4f owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ HEADER_SQL)?;
+        let mut claims = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h39f24e5159cd owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ &CLAIMS_SQL)?;
+        let mut writer_signature = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4fbcb77a7406 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ WRITER_SIGNATURE_SQL)?;
         let mut found = Vec::new();
         'envelopes: for id in ids.iter().take(SIGNED_ENVELOPE_LIMIT) {
             if authoritative && retired::envelope_retired(&connection, &id.writer, id.sequence, &id.hash)? {
                 continue;
             }
             let Some((previous_hash, accepted, member_key, signature, batch)) = header
-                .query_row(params![id.writer, id.sequence, id.hash], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hf5c5f80a3c6c owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![id.writer, id.sequence, id.hash], |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, String>(1)?,
@@ -207,7 +217,7 @@ impl Store {
                     continue;
                 }
                 let Some((claim_key, claim_signature)) = writer_signature
-                    .query_row(params![claim.id, member_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hda03731ef031 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![claim.id, member_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                     .optional()?
                 else {
                     continue 'envelopes;
@@ -283,19 +293,19 @@ impl Store {
             let before = saved_inventory::changes(&transaction)?;
             let keep_valid = record_bytes::valid_records_kept(&transaction)?;
             for (envelope, batch) in &verified {
-                transaction.execute_batch("SAVEPOINT signed_envelope")?;
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h51fc09002710 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ "SAVEPOINT signed_envelope")?;
                 match admit_signed_tx(&transaction, envelope, batch, keep_valid, &*self.runtime) {
                     Ok(true) => {
-                        transaction.execute_batch("RELEASE signed_envelope")?;
+                        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-heb2fcee409d1 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ "RELEASE signed_envelope")?;
                         admitted.push(ReplicaEnvelopeId {
                             writer: envelope.writer.clone(),
                             sequence: envelope.sequence,
                             hash: envelope.hash.clone(),
                         });
                     }
-                    Ok(false) => transaction.execute_batch("RELEASE signed_envelope")?,
+                    Ok(false) => transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hc598d1d74fc1 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ "RELEASE signed_envelope")?,
                     Err(error) => {
-                        transaction.execute_batch("ROLLBACK TO signed_envelope; RELEASE signed_envelope")?;
+                        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf9b9b499a0b7 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ "ROLLBACK TO signed_envelope; RELEASE signed_envelope")?;
                         eprintln!(
                             "st3: refused signed envelope {} {} {}: {}",
                             envelope.writer, envelope.sequence, envelope.hash, error.message
@@ -306,9 +316,9 @@ impl Store {
             }
             if !admitted.is_empty() {
                 // A capture under way never saw these claims; it starts again.
-                transaction.execute("UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hcdc26b2deabf owner=smallclaims::store::signed_claims TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [])?;
                 transaction.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('replication_admitted_index',?1)",
+                    /* sqlite-large-value: allow-for-now lv-h8709c4273d89 owner=smallclaims::store::signed_claims TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO meta(key,value) VALUES('replication_admitted_index',?1)",
                     [current_index_tx(&transaction)?.to_string()],
                 )?;
             }
@@ -491,9 +501,9 @@ fn admit_signed_tx(
     for (hash, bytes) in &envelope.blobs {
         let bytes = bytes.bytes().map_err(internal)?;
         transaction
-            .prepare_cached("INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)")
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h095c38a86e2c owner=smallclaims::store::signed_claims TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)")
             .map_err(internal)?
-            .execute(params![hash, bytes, bytes.len() as u64])
+            .execute(/* sqlite-large-value: allow-for-now lv-heb188853547e owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
             .map_err(internal)?;
     }
     let batch_rowid = transaction
@@ -503,11 +513,11 @@ fn admit_signed_tx(
         .map_or_else(|| next_batch_rowid(transaction).map_err(internal), Ok)?;
     transaction
         .prepare_cached(
-            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
+            /* sqlite-large-value: allow-for-now lv-hbdfba9fcf8a7 owner=smallclaims::store::signed_claims TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h6ea19cd84702 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![
             batch.id, batch.origin, batch.replica_sequence, batch.previous_hash, batch.hash,
             batch.accepted_at_unix_ms.to_string(), batch_rowid,
         ])
@@ -529,11 +539,11 @@ fn admit_signed_tx(
         canonical::record_position_tx(transaction, &claim.id, signed.position).map_err(internal)?;
         transaction
             .prepare_cached(
-                "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h6ec591188c85 owner=smallclaims::store::signed_claims TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .map_err(internal)?
-            .execute(params![
+            .execute(/* sqlite-large-value: allow-for-now lv-h6695f067a887 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![
                 claim.id, claim.batch_id, claim.subject, claim.kind, claim.origin, claim.actor,
                 canonical_json_text(&claim.body).map_err(internal)?,
                 serde_json::to_string(&claim.predecessors).map_err(internal)?,
@@ -558,13 +568,13 @@ fn admit_signed_tx(
         if keep_valid {
             transaction
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO replica_records(
+                    /* sqlite-large-value: allow-for-now lv-h6d72a0efd20e owner=smallclaims::store::signed_claims TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          claim_id, subject_hint, kind_hint, updated_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, ?10)",
                 )
                 .map_err(internal)?
-                .execute(params![
+                .execute(/* sqlite-large-value: allow-for-now lv-h234478a24e5e owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![
                     crate::hash::replica_record_ref(&envelope.writer, envelope.sequence, &envelope.hash, signed.position),
                     envelope.writer, envelope.sequence, envelope.hash, signed.position,
                     record_bytes::VALID_RECORD_RAW, claim.id, claim.subject, claim.kind, now,
@@ -574,18 +584,34 @@ fn admit_signed_tx(
     }
     transaction
         .prepare_cached(
-            "INSERT INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
+            /* sqlite-large-value: allow-for-now lv-h15c0380ff98b owner=smallclaims::store::signed_claims TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO released_envelopes(writer, sequence, envelope_hash, previous_hash,
                  accepted_at_unix_ms, batch_id, original_rowid, released_at_unix_ms, member_key,
                  envelope_signature)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, MIN(0, COALESCE(MIN(original_rowid), 0)) - 1, ?7, ?8, ?9
-             FROM released_envelopes",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-hd0a50d98497a owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ params![
             envelope.writer, envelope.sequence, envelope.hash, envelope.previous_hash,
-            envelope.accepted_at_unix_ms.to_string(), batch.id, i64::try_from(now_ms()).map_err(internal)?,
-            envelope.member_key, envelope.signature,
+            envelope.accepted_at_unix_ms.to_string(), batch.id,
+            transaction.query_row(/* sqlite-large-value: allow-for-now lv-ha52d97cb16b5 owner=smallclaims::store::signed_claims TODO=trace-statement-and-value-representation */ RECEIVED_ROWID_SQL, [], |row| row.get::<_, i64>(0)).map_err(internal)?,
+            i64::try_from(now_ms()).map_err(internal)?, envelope.member_key, envelope.signature,
         ])
         .map_err(internal)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// What serving and admitting signed envelopes reads, per envelope and claim, seeks its index.
+    #[test]
+    fn what_signed_claims_read_seeks_and_scans_nothing() {
+        let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+        let connection = store.connection.write();
+        for sql in [HEADER_SQL, &CLAIMS_SQL, WRITER_SIGNATURE_SQL, RECEIVED_ROWID_SQL] {
+            envelope_release::assert_plan_seeks(&connection, sql);
+        }
+    }
 }

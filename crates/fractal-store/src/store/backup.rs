@@ -677,7 +677,7 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
     loop {
         // Both index seeks are bounded before the UNION sorts at most two pages.
         let identities = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h756acba9d94c owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
+            /* sqlite-large-value: allow-for-now lv-h211536259bef owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4),
              dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
@@ -796,6 +796,56 @@ mod tests {
         let error = error.downcast_ref::<FractalError>().unwrap();
         assert_eq!(error.code, "invalid-desired-cursor",
             "a new restore writer must reject old cursors regardless of generation");
+    }
+
+    /// A member that released envelopes archives their claims as signed envelopes, at the
+    /// version that declares them, and the archive restores to the same claims, identities and
+    /// projections. An archive with none keeps the earlier version and restores as before.
+    #[test]
+    fn an_archive_carries_released_envelopes_as_signed_claims_and_restores_the_same_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet("archive-fleet").unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("archive-fleet", key.public(), "listening").unwrap();
+        for n in 0..12 {
+            diagnostic(&source, &format!("released-{n}"));
+        }
+        source.replication_snapshot().unwrap();
+        while !source.sign_own_claims().unwrap().done {}
+        let unreleased = root.path().join("unreleased.backup");
+        let header = archive(&source, &unreleased);
+        assert!(header.version < super::super::backup_format::VERSION_WITH_SIGNED_CLAIMS);
+        assert!(backup::restore(&unreleased, &root.path().join("unreleased.db"), root.path()).unwrap().projections_match);
+
+        while !source.release_envelopes(0).unwrap().done {}
+        assert!(source.released_envelopes().unwrap() > 5);
+        let path = root.path().join("released.backup");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_SIGNED_CLAIMS);
+        let destination = root.path().join("restored.db");
+        let report = backup::restore(&path, &destination, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert_eq!(report.log_digest, header.log_digest);
+        let restored = Store::open(&destination, &report.writer).unwrap();
+        let claims = |store: &Store| -> Vec<String> {
+            store.readers.get().prepare("SELECT id FROM claims ORDER BY id").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let released = |store: &Store| -> Vec<(String, u64, String)> {
+            store.readers.get().prepare("SELECT writer, sequence, envelope_hash FROM released_envelopes ORDER BY 1, 2, 3").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(claims(&restored), claims(&source));
+        assert_eq!(released(&restored), released(&source));
+        assert_eq!(
+            restored.replication_snapshot().unwrap().authority_digest,
+            source.replication_snapshot().unwrap().authority_digest
+        );
+        assert_eq!(restored.backup_header().unwrap().tables, source.backup_header().unwrap().tables);
     }
 
     #[test]
