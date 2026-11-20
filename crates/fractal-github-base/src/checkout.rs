@@ -83,6 +83,28 @@ impl Checkout {
     /// checked out as it is; a new branch starts at the base. When the base names a remote
     /// branch, Fractal fetches it first. A failed fetch leaves the local base and returns a warning.
     pub fn create(&self, workspace: &Path) -> Result<Vec<String>> {
+        let lease = self.activation_lease(workspace)?;
+        self.create_leased(workspace, &lease)
+    }
+
+    pub fn activation_lease(
+        &self,
+        workspace: &Path,
+    ) -> Result<fractal_runtime::store_worktree_lease::StoreWorktreeLease> {
+        fractal_runtime::store_worktree_lease::StoreWorktreeLease::acquire_with(
+            crate::environment::command("mr")?,
+            workspace,
+            &self.repository,
+        )
+    }
+
+    /// The caller retains the lease through initialization and workspace publication.
+    pub fn create_leased(
+        &self,
+        workspace: &Path,
+        lease: &fractal_runtime::store_worktree_lease::StoreWorktreeLease,
+    ) -> Result<Vec<String>> {
+        lease.ensure_owner(workspace)?;
         anyhow::ensure!(
             self.repository.is_absolute(),
             "checkout repository {} is not an absolute path",
@@ -272,37 +294,53 @@ pub mod test_support {
     }
 }
 
+/// The reclamation owner is the worktree root, even when an agent works in a subdirectory.
+pub fn workspace_worktree(workspace: &Path) -> Option<PathBuf> {
+    let workspace = std::fs::canonicalize(workspace).ok()?;
+    workspace.ancestors().find(|root| {
+        let git = root.join(".git");
+        git.is_dir() || git.is_file()
+    }).map(Path::to_path_buf)
+}
+
 /// Read Git's directory pointers on the owning host during reconciliation. Checks only the
 /// declared workspace and its ancestors, with no search through other host directories.
 pub fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
-    let workspace = std::fs::canonicalize(workspace).ok()?;
-    for root in workspace.ancestors() {
-        let dot_git = root.join(".git");
-        if dot_git.is_dir() {
-            return Some(root.to_path_buf());
-        }
-        if dot_git.is_file() {
-            let pointer = std::fs::read_to_string(dot_git).ok()?;
-            let git_dir = root.join(pointer.strip_prefix("gitdir:")?.trim());
-            if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
-                let common = std::fs::canonicalize(git_dir.join(common.trim())).ok()?;
-                return Some(if common.file_name().is_some_and(|name| name == ".git") {
-                    common.parent()?.to_path_buf()
-                } else {
-                    // Bare repositories keep their shared Git directory at the repository root.
-                    common
-                });
-            }
-            return Some(root.to_path_buf());
-        }
+    let root = workspace_worktree(workspace)?;
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(root);
     }
-    None
+    let pointer = std::fs::read_to_string(dot_git).ok()?;
+    let git_dir = root.join(pointer.strip_prefix("gitdir:")?.trim());
+    if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+        let common = std::fs::canonicalize(git_dir.join(common.trim())).ok()?;
+        return Some(if common.file_name().is_some_and(|name| name == ".git") {
+            common.parent()?.to_path_buf()
+        } else {
+            // Bare repositories keep their shared Git directory at the repository root.
+            common
+        });
+    }
+    Some(root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::test_support::{git, repository};
     use super::*;
+    #[test]
+    fn a_workspace_subdirectory_uses_the_worktree_root_as_lease_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = super::test_support::repository(root.path());
+        let workspace = repository.join("nested/project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        assert_eq!(
+            super::workspace_worktree(&workspace),
+            Some(std::fs::canonicalize(&repository).unwrap()),
+        );
+    }
+
 
     #[test]
     fn a_checkout_is_read_from_its_agent_declaration() {

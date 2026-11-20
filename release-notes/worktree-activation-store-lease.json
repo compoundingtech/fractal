@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence worktree activation against concurrent megarepo build-output reclamation",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No storage, client schema or code generation changes."},
+  "rules": {"status": "none", "detail": "Graph rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Checkout creation and reuse, reconciliation rendering and runtime initialization, cargo-test gates, and web snapshot activation hold an mr store lease through publication and failure cleanup. Activation refuses when mr cannot acquire admission. The installed mr must include effect-utils f2b187c4 or newer, including --repo-path and descendant reentrancy."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "changed", "detail": "Make the pinned mr CLI available to the daemon login environment and web activation launcher before upgrading."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}
