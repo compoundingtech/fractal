@@ -1252,7 +1252,7 @@ fn run_generation_rows_tx(
     Ok(view)
 }
 
-fn step_generation_is_current(
+pub(super) fn step_generation_is_current(
     connection: &Connection,
     step: &StepRunView,
 ) -> rusqlite::Result<bool> {

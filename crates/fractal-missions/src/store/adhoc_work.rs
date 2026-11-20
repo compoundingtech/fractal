@@ -241,7 +241,7 @@ pub fn native_turn_subject(key: &str) -> String {
 fn native_parent_live(tx: &Transaction<'_>, owner: &StepRunView, attempt: u64) -> Result<bool, FractalError> {
     if u64::from(owner.attempt) != attempt
         || !matches!(owner.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
-        || !step_generation_is_current(tx, owner).map_err(internal)?
+        || !super::missions::step_generation_is_current(tx, owner).map_err(internal)?
         || step_owner_is_terminal_tx(tx, &owner.subject)?
     {
         return Ok(false);
