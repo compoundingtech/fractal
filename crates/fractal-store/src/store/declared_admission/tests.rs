@@ -131,10 +131,18 @@ fn recovery_observations_require_every_signed_fleet_reader() {
     // Idle authority maintenance, with no new membership request or restart:
     // one tick cannot replay more than the configured page.
     let before = observations().len();
+    let validations = crate::store::resource_admission_objectives::reader_validation_count();
     assert!(store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 1,
+        "a full replay page must evaluate the fleet-reader barrier once, not once per ID");
     assert!(observations().len() - before <= crate::store::resource_admission_objectives::REPLAY_PAGE_SIZE);
     assert_eq!(coverage(), false);
     assert!(!store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 2,
+        "the final partial page validates its reader snapshot once");
+    assert!(!store.replay_resource_admission_observations().unwrap());
+    assert_eq!(crate::store::resource_admission_objectives::reader_validation_count() - validations, 2,
+        "an idle complete queue must not fold fleet history");
     let events = observations();
     let retired = events.iter().rfind(|claim| claim.body["fields"]["id"] == request.id).unwrap();
     assert_eq!(retired.body["fields"]["state"], "retired");

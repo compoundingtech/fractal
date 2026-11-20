@@ -340,7 +340,7 @@ mod tests {
         // Model authoritative custody written by a newer binary, without asking this binary
         // to admit an unsupported class. Preserve the exact persisted body through cleanup.
         store.connection.write().execute(
-            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','recovery') WHERE id=?1",
+            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','future-class') WHERE id=?1",
             [&future.id],
         ).unwrap();
         let body = || store.connection.write().query_row(

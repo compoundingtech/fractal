@@ -13,16 +13,38 @@ const RECOVERY_FEATURE: super::declared_admission::FleetFeature = super::declare
 
 pub(super) fn validate_publication(connection: &Connection, host: &str, class: &fractal_runtime::RequestClass) -> Result<(), FractalError> {
     if *class == fractal_runtime::RequestClass::Recovery {
-        super::declared_admission::validate_fleet(connection, host, &RECOVERY_FEATURE)?;
+        validate_readers(connection, host)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static READER_VALIDATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reader_validation_count() -> u64 {
+    READER_VALIDATIONS.with(std::cell::Cell::get)
+}
+
+fn validate_readers(connection: &Connection, host: &str) -> Result<(), FractalError> {
+    #[cfg(test)]
+    READER_VALIDATIONS.with(|count| count.set(count.get() + 1));
+    super::declared_admission::validate_fleet(connection, host, &RECOVERY_FEATURE)
+}
+
+fn requires_recovery_readers(member: &Membership) -> bool {
+    !matches!(&member.request.class, fractal_runtime::RequestClass::Unknown(_))
+        && (member.request.class == fractal_runtime::RequestClass::Recovery
+            || member.refusal_code == Some(super::resource_membership::RefusalCode::RecoveryNotAllowed))
 }
 
 /// Process-local authority acquisition proof; a persisted cut alone cannot prove a live producer.
 #[derive(Default)]
 pub struct Coverage(pub std::sync::atomic::AtomicBool);
 
-pub const REPLAY_PAGE_SIZE: usize = 128;
+pub const REPLAY_PAGE_SIZE: usize = 32;
 
 #[derive(Default)]
 struct Maintenance(std::sync::atomic::AtomicBool);
@@ -32,6 +54,18 @@ pub(super) fn activate(store: &Store) {
 }
 
 impl Store {
+    /// Pending facts, or their final incomplete cut after a live write repaired the last ID.
+    pub fn has_pending_resource_admission_observations(&self) -> Result<bool> {
+        let connection = self.readers.get();
+        let queued: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_admission_pending_v1 WHERE host=?1)",
+            [&self.origin], |row| row.get(0))?;
+        if queued { return Ok(true); }
+        drop(connection);
+        Ok(self.latest_claim(&format!("resource-admission/{}", self.origin), Some(COVERAGE_KIND))?
+            .is_some_and(|coverage| coverage.body["fields"]["complete"] == false))
+    }
+
     /// One bounded maintenance page, including retired rows. Returns whether another
     /// tick is required. No membership traffic or request-time SLO read drives repair.
     pub fn replay_resource_admission_observations(&self) -> Result<bool> {
@@ -53,9 +87,14 @@ impl Store {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
+        let mut recovery_readers = None;
         for (id, body) in &members {
             let member: Membership = serde_json::from_str(body)?;
-            let published = publish(&tx, &member)?;
+            // Fleet history is folded at most once for this entire writer transaction.
+            let supported = !requires_recovery_readers(&member) || *recovery_readers.get_or_insert_with(|| {
+                validate_readers(&tx, &self.origin).is_ok()
+            });
+            let published = publish_with_readers(&tx, &member, supported)?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-hbe53b1627d37 owner=fractal_store::store::resource_admission_objectives TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_admission_pending_v1 WHERE membership_id=?1", [id])?;
             if !published {
                 // Rotate blocked IDs behind already-pending work. New traffic cannot
@@ -109,15 +148,19 @@ pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool>
 }
 
 fn publish(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
+    let readers = !requires_recovery_readers(member)
+        || validate_readers(tx, &member.request.host).is_ok();
+    publish_with_readers(tx, member, readers)
+}
+
+fn publish_with_readers(tx: &Transaction<'_>, member: &Membership, readers: bool) -> Result<bool> {
     if let Err(error) = member.request.class.ensure_supported() {
         tracing::warn!(membership = %member.request.id, %error,
             "withholding unsupported-class admission observation; authoritative custody retained");
         return Ok(false);
     }
-    if (member.request.class == fractal_runtime::RequestClass::Recovery
-        || member.refusal_code == Some(super::resource_membership::RefusalCode::RecoveryNotAllowed))
-        && let Err(error) = super::declared_admission::validate_fleet(tx, &member.request.host, &RECOVERY_FEATURE) {
-        tracing::warn!(membership = %member.request.id, %error,
+    if requires_recovery_readers(member) && !readers {
+        tracing::warn!(membership = %member.request.id,
             "deferring recovery observation until every active fleet reader supports it");
         return Ok(false);
     }
