@@ -221,6 +221,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         match operation {
+            "agent.turn" => self.settle_program_turn(engine, run, request, payload, cancelled),
             "resource.lane.acquire" => {
                 if !cancelled {
                     let view = self.store.step_run(&request.step)?.context("resource owner step missing")?;

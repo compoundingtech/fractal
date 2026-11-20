@@ -110,8 +110,10 @@ mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod wal_escalation;
+pub mod blob_file;
 pub mod document_index;
 mod document_pages;
+pub mod durability;
 pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
@@ -1094,6 +1096,7 @@ impl Store {
             );
         }
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &path)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         // Keep the hot graph and replication index pages in SQLite's bounded
@@ -1156,6 +1159,7 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_URI,
         )?;
         projection_digest::register(&connection)?;
+        blob_file::attach_writer(&connection, &uri)?;
         crate::sqlite::observe(&mut connection);
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         Self::create_schema(&connection, &*runtime)?;
@@ -2176,9 +2180,11 @@ pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, a
     };
     let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
+    // Keep the optional upper bound seekable, especially for descending one-row history
+    // lookups. Store indexes are SQLite signed integers; NULL includes their full domain.
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND store_index<=COALESCE(?2 - 1, 9223372036854775807)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
@@ -6388,7 +6394,7 @@ pub fn collect_referenced_blobs(
     }
     for hash in hashes {
         if let Some(bytes) = connection
-            .query_row("SELECT bytes FROM blobs WHERE hash=?1", [&hash], |row| {
+            .query_row(concat!("SELECT ", crate::blob_bytes!("b"), " FROM blobs AS b WHERE b.hash=?1"), [&hash], |row| {
                 row.get(0)
             })
             .optional()?
@@ -6970,7 +6976,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", crate::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -7245,16 +7251,7 @@ impl Store {
     }
 
     pub fn get_blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT bytes FROM blobs WHERE hash=?1
-                        UNION ALL SELECT bytes FROM local_blobs WHERE hash=?1 LIMIT 1",
-                [hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Into::into)
+        self.blob_bytes(hash)
     }
 
     pub fn bind_fleet(&self, fleet_id: &str) -> Result<()> {
@@ -10808,6 +10805,7 @@ impl Store {
             timings: self.replication_timings(),
             first_sync: self.first_sync()?,
             removed: None,
+            stream_fallbacks: None,
         })
     }
 

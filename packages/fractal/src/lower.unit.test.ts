@@ -82,6 +82,63 @@ describe('graph lowering golden parity', () => {
     expect(compiled.graph).toEqual(source.steps.map((step) => ({ id: step.id, dependsOn: (step.dependsOn ?? []).map((edge) => edge.step), gates: 'gates' in step ? step.gates ?? [] : [] })))
   })
 
+  it.effect('preserves ordered multiline policy in the declaration and every worker instruction', () => Effect.gen(function* () {
+    const target = Fractal.input.text('target')
+    const constraints = [
+      'Read-only inspection; no activation.\nRetain exact evidence and owner approval.',
+      Fractal.t`Use the approved ${target} scope only.`,
+    ]
+    const graph = Fractal.mission({ meta, ...base, inputs: [target], constraints, steps: [
+      Fractal.step({ id: 'inspect', assignedTo: worker, goal: 'Inspect.' }),
+      Fractal.step({ id: 'report', assignedTo: worker, dependsOn: 'inspect', goal: 'Report.' }),
+    ] })
+    const compiled = lower(graph, bindings)
+    const text = 'Read-only inspection; no activation.\nRetain exact evidence and owner approval.\nUse the approved ${input.target} scope only.'
+    expect(compiled.intent.goal).toBe(`${base.goal}\n\nConstraints:\n${text}`)
+    const seen: string[] = []
+    const host = fakeHost({ payload: { target: 'fixture' }, child: async ({ key, input }) => {
+      seen.push(key)
+      expect(input).toEqual({ target: 'fixture', goal: `${key === 'inspect' ? 'Inspect.' : 'Report.'}\n\nConstraints:\n${text.replace('${input.target}', 'fixture')}` })
+      return completed(key)
+    } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+    expect(seen).toEqual(['inspect', 'report'])
+  }))
+
+  it.effect('preserves graph dollar escapes in policy and worker goals', () => Effect.gen(function* () {
+    const target = Fractal.input.text('target')
+    const graph = Fractal.mission({ meta, ...base, inputs: [target], constraints: [
+      'Explain $${input.example} and $${ST_MISSION_RUN} literally.',
+      'Keep $$${input.target} escaped; expand ${input.target}.',
+    ], steps: [
+      Fractal.step({ id: 'work', assignedTo: worker, goal: 'Document $${input.example}.' }),
+    ] })
+    const host = fakeHost({ payload: { target: 'fixture' }, child: async ({ key, input }) => {
+      expect(input).toEqual({ target: 'fixture', goal: [
+        'Document ${input.example}.',
+        '',
+        'Constraints:',
+        'Explain ${input.example} and ${ST_MISSION_RUN} literally.',
+        'Keep $${input.target} escaped; expand fixture.',
+      ].join('\n') })
+      return completed(key)
+    } })
+    expect(yield* start(lower(graph, bindings), host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it('treats empty constraints as absent and preserves native resources and completed ordering', () => {
+    const resources = [{ id: 'example/repository', kind: 'vcs.repository' as const }]
+    const graph = Fractal.mission({ meta, ...base, constraints: [], resources, concurrentRuns: 1, steps: [
+      { id: 'first', agentless: true },
+      { id: 'last', agentless: true, dependsOn: 'first' },
+    ] })
+    const compiled = lower(graph, bindings)
+    expect(compiled.intent.goal).toBe(base.goal)
+    expect(compiled.intent.resources).toEqual(resources)
+    expect(compiled.intent.concurrentRuns).toBe(1)
+    expect(compiled.graph.map((step) => step.dependsOn)).toEqual([[], ['first']])
+  })
+
   it.effect('runs independent siblings concurrently and journals original worker ids', () => Effect.gen(function* () {
     const entered: string[] = []
     const release = Promise.withResolvers<void>()
@@ -174,6 +231,14 @@ describe('graph lowering golden parity', () => {
 
 describe('typed compile refusals', () => {
   it.each([
+    ['targetAt', { targetAt: '2030-01-01T00:00:00Z' }],
+    ['milestones', { milestones: [{ id: 'release', at: '2030-01-01T00:00:00Z' }] }],
+  ] as const)('refuses %s instead of silently losing mission date metadata', (construct, fields) => {
+    const graph = Fractal.mission({ meta, ...base, ...fields, steps: [{ id: 'work', agentless: true }] })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ _tag: 'GraphCompileRefusal', construct }))
+  })
+
+  it.each([
     ['waitFor', { waitFor: Fractal.pinMission({ subject: diamond(), revision: 'a'.repeat(64) }) }], ['watch', { watch: {} }], ['observer', { observer: {} }],
     ['Timing', { timing: { _tag: 'Calendar', at: '09:00', timezone: 'UTC' } }],
     ['Review', { review: [{ _tag: 'Subject', subject: 'resource/example' }] }],
@@ -187,8 +252,33 @@ describe('typed compile refusals', () => {
   })
 
   it('refuses missing worker bindings and remote exec hosts', () => {
-    expect(() => lower(diamond(), { ...bindings, workers: {} })).toThrow(expect.objectContaining({ construct: 'worker binding', step: 'inspect' }))
+    expect(() => lower(diamond(), { ...bindings, workers: {}, strictWorkers: true })).toThrow(expect.objectContaining({ construct: 'worker binding', step: 'inspect' }))
     expect(() => lower(verify(), { ...bindings, host: 'other' })).toThrow(expect.objectContaining({ construct: 'gate.exec.host', step: 'verify' }))
+  })
+
+  it('refuses publication approval lanes rather than treating them as resource lanes', () => {
+    const graph = Fractal.mission({ meta, ...base, lanes: [{ name: 'review', entries: 'resource/example/change/', approver: 'person/owner' }], steps: [] })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'lanes', step: bindings.id }))
+  })
+
+  it.each([
+    ['steps', () => ({ steps: [{ ...Fractal.step({ id: 'work', assignedTo: worker, goal: 'Work.' }) }] })],
+    ['inputs', () => ({ inputs: [{ name: 'target', kind: 'text' as const, [Symbol()]: true }], steps: [] })],
+    ['concurrentRuns', () => ({ concurrentRuns: 0, steps: [] })],
+  ] as const)('reports invalid %s authoring data with its original schema path', (path, fields) => {
+    const graph = Fractal.defineMission({ meta, intent: { ...base, ...fields() } })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({
+      _tag: 'GraphCompileRefusal', step: bindings.id, construct: 'authoring boundary',
+      reason: expect.stringContaining(path),
+    }))
+  })
+
+  it('does not reclassify resolver defects or typed binding refusals as schema failures', () => {
+    const ref = Fractal.agent({ meta: { url: 'file:///tree/example/worker/agent.ts' } })
+    const graph = Fractal.defineMission({ meta, intent: { ...base, steps: [{ id: 'work', assignedTo: ref, goal: 'Work.' }] } })
+    const defect = new Error('resolver defect')
+    expect(() => lower(graph, { ...bindings, resolveAgent: () => { throw defect } })).toThrow(defect)
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'agent binding', step: 'work' }))
   })
 
   it.effect('preserves a declared goal input through explicit instruction-input binding', () => Effect.gen(function* () {
@@ -213,5 +303,98 @@ describe('typed compile refusals', () => {
   it('refuses cyclic graphs at compile time rather than spinning the program', () => {
     const graph = Fractal.mission({ meta, ...base, steps: [{ id: 'a', agentless: true, dependsOn: 'b' }, { id: 'b', agentless: true, dependsOn: 'a' }] })
     expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'dependsOn cycle', step: 'a' }))
+  })
+})
+
+describe('standard native worker binding', () => {
+  it.effect('defaults to the published standard mission with full product and input context', () => Effect.gen(function* () {
+    const compiled = lower(review(), { id: bindings.id, host: 'local' })
+    const host = fakeHost({ payload: { head: 'abc' }, child: async ({ key, mission, input }) => {
+      expect({ key, mission }).toEqual({ key: 'review', mission: 'fractal/seat-turn' })
+      expect(input.agent).toBe('agent/example/worker')
+      expect(input.instructions).toBe('Review abc.')
+      expect(JSON.parse(input.context!)).toEqual({ inputs: { head: 'abc' }, products: [
+        { path: 'review/abc/verdict', kind: 'custom.example.verdict', fields: { kind: 'custom.example.verdict', head: 'abc' } },
+        { path: 'review/evidence', kind: 'custom.example.evidence', fields: { kind: 'custom.example.evidence', present: true } },
+      ] })
+      return { _tag: 'Success', value: { run: 'mission-run/native-program', status: 'completed', result: {
+        run: 'mission-run/real-episode', step: 'step-run/real-episode/work', summary: 'Reviewed.', evidence: ['work.completed'],
+        products: {
+          'review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'GO' },
+          'review/evidence': { kind: 'custom.example.evidence', present: true },
+        },
+      } } }
+    } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('keeps all colliding graph inputs inert and preserves instruction constraints', () => Effect.gen(function* () {
+    const names = ['agent', 'instructions', 'context', 'goal'] as const
+    const graph = Fractal.mission({ meta, ...base,
+      inputs: names.map((name) => Fractal.input.text(name)),
+      constraints: ['Preserve ${input.context}.'],
+      steps: [Fractal.step({ id: 'work', assignedTo: worker, goal: 'Implement ${input.goal}.' })],
+    })
+    const original = { agent: 'not an assignee', instructions: 'not instructions', context: '$(not-shell)', goal: 'requested change' }
+    const host = fakeHost({ payload: original, child: async ({ input }) => {
+      expect(input).toEqual({
+        agent: 'agent/example/worker', instructions: 'Implement requested change.\n\nConstraints:\nPreserve $(not-shell).',
+        context: JSON.stringify({ inputs: original, products: [] }),
+      })
+      return { _tag: 'Success', value: { run: 'mission-run/program', status: 'completed', result: {
+        run: 'mission-run/episode', step: 'step-run/episode/work', summary: 'Done.', evidence: [], products: {},
+      } } }
+    } })
+    expect(yield* start(lower(graph, { id: bindings.id, host: 'local' }), host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('supports explicit context, agent and report mappings while retaining legacy overrides', () => Effect.gen(function* () {
+    const graph = diamond()
+    const host = fakeHost({ payload: {}, child: async ({ key, mission, input }) => {
+      expect(mission).toBe('example/custom-turn')
+      expect(input.assignee).toBe('agent/example/worker')
+      expect(input.prompt).toBeDefined()
+      expect(JSON.parse(input.data!)).toEqual({ inputs: {}, products: [] })
+      return { _tag: 'Success', value: { run: `mission-run/${key}`, status: 'completed', result: {
+        run: `mission-run/${key}-episode`, step: `step-run/${key}/work`, summary: 'Done.', evidence: [], products: {},
+      } } }
+    } })
+    const compiled = lower(graph, { ...bindings, workers: { 'example/worker': {
+      mission: 'example/custom-turn', goalInput: 'prompt', contextInput: 'data', agentInput: 'assignee', report: true,
+    } } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+  }))
+
+  it.effect('preserves prototype-named instruction and agent mappings as own input fields', () => Effect.gen(function* () {
+    for (const mapping of [
+      { goalInput: '__proto__', agentInput: 'assignee' },
+      { goalInput: 'prompt', agentInput: '__proto__' },
+    ]) {
+      const host = fakeHost({ payload: {}, child: async ({ key, input }) => {
+        expect(Object.hasOwn(input, mapping.goalInput)).toBe(true)
+        expect(typeof input[mapping.goalInput]).toBe('string')
+        expect(input[mapping.goalInput]!.length).toBeGreaterThan(0)
+        expect(Object.hasOwn(input, mapping.agentInput)).toBe(true)
+        expect(input[mapping.agentInput]).toBe('agent/example/worker')
+        return completed(key)
+      } })
+      const compiled = lower(diamond(), { ...bindings, workers: { 'example/worker': {
+        mission: 'example/custom-turn', contextInput: 'data', ...mapping,
+      } } })
+      expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+    }
+  }))
+
+  it.effect('does not accept an unreported child success even when no product was requested', () => Effect.gen(function* () {
+    const host = fakeHost({ payload: {}, child: async ({ key }) => completed(key) })
+    expect(yield* start(lower(diamond(), { id: bindings.id, host: 'local' }), host)).toMatchObject({
+      _tag: 'Failure', error: { _tag: 'Defect' },
+    })
+  }))
+
+  it('refuses ambiguous explicit protocol mappings', () => {
+    expect(() => lower(diamond(), { ...bindings, workers: { 'example/worker': {
+      mission: 'example/custom-turn', goalInput: 'same', contextInput: 'same',
+    } } })).toThrow(expect.objectContaining({ construct: 'worker input binding' }))
   })
 })

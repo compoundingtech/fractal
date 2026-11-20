@@ -2706,6 +2706,13 @@ enum StoreCommand {
         #[arg(long)]
         store: PathBuf,
     },
+    /// Copy every blob byte back from the store's blob file into the store, so the previous
+    /// release can open it; stop the daemon first.
+    RestoreBlobBytes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -6377,6 +6384,11 @@ async fn run(cli: Cli) -> Result<()> {
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
+    if let Command::Store {
+        command: StoreCommand::RestoreBlobBytes { ref store },
+    } = cli.command {
+        return fractal_daemon::blob_restore::restore(store, &mut cli_output::stdout());
+    }
     // Archive construction uses only explicit offline paths, before config or client discovery.
     if let Command::Replication {
         command: ReplicationCommand::ArchiveCandidates(args),
@@ -6606,6 +6618,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Store {
             command: StoreCommand::PrepareIndexes { store },
         } => fractal_daemon::owner_indexes::prepare(&store, &mut cli_output::stdout()),
+        Command::Store {
+            command: StoreCommand::RestoreBlobBytes { store },
+        } => fractal_daemon::blob_restore::restore(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -7971,7 +7986,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"owned_set_native_policy":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                    "mission-escalation-v1": 1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
                     "resource_recovery_observations": 1,
@@ -8148,6 +8164,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if config.trim.retires_mail() {
         tokio::spawn(fractal_daemon::task_cpu::account("mail.retire", retire_closed_mail(store.clone())));
     }
+    let blob_move_after_ms = config.store.blob_move_after_ms().expect("the daemon validated its store config");
+    tokio::spawn(fractal_daemon::task_cpu::account("blobs.move", move_blob_bytes(store.clone(), blob_move_after_ms)));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     // The shipped CI objectives are retired: end any fault one left open, once per start.
@@ -9143,33 +9161,100 @@ async fn startable_mission(
 
 struct MissionPublication {
     revision: String,
+    actor: Option<String>,
+    claim_id: String,
     origin: String,
     accepted_at_unix_ms: u128,
 }
 
-/// The mission's publications on this host, newest first.
+/// Bounded recent publications for mission-start revision diagnostics, not run attribution.
 async fn mission_publications(
     client: &Client,
     mission_id: &str,
 ) -> Result<Vec<MissionPublication>> {
     let page: ClaimsPage = client
         .get(&format!(
-            "/v1/claims?subject={}&order=desc&limit=100",
+            "/v1/claims?subject={}&kind=mission.published&order=desc&limit=100",
             urlencoding::encode(&format!("mission/{mission_id}"))
         ))
         .await?;
-    Ok(page
-        .claims
-        .into_iter()
-        .filter(|claim| claim.kind == "mission.published")
-        .filter_map(|claim| {
-            Some(MissionPublication {
-                revision: claim.body.get("revision")?.as_str()?.to_owned(),
-                origin: claim.origin,
-                accepted_at_unix_ms: claim.accepted_at_unix_ms,
-            })
+    Ok(page.claims.into_iter().filter_map(|claim| {
+        Some(MissionPublication {
+            revision: claim.body.get("revision")?.as_str()?.to_owned(),
+            actor: claim.actor,
+            claim_id: claim.id,
+            origin: claim.origin,
+            accepted_at_unix_ms: claim.accepted_at_unix_ms,
         })
-        .collect())
+    }).collect())
+}
+
+/// Publication authority is independent of the requester who owns the run.
+fn mission_publication_note(publication: Option<&MissionPublication>) -> String {
+    let Some(publication) = publication else {
+        return "PUBLISHER No publication claim available; requester is not publication attribution.\n".into();
+    };
+    let published = i64::try_from(publication.accepted_at_unix_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "unknown time".into());
+    format!(
+        "PUBLISHER {} · {} · {published}\nPUBLICATION {}\n",
+        publication.actor.as_deref().unwrap_or("unattributed"),
+        publication.origin,
+        publication.claim_id,
+    )
+}
+
+/// Read the run's indexed creation receipt, then its exact admission publication by ID.
+/// Never substitute a newer publication of the same mission or revision.
+async fn load_run_publication(client: &Client, run: &MissionRunView) -> Result<Option<MissionPublication>> {
+    let page: ClaimsPage = client.get(&format!(
+        "/v1/claims?subject={}&kind=mission-run.created&order=asc&limit=1",
+        urlencoding::encode(&run.subject),
+    )).await?;
+    let Some(created) = page.claims.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(id) = created.body["fields"]["admission_publication"].as_str() else {
+        return Ok(None);
+    };
+    let claim: ClaimRecord = client.get(&format!(
+        "/v1/claims/by-id/{}", urlencoding::encode(id),
+    )).await?;
+    if claim.kind != "mission.published"
+        || claim.subject != run.mission
+        || claim.body["revision"].as_str() != Some(run.revision.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(MissionPublication {
+        revision: run.revision.clone(),
+        actor: claim.actor,
+        claim_id: claim.id,
+        origin: claim.origin,
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    }))
+}
+
+/// Older daemons may omit the sidecar from their run view. Join only the exact revision,
+/// never the mission's latest source or the requester's workspace.
+async fn load_run_source_provenance(client: &Client, run: &mut MissionRunView) -> Result<()> {
+    if run.provenance.is_some() {
+        return Ok(());
+    }
+    let subject = format!("{}@{}", run.mission, run.revision);
+    let page: ClaimsPage = client.get(&format!(
+        "/v1/claims?subject={}&kind=mission.provenance&order=asc&limit=1",
+        urlencoding::encode(&subject),
+    )).await?;
+    if let Some(claim) = page.claims.into_iter().next() {
+        run.provenance = Some(serde_json::from_value(
+            claim.body["fields"]["provenance"].clone(),
+        ).context("invalid mission revision provenance")?);
+    }
+    Ok(())
 }
 
 /// Say which revision a run started, and whether other revisions share the mission name.
@@ -9245,6 +9330,7 @@ async fn follow_mission_run_to(
     let client = &client;
     let mut prior = String::new();
     let mut event_feed = LocalEventFeed::default();
+    let mut attribution = BTreeMap::new();
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9266,7 +9352,20 @@ async fn follow_mission_run_to(
             String::new()
         };
         if summary != prior && let Some(page) = &page {
+            if !attribution.contains_key(&run.revision) {
+                load_run_source_provenance(client, &mut run).await?;
+                let publication = load_run_publication(client, &run).await?;
+                attribution.insert(
+                    run.revision.clone(),
+                    (run.provenance.clone(), mission_publication_note(publication.as_ref())),
+                );
+            }
+            let (provenance, publication_note) = &attribution[&run.revision];
+            if run.provenance.is_none() {
+                run.provenance.clone_from(provenance);
+            }
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
+            frame.push_str(publication_note);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
                     "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}\n",
@@ -13628,6 +13727,15 @@ fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue
             fenced.join(", ")
         )
     })
+}
+
+/// The messages routed to the stream that went to the graph since the daemon started, by code.
+fn render_stream_fallbacks(fallbacks: &BTreeMap<String, u64>) -> String {
+    if fallbacks.is_empty() {
+        return "none since start".into();
+    }
+    let counts = fallbacks.iter().map(|(code, count)| format!("{code}={count}")).collect::<Vec<_>>();
+    format!("{} since start", counts.join(" "))
 }
 
 /// This node's first sync in one line.
@@ -18840,6 +18948,9 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        if frame["type"] == "admission_fallback" {
+            return Ok(state.accept_admission_fallback(subject, &frame));
+        }
         if frame["type"] == "delivered"
             && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
                 == Some(state.incarnation.as_str())
@@ -18998,6 +19109,9 @@ struct PiChannelResume {
     #[serde(default)]
     retry_after_ms: BTreeMap<String, u64>,
     failed_diagnostics: BTreeSet<String>,
+    /// First-message IDs of observed idle handoff/batch fallbacks, retained across reexec.
+    #[serde(default)]
+    admission_fallbacks_seen: BTreeSet<String>,
     // Historical resume-wire name: either idle or an explicit handoff-ready proof opens delivery.
     first_idle_seen: bool,
     frame_sequence: u64,
@@ -19012,6 +19126,33 @@ struct PiChannelResume {
 }
 
 impl PiChannelResume {
+    fn accept_admission_fallback(&mut self, subject: &str, frame: &Value) -> bool {
+        let Some(reason @ ("content-mismatch" | "no-message-start" | "timeout")) =
+            frame["reason"].as_str()
+        else {
+            return false;
+        };
+        if self.incarnation.is_empty()
+            || frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                != Some(self.incarnation.as_str())
+            || frame.pointer("/meta/identity").and_then(Value::as_str)
+                != Some(subject.strip_prefix("agent/").unwrap_or(subject))
+        {
+            return false;
+        }
+        let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+        else {
+            return false;
+        };
+        if !self.admission_fallbacks_seen.insert(message.to_owned()) {
+            return false;
+        }
+        // Never retain the wire frame: it can contain prompt content or unrelated metadata.
+        self.pending.admission_fallbacks.insert(message.to_owned(), reason.to_owned());
+        true
+    }
+
     fn record_input_attempt(&self, message: &str) -> Result<()> {
         let dir = self.pending.input_source_dir.as_deref()
             .context("native input source has no durable journal")?;
@@ -19210,6 +19351,9 @@ struct PiFamilyReports {
     input_source_dir: Option<PathBuf>,
     #[serde(default)]
     input_source_ready: bool,
+    /// One fallback per idle handoff/batch, identified by its first message, not every member.
+    #[serde(default)]
+    admission_fallbacks: BTreeMap<String, String>,
 }
 
 impl PiFamilyReports {
@@ -19222,6 +19366,14 @@ impl PiFamilyReports {
         session: &str,
     ) -> Result<()> {
         let source_cut = u64::try_from(current_unix_ms()?)?;
+        while let Some((message, reason)) = self.admission_fallbacks.first_key_value()
+            .map(|(message, reason)| (message.clone(), reason.clone()))
+        {
+            let _: ClaimRecord = client.post("/v1/claims",
+                &omp_channel_admission_fallback_claim(subject, incarnation, &message, &reason),
+            ).await?;
+            self.admission_fallbacks.remove(&message);
+        }
         if let Some((status, sequence)) = self.state.clone() {
             let _: ClaimRecord = client
                 .post(
@@ -19395,6 +19547,30 @@ impl PiFamilyReports {
             }
         }
         Ok(())
+    }
+}
+
+/// Content-free observation, not a failed delivery: awaiting the run remains the hook's owner.
+fn omp_channel_admission_fallback_claim(
+    subject: &str, incarnation: &str, message: &str, reason: &str,
+) -> ClaimInput {
+    ClaimInput {
+        subject: subject.into(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("code".into(), json!("omp-channel-admission-fallback")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("message_id".into(), json!(message)),
+            ("reason".into(), json!(reason)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        // The first observed reason wins even if the same handoff frame is replayed.
+        idempotency_key: Some(format!(
+            "omp-channel-admission-fallback:{subject}:{incarnation}:{message}"
+        )),
     }
 }
 
@@ -22999,6 +23175,61 @@ async fn retire_closed_mail(store: Arc<Store>) {
         if claims > 0 {
             stderr_message("fractal", format_args!(
                 "closed mail retired: {threads} threads, {claims} claims, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+                longest.as_millis(),
+                pass_started.elapsed().as_secs(),
+            ));
+        }
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
+/// Move blob bytes into the store's blob file (`smallclaims::store::blob_file`), hourly, once
+/// `[store] blob_move_after` has passed since this member first ran the build. Each step is two
+/// short writer holds and is followed by a rest of four times the longer, at least 100 ms; the
+/// emptied pages go back to the filesystem as it goes.
+async fn move_blob_bytes(store: Arc<Store>, move_after_ms: u64) {
+    const PASS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    const HOLD_BUDGET: Duration = Duration::from_millis(40);
+    // Bytes moved between giving free pages back, so a long first pass shrinks the file early.
+    const RELEASE_EVERY_BYTES: u64 = 64 << 20;
+    tokio::time::sleep(first_observation_trim_delay()).await;
+    loop {
+        let pass_started = Instant::now();
+        let (mut rows, mut bytes, mut unreleased, mut released) = (0, 0, 0, 0);
+        let mut longest = Duration::ZERO;
+        loop {
+            let step_store = store.clone();
+            let step = match store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("blobs.move", || {
+                    step_store.move_blob_bytes_step(u64::try_from(now_ms()).unwrap_or(u64::MAX), move_after_ms, HOLD_BUDGET)
+                })
+            }).await {
+                Ok(Ok(step)) => step,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("moving blob bytes failed: {error:#}"));
+                    break;
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("moving blob bytes stopped: {error}"));
+                    break;
+                }
+            };
+            rows += step.rows;
+            bytes += step.bytes;
+            unreleased += step.bytes;
+            longest = longest.max(step.hold);
+            if unreleased >= RELEASE_EVERY_BYTES || (!step.more && unreleased > 0) {
+                released += release_free_pages_paced(&store).await;
+                unreleased = 0;
+            }
+            if !step.more {
+                break;
+            }
+            tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+        }
+        if rows > 0 {
+            stderr_message("fractal", format_args!(
+                "blob bytes moved to the blob file: {rows} blobs, {bytes} bytes, gave {released} free pages back, longest writer hold {} ms, pass {} s",
                 longest.as_millis(),
                 pass_started.elapsed().as_secs(),
             ));

@@ -38,6 +38,34 @@ fn replay_returns_this_attempts_results_in_order() {
 }
 
 #[test]
+fn completed_result_selects_only_the_exact_program_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = "step-run/generation/program";
+    let hash = "a".repeat(64);
+    entry(&engine, step, "inner", "completed", 1, json!({"not": "the return"}));
+    assert_eq!(completed_result(&engine.store, step, 1, &hash).unwrap(), None);
+    entry(&engine, step, RESULT_KEY, "completed", 1, json!({"summary": "real output"}));
+    assert_eq!(completed_result(&engine.store, step, 1, &hash).unwrap(), Some(json!({"summary": "real output"})));
+    assert_eq!(completed_result(&engine.store, step, 2, &hash).unwrap(), None);
+    assert_eq!(completed_result(&engine.store, step, 1, &"b".repeat(64)).unwrap(), None);
+    entry(&engine, step, RESULT_KEY, "failed", 2, json!({"_tag": "ChildFailed"}));
+    assert_eq!(completed_result(&engine.store, step, 2, &hash).unwrap(), None);
+}
+
+#[test]
+fn completed_result_preserves_null_and_pages_past_inner_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = "step-run/generation/program";
+    entry(&engine, step, RESULT_KEY, "completed", 1, Value::Null);
+    for n in 0..=JOURNAL_PAGE {
+        entry(&engine, step, &format!("inner-{n}"), "completed", 1, json!(n));
+    }
+    assert_eq!(completed_result(&engine.store, step, 1, &"a".repeat(64)).unwrap(), Some(Value::Null));
+}
+
+#[test]
 fn replay_pages_through_long_journals_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
@@ -536,6 +564,25 @@ fn resource_protocol_preserves_native_identity_and_exact_cancellation() {
     assert!(wait("step-run/generation/check", 2, "checks", &json!({
         "t": "resource", "operation": "resource.lane.acquire", "payload": null
     })).is_err());
+}
+
+#[test]
+fn native_turn_protocol_preserves_payload_and_exact_cancellation() {
+    let payload = json!({"agent": "agent/worker", "instructions": "do the work", "context": "{}"});
+    for cancelled in [false, true] {
+        let message = json!({
+            "t": if cancelled { "resource-cancel" } else { "resource" },
+            "operation": "agent.turn", "payload": payload,
+        });
+        match wait("step-run/generation/turn", 2, "agent.turn/work", &message).unwrap() {
+            Wait::Resource { operation, payload: actual, cancelled: actual_cancelled } => {
+                assert_eq!(operation, "agent.turn");
+                assert_eq!(actual, payload);
+                assert_eq!(actual_cancelled, cancelled);
+            }
+            other => panic!("native turn request changed kind: {other:?}"),
+        }
+    }
 }
 
 #[test]
