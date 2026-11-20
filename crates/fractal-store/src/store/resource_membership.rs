@@ -475,10 +475,10 @@ impl Store {
         let transaction = connection.transaction()?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
-        super::resource_admission_objectives::recover(&transaction, host, epoch)?;
+        let complete = super::resource_admission_objectives::recover(&transaction, host, epoch)?;
         transaction.commit()?;
         self.fractal.extensions.get::<super::resource_admission_objectives::Coverage>().0
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(complete, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -988,6 +988,69 @@ mod tests {
         assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
         let after = serde_json::to_value(store.resource_membership_record(&request.id, &request.owner).unwrap()).unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn authority_startup_replays_newer_evidence_without_extending_admission_authority() {
+        use super::super::resource_admission_objectives::{Coverage as AdmissionCoverage, COVERAGE_KIND, KIND};
+        use std::sync::atomic::Ordering;
+
+        for (class, refusal, complete) in [
+            (RequestClass::Unknown("future-class".into()), None, false),
+            (RequestClass::Unknown("recovery".into()), Some(RefusalCode::RecoveryNotAllowed), false),
+            (RequestClass::Agent, Some(RefusalCode::RecoveryNotAllowed), true),
+            (RequestClass::Check, None, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("graph.db");
+            let persisted_request = request("persisted");
+            let old_grant;
+            let body;
+            {
+                let store = Store::open(&path, "host-a").unwrap();
+                store.start_resource_authority("host-a", "epoch-a").unwrap();
+                old_grant = grant(&store, &persisted_request, 1);
+                let mut member = store.resource_membership_record(&persisted_request.id, &persisted_request.owner).unwrap();
+                member.request.class = class.clone();
+                member.refusal_code = refusal;
+                // Seed authoritative bytes from a newer writer, without going through this
+                // binary's evidence writer. Acquisition must replay them after reopening.
+                body = serde_json::to_string(&member).unwrap();
+                store.connection.write().execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+                    rusqlite::params![persisted_request.id, body]).unwrap();
+            }
+            let store = Store::open(&path, "host-a").unwrap();
+            assert!(!store.fractal.extensions.get::<AdmissionCoverage>().0.load(Ordering::Acquire));
+            store.start_resource_authority("host-a", "epoch-b").unwrap();
+            assert_eq!(store.fractal.extensions.get::<AdmissionCoverage>().0.load(Ordering::Acquire), complete);
+            let evidence = store.claims_by_kinds_after(&[KIND], None, 0, 100).unwrap().claims;
+            let fields = &evidence.last().unwrap().body["fields"];
+            assert_eq!(fields["class"], serde_json::to_value(&class).unwrap());
+            assert_eq!(fields["refusal"], serde_json::to_value(refusal).unwrap());
+            let cuts = store.claims_by_kinds_after(&[COVERAGE_KIND], None, 0, 100).unwrap().claims;
+            assert_eq!(cuts.last().unwrap().body["fields"]["complete"], json!(complete));
+            assert!(store.prepare_resource_membership(&old_grant, "stale-root").is_err());
+            if !complete {
+                assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
+                let retained: String = store.connection.write().query_row(
+                    "SELECT body FROM resource_memberships_v1 WHERE id=?1", [&persisted_request.id], |row| row.get(0)).unwrap();
+                assert_eq!(retained, body, "unsupported custody must remain byte-for-byte intact");
+                let mut unsupported = request("unsupported");
+                unsupported.class = class;
+                assert!(store.request_resource_membership(&unsupported, test_fit(), 3).is_err());
+            }
+            // An uncertified SLO source must not disable supported work or ignore held custody.
+            let mut supported = request("supported");
+            supported.name = "executor/supported".into();
+            let admitted = match store.request_resource_membership(&supported, test_fit(), 4).unwrap() {
+                Admission::Admitted(grant) => grant,
+                other => panic!("supported admission blocked after startup: {other:?}"),
+            };
+            assert_eq!(admitted.authority_epoch, "epoch-b");
+            assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 512 << 20);
+            store.start_resource_authority("host-a", "epoch-c").unwrap();
+            assert_eq!(store.fractal.extensions.get::<AdmissionCoverage>().0.load(Ordering::Acquire), complete);
+        }
     }
 
     #[test]
