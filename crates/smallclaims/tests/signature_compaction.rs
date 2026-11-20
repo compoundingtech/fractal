@@ -390,6 +390,21 @@ fn the_writer_compacts_each_claim_as_it_settles_and_fences_the_store() {
     assert!(store.signature_state_faults().unwrap().is_empty());
 }
 
+/// The fence is max(current, 26): a store a later writer already raised (to 27, for valid-row
+/// deletion) compacts and keeps its higher version.
+#[test]
+fn a_store_at_a_later_version_compacts_and_keeps_it() {
+    let (_directory, store, _anchor) = studio();
+    store.connection.write().pragma_update(None, "user_version", 27).unwrap();
+    let claim = note(&store, None, "compacted at 27");
+    seal(&store);
+    drain(&store);
+    assert_eq!(compact(&store), count(&store, "SELECT COUNT(*) FROM claim_signatures"));
+    assert_eq!(user_version(&store), 27, "never lowered to 26");
+    assert_eq!(writer_flag(&store).as_deref(), Some("1"));
+    assert_eq!(verdict(&store, &claim), Verdict::Verified);
+}
+
 #[test]
 fn the_paced_pass_compacts_what_an_earlier_release_kept_whole() {
     let (_directory, store, _anchor) = studio();
