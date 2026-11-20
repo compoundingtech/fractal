@@ -105,7 +105,9 @@ pub fn send_work_wake(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, 
         let sent = send(store, input)?;
         // The step views and the wake deadline read the mirror, so it takes the wake at once, as
         // the outbox's drain does. Should this fail, the daemon's mirror loop catches it up.
-        let _ = super::stream_mirror::mirror(store);
+        if let Err(error) = super::stream_mirror::mirror(store) {
+            tracing::warn!(error = %format!("{error:#}"), "mirroring a work wake after its send failed");
+        }
         return Ok(sent);
     }
     store.append_claim(input)

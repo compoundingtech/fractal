@@ -22200,12 +22200,12 @@ fn work_wake_acknowledged(
         }) && attempts.iter().any(|(_, message)| message.status == "staged")
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The subject of the work wake sent under `idempotency_key`, in either store.
 pub fn work_wake_subject(idempotency_key: &str) -> String {
     format!("message/{}", &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn append_work_wake_message(
     store: &Store,
     step: &StepRunView,
