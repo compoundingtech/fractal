@@ -268,6 +268,8 @@ check below. No custody layout or configurable cgroup root is exposed.
 released root, live grant, enforced coverage and execution generation, then verifies the running
 runtime binding and exact kernel cgroup path. Parent slices, sibling generations, ended roots,
 retiring memberships and logical-only execution are not proof of a live enforced member.
+This cgroup proof endpoint is Linux-only; Darwin UID custody does not make `member-scope`
+available, even when shell execution is admitted.
 
 A root helper must independently read its own unified `/proc/self/cgroup` entry and require
 **exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_MEMBER_EXEC_ID`; prefix matching
