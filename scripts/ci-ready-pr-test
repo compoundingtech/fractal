@@ -33,6 +33,7 @@ def evaluate(expression, event, draft, pr_repository, run_repository, prior_cond
 
 
 count = ready_count = always_count = cancellation_count = 0
+self_hosted_pr_count = 0
 for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
     workflow = path.read_text()
     triggers, jobs = workflow.split('\njobs:\n', 1)
@@ -57,6 +58,17 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         condition = ast.literal_eval(raw) if raw.startswith(('"', "'")) else raw
         expression = condition.removeprefix('${{ ').removesuffix(' }}')
         assert expression.startswith(OUTER_PREFIX) and expression.endswith(')'), (path.name, name, condition)
+        if has_pr:
+            route = re.search(r'^    runs-on:(.*(?:\n      .*)*)', block, re.M)
+            assert route, (path.name, name, 'missing runner route')
+            # Only a literal hosted label is exempt. Expressions, matrices and
+            # label arrays may select self-hosted capacity and must fail closed.
+            hosted_only = re.fullmatch(r"\s*['\"]?(?:ubuntu|windows|macos)-[\w.-]+['\"]?\s*", route[1])
+            if not hosted_only:
+                assert expression.startswith(FORK_GUARD + ' && '), (
+                    path.name, name, 'self-hosted pull_request job lacks same-repository guard',
+                )
+                self_hosted_pr_count += 1
         predicate = expression[len(OUTER_PREFIX):]
         # Substitute only the original predicate: exercise the actual generated
         # admission envelope on every job, even workflows without PR triggers.
@@ -120,4 +132,6 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
 assert ready_count >= 20, ready_count
 assert count >= ready_count, (count, ready_count)
 assert always_count and cancellation_count, (always_count, cancellation_count)
+assert self_hosted_pr_count > 0, 'no self-hosted pull_request jobs checked'
+print('passed:', self_hosted_pr_count, 'potentially self-hosted pull_request jobs require the same-repository guard')
 print('passed:', count, 'generated job origin guards;', ready_count, 'ready-PR guards; missing identities fail closed')

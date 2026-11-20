@@ -88,13 +88,17 @@ auto-merge before the fresh ready-head checks register. Re-running an old draft 
 old draft event and stays skipped; use the ready transition or a new push for fresh checks.
 
 Job guards do not protect against fork-controlled YAML: a fork can remove a guard.
-Before enabling these routes, CI Manager / the repository owner must configure
-runner-group or repository restrictions to disallow public-repository fork PRs on
-self-hosted runners, and require approval for outside-collaborator workflow runs.
-This workflow change does not modify those settings. Keep the migration draft
-until the settings prerequisite is confirmed. A reviewed external contribution
-must enter an authorized same-repository PR and pass the real required checks;
-do not dispatch its fork head onto the fleet or manufacture passing checks.
+The repository security boundary is **Require approval for all external contributors**.
+Keep the runner-group settings unchanged: selected repositories, public repositories
+allowed, all workflows. Every job moved onto a self-hosted route retains the
+same-repository pull-request guard; merge-group and push events remain admitted.
+Organization members are trusted: member forks have no additional per-run gate.
+Do not add a main-ref allowlist: it would break merge-group, PR and tag refs.
+CI Manager / the repository owner confirms the repository approval setting; this
+workflow change modifies neither repository nor runner-group settings.
+The migration stays draft/HOLD while mission design, status-credential custody
+and capacity gates remain open. `scripts/ci-ready-pr-test` rejects any potentially
+self-hosted pull-request job missing the same-repository guard.
 
  `Workspace CI` also runs on the `merge_group` event, so GitHub's merge queue receives
 the required checks for each queued entry.

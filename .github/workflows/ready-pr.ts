@@ -14,7 +14,8 @@ export const readyPRJobs = <T extends { jobs: Record<string, any> }>(workflow: T
 }) as T
 
 /** Job admission is defense in depth, not a boundary against fork-controlled YAML.
- * Runner-group restrictions and outside-collaborator approval must be enforced separately.
+ * Repository approval for all external contributors is the security boundary.
+ * Runner-group settings stay unchanged; do not add a main-ref allowlist.
  */
 export const withoutForkPRJobs = <T extends { jobs: Record<string, any> }>(workflow: T): T => ({
   ...workflow,
