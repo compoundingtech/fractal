@@ -365,6 +365,26 @@ describe('standard native worker binding', () => {
     expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
   }))
 
+  it.effect('preserves prototype-named instruction and agent mappings as own input fields', () => Effect.gen(function* () {
+    for (const mapping of [
+      { goalInput: '__proto__', agentInput: 'assignee' },
+      { goalInput: 'prompt', agentInput: '__proto__' },
+    ]) {
+      const host = fakeHost({ payload: {}, child: async ({ key, input }) => {
+        expect(Object.hasOwn(input, mapping.goalInput)).toBe(true)
+        expect(typeof input[mapping.goalInput]).toBe('string')
+        expect(input[mapping.goalInput]!.length).toBeGreaterThan(0)
+        expect(Object.hasOwn(input, mapping.agentInput)).toBe(true)
+        expect(input[mapping.agentInput]).toBe('agent/example/worker')
+        return completed(key)
+      } })
+      const compiled = lower(diamond(), { ...bindings, workers: { 'example/worker': {
+        mission: 'example/custom-turn', contextInput: 'data', ...mapping,
+      } } })
+      expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
+    }
+  }))
+
   it.effect('does not accept an unreported child success even when no product was requested', () => Effect.gen(function* () {
     const host = fakeHost({ payload: {}, child: async ({ key }) => completed(key) })
     expect(yield* start(lower(diamond(), { id: bindings.id, host: 'local' }), host)).toMatchObject({

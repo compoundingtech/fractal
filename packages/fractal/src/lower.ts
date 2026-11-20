@@ -188,11 +188,14 @@ export const lower = (
           path: paths[index]!, kind: expand(product.fields.kind as string),
           fields: Object.fromEntries(Object.entries(product.fields).map(([key, value]) => [key, typeof value === 'string' ? expand(value) : value])),
         }))
-        const input = step.worker.contextInput === undefined ? { ...values } : {
-          [step.worker.contextInput]: JSON.stringify({ inputs: values, products: specs }),
+        const input = {
+          ...(step.worker.contextInput === undefined ? values : {
+            [step.worker.contextInput]: JSON.stringify({ inputs: values, products: specs }),
+          }),
+          [step.worker.goalInput]: instructions,
+          ...(step.worker.agentInput !== undefined && step.agent !== undefined && 'id' in step.agent
+            ? { [step.worker.agentInput]: `agent/${step.agent.id}` } : {}),
         }
-        input[step.worker.goalInput] = instructions
-        if (step.worker.agentInput !== undefined && step.agent !== undefined && 'id' in step.agent) input[step.worker.agentInput] = `agent/${step.agent.id}`
         const worker = Native.Worker.layer({
           mission: step.worker.mission, input,
           ...(step.worker.report === undefined ? {} : { report: step.worker.report }),

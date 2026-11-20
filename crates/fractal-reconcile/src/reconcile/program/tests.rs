@@ -567,6 +567,25 @@ fn resource_protocol_preserves_native_identity_and_exact_cancellation() {
 }
 
 #[test]
+fn native_turn_protocol_preserves_payload_and_exact_cancellation() {
+    let payload = json!({"agent": "agent/worker", "instructions": "do the work", "context": "{}"});
+    for cancelled in [false, true] {
+        let message = json!({
+            "t": if cancelled { "resource-cancel" } else { "resource" },
+            "operation": "agent.turn", "payload": payload,
+        });
+        match wait("step-run/generation/turn", 2, "agent.turn/work", &message).unwrap() {
+            Wait::Resource { operation, payload: actual, cancelled: actual_cancelled } => {
+                assert_eq!(operation, "agent.turn");
+                assert_eq!(actual, payload);
+                assert_eq!(actual_cancelled, cancelled);
+            }
+            other => panic!("native turn request changed kind: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_reply_race() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());

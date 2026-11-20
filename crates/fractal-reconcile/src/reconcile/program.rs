@@ -1307,7 +1307,7 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
     if matches!(message["t"].as_str(), Some("resource" | "resource-cancel")) {
         let operation = text("operation")?;
         if !matches!(operation.as_str(),
-            "resource.lane.acquire" | "resource.lane.release" | "resource.lane.exec" | "resource.lane.run")
+            "resource.lane.acquire" | "resource.lane.release" | "resource.lane.exec" | "resource.lane.run" | "agent.turn")
         {
             return Err(format!("unknown resource operation `{operation}`"));
         }
