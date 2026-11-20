@@ -1,9 +1,10 @@
 //! Each claim carries its writer's signature (`store::member_signatures`): the writer signs its
 //! own claims, the signatures travel beside the envelopes that carry the claims, and a peer keeps
-//! only those that verify for that writer.
+//! only those that verify with a key the membership admits for that writer and that name a claim
+//! of that writer.
 use smallclaims::{
     claim::ClaimInput,
-    fleet::MemberKey,
+    fleet::{MemberKey, keys::claim_signature_message},
     store::{Store, member_signatures::ClaimMemberSignature, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -24,9 +25,10 @@ fn note(store: &Store, n: usize) {
         .unwrap();
 }
 
-fn node(name: &str, key: Option<&Arc<MemberKey>>) -> Store {
+fn node(name: &str, key: Option<&Arc<MemberKey>>, anchor: &Arc<MemberKey>) -> Store {
     let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(anchor.public()).unwrap();
     if let Some(key) = key {
         store.set_member_key(Some(key.clone())).unwrap();
     }
@@ -49,10 +51,42 @@ fn own_claims(store: &Store) -> usize {
         .unwrap()
 }
 
+/// Bring `peer` level with `source`, keeping the signatures each exchange carries.
+fn sync(source: &Store, peer: &Store) {
+    for _ in 0..8 {
+        let exchange = source
+            .export_replication_exchange(FLEET, &peer.replication_inventory().unwrap())
+            .unwrap();
+        if exchange.envelopes.is_empty() {
+            break;
+        }
+        peer.receive_replication_exchange(source.origin(), FLEET, &exchange).unwrap();
+        peer.validate_replication_backlog().unwrap();
+        peer.project_replication_backlog().unwrap();
+    }
+}
+
+/// One of `store`'s signatures, for a claim alder wrote, with its batch's sequence.
+fn some_signature(store: &Store) -> ClaimMemberSignature {
+    let claim: String = store
+        .connection
+        .write()
+        .query_row(
+            "SELECT claims.id FROM claims JOIN claim_member_signatures s ON s.claim_id=claims.id
+             WHERE claims.kind='example.note' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store.claim_member_signatures_for(&[claim]).unwrap().remove(0)
+}
+
 #[test]
 fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
+    // alder is the fleet's anchor member, so its key is the one membership admits for it.
     let key = Arc::new(MemberKey::generate().unwrap().0);
-    let alder = node("alder", Some(&key));
+    let alder = node("alder", Some(&key), &key);
+    alder.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
     for n in 0..700 {
         note(&alder, n);
     }
@@ -61,36 +95,44 @@ fn a_writer_signs_its_claims_and_a_peer_keeps_only_signatures_that_verify() {
     assert_eq!(signed(&alder), own_claims(&alder));
     assert_eq!(alder.sign_own_claims().unwrap().signed, 0);
 
-    // The signatures ride with the envelopes that carry their claims.
-    let birch = node("birch", None);
-    let mut kept = 0;
-    for _ in 0..8 {
-        let exchange = alder
-            .export_replication_exchange(FLEET, &birch.replication_inventory().unwrap())
-            .unwrap();
-        if exchange.envelopes.is_empty() {
-            break;
-        }
-        assert!(!exchange.claim_member_signatures.is_empty());
-        birch.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
-        birch.validate_replication_backlog().unwrap();
-        kept = signed(&birch);
-    }
-    assert_eq!(kept, signed(&alder), "the peer keeps every signature of alder's claims");
+    // The signatures ride with the envelopes that carry their claims, and the peer keeps each.
+    let birch = node("birch", None, &key);
+    sync(&alder, &birch);
+    while birch.promote_claim_member_signatures().unwrap() > 0 {}
+    assert_eq!(signed(&birch), signed(&alder), "the peer keeps every signature of alder's claims");
 
-    // A forged signature, or one by a key that is not the writer's, is dropped.
-    let cedar = node("cedar", None);
-    let mut signature: ClaimMemberSignature = alder
-        .claim_member_signatures_for(&[alder
-            .connection
-            .write()
-            .query_row("SELECT claim_id FROM claim_member_signatures LIMIT 1", [], |row| row.get::<_, String>(0))
-            .unwrap()])
-        .unwrap()
-        .remove(0);
+    let genuine = some_signature(&birch);
     let other = MemberKey::generate().unwrap().0;
-    let mut wrong_key = signature.clone();
-    wrong_key.member_key = other.public().to_owned();
-    signature.signature = other.sign(b"something else");
-    assert_eq!(cedar.receive_claim_member_signatures(&[signature, wrong_key]).unwrap(), 0);
+    let message = |writer: &str, sequence: u64, claim: &str| claim_signature_message(FLEET, writer, sequence, claim);
+
+    // A signature that verifies, by a key membership does not admit for alder, is dropped.
+    let unadmitted = ClaimMemberSignature {
+        member_key: other.public().to_owned(),
+        signature: other.sign(&message(&genuine.writer, genuine.sequence, &genuine.claim_id)),
+        ..genuine.clone()
+    };
+    // A signature that verifies for a writer membership does not key (cedar), naming alder's
+    // claim, is dropped: the claim's batch is alder's.
+    let foreign = ClaimMemberSignature {
+        writer: "cedar".into(),
+        member_key: other.public().to_owned(),
+        signature: other.sign(&message("cedar", genuine.sequence, &genuine.claim_id)),
+        ..genuine.clone()
+    };
+    // Altered bytes do not verify.
+    let forged = ClaimMemberSignature { signature: other.sign(b"something else"), ..genuine.clone() };
+    assert_eq!(birch.receive_claim_member_signatures(&[unadmitted, foreign.clone(), forged]).unwrap(), 0);
+    assert_eq!(signed(&birch), signed(&alder), "no signature was added beside the genuine ones");
+
+    // A signature for a claim not held yet waits, and is dropped once the claim turns out to be
+    // another writer's.
+    let cedar = node("cedar", None, &key);
+    assert_eq!(cedar.receive_claim_member_signatures(&[foreign]).unwrap(), 0);
+    sync(&alder, &cedar);
+    while cedar.promote_claim_member_signatures().unwrap() > 0 {}
+    assert_eq!(
+        cedar.claim_member_signatures_for(&[genuine.claim_id.clone()]).unwrap(),
+        vec![genuine],
+        "only alder's own signature is kept for alder's claim"
+    );
 }

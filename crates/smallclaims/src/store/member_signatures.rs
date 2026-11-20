@@ -6,23 +6,38 @@
 //!
 //! A writer signs its own claims in a paced background pass, the new ones and those it held
 //! before this build (`sign_own_claims`). Signatures travel beside the claims in an exchange's
-//! `claim_member_signatures` and are kept only after the signature verifies with a key the
-//! membership window admits for that writer and sequence. An older peer ignores the field.
+//! `claim_member_signatures`. A member keeps one only after it verifies with a key the membership
+//! window admits for that writer and sequence, and only for a claim whose batch names that writer
+//! and sequence. The claim id does not name its writer, so a signature for a claim not held yet
+//! waits in `claim_member_signature_pending` until the claim arrives
+//! (`promote_claim_member_signatures`); a member's key can sign only its own claims. An older
+//! peer ignores the field.
 use super::*;
-use std::time::{Duration, Instant};
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc057e3fd627d owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a55fb29678a owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_member_signatures (
     id INTEGER PRIMARY KEY,
-    claim_id TEXT NOT NULL UNIQUE,
+    claim_id TEXT NOT NULL,
     member_key TEXT NOT NULL,
-    signature TEXT NOT NULL
+    signature TEXT NOT NULL,
+    UNIQUE(claim_id, member_key)
 );
+CREATE TABLE IF NOT EXISTS claim_member_signature_pending (
+    claim_id TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    member_key TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    received_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY(claim_id, member_key)
+) WITHOUT ROWID;
 ";
 
 const SIGN_CURSOR: &str = "claim_member_signature_cursor";
 const SIGN_PAGE: usize = 512;
-const STORE_BUDGET: Duration = Duration::from_millis(10);
+const PROMOTE_PAGE: usize = 512;
+/// A signature for a claim that never arrives is dropped after this long.
+const PENDING_KEEP_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 
 /// One claim's writer signature, as an exchange carries it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,12 +79,12 @@ impl Store {
             let page = connection
                 .prepare_cached(
                     "SELECT claims.store_index, claims.id, batches.replica_sequence,
-                            EXISTS(SELECT 1 FROM claim_member_signatures WHERE claim_id=claims.id)
+                            EXISTS(SELECT 1 FROM claim_member_signatures WHERE claim_id=claims.id AND member_key=?4)
                      FROM claims JOIN batches ON batches.id=claims.batch_id
                      WHERE claims.store_index>?1 AND claims.origin=?2
                      ORDER BY claims.store_index LIMIT ?3",
                 )?
-                .query_map(params![after, self.origin, SIGN_PAGE], |row| {
+                .query_map(params![after, self.origin, SIGN_PAGE, key.public()], |row| {
                     Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?, row.get::<_, bool>(3)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -110,7 +125,9 @@ impl Store {
     }
 
     /// Keep the writer signatures a peer sent that verify with a key the membership window
-    /// admits for that writer and sequence. Returns how many it kept; one that does not verify is
+    /// admits for that writer and sequence, each for the claim it names only if that claim's batch
+    /// is that writer's at that sequence. One for a claim not held here yet waits until it is.
+    /// Returns how many it kept; one that does not verify, or names another writer's claim, is
     /// dropped.
     pub fn receive_claim_member_signatures(&self, signatures: &[ClaimMemberSignature]) -> Result<usize> {
         if signatures.is_empty() {
@@ -142,20 +159,82 @@ impl Store {
         if verified.is_empty() {
             return Ok(0);
         }
+        let now = i64::try_from(now_ms())?;
+        // Every signature of one exchange is decided in one write: an exchange carries the
+        // signatures of the envelopes it sends, at most its envelope limit's claims.
         self.connection
             .batched(|tx| -> Result<usize> {
-                let started = Instant::now();
                 let mut kept = 0;
                 for signature in verified {
-                    // The claim id hashes its batch, which hashes this writer and sequence, so a
-                    // signature that verifies names exactly one claim, held here yet or not:
-                    // signatures travel beside envelopes that are admitted after they arrive.
-                    kept += insert_signature_tx(tx, signature)?;
-                    if started.elapsed() >= STORE_BUDGET {
-                        break;
+                    match claim_writer_tx(tx, &signature.claim_id)? {
+                        Some((writer, sequence)) => {
+                            if writer == signature.writer && sequence == signature.sequence {
+                                kept += insert_signature_tx(tx, signature)?;
+                            }
+                        }
+                        None => {
+                            tx.execute(
+                                /* sqlite-large-value: allow-for-now lv-h39694ad7823a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signature_pending(
+                                     claim_id, writer, sequence, member_key, signature, received_at_unix_ms)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                params![signature.claim_id, signature.writer, signature.sequence,
+                                    signature.member_key, signature.signature, now],
+                            )?;
+                        }
                     }
                 }
                 Ok(kept)
+            })
+            .map_err(anyhow::Error::msg)?
+    }
+
+    /// Keep the waiting signatures whose claims have arrived and whose batch names the signing
+    /// writer and sequence, drop those whose claim names another writer or sequence, and drop
+    /// those older than a month whose claim never came. One bounded page; returns how many it
+    /// settled.
+    pub fn promote_claim_member_signatures(&self) -> Result<usize> {
+        let now = i64::try_from(now_ms())?;
+        let keep = i64::try_from(PENDING_KEEP_MS)?;
+        self.connection
+            .batched(|tx| -> Result<usize> {
+                let page = tx
+                    .prepare_cached(
+                        "SELECT claim_id, writer, sequence, member_key, signature, received_at_unix_ms
+                         FROM claim_member_signature_pending LIMIT ?1",
+                    )?
+                    .query_map([PROMOTE_PAGE], |row| {
+                        Ok((
+                            ClaimMemberSignature {
+                                claim_id: row.get(0)?,
+                                writer: row.get(1)?,
+                                sequence: row.get(2)?,
+                                member_key: row.get(3)?,
+                                signature: row.get(4)?,
+                            },
+                            row.get::<_, i64>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut settled = 0;
+                for (signature, received) in &page {
+                    let decided = match claim_writer_tx(tx, &signature.claim_id)? {
+                        Some((writer, sequence)) => {
+                            if writer == signature.writer && sequence == signature.sequence {
+                                insert_signature_tx(tx, signature)?;
+                            }
+                            true
+                        }
+                        None => now - received > keep,
+                    };
+                    if decided {
+                        tx.execute(
+                            /* sqlite-large-value: allow-for-now lv-h82059a59bb28 owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_member_signature_pending WHERE claim_id=?1 AND member_key=?2",
+                            params![signature.claim_id, signature.member_key],
+                        )?;
+                        settled += 1;
+                    }
+                }
+                Ok(settled)
             })
             .map_err(anyhow::Error::msg)?
     }
@@ -224,6 +303,17 @@ impl Store {
         }
         Ok(found)
     }
+}
+
+/// The writer and sequence of the batch that holds claim `id`, when this store holds it.
+fn claim_writer_tx(connection: &Connection, id: &str) -> Result<Option<(String, u64)>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT batches.origin, batches.replica_sequence FROM claims
+             JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3044a4adf888 owner=smallclaims::store::member_signatures TODO=trace-statement-and-value-representation */ [id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?)
 }
 
 fn insert_signature_tx(connection: &Connection, signature: &ClaimMemberSignature) -> Result<usize> {

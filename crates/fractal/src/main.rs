@@ -22303,7 +22303,12 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
 async fn sign_own_claims(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || page_store.sign_own_claims())).await;
+        // Signatures that wait for their claims are settled first: a page of them, then a page
+        // of this member's own claims to sign.
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+            page_store.promote_claim_member_signatures()?;
+            page_store.sign_own_claims()
+        })).await;
         let pause = match result {
             Ok(Ok(report)) if report.done => Duration::from_secs(5),
             Ok(Ok(_)) => Duration::from_millis(50),

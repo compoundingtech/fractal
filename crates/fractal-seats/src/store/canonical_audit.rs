@@ -69,6 +69,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_records",
         "claim_positions",
         "claim_member_signatures",
+        "claim_member_signature_pending",
         "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",

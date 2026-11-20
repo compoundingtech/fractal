@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Each claim carries its writer's own signature: every member signs the claims it writes (and, in a paced background pass, those it already held) with its member key, the signatures travel beside the envelopes that carry the claims, and a peer keeps one only when it verifies with a key membership admits for that writer and names a claim of that writer. This prepares releasing envelope history; nothing reads the signatures yet",
+  "replay": {
+    "status": "none",
+    "detail": "No replay; claims, envelopes and projections are unchanged."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "New tables claim_member_signatures (claim, member key, signature; one row per claim and key) and claim_member_signature_pending (a verified signature whose claim has not arrived yet; dropped after 30 days if it never does). New meta key claim_member_signature_cursor for the signing pass. No storage version change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet coordination change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Exchanges carry an optional claim_member_signatures list beside the envelopes they send (about 200 bytes per claim). Older peers neither send nor read it; their claims get a signature once their writer runs this build and signs its own. The signed message is st3-claim-v1, fleet, writer, sequence and claim id with the writer's member key."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "No startup work. After start each member signs its own retained claims in the background, 512 a page with signing outside the writer and one short write per page; on a member with three million claims of which a third are its own that is about two thousand pages."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback to the previous release is supported; it ignores the new tables and the exchange field."
+  }
+}
