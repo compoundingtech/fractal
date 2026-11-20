@@ -5,7 +5,7 @@
 //! node runs in the foreground under a temporary root, and no test installs a service.
 
 use fractal_daemon::WatchesStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -6596,9 +6596,51 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
     };
-    let unverified = |node: &Node| {
-        rows(node, "SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
-                     WHERE v.verdict IS NOT 'verified'")
+    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
+    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    let verdicts = |node: &Node| -> BTreeMap<String, String> {
+        let connection = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT s.claim_id, COALESCE(v.verdict, 'none') FROM claim_signatures s
+                      LEFT JOIN claim_verdicts v USING(claim_id)")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    // Settled: nothing queued for judgment, every signed claim has a verdict, and the node's own
+    // claims read verified.
+    let unsettled = |node: &Node| {
+        rows(node, &format!(
+            "SELECT (SELECT COUNT(*) FROM claim_verdict_queue)
+                  + (SELECT COUNT(*) FROM claim_signatures s LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE v.verdict IS NULL)
+                  + (SELECT COUNT(*) FROM claim_signatures s JOIN claims c ON c.id = s.claim_id
+                     LEFT JOIN claim_verdicts v USING(claim_id)
+                     WHERE c.origin = '{}' AND v.verdict IS NOT 'verified')",
+            node.name,
+        ))
+    };
+    macro_rules! settle {
+        ($node:expr) => {{
+            let node: &Node = $node;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while unsettled(node) != 0 {
+                assert!(Instant::now() < deadline, "{}: verdicts did not settle: {:?}", node.name, verdicts(node));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }};
+    }
+    let kept = |before: &BTreeMap<String, String>, after: &BTreeMap<String, String>, stage: &str| {
+        for (claim, verdict) in before {
+            assert_eq!(after.get(claim), Some(verdict), "{stage}: verdict of {claim} changed");
+        }
     };
     // Node-signed notes: no actor, so they need no verified caller ancestry on any host.
     let note = |node: &Node, text: &str| {
@@ -6630,24 +6672,30 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     }
     for node in [&o, &n] {
         wait_for_notes(node, &expected, 90, &[&o, &n]).await;
-        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+        settle!(node);
     }
     // The new member keeps no row for a settled verdict; the previous release keeps one each.
     assert_eq!(rows(&n, "SELECT COUNT(*) FROM claim_signature_judging"), 0);
     assert!(rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") > 0);
 
     // Upgrade in place: the prune drops the release's rows, verdicts and the set stay.
+    let judged = verdicts(&o);
     let before: BTreeSet<String> =
         o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    o.wait_listening().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
     wait_until("the upgraded member prunes settled judging rows", 120, || async {
         rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") == 0
     })
     .await;
-    assert_eq!(unverified(&o), 0);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "upgrade");
     let after: BTreeSet<String> =
         o.claims().await.into_iter().map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
     assert!(before.is_subset(&after), "upgrade lost history");
@@ -6657,36 +6705,48 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     }
     for node in [&o, &n] {
         wait_for_notes(node, &expected, 90, &[&o, &n]).await;
-        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+        settle!(node);
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
     // Roll back: the release reads every verdict, signs and replicates as before.
+    let judged = verdicts(&o);
     o.stop();
     o.binary = old;
     o.start().await;
-    o.wait_listening().await;
-    assert_eq!(unverified(&o), 0);
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "rollback");
     for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
         note(node, text).await;
         expected.insert(format!("custom/fleet-test/{text}"));
     }
     for node in [&o, &n] {
         wait_for_notes(node, &expected, 90, &[&o, &n]).await;
-        wait_until("every signed claim is verified", 60, || async { unverified(node) == 0 }).await;
+        settle!(node);
     }
 
     // Upgrade again: what the release kept meanwhile is pruned too.
+    let judged = verdicts(&o);
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    o.wait_listening().await;
+    // A legacy member dials its static peers and announces no endpoint: wait for its port.
+    wait_until("the restarted member listens", 30, || async {
+        tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
+    })
+    .await;
     wait_until("the re-upgraded member prunes again", 120, || async {
         rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") == 0
     })
     .await;
-    assert_eq!(unverified(&o), 0);
+    settle!(&o);
+    kept(&judged, &verdicts(&o), "re-upgrade");
 }
 
 /// A page cursor into the messages stream names its position in `stream_after` and leaves out
