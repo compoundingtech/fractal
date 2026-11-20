@@ -9,7 +9,7 @@ pub struct EscalationEpisode {
 
 // One row per clock-bearing receipt, ordered by the shared canonical key. Inserting an
 // out-of-order status changes only its own transition bit and the next status's bit.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6232d25a79e0 owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h08c7d25eba0f owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_escalation_clocks_v1 (
  store_index INTEGER PRIMARY KEY, subject TEXT NOT NULL, ordering BLOB NOT NULL,
  claim_id TEXT NOT NULL, state TEXT, at TEXT NOT NULL, pause_until TEXT,
@@ -23,23 +23,35 @@ CREATE TABLE IF NOT EXISTS local_escalation_pending_v1(store_index INTEGER PRIMA
 CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
  run_id TEXT PRIMARY KEY, origin TEXT NOT NULL
 );
-CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v1 AFTER INSERT ON claims
+DROP TRIGGER IF EXISTS local_escalation_insert_v1;
+DROP TRIGGER IF EXISTS local_escalation_change_v1;
+DROP TRIGGER IF EXISTS local_escalation_delete_v1;
+DROP TRIGGER IF EXISTS local_escalation_position_insert_v1;
+DROP TRIGGER IF EXISTS local_escalation_position_v1;
+-- An outer canonical-position UPSERT can override a trigger's OR IGNORE policy.
+-- Use an explicit UPSERT here so already-pending receipts remain idempotent.
+CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v2 AFTER INSERT ON claims
 WHEN (NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
  AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress') BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 VALUES(NEW.store_index); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_change_v1 AFTER UPDATE ON claims BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT NEW.store_index
+ INSERT INTO local_escalation_pending_v1 VALUES(NEW.store_index)
+ ON CONFLICT(store_index) DO NOTHING; END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_change_v2 AFTER UPDATE ON claims BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT NEW.store_index
  WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
  OR ((NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
- AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress')); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v1 AFTER DELETE ON claims BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT OLD.store_index
- WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index); END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v1 AFTER INSERT ON claim_positions BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;
-CREATE TRIGGER IF NOT EXISTS local_escalation_position_v1 AFTER UPDATE ON claim_positions
+ AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress'))
+ ON CONFLICT(store_index) DO NOTHING; END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v2 AFTER DELETE ON claims BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT OLD.store_index
+ WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
+ ON CONFLICT(store_index) DO NOTHING; END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v2 AFTER INSERT ON claim_positions BEGIN
+ INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
+ ON CONFLICT(store_index) DO NOTHING; END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_v2 AFTER UPDATE ON claim_positions
 WHEN OLD.position<>NEW.position BEGIN
- INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;
+ INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
+ ON CONFLICT(store_index) DO NOTHING; END;
 ";
 
 pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
@@ -205,6 +217,56 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_position_upserts_coalesce_pending_receipts_and_keep_the_minimum() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        insert(&tx, 1, 10, "ready", false);
+        insert(&tx, 2, 10, "working", false);
+        canonical::record_position_tx(&tx, "claim-1", 10).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 20).unwrap();
+        // Both receipts are already pending. A duplicate-envelope join must not
+        // inherit the outer UPSERT's conflict policy and reject the pending key.
+        canonical::record_position_tx(&tx, "claim-2", 1).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 0).unwrap();
+        canonical::record_position_tx(&tx, "claim-2", 30).unwrap();
+        let pending: u64 = tx.query_row("SELECT COUNT(*) FROM local_escalation_pending_v1",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(pending, 2);
+        let position: u64 = tx.query_row("SELECT position FROM claim_positions WHERE claim_id='claim-2'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(position, 0);
+        flush(&tx).unwrap();
+        assert_eq!(entry(&tx), "claim-1");
+        let ordering: Vec<u8> = tx.query_row("SELECT ordering FROM local_escalation_clocks_v1 WHERE claim_id='claim-2'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(ordering, canonical::sortable_key(&canonical::claim_key(&tx, "claim-2").unwrap()));
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn reopen_replaces_legacy_pending_triggers() {
+        let mut db = database();
+        db.execute_batch("DROP TRIGGER local_escalation_position_v2;
+            CREATE TRIGGER local_escalation_position_v1 AFTER UPDATE ON claim_positions
+            WHEN OLD.position<>NEW.position BEGIN
+            INSERT OR IGNORE INTO local_escalation_pending_v1
+            SELECT store_index FROM claims WHERE id=NEW.claim_id; END;").unwrap();
+        let tx = db.transaction().unwrap();
+        open(&tx).unwrap();
+        let legacy: u64 = tx.query_row("SELECT COUNT(*) FROM sqlite_schema
+            WHERE type='trigger' AND name='local_escalation_position_v1'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(legacy, 0);
+        insert(&tx, 1, 10, "ready", false);
+        canonical::record_position_tx(&tx, "claim-1", 10).unwrap();
+        canonical::record_position_tx(&tx, "claim-1", 1).unwrap();
+        canonical::record_position_tx(&tx, "claim-1", 0).unwrap();
+        flush(&tx).unwrap();
+        assert_eq!(entry(&tx), "claim-1");
+        tx.commit().unwrap();
+    }
 
     fn database() -> Connection {
         let mut db = Connection::open_in_memory().unwrap();
