@@ -256,14 +256,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let waits = self.seat_admission.status.state().lane_waits.clone();
         let finite = self.store.resource_memberships_for_host(&self.host)?;
-        for record in finite.iter().filter(|record| record.state == "queued") {
+        // Newer queued requests retain their durable bytes but cannot participate in this
+        // binary's executable FIFO. Actual held custody remains in the lane accountant.
+        for record in finite.iter().filter(|record| record.state == "queued"
+            && !matches!(record.request.class, fractal_runtime::RequestClass::Unknown(_))) {
             self.seat_admission.status.lane_wait_class(&record.request.id,
-                record.reason.clone(), true, now, record.request.class);
+                record.reason.clone(), true, now, record.request.class.clone());
         }
         let mut gone = BTreeSet::new();
         for wait in waits {
             if let Some(record) = finite.iter().find(|record| record.request.id == wait.subject) {
-                if record.state == "queued" {
+                if record.state == "queued"
+                    && !matches!(record.request.class, fractal_runtime::RequestClass::Unknown(_)) {
                     self.seat_admission.status.lane_tried(&wait.subject, now);
                 } else {
                     gone.insert(wait.subject);

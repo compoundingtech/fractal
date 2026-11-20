@@ -554,14 +554,25 @@ and adding the two measured changes. This run does not establish a full dense-se
 characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
 cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
 
-`claims-v40.json` extends `usage.limits.observed` with optional bounded source
-frontiers and reset-period observations. Versions 1 through 39 remain frozen.
-Generate it with
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
-The simulation and audit reports select v40. Existing producers may omit the new
-fields; omission provides observations but no source completeness. The existing
-usage draw deliberately exercises this legacy-compatible shape. Source-chain,
-reordered mirror and reset-period semantics have dedicated native regressions.
-No new claim kind or historical-kind exclusion is introduced. The prior
-never-trim expectations remain enforced pending actual exact-head hosted outcomes;
-no v40 seed characterization is claimed from source inspection.
+The v40 simulation and audit reports selected it. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
+
+`claims-v42.json` adds the optional bounded `usage.limits.observed` source frontiers,
+reset-period observations and explicit unsupported account gaps to the combined
+current registry. Published v40 and #6609's v41 remain frozen; versions 1 through
+41 are preserved. Generate v42 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The current simulation loader and audit report select v42. Existing producers may
+omit the new optional fields, but omission cannot assert source completeness.
+The existing usage draw deliberately exercises that legacy-compatible shape;
+authenticated source chains, reordered replay, native owner bindings and period
+bounds have dedicated regressions. No claim kind or historical-kind exclusion is
+added. Exact per-seed equality, mandatory post-excusal trimming, the three-seed cap
+and majority coverage remain enforced; no new seed characterization is assumed.

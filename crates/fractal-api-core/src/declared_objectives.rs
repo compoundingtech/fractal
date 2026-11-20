@@ -311,9 +311,11 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 // from this declaration, never raw native prefixes or another owner's subtree.
                 let mut ids = entry.ids.clone();
                 ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
+                for row in &produced {
+                    if let Some(id) = row["id"].as_str() { ids.remove(id); }
+                }
                 if ids.is_empty() && produced.is_empty() { ids.insert(objective.name.clone()); }
                 for id in ids {
-                    if produced.iter().any(|row| row["id"] == id) { continue; }
                     produced.push(json!({
                         "id": id, "kind": "objective", "about": objective.about,
                         "target": "native objective", "current": "native source scope unavailable", "window": "now",

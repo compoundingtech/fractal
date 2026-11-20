@@ -1016,6 +1016,29 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+### Shell request identity and cancellation (#6762)
+
+The `fractal_store::store::shell_resources` maintainer owns
+`lv-h319ba7a29fc7`, replacing `lv-h379f0157342b`: request submission now
+uses conflict-preserving insertion. Execution ID, host and state TEXT keys and
+the serialized command/result body remain inline to preserve atomic request
+identity and replay. Neither one row per command nor conflict suppression bounds
+encoded bytes. The `bound-or-reference-values-and-reclamation` obligation remains:
+reference or physically bound the complete execution values and keys, preserving
+request identity and cleanup semantics.
+
+The same maintainer owns cancellation schema `lv-h68c595b5ab84`, insertion
+`lv-hc433437e984c` and expiry `lv-h3ecd1f97c431`. These retain a derived
+UUID TEXT primary key and integer cancellation timestamp, indexed by timestamp,
+so cancellation-before-submission is atomic with request lookup. The 36-character
+check and seven-day retention are not general encoded-size or statement-cost
+proofs: an expiry can delete an unbounded number of rows inside submission.
+Values remain inline to retain the existing cancellation authority transition.
+The schema's `chunk-or-reference-variable-columns` task covers the identifier
+and index representation; the insertion/expiry
+`bound-or-reference-values-and-reclamation` tasks must bound physical storage
+and incremental reclamation without weakening cancellation tombstones or replay.
+This review records transitional debt, not a permanent exemption or size proof.
 
 ### Durable phone service minutes
 

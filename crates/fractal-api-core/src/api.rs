@@ -498,6 +498,8 @@ impl ApiError {
             | "stale-subject"
             | "stale-fence"
             | "idempotency-conflict"
+            | "resource-request-conflict"
+            | "resource-request-cancelled"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -664,6 +666,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
+        .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
+        .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
+        .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -875,6 +880,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
@@ -8454,7 +8460,9 @@ pub async fn guard_bound_request(
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
     }
-    if ![
+    let message_path = messages::is_message_path(path);
+    let message_send = matches!(path, "/v1/messages" | "/v1/messages/");
+    if !message_path && ![
         "/v1/intent/apply",
         "/v1/sets/",
         "/v1/agent-queue-moves",
@@ -8484,7 +8492,6 @@ pub async fn guard_bound_request(
         "/v1/subscription-requests/",
         "/v1/reviews/",
         "/v1/claims",
-        "/v1/messages/",
         "/v1/schema/registrations",
         "/v1/custom/reply",
         "/v1/diagnostic",
@@ -8513,10 +8520,16 @@ pub async fn guard_bound_request(
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
         }
-        for key in ["actor", "requester"] {
+        let message_write = message_path
+            || parts.uri.path() == "/v1/claims" && value.get("kind").and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("message."));
+        for key in ["actor", "requester"].into_iter().chain(message_send.then_some("from")) {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
+                if message_write {
+                    return Err(messages::attribution_error());
+                }
                 return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
@@ -8599,7 +8612,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"mission_run_follow_head":1},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
     health["replication"] = json!({
