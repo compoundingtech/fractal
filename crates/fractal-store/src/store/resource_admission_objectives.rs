@@ -9,7 +9,24 @@ pub const COVERAGE_KIND: &str = "resource.admission.coverage";
 #[derive(Default)]
 pub struct Coverage(pub std::sync::atomic::AtomicBool);
 
-pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
+pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
+    if let Err(error) = member.request.class.ensure_supported() {
+        tracing::warn!(membership = %member.request.id, %error,
+            "withholding unsupported-class admission observation; authoritative custody retained");
+        return Ok(false);
+    }
+    if member.refusal_code == Some(super::resource_membership::RefusalCode::RecoveryNotAllowed) {
+        let feature = super::declared_admission::FleetFeature {
+            keys: &["resource_recovery_observations"],
+            code: "resource-recovery-feature-barrier",
+            carries: "recovery admission observations",
+        };
+        if let Err(error) = super::declared_admission::validate_fleet(tx, &member.request.host, &feature) {
+            tracing::warn!(membership = %member.request.id, %error,
+                "withholding recovery refusal observation until every active reader supports it");
+            return Ok(false);
+        }
+    }
     // Child/inherited contexts never create memberships and therefore never add samples.
     // Preserve the accepted request epoch across authority restarts.
     let subject = format!("resource-admission/{}/{}", member.request.host, member.request.id);
@@ -25,14 +42,14 @@ pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<()> {
         "clock_uncertain": member.clock_uncertain,
     });
     if let Some(previous) = latest_claim_of_kind_tx(tx, &subject, KIND)?
-        && previous.body.get("fields") == Some(&fields) { return Ok(()); }
+        && previous.body.get("fields") == Some(&fields) { return Ok(true); }
     append_claim_tx(tx, &member.request.host, &subject, KIND, None,
         &json!({"fields": fields, "evidence": []}), &[], None)?;
-    Ok(())
+    Ok(true)
 }
 
-/// Replay every authoritative membership without granting newer classes authority.
-/// A retained unsupported class leaves the local source cut uncertified.
+/// Replay only understood, fleet-compatible evidence without granting newer classes authority.
+/// Withheld observations retain custody and leave the local source cut uncertified.
 pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<bool> {
     let mut statement = tx.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1 ORDER BY id")?;
     let members = statement.query_map([host], |row| row.get::<_, String>(0))?
@@ -41,8 +58,7 @@ pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<b
     let mut complete = true;
     for body in members {
         let member: Membership = serde_json::from_str(&body)?;
-        complete &= member.request.class.ensure_supported().is_ok();
-        observe(tx, &member)?;
+        complete &= observe(tx, &member)?;
     }
     append_claim_tx(tx, host, &format!("resource-admission/{host}"), COVERAGE_KIND, None,
         &json!({"fields": {"host": host, "epoch": epoch, "complete": complete}, "evidence": []}), &[], None)?;

@@ -1039,14 +1039,14 @@ mod tests {
     }
 
     #[test]
-    fn authority_startup_replays_newer_evidence_without_extending_admission_authority() {
+    fn authority_startup_withholds_newer_evidence_without_extending_admission_authority() {
         use super::super::resource_admission_objectives::{Coverage as AdmissionCoverage, COVERAGE_KIND, KIND};
         use std::sync::atomic::Ordering;
 
         for (class, refusal, complete) in [
             (RequestClass::Unknown("future-class".into()), None, false),
             (RequestClass::Unknown("recovery".into()), Some(RefusalCode::RecoveryNotAllowed), false),
-            (RequestClass::Agent, Some(RefusalCode::RecoveryNotAllowed), true),
+            (RequestClass::Agent, Some(RefusalCode::RecoveryNotAllowed), false),
             (RequestClass::Check, None, true),
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -1054,15 +1054,17 @@ mod tests {
             let persisted_request = request("persisted");
             let old_grant;
             let body;
+            let evidence_count;
             {
                 let store = Store::open(&path, "host-a").unwrap();
                 store.start_resource_authority("host-a", "epoch-a").unwrap();
                 old_grant = grant(&store, &persisted_request, 1);
+                evidence_count = store.claims_by_kinds_after(&[KIND], None, 0, 100).unwrap().claims.len();
                 let mut member = store.resource_membership_record(&persisted_request.id, &persisted_request.owner).unwrap();
                 member.request.class = class.clone();
                 member.refusal_code = refusal;
                 // Seed authoritative bytes from a newer writer, without going through this
-                // binary's evidence writer. Acquisition must replay them after reopening.
+                // binary's evidence writer. Acquisition must withhold unsupported publication.
                 body = serde_json::to_string(&member).unwrap();
                 store.connection.write().execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
                     rusqlite::params![persisted_request.id, body]).unwrap();
@@ -1073,12 +1075,18 @@ mod tests {
             assert_eq!(store.fractal.extensions.get::<AdmissionCoverage>().0.load(Ordering::Acquire), complete);
             let evidence = store.claims_by_kinds_after(&[KIND], None, 0, 100).unwrap().claims;
             let fields = &evidence.last().unwrap().body["fields"];
-            assert_eq!(fields["class"], serde_json::to_value(&class).unwrap());
-            assert_eq!(fields["refusal"], serde_json::to_value(refusal).unwrap());
+            if complete {
+                assert_eq!(fields["class"], serde_json::to_value(&class).unwrap());
+                assert_eq!(fields["refusal"], serde_json::to_value(refusal).unwrap());
+            } else {
+                assert_eq!(fields["class"], "agent", "no unsupported observation was republished");
+                assert!(fields["refusal"].is_null());
+                assert_eq!(evidence.len(), evidence_count);
+            }
             let cuts = store.claims_by_kinds_after(&[COVERAGE_KIND], None, 0, 100).unwrap().claims;
             assert_eq!(cuts.last().unwrap().body["fields"]["complete"], json!(complete));
             assert!(store.prepare_resource_membership(&old_grant, "stale-root").is_err());
-            if !complete {
+            if class.ensure_supported().is_err() {
                 assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 1);
                 let retained: String = store.connection.write().query_row(
                     "SELECT body FROM resource_memberships_v1 WHERE id=?1", [&persisted_request.id], |row| row.get(0)).unwrap();
