@@ -85,9 +85,10 @@ stops the runtime, and freezes portable transcript files after the process ends.
 stays declared. Its restart policy does not restart it, `fractal agents restart` refuses it, and mail
 sent to it waits until it resumes.
 
-Idle-cause OMP operations may instead capture `in-place` when Git refuses with
-`workspace-not-git`, `workspace-unborn`, `workspace-not-root`, or
-`workspace-submodule-unsupported`. The workspace stays untouched on its source host.
+Manual and idle operations with non-Git workspaces capture `in-place`. Idle-cause OMP
+operations also use this mode for `workspace-unborn`, `workspace-not-root`, or
+`workspace-submodule-unsupported`. The workspace stays untouched on its source host;
+only the session is preserved, not a portable copy of arbitrary workspace files.
 The snapshot receipt records the mode before stopping; after the stop fence, the owner freezes
 the native transcript without a Git bundle. Same-host resume validates the frozen transcript's
 digest, native session header and absolute workspace path, then checks that the original native
@@ -95,6 +96,21 @@ binding still contains those bytes. It launches the original authoritative trans
 ordinary restarts retain post-resume turns rather than selecting a stale inventory copy.
 Missing or mismatched content fails rather than selecting a fresh conversation. Retrying after
 a daemon restart reuses the captured mode and original native inventory.
+The host-local manifest records `workspace_kind` as `git` or `non-git`. Resume refuses
+with `workspace-kind-mismatch` if an in-place workspace changed kind while suspended.
+Missing kind metadata defaults to `git` for portable snapshots. Historical in-place
+snapshots and empty capture markers convert to the tagged `legacy-unknown` kind:
+they retain the previous resume checks without claiming historical kind equality.
+Their resume evidence records `legacy-unknown-kind`. This preserves both non-Git
+and unborn-Git historical sessions; only known kinds enforce the new equality guard.
+Same-host Git resume checks the captured workspace HEAD evidence before comparing
+the live kind. A historical native-only suspension with no workspace capture retains
+its previous resume behavior; a missing/defaulted mode is not itself Git evidence.
+Existing but unreadable or malformed workspace evidence still fails validation.
+Older daemons with in-place support ignore the additive kind field and can preserve the
+session, but do not enforce the kind-change guard. Use an updated daemon to resume.
+Daemons without in-place support cannot restore the missing Git bundle; they refuse
+instead of reconstructing the workspace or starting a fresh session.
 
 Git snapshot receipts omit the mode field: absence already means `git`, preserving ordinary
 manual suspension interoperability with older members.
@@ -240,7 +256,8 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 
 | refusal | meaning |
 | --- | --- |
-| `workspace-not-git`, `workspace-unborn`, `workspace-not-root` | suspend needs a committed Git working tree rooted at the workspace |
+| `workspace-unborn`, `workspace-not-root` | manual Git suspend needs a committed working tree rooted at the workspace; non-Git workspaces suspend in place |
+| `workspace-kind-mismatch` | an in-place workspace with recorded kind changed between Git and non-Git |
 | `workspace-path-mismatch` | the declaration, archive, or native transcript records a different cwd |
 | `workspace-occupied`, `transcript-occupied` | the target already contains files that would be overwritten |
 | `snapshot-harness-unsupported` | this harness has no portable export adapter yet |
