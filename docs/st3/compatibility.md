@@ -325,8 +325,11 @@ unchanged, and a claim-scoped dictionary preserves legacy-only evidence.
 Collisions, changed/missing targets and missing canonical authority fail closed.
 
 The default writer may move to version 21 only in a later release whose N-1
-published binary already contains this reader arm. Do not manually change
-`user_version` to activate it on a fleet store. The v21 fixture explicitly
+published binary already contains this reader arm. `user_version` is a reader
+fence only. The reference writer runs on a store fenced at 21 or later only when
+its own activation flag, `meta.claim_signature_reference_writer = '1'`, is set
+by that release. A later format's fence (23, say) therefore does not switch it
+on. Do not manually change `user_version` or the flag on a fleet store. The v21 fixture explicitly
 exercises the later cutover, not a deployment-ready operator activation path.
 Within that format, conversion runs after authorization bootstrap, at most
 64 rows per writer loan with durable cursors and a 10 ms cooperative budget
