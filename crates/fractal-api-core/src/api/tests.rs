@@ -4795,6 +4795,20 @@ async fn internal_routes_refuse_seat_callers() {
     let state = state(root.path());
     let routes = internal_routes();
     assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    let resource_owner_routes = [
+        ("/v1/internal/resources", "GET"),
+        ("/v1/internal/resources/example", "GET"),
+        ("/v1/internal/resources/example/member-scope", "GET"),
+        ("/v1/internal/resources/by-request/example", "GET"),
+        ("/v1/internal/resources/exec", "POST"),
+        ("/v1/internal/resources/example/wait", "POST"),
+        ("/v1/internal/resources/example/cancel", "POST"),
+        ("/v1/internal/resources/by-request/example/cancel", "POST"),
+    ];
+    for (route, method) in &resource_owner_routes {
+        assert!(routes.iter().any(|registered| registered.as_str() == *route),
+            "{method} {route} must be included in the exhaustive internal-route checks");
+    }
     for route in &routes {
         for method in [
             axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT,
@@ -4810,12 +4824,7 @@ async fn internal_routes_refuse_seat_callers() {
                     .unwrap()
             };
             let bound = guard_bound_request(request(), Some("agent/own"), &state.store).await;
-            let resource_owner_route = matches!((route.as_str(), method.as_str()),
-                ("/v1/internal/resources" | "/v1/internal/resources/example", "GET")
-                | ("/v1/internal/resources/exec"
-                    | "/v1/internal/resources/example/wait"
-                    | "/v1/internal/resources/example/cancel", "POST"));
-            if resource_owner_route {
+            if resource_owner_routes.contains(&(route.as_str(), method.as_str())) {
                 assert!(bound.is_ok(), "{method} {route} reaches native resource ownership enforcement");
             } else {
                 assert_eq!(bound.unwrap_err().code, "foreign-agent-actor", "{method} {route}");
