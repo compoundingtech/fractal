@@ -7835,6 +7835,30 @@ mod tests {
     }
 
     #[test]
+    fn composer_arrows_route_to_the_draft_without_navigating_the_list() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open("agent/example/atlas/builder");
+        ui.editing = true;
+        let input = ui.draft_key().unwrap();
+        ui.paste("abcdef\nx\nabcdef".into());
+        let selected = ui.selected;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), "abcdef\nx".len());
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), 6);
+        ui.key(key(KeyCode::Up));
+        assert_eq!(ui.selected, selected);
+        ui.key(key(KeyCode::Down));
+        ui.key(key(KeyCode::Down));
+        ui.key(key(KeyCode::Down));
+        assert_eq!(ui.cursor.at(&input, &ui.conversation_state.drafts[&input]), "abcdef\nx\nabcdef".len());
+        assert_eq!(ui.selected, selected);
+        assert!(ui.editing);
+        assert!(ui.effects.is_empty());
+    }
+
+    #[test]
     fn drafts_take_the_terminal_editing_keys() {
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         let mut text = "look at the  ".to_owned();
