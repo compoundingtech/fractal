@@ -1072,7 +1072,7 @@ invariants; no growing receipt body is synthesized by this update.
 
 `fractal_store::store::escalation` owns the restart index writes
 `lv-h0003f1ad06a3` and `lv-ha65878244411`, and the clock projection schema
-`lv-h6232d25a79e0`. The restart index stores only run and origin identifiers,
+`lv-h08c7d25eba0f`. The restart index stores only run and origin identifiers,
 never policy text, messages, or ask bodies. Its key is removed when the terminal
 ladder has no remaining deadline.
 
