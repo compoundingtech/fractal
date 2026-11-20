@@ -1,0 +1,5 @@
+record 0eb6038582dfb3bd303b0b56dfa485d2d6a38723 linux-fleet-compat 0 host/anvil 2026-11-03T09:50:03Z
+record 16f3995aa01d3216cb919cf1e65148001d6a9fb1 linux-fleet-compat 0 host/spindle 2026-11-03T10:29:48Z
+record 4dfa0285d1effac6af938d5be78740e10053c480 linux-fleet-compat 0 fleet/ci 2026-11-03T08:32:50Z
+record 8b04fbe896eb54b408a7cca8d9a922261ef669e4 linux-fleet-compat 0 fleet/ci 2026-11-03T08:23:10Z
+record aec0533c25d44556c62fd7dd5aa81c805a65677f linux-fleet-compat 0 agent/sorrel 2026-11-03T10:31:45Z
