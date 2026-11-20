@@ -74,6 +74,7 @@ mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
 mod shell_resources;
+mod resource_profiles;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -1335,14 +1336,12 @@ impl NativeRuntime {
                 let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
                     anyhow::bail!("finite execution membership is not admitted");
                 };
-                let aggregate = request.capacity.map(|capacity| -> Result<fractal_runtime::Capacity> {
-                    Ok(fractal_runtime::Capacity {
-                        cores: capacity.cores.checked_mul(request.max_members).context("aggregate lane cores overflow")?,
-                        memory: capacity.memory.checked_mul(u64::from(request.max_members)).context("aggregate lane memory overflow")?,
-                    })
-                }).transpose()?;
+                // Every live snapshot contributes once, including generations retiring under an
+                // older estimate. A new estimate can never shrink another generation's envelope.
+                let aggregate = store.resource_lane_aggregate(&request.host, &request.name)?;
                 let lane = fractal_runtime::FiniteLane {
-                    name: request.name.clone(), capacity: aggregate,
+                    name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
+                    memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
@@ -9285,6 +9284,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .source_host
                     .as_deref()
                     .is_some_and(|source| source != self.host);
+                if !moved && suspension.mode() == "git"
+                    && let Some(operation) = suspension.suspend_operation_id.as_deref()
+                    && let Err(error) = crate::seat_snapshot::validate_git_workspace(
+                        self.driver_state_dir.parent().unwrap(), operation, Path::new(&member.workspace),
+                    )
+                {
+                    return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
+                }
                 if suspension.mode() == "in-place" {
                     if moved {
                         return self.fail_suspension(agent, suspension, "snapshot-in-place", "an in-place suspension can only resume on its source host".into(), Vec::new());
@@ -9295,6 +9302,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let dir = crate::seat_snapshot::directory(self.driver_state_dir.parent().unwrap(), operation);
                     match crate::seat_snapshot::restore(&dir.join("payload.tar"), &self.driver_state_dir, agent, operation, member, &session) {
                         Ok(manifest) => {
+                            if manifest.workspace_kind == crate::seat_snapshot::WorkspaceKind::LegacyUnknown {
+                                self.store.append_claim(&ClaimInput {
+                                    subject: agent.into(),
+                                    kind: "runtime.action.succeeded".into(),
+                                    actor: suspension.requested_by.clone(),
+                                    fields: BTreeMap::from([
+                                        ("action".into(), Value::String("resume".into())),
+                                        ("operation_status".into(), Value::String("restoring".into())),
+                                        ("workspace_kind".into(), Value::String("legacy-unknown-kind".into())),
+                                    ]),
+                                    evidence: vec![operation.into()],
+                                    expected_subject: None,
+                                    idempotency_key: Some(format!("agent-resume-legacy-workspace-kind:{}", suspension.operation_id)),
+                                })?;
+                            }
                             let path = manifest.transcript_path.expect("validated in-place transcript path");
                             crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path.to_string_lossy().into_owned());
                         }

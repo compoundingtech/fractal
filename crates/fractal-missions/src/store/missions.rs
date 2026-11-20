@@ -7499,7 +7499,17 @@ impl MissionsStore for Store {
                 let previous_object = previous.as_ref().and_then(Value::as_object);
                 let current_object = facts.as_object()
                     .expect("prepared resource facts are an object");
-                if !should_record {
+                // Unavailable-node state belongs to observer continuity, not resource facts.
+                // Persist both additions and recoveries even when the facts were already known.
+                let tombstones = |cursor: Option<&str>| {
+                    cursor.and_then(|cursor| serde_json::from_str::<Value>(cursor).ok())
+                        .and_then(|mut cursor| cursor.get_mut("tombstones").map(Value::take))
+                        .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+                };
+                let previous_cursor = fractal_store::store::resources::claimed_observer_cursor_at(transaction, observer)
+                    .map_err(internal)?;
+                let tombstones_changed = tombstones(previous_cursor.as_deref()) != tombstones(cursor);
+                if !should_record && !tombstones_changed {
                     return Ok(Some((ResourceObservationOutcome {
                         baseline,
                         changed_fields,
@@ -7531,7 +7541,7 @@ impl MissionsStore for Store {
                     )
                     .map_err(internal)?;
                 }
-                if changed || attempt.is_some() {
+                if changed || attempt.is_some() || tombstones_changed {
                     let observer_predecessors = latest_claim_id_tx(transaction, observer)
                         .map_err(internal)?
                         .into_iter()
@@ -7539,8 +7549,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
-                        // For a repository observer, only how far it has read: its version maps
-                        // stay in the polling member's GitHub plugin database.
+                        // Repository cursors carry read position and unavailable identities;
+                        // version maps stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });

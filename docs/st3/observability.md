@@ -74,7 +74,7 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
-The lines the daemon writes itself (prefixed `st3:` or `fractal:`) still reach stderr, but with no
+The lines the daemon writes itself (including those prefixed `fractal:`) still reach stderr, but with no
 subscriber a `tracing` event anywhere in its code is written nowhere. `[logging] stderr_warnings
 = true` in the daemon's config installs a stderr subscriber at WARN for that case, so warnings such
 as a writer hold over a second reach the journal; it is off by default, and does nothing when
@@ -602,6 +602,10 @@ cause is consumed on the next outer wake; subsequent stabilization passes use
 as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
+
+An API write is proved by its accepted request span and the `cause=api` wake
+counter, followed by an independent reconcile pass. Its pass label may name a
+later coalesced wake; tests must not require the last-writer-wins label to retain `api`.
 
 `st.reconcile.passes_per_wake` records the number of completed passes when an
 outer wake rests or reaches its 64-pass continuation cap. It includes the

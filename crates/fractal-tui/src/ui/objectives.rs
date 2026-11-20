@@ -12,7 +12,7 @@ use super::screens::Item;
 use super::theme;
 use super::view::{Load, World};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use fractal_client::{SloHistory, SloRow};
 use fractal_ui_model::slo::{NEARLY_SPENT, Tone};
 
