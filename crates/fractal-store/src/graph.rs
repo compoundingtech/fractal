@@ -2503,6 +2503,27 @@ fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, FractalE
 }
 
 fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), FractalError> {
+    if let Some(policy) = unique_child(document, "model-return")? {
+        ensure_no_properties(policy)?;
+        if !policy.entries().is_empty() {
+            return Err(FractalError::new("invalid-model-return", "model-return takes a policy block, not arguments"));
+        }
+        if let Some(body) = policy.children() {
+            reject_unknown_children(body, &["enabled", "max-drift", "max-per-hour"], "model-return", owner)?;
+            for name in ["enabled", "max-drift", "max-per-hour"] {
+                if let Some(node) = unique_child(body, name)? {
+                    ensure_no_properties(node)?;
+                    ensure_no_children(node)?;
+                    if name == "enabled" { one_bool(node)?; } else {
+                        let value = node.entries().first().and_then(|entry| entry.value().as_integer());
+                        if node.entries().len() != 1 || value.is_none_or(|v| if name == "max-drift" { v < 600 } else { !(0..=1).contains(&v) }) {
+                            return Err(FractalError::new("invalid-model-return", "max-drift must be at least 600 seconds; max-per-hour must be zero or one"));
+                        }
+                    }
+                }
+            }
+        }
+    }
     const ALLOWED: &[&str] = &[
         "declared-priority",
         "declared-lane",
@@ -2518,6 +2539,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "restart",
         "rollout",
         "idle-suspend",
+        "model-return",
         "shutdown-timeout",
         "command",
         "argv",
@@ -6837,6 +6859,34 @@ mod idle_suspend_tests {
                 "version 2\nagent \"example/worker\" {{ command \"true\"; {policy}; }}"
             );
             assert!(parse_intent(&source, "node").is_err(), "{policy}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_return_policy_tests {
+    use super::*;
+    #[test]
+    fn model_return_accepts_explicit_off_and_safe_partial_overrides() {
+        for policy in ["model-return { enabled false; }", "model-return { max-drift 900; max-per-hour 0; }"] {
+            let source = format!("version 2\nagent \"example\" {{ command \"true\"; {policy}; }}");
+            assert!(parse_internal_intent(&source, "node").is_ok(), "{policy}");
+        }
+    }
+    #[test]
+    fn model_return_rejects_unsafe_or_ambiguous_overrides() {
+        for policy in [
+            "model-return { max-drift 599; }",
+            "model-return { max-per-hour 2; }",
+            "model-return { max-per-hour -1; }",
+            "model-return { enabled \"off\"; }",
+            "model-return { enabled false; enabled true; }",
+            "model-return { unknown true; }",
+            "model-return false",
+            "model-return {}; model-return {}",
+        ] {
+            let source = format!("version 2\nagent \"example\" {{ command \"true\"; {policy}; }}");
+            assert!(parse_internal_intent(&source, "node").is_err(), "{policy}");
         }
     }
 }

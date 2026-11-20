@@ -30,6 +30,50 @@ pub struct ModelDrift {
     pub since_ms: u128,
 }
 
+/// Incarnation-scoped main-loop evidence, never response/subagent spend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelObservation {
+    pub model: String,
+    pub observed_at_ms: Option<u128>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelDriftState {
+    AtDeclared,
+    Drifted,
+    Unknown,
+    Stale,
+    Uncomparable,
+}
+
+/// Missing evidence is not success. Freshness is supplied by the reader's policy.
+pub fn model_drift_state(
+    declared: Option<&str>,
+    observation: Option<&ModelObservation>,
+    now: u128,
+    max_age_ms: u128,
+) -> ModelDriftState {
+    let Some(observation) = observation else { return ModelDriftState::Unknown };
+    if observation.observed_at_ms.is_none_or(|at| at > now || now - at > max_age_ms) {
+        return ModelDriftState::Stale;
+    }
+    match declared.and_then(|declared| fractal_kernel::pricing::declared_model_matches(declared, &observation.model)) {
+        Some(true) => ModelDriftState::AtDeclared,
+        Some(false) => ModelDriftState::Drifted,
+        None => ModelDriftState::Uncomparable,
+    }
+}
+
+/// Canonical declaration reader shared by reconciliation and presentation.
+pub fn declared_harness_model(desired: &Value) -> Option<&str> {
+    desired.get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("harness"))?
+        .get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("model"))?
+        .get("arguments")?.as_array()?.first()?.as_str()
+}
+
 impl ModelDrift {
     /// The failure reason: readable, with `since` in a marker so later passes reuse it
     /// without reading history.
@@ -163,6 +207,27 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Reuse the detector's durable episode, but never borrow another incarnation's clock.
+    pub fn model_drift_since(
+        &self,
+        subject: &str,
+        incarnation: &str,
+        declared: &str,
+        live: &str,
+    ) -> Result<Option<u128>> {
+        let Some(failure) = self.operational_failure(&model_drift_episode(subject))?
+            .filter(|failure| failure.status == "pending") else { return Ok(None) };
+        let Some(claim) = self.claim_by_id(&failure.request)? else { return Ok(None) };
+        if claim.body.pointer("/fields/incarnation").and_then(Value::as_str) != Some(incarnation) {
+            return Ok(None);
+        }
+        Ok(ModelDrift::parse(&failure.reason)
+            .filter(|drift| drift.declared == declared && drift.live == live)
+            .map(|drift| drift.since_ms))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +241,48 @@ mod tests {
         };
         assert_eq!(ModelDrift::parse(&drift.reason()), Some(drift));
         assert_eq!(ModelDrift::parse("the harness did not become ready"), None);
+    }
+
+    #[test]
+    fn detector_clock_is_fenced_by_incarnation_and_model_pair() {
+        let store = Store::open_memory("node").unwrap();
+        store.append_claim(&ClaimInput {
+            subject: "agent/worker".into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("incarnation_id".into(), json!("one")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let drift = ModelDrift { declared: "claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 100 };
+        store.record_failure(&model_drift_episode("agent/worker"), &AttentionRequest {
+            reviewer: "agent/worker".into(), title: MODEL_DRIFT_TITLE.into(), reason: drift.reason(),
+            severity: "error".into(), targets: vec!["agent/worker".into()], actor: "test".into(),
+            idempotency_key: "drift-test".into(),
+        }, MODEL_DRIFT_CONDITION).unwrap();
+        assert_eq!(store.model_drift_since("agent/worker", "one", &drift.declared, &drift.live).unwrap(), Some(100));
+        assert_eq!(store.model_drift_since("agent/worker", "two", &drift.declared, &drift.live).unwrap(), None);
+        assert_eq!(store.model_drift_since("agent/worker", "one", "sonnet", &drift.live).unwrap(), None);
+    }
+
+    #[test]
+    fn model_drift_distinguishes_missing_stale_and_uncomparable() {
+        let mut observation = ModelObservation {
+            model: "gpt-6.1-sol".into(), observed_at_ms: Some(100),
+        };
+        let classify = |observation: Option<&ModelObservation>, declared| {
+            model_drift_state(declared, observation, 200, 100)
+        };
+        assert_eq!(classify(None, Some("gpt-6.1-sol")), ModelDriftState::Unknown);
+        assert_eq!(classify(Some(&observation), Some("gpt-6.1-sol")), ModelDriftState::AtDeclared);
+        assert_eq!(classify(Some(&observation), Some("anthropic/claude-opus-5-5")), ModelDriftState::Drifted);
+        assert_eq!(classify(Some(&observation), None), ModelDriftState::Uncomparable);
+        assert_eq!(classify(Some(&observation), Some("unregistered-model")), ModelDriftState::Uncomparable);
+        observation.observed_at_ms = Some(99);
+        assert_eq!(classify(Some(&observation), Some("gpt-6.1-sol")), ModelDriftState::Stale);
+        observation.observed_at_ms = None;
+        assert_eq!(classify(Some(&observation), Some("gpt-6.1-sol")), ModelDriftState::Stale);
+        observation.observed_at_ms = Some(201);
+        assert_eq!(classify(Some(&observation), Some("gpt-6.1-sol")), ModelDriftState::Stale);
     }
 }

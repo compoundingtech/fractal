@@ -29663,6 +29663,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("worker-one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -29752,9 +29753,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         // previous incarnation's readings never count for it.
         reconciler.reconcile_model_drift(&desired, "worker-two").unwrap();
         assert!(drift().is_none());
-        assert_eq!(store.latest_usage_model("agent/node.worker", "worker-two").unwrap(), None);
+        assert_eq!(store.latest_usage_model_observation("agent/node.worker", "worker-two").unwrap(), None);
         assert_eq!(
-            store.latest_usage_model("agent/node.worker", "worker-one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.worker", "worker-one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("gpt-6.1-sol")
         );
         drop(member);
@@ -29800,6 +29801,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("semantics".into(), Value::String(semantics.into())),
                         ("total_tokens".into(), Value::from(1)),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,
@@ -29821,7 +29823,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         reconciler.reconcile_model_drift(&desired("agent/node.parent"), "one").unwrap();
         assert!(drift("agent/node.parent").is_none());
         assert_eq!(
-            store.latest_usage_model("agent/node.parent", "one").unwrap().as_deref(),
+            store.latest_usage_model_observation("agent/node.parent", "one").unwrap().as_ref().map(|observation| observation.model.as_str()),
             Some("claude-opus-5-5")
         );
         // A declared Claude alias matches its family's full API ID, and only that family.
@@ -29872,6 +29874,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                         ("model".into(), Value::String(model.into())),
                         ("semantics".into(), Value::String("context_occupancy".into())),
                         ("incarnation_id".into(), Value::String("one".into())),
+                        ("observed_at_unix_ms".into(), Value::from(now_ms() as u64)),
                     ]),
                     evidence: Vec::new(),
                     expected_subject: None,

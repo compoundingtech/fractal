@@ -160,6 +160,36 @@ final class FractalClientTests: XCTestCase {
         }
     }
 
+    func testAgentModelDriftExtensionKeepsExistingDecodersCompatible() throws {
+        let base: [String: Any] = [
+            "id": "agent/example.worker", "kind": "agent", "revision": "claim/example",
+            "updated_at": "2026-11-19T00:00:00Z", "name": "Worker", "state": "running",
+            "reachability": "local", "runtime_ids": [], "live_model": "openai/gpt-5",
+        ]
+        var extended = base
+        extended["declared_model"] = "anthropic/claude-sonnet-4-5"
+        extended["model_drift"] = [
+            "state": "drifted", "drift_since": "2026-11-18T23:00:00Z",
+            "drift_age_seconds": 3600, "observed_at": "2026-11-19T00:00:00Z",
+            "fallback_reason": "transient", "return_attempts": 1,
+        ] as [String: Any]
+        var unknown = base
+        unknown["declared_model"] = NSNull()
+        unknown["model_drift"] = [
+            "state": "unknown", "drift_since": NSNull(), "drift_age_seconds": NSNull(),
+            "observed_at": NSNull(), "fallback_reason": NSNull(), "return_attempts": NSNull(),
+        ] as [String: Any]
+        for object in [base, extended, unknown] {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let agent = try JSONDecoder().decode(AgentResource.self, from: data)
+            XCTAssertEqual(agent.id, "agent/example.worker")
+            XCTAssertEqual(agent.liveModel, "openai/gpt-5")
+            let resource = try JSONDecoder().decode(Resource.self, from: data)
+            guard case .agent(let row) = resource else { return XCTFail("agent discriminator lost") }
+            XCTAssertEqual(row.id, agent.id)
+        }
+    }
+
     func testPushRegistrationRoundTripAndRedactedDescription() throws {
         let registration = PushRegistration(token: String(repeating: "ab", count: 32),
             environment: .development, bundleID: "example.push", appVersion: "1.0")

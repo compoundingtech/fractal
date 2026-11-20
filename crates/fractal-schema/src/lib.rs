@@ -844,6 +844,17 @@ impl Registry {
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
+        if kind == "harness.model-fallback.observed" {
+            let bounded = |name: &str| fields.get(name).and_then(Value::as_str).is_some_and(|text|
+                !text.is_empty() && text.len() <= 256 && text.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || b"-_./:@+".contains(&byte)));
+            if !["incarnation_id", "native_session", "source_event", "episode_id", "to"].into_iter().all(bounded)
+                || (fields.get("observation").and_then(Value::as_str) == Some("applied")
+                    && (!bounded("from") || !fields.contains_key("cause")))
+            {
+                return Err(error("invalid-model-fallback", "model fallback requires bounded native provenance and sanitized cause"));
+            }
+        }
         usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
             for name in ["rows", "columns"] {
@@ -1786,6 +1797,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "harness.todo.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "harness.model-fallback.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
@@ -4464,6 +4484,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
+            ("model_return_attempt", integer()),
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
@@ -4828,6 +4849,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("result_digest", string()),
             ("error", string()),
             ("evidence", array()),
+        ],
+        "harness.model-fallback.observed" => &[
+            ("observation", required_enum(&["applied", "selected"])),
+            ("cause", enumeration(&["transient", "quota", "auth", "unknown"])),
+            ("from", string()),
+            ("to", required_string()),
+            ("native_session", required_string()),
+            ("source_event", required_string()),
+            ("episode_id", required_string()),
+            ("incarnation_id", required_string()),
+            ("observed_at_unix_ms", required_integer()),
+            ("reason", required_enum(&["native-retry-fallback", "native-model-selection"])),
         ],
         "harness.timeline" => &[
             (
