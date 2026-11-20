@@ -60,7 +60,8 @@ pub const PAGE: usize = 512;
 /// One page's share of a writer batch, as in `record_bytes`.
 pub const BUDGET: Duration = Duration::from_millis(10);
 
-/// The next envelopes past the cursor, without their payloads.
+/// The next envelopes past the cursor. The batch and state columns follow the payload in the row,
+/// so reading them walks each payload's overflow pages, as deleting a released row does.
 const PAGE_SQL: &str = "SELECT rowid, writer, sequence, envelope_hash, accepted_at_unix_ms, batch_id,
         receipt_state='validated' AND batch_id IS NOT NULL
      FROM replica_envelopes WHERE rowid>?1 ORDER BY rowid LIMIT ?2";
