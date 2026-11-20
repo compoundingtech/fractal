@@ -96,6 +96,20 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
 /// took 93 ms at p50 and 393 ms at most; a quarter of that keeps the longest hold under 100 ms.
 pub const FREE_PAGE_CHUNK: u64 = 128;
 
+/// Run `work`, whose commits redo themselves after a crash (giving free pages back, retiring
+/// closed mail), at synchronous=NORMAL, then restore the connection's level. In WAL mode NORMAL
+/// is corruption-safe and skips the WAL fsync at commit, which on a busy host took most of a
+/// 100 ms hold; the writer's next FULL commit fsyncs the WAL and these frames with it. A crash
+/// before then loses only the work, which the next pass does again. The level can't change
+/// inside a transaction, so `work` begins and commits its own.
+pub(crate) fn committing_without_fsync<T>(connection: &Connection, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let level: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    let done = work();
+    connection.pragma_update(None, "synchronous", level)?;
+    done
+}
+
 impl Store {
     /// Give up to [`FREE_PAGE_CHUNK`] free pages back to the filesystem in one short write, and
     /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
@@ -112,11 +126,12 @@ impl Store {
             return Ok(0);
         }
         // FREE_PAGE_CHUNK (128) pages. Each step gives back one, so the pragma runs to its end.
-        let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
-        let mut steps = statement.query([])?;
-        while steps.next()?.is_some() {}
-        drop(steps);
-        drop(statement);
+        committing_without_fsync(&connection, || {
+            let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
+            let mut steps = statement.query([])?;
+            while steps.next()?.is_some() {}
+            Ok(())
+        })?;
         Ok(before.saturating_sub(free()?))
     }
 

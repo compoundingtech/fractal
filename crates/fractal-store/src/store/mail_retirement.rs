@@ -51,6 +51,10 @@ pub struct MailRetirement {
     pub claims: usize,
     /// The writer hold, commit included.
     pub hold: Duration,
+    /// The part of the hold spent committing.
+    pub commit: Duration,
+    /// The longest single claim delete in the hold.
+    pub slowest_delete: Duration,
     /// Whether more closed threads old enough to judge remain after this step.
     pub more: bool,
 }
@@ -94,48 +98,53 @@ impl Store {
         } else {
             (after, false)
         };
-        let mut done = MailRetirement { more, ..MailRetirement::default() };
-        let mut connection = self.connection.write_background();
+        let connection = self.connection.write_background();
         let started = Instant::now();
-        let transaction = connection.transaction()?;
-        let mut cursor = after;
-        let mut still_deferred = Vec::new();
-        let mut cut = false;
-        for (closed_index, subject, judgement) in &judged {
-            // Once the budget runs out, a deferred thread keeps its place in the list and a new
-            // one waits behind the cursor for the next step.
-            let finished = !cut
-                && match judgement {
-                    Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
-                    Judgement::Keep => true,
-                    Judgement::Defer => {
+        let mut done = super::database_size::committing_without_fsync(&connection, || {
+            let mut done = MailRetirement { more, ..MailRetirement::default() };
+            let transaction = connection.unchecked_transaction()?;
+            let mut cursor = after;
+            let mut still_deferred = Vec::new();
+            let mut cut = false;
+            for (closed_index, subject, judgement) in &judged {
+                // Once the budget runs out, a deferred thread keeps its place in the list and a new
+                // one waits behind the cursor for the next step.
+                let finished = !cut
+                    && match judgement {
+                        Judgement::Retire(claims) => delete_thread(&transaction, claims, started, budget, &mut done)?,
+                        Judgement::Keep => true,
+                        Judgement::Defer => {
+                            still_deferred.push(subject.clone());
+                            true
+                        }
+                    };
+                if !finished {
+                    cut = true;
+                    if closed_index.is_none() {
                         still_deferred.push(subject.clone());
-                        true
                     }
-                };
-            if !finished {
-                cut = true;
-                if closed_index.is_none() {
-                    still_deferred.push(subject.clone());
+                } else if let Some(index) = closed_index {
+                    cursor = *index;
                 }
-            } else if let Some(index) = closed_index {
-                cursor = *index;
             }
-        }
-        if cut {
-            done.more = true;
-        } else {
-            cursor = cursor.max(judged_through);
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        deferred = deferred.split_off(rejudged.min(deferred.len()));
-        deferred.extend(still_deferred);
-        deferred.retain(|subject| seen.insert(subject.clone()));
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-hf3a8ffdc82a1 owner=fractal_store::store::mail_retirement TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
-            params![CURSOR, cursor.to_string(), DEFERRED, serde_json::to_string(&deferred)?],
-        )?;
-        transaction.commit()?;
+            if cut {
+                done.more = true;
+            } else {
+                cursor = cursor.max(judged_through);
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            deferred = deferred.split_off(rejudged.min(deferred.len()));
+            deferred.extend(still_deferred);
+            deferred.retain(|subject| seen.insert(subject.clone()));
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hf3a8ffdc82a1 owner=fractal_store::store::mail_retirement TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2), (?3, ?4)",
+                params![CURSOR, cursor.to_string(), DEFERRED, serde_json::to_string(&deferred)?],
+            )?;
+            let committing = Instant::now();
+            transaction.commit()?;
+            done.commit = committing.elapsed();
+            Ok(done)
+        })?;
         done.hold = started.elapsed();
         Ok(done)
     }
@@ -201,13 +210,17 @@ fn delete_thread(
 ) -> Result<bool> {
     let mut finishing = false;
     for (id, operation_id, kind) in claims {
-        finishing |= kind == "message.sent";
-        // At least one delete a hold, so a slow store still makes progress.
+        // At least one delete a hold, so a slow store still makes progress. The budget is read
+        // before the sent claim too: a thread of only a sent and a closed claim must not pass
+        // it whole, or one hold takes every thread judged.
         if !finishing && done.claims > 0 && started.elapsed() >= budget {
             return Ok(false);
         }
+        let deleting = Instant::now();
         delete_dropped_rows_tx(transaction, &[], &[tombstone(id, operation_id.clone())])?;
+        done.slowest_delete = done.slowest_delete.max(deleting.elapsed());
         done.claims += 1;
+        finishing |= kind == "message.sent";
     }
     done.threads += 1;
     Ok(true)

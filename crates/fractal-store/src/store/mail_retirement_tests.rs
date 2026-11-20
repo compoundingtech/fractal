@@ -217,3 +217,27 @@ fn a_thread_closed_before_its_sent_claim_arrives_retires_once_it_does() {
     assert_eq!(retire_all(&store, later), (1, 4));
     assert_eq!(retired(&store), ids.into_iter().collect());
 }
+
+#[test]
+fn a_spent_budget_stops_before_the_next_sent_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    // Threads of only a sent and a closed claim, as a member holds when the rest went to the
+    // stream: the sent claim comes first in deletion order. Appending refuses sent to closed, so
+    // drop the delivered and read rows afterwards.
+    let short = |subject: &str| {
+        let ids = thread(&store, subject, SENDER, RECIPIENT, true);
+        for id in &ids[1..3] {
+            store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd1bf57d459d7 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id]).unwrap();
+        }
+        vec![ids[0].clone(), ids[3].clone()]
+    };
+    let first = short("message/short-1");
+    let second = short("message/short-2");
+    let later = now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS;
+    let step = store.retire_closed_mail_step_within(later, Duration::ZERO).unwrap();
+    assert_eq!((step.threads, step.claims, step.more), (1, 2, true), "one thread a spent hold, not every thread judged");
+    assert_eq!(retired(&store), first.iter().cloned().collect());
+    assert_eq!(retire_all(&store, later), (1, 2));
+    assert_eq!(retired(&store), first.iter().chain(&second).cloned().collect());
+}
