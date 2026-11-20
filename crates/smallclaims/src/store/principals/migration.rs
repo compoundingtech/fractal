@@ -90,8 +90,6 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     let upgrading: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='claim_signatures') AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='claim_signature_migration')", [], |row| row.get(0))?;
     if upgrading {
-        // A version-19 schema has no such trigger; never carry one onto a legacy table.
-        transaction.execute_batch("DROP TRIGGER IF EXISTS claim_verdict_queue_marks_pruned;")?;
         for table in [
             "claim_signatures",
             "claim_verdicts",

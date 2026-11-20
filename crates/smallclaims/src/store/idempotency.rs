@@ -6,12 +6,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// Completed new receipts last seven days; their claims retain the operation identity.
 pub const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-/// A receipt's expiry for cleanup. Receipts stored before expiry was recorded (2026-10-07) were
-/// kept for a separately scheduled deployment+30d follow-up; this is it: they are due now, and
-/// go through the same checks as any expired receipt, so one whose effect has no durable
-/// operation identity is still kept.
-const EXPIRY_SQL: &str = "CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta
-        WHERE key='idempotency_legacy_rowid') THEN 0 ELSE expires_at_unix_ms END";
 /// Limit both candidate inspection and mutations, including responses still in use.
 pub const CLEANUP_CHUNK: usize = 64;
 /// Stop starting response checks after this much work. A check, its mutation and COMMIT
@@ -29,7 +23,7 @@ pub struct Cleanup {
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     // Capture once, before any new request. Existing rows have no recoverable caller
-    // association; cleanup treats them as due (see `EXPIRY_SQL`).
+    // association; cleanup treats them as due (see `cleanup_tx`).
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h4d25c7671914 owner=smallclaims::store::idempotency TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value)
          SELECT 'idempotency_legacy_rowid',CAST(COALESCE(MAX(rowid),0) AS TEXT) FROM idempotency",
@@ -69,7 +63,10 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
 
 pub fn next_expiry(connection: &Connection) -> Result<Option<i64>> {
     Ok(connection.query_row(
-        &format!("SELECT {EXPIRY_SQL} FROM idempotency ORDER BY rowid LIMIT 1"), [], |row| row.get(0),
+        // Receipts stored before expiry was recorded (2026-10-07) are due: see `cleanup_tx`.
+        "SELECT CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
+                THEN 0 ELSE expires_at_unix_ms END
+         FROM idempotency ORDER BY rowid LIMIT 1", [], |row| row.get(0),
     ).optional()?)
 }
 
@@ -164,10 +161,17 @@ pub fn cleanup_tx(
     mut in_use: impl FnMut(&Transaction<'_>, &str) -> Result<bool>,
 ) -> Result<Cleanup> {
     let started = std::time::Instant::now();
-    let candidates = transaction.prepare_cached(&format!(
-        "SELECT rowid,operation_id,response,{EXPIRY_SQL},replay_safe FROM idempotency
+    // Receipts stored before expiry was recorded (2026-10-07) were kept for a separately
+    // scheduled deployment+30d follow-up; this is it. They have no recorded expiry, so they are
+    // due now and go through the same checks as any expired receipt: one whose effect has no
+    // durable operation identity is still kept.
+    let candidates = transaction.prepare_cached(
+        "SELECT rowid,operation_id,response,
+                CASE WHEN rowid <= (SELECT CAST(value AS INTEGER) FROM meta WHERE key='idempotency_legacy_rowid')
+                THEN 0 ELSE expires_at_unix_ms END,
+                replay_safe FROM idempotency
          ORDER BY rowid LIMIT ?1",
-    ))?.query_map([limit.min(CLEANUP_CHUNK) as i64], |row|
+    )?.query_map([limit.min(CLEANUP_CHUNK) as i64], |row|
         Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,bool>(4)?))
     )?.collect::<Result<Vec<_>,_>>()?;
     let mut result = Cleanup::default();

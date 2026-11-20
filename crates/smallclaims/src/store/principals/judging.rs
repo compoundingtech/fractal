@@ -70,18 +70,20 @@ pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Opt
 /// that `judge_claim` judges it directly without reading this row. Old and new readers treat a
 /// missing row of such a claim as never paged: `unavailable` sees nothing pending, and a
 /// later requeue inserts a fresh row before judging. So the row is dropped once settled.
-const SETTLED: &str = "complete=1 AND dirty=0 AND blocked=0 AND notified=1
-    AND candidate_count<=32
-    AND candidate_count=COALESCE((SELECT candidates FROM claim_signature_counts c
-                                  WHERE c.claim_id=claim_signature_judging.claim_id), 0)";
+/// The two statements below spell the same predicate; 32 is `CANDIDATE_PAGE`.
 const _: () = assert!(CANDIDATE_PAGE == 32);
 
 /// Drop `claim_id`'s judging row if it is settled. Returns whether it did.
 pub(super) fn discard_settled_tx(connection: &Connection, claim_id: &str) -> Result<bool> {
-    static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!("DELETE FROM claim_signature_judging WHERE claim_id=?1 AND {SETTLED}")
-    });
-    Ok(connection.prepare_cached(&SQL)?.execute([claim_id])? != 0)
+    Ok(connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h323477dd058f owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging WHERE claim_id=?1
+             AND complete=1 AND dirty=0 AND blocked=0 AND notified=1 AND candidate_count<=32
+             AND candidate_count=COALESCE((SELECT candidates FROM claim_signature_counts c
+                                           WHERE c.claim_id=claim_signature_judging.claim_id), 0)",
+        )?
+        .execute(/* sqlite-large-value: allow-for-now lv-h8858f9f9045d owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![claim_id])?
+        != 0)
 }
 
 /// Rows the prune looks at in one writer loan, and the time after which it commits early.
@@ -99,10 +101,15 @@ pub(super) fn prune_settled_page_tx(connection: &Connection) -> Result<(usize, u
     if cursor == "done" {
         // Once pruned, only pending folds and large ones keep rows, so this reads few rows. A
         // settled row here was written by an earlier release after a rollback: start over.
-        static LEFT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-            format!("SELECT EXISTS(SELECT 1 FROM claim_signature_judging WHERE {SETTLED})")
-        });
-        if !connection.prepare_cached(&LEFT)?.query_row([], |row| row.get::<_, bool>(0))? {
+        let left: bool = connection
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM claim_signature_judging
+                 WHERE complete=1 AND dirty=0 AND blocked=0 AND notified=1 AND candidate_count<=32
+                 AND candidate_count=COALESCE((SELECT candidates FROM claim_signature_counts c
+                                               WHERE c.claim_id=claim_signature_judging.claim_id), 0))",
+            )?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h84b85cdb55be owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+        if !left {
             return Ok((0, 0, true));
         }
         cursor = String::new();

@@ -31,7 +31,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h47095dd529d7 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -1871,8 +1871,8 @@ impl Store {
                 let Some(row) = claim_row(&transaction, claim_id)? else {
                     // Nothing judges it again: drop the placeholder its queueing made.
                     transaction
-                        .prepare_cached("DELETE FROM claim_signature_judging WHERE claim_id=?1 AND candidate_count=0 AND complete=0 AND dirty=1")?
-                        .execute([claim_id])?;
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7fff7fbe77a9 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging WHERE claim_id=?1 AND candidate_count=0 AND complete=0 AND dirty=1")?
+                        .execute(/* sqlite-large-value: allow-for-now lv-h84587f2a5297 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id])?;
                     continue;
                 };
                 let (result, used) = judging::advance(

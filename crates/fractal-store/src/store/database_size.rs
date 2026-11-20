@@ -95,7 +95,7 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
 /// store giving back 1.3 million pages, chunks of 512 held the writer up to 225 ms and chunks of
 /// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
-const INCREMENTAL_VACUUM: &str = "PRAGMA incremental_vacuum(128)";
+// The literal in `release_free_pages` spells this chunk.
 const _: () = assert!(FREE_PAGE_CHUNK == 128);
 
 impl Store {
@@ -114,7 +114,7 @@ impl Store {
             return Ok(0);
         }
         // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
-        let mut statement = connection.prepare(INCREMENTAL_VACUUM)?;
+        let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
         let mut steps = statement.query([])?;
         while steps.next()?.is_some() {}
         drop(steps);
