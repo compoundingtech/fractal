@@ -3,7 +3,7 @@ use rusqlite::{Connection, OpenFlags};
 use smallclaims::{
     claim::ClaimInput,
     sqlite::ReadPool,
-    store::{AdmittedStore, Store, StoreCopy, runtime::Plain},
+    store::{AdmittedStore, Store, runtime::Plain},
 };
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
 
@@ -162,7 +162,7 @@ fn shared_memory_uri_stays_shared_and_copies_in_full() {
     assert_eq!(claims(&store.readers.get()), 1);
     let root = tempfile::tempdir().unwrap();
     let copy = root.path().join("memory.sqlite3");
-    assert_eq!(store.copy_store_to(&copy).unwrap(), StoreCopy::Full);
+    store.copy_store_to(&copy).unwrap();
     let copied = Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(claims(&copied), 1);
 }

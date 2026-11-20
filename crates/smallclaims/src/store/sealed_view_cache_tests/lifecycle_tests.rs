@@ -1,6 +1,6 @@
 use super::*;
-use crate::store::checkpoint::{DropPlan, SealedIdentities, checkpoint_name, retained_digest};
-use crate::store::checkpoint_agreement::{CheckpointAction, SealTerms};
+use crate::store::checkpoint::{DropPlan, checkpoint_name, retained_digest, sealed_digest};
+use crate::store::checkpoint_agreement::CheckpointAction;
 use crate::store::runtime::{IncrementalProjection, LegacyDigestTable, Runtime};
 use std::sync::Barrier;
 
@@ -78,14 +78,6 @@ impl Runtime for FleetCheckpointRuntime {
         Plain.plan_checkpoint_drops(sealed)
     }
 
-    fn clear_checkpoint_projections(&self, tx: &Transaction<'_>) -> Result<()> {
-        Plain.clear_checkpoint_projections(tx)
-    }
-
-    fn replay_checkpoint_projections(&self, tx: &Transaction<'_>) -> Result<()> {
-        Plain.replay_checkpoint_projections(tx)
-    }
-
     fn checkpoint_subject_answers(&self, connection: &Connection, _subject: &str,
         _cut: u128) -> Result<Value> {
         let membership = fleet_membership_tx(connection)?;
@@ -138,7 +130,7 @@ fn sealed_view_cache_invalidates_after_replication_receive_and_admission() {
 }
 
 #[test]
-fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
+fn sealed_view_cache_invalidates_after_a_trim() {
     let source = Store::open_memory("anchor", Arc::new(FleetCheckpointRuntime)).unwrap();
     let key = configure(&source, 1);
     // Separate commits and seals leave the superseded endpoint alone in its envelope.
@@ -170,15 +162,13 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
         envelope_hash: old_envelope.key.envelope_hash.clone(),
         accepted_at_unix_ms: old_envelope.accepted_at_unix_ms,
     };
-    let identities = SealedIdentities::of(&sealed);
-    // Plain has no retention planner. Supply a concrete one-claim plan and
-    // prove it on a real scratch copy before publishing the single participant's certificate.
+    // Plain has no retention planner. Supply a concrete one-claim plan.
     let plan = DropPlan {
         cut_unix_ms: cut,
         rules_digest: source.runtime.checkpoint_rules_digest(),
         sealed_envelopes: sealed.envelopes.len(),
         sealed_claims: sealed.claims.len(),
-        sealed_digest: identities.digest.clone(),
+        sealed_digest: sealed_digest(&sealed),
         drop_digest: drop_digest(std::slice::from_ref(&envelope_tombstone),
             std::slice::from_ref(&tombstone)),
         envelopes: vec![envelope_tombstone],
@@ -187,21 +177,9 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
         claims: vec![tombstone],
         by_kind: BTreeMap::new(),
     };
-    let scratch = tempfile::tempdir().unwrap();
-    let proof = source.prove_checkpoint_plan(&sealed, &plan, scratch.path()).unwrap();
-    assert!(proof.passed, "superseded endpoint drop failed proof: {proof:?}");
-    let terms = SealTerms {
-        cut_unix_ms: cut,
-        participants: BTreeSet::from(["anchor".to_owned()]),
-        sealed_digest: identities.digest.clone(),
-        rules_digest: plan.rules_digest.clone(),
-    };
     drop(sealed);
-    source.publish_seal(&checkpoint, &terms, &identities, None).unwrap();
-    source.publish_verification(&checkpoint, &terms, &checkpoint_staging::StagedPlan::of(&plan), &proof).unwrap();
 
-    // The observer has the certified claim log and the soon-to-be-dropped fleet claim,
-    // but did not participate in the certificate or apply the checkpoint locally.
+    // The target has the claim log and the soon-to-be-dropped fleet claim, and trims it too.
     let target = replica(&key);
     let exchange = source
         .export_replication_exchange("sealed-cache-test", &target.replication_inventory().unwrap())
@@ -213,12 +191,14 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
     assert!(target.claim_by_id(&claim_id).unwrap().is_some());
     let mut actions = Vec::new();
     source.trim_checkpoint(&checkpoint, cut, &plan.drop_digest, &plan.envelopes,
-        &plan.claims, false, &mut actions).unwrap();
+        &plan.claims, &mut actions).unwrap();
     let manifest = source.checkpoint_manifest(&checkpoint, cut).unwrap();
     assert_eq!(manifest.claims, plan.claims);
     assert_eq!(manifest.envelopes, plan.envelopes);
-    let adopted = target.adopt_checkpoint(&manifest).unwrap();
-    assert!(matches!(adopted.last(), Some(CheckpointAction::Trimmed { .. })));
+    let mut trimmed = Vec::new();
+    target.trim_checkpoint(&checkpoint, cut, &plan.drop_digest, &plan.envelopes,
+        &plan.claims, &mut trimmed).unwrap();
+    assert!(matches!(trimmed.last(), Some(CheckpointAction::Trimmed { .. })));
     assert!(target.claim_by_id(&claim_id).unwrap().is_none());
     assert_eq!(target.checkpoint_manifest(&checkpoint, cut).unwrap(), manifest);
     let current = refolded(&target);
@@ -226,7 +206,6 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
     assert_eq!(current.members[0].endpoints, vec![json!({"url": "https://anchor-1.invalid"})]);
     assert_eq!(current, first);
     assert_eq!(current, oracle(&source));
-    assert!(target.adopt_checkpoint(&manifest).unwrap().is_empty());
     assert_eq!(current, target.fleet_view_sealed().unwrap());
 }
 

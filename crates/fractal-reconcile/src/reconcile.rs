@@ -3335,6 +3335,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _entered = telemetry.span.enter();
         let result = self.recording_writes(|| self.reconcile_pass());
         if result.is_err() { telemetry.error(); }
+        // Mail the pass queued from inside its transactions leaves now, as the daemon's drain would
+        // after the commit: no wait for that task, and a pass alone delivers what it caused.
+        if let Err(error) = crate::store::message_outbox::drain_fresh(&self.store) {
+            tracing::warn!(error = %format!("{error:#}"), "message outbox drain after a reconcile pass failed");
+        }
         result
     }
 
@@ -4829,7 +4834,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let work_context = step
                 .map(|step| format!(" Continue the claimed work `{step}`."))
                 .unwrap_or_default();
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: message_subject,
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -5171,7 +5176,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(key.clone()),
             })?;
             let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
-            self.store.append_claim(&ClaimInput {
+            crate::store::message_routing::send(&self.store, &ClaimInput {
                 subject: format!("message/{message_id}"),
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -6664,6 +6669,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ) {
                     return Ok(());
                 }
+                // A stream wake's read and close are this member's shard records, not claims.
+                if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+                    let status = |status: &str| BTreeMap::from([("status".into(), Value::String(status.into()))]);
+                    if message.status == "delivered" {
+                        crate::store::messages_shard::record_lifecycle(
+                            &self.store, &message.subject, "message.read", Some(agent), &status("read"),
+                        )?;
+                    }
+                    if message.status == "sent" && turn_acknowledged {
+                        return Ok(());
+                    }
+                    let actor = if matches!(message.status.as_str(), "sent" | "staged") { "daemon/runtime" } else { agent };
+                    crate::store::messages_shard::record_lifecycle(
+                        &self.store, &message.subject, "message.closed", Some(actor), &status("closed"),
+                    )?;
+                    self.signal_changed();
+                    return Ok(());
+                }
                 if message.status == "delivered" {
                     self.store.append_claim(&ClaimInput {
                         subject: message.subject.clone(),
@@ -6842,13 +6865,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let diagnostic_key =
                         format!("work-wake-exhausted:{agent}:{tag_value}:{attempt_count}");
                     if self.store.operation_claim(&diagnostic_key)?.is_none() {
-                        let mut evidence = work_wake_attempt_evidence(&self.store, &attempts)?;
+                        let (mut evidence, stream_wakes) = work_wake_attempt_evidence(&self.store, &attempts)?;
                         if let Some(failure) = &claim_failure { evidence.push(failure.id.clone()); }
                         self.store.append_claim(&ClaimInput {
                             subject: agent.into(),
                             kind: "harness.diagnostic".into(),
                             actor: None,
-                            fields: BTreeMap::from([
+                            fields: [
                                 ("severity".into(), Value::String("error".into())),
                                 ("status".into(), Value::String("failed".into())),
                                 ("code".into(), Value::String("work-wake-exhausted".into())),
@@ -6858,7 +6881,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 ("wake_attempts".into(), Value::from(attempt_count)),
                                 ("attempt".into(), Value::from(step.attempt)),
                                 ("readiness_epoch".into(), Value::from(step.readiness_epoch)),
-                            ]),
+                            ].into_iter().chain(stream_wakes.last().map(|latest| {
+                                ("message_id".into(), Value::String(latest.clone()))
+                            })).collect::<BTreeMap<String, Value>>(),
                             evidence,
                             expected_subject: None,
                             idempotency_key: Some(diagnostic_key.clone()),
@@ -22171,6 +22196,11 @@ fn work_wake_acknowledged(
         }) && attempts.iter().any(|(_, message)| message.status == "staged")
 }
 
+/// The subject of the work wake sent under `idempotency_key`, in either store.
+pub fn work_wake_subject(idempotency_key: &str) -> String {
+    format!("message/{}", &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn append_work_wake_message(
     store: &Store,
@@ -22184,8 +22214,7 @@ pub fn append_work_wake_message(
     idempotency_key: String,
 ) -> Result<MessageView> {
     let incarnation_key = harness_incarnation_key(incarnation);
-    let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
-    let message_subject = format!("message/{message_id}");
+    let message_subject = work_wake_subject(&idempotency_key);
     let invocation_id = store.record_work_turn_wake(step, agent, incarnation, &message_subject)?;
     let queue = step
         .queue
@@ -22208,7 +22237,8 @@ pub fn append_work_wake_message(
         "{}@{}@{}@{}",
         step.subject, step.attempt, step.readiness_epoch, incarnation_key
     );
-    store.append_claim(&ClaimInput {
+    // A wake for a seat on this member goes to the stream; its readers here read both stores.
+    let sent = crate::store::message_routing::send_work_wake(store, &ClaimInput {
         subject: message_subject.clone(),
         kind: "message.sent".into(),
         actor: Some("daemon/runtime".into()),
@@ -22241,6 +22271,10 @@ pub fn append_work_wake_message(
         expected_subject: None,
         idempotency_key: Some(idempotency_key),
     })?;
+    let created_index = match store.latest_claim(&message_subject, Some("message.sent"))? {
+        Some(claim) => claim.store_index,
+        None => crate::store::messages_shard::STREAM_INDEX_BASE + sent.store_index,
+    };
     Ok(MessageView {
         subject: message_subject,
         from: "daemon/runtime".into(),
@@ -22265,10 +22299,7 @@ pub fn append_work_wake_message(
         body_origin: None,
         sender_class: None,
         assistant_grant_id: None,
-        created_index: store
-            .latest_claim(&format!("message/{message_id}"), Some("message.sent"))?
-            .map(|claim| claim.store_index)
-            .unwrap_or_default(),
+        created_index,
             attachments: Vec::new(),
         status_from: None,
     })
@@ -22333,24 +22364,38 @@ pub fn append_fault_message(
 }
 
 fn message_sent_at(store: &Store, message: &MessageView) -> Option<u128> {
+    if crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return crate::store::messages_shard::mailbox_reads::sent_claim(store, &message.subject)
+            .ok()?
+            .map(|claim| claim.accepted_at_unix_ms);
+    }
     store
         .oldest_claim_where(&message.subject, "message.sent", |_| true)
         .ok()?
         .map(|claim| claim.accepted_at_unix_ms)
 }
 
+/// The attempts' graph `message.sent` claims, as evidence, and the subjects of those that are
+/// stream items, oldest first. Graph evidence names graph claims only, so the fault names the
+/// latest stream wake in its `message_id`; its tags name the step, attempt and epoch the others
+/// share.
 fn work_wake_attempt_evidence(
     store: &Store,
     attempts: &[(u128, &MessageView)],
-) -> Result<Vec<String>> {
-    Ok(attempts
+) -> Result<(Vec<String>, Vec<String>)> {
+    let (stream, graph): (Vec<_>, Vec<_>) = attempts
         .iter()
-        .map(|(_, message)| store.latest_claim(&message.subject, Some("message.sent")))
+        .map(|(_, message)| *message)
+        .partition(|message| crate::store::messages_shard::mailbox_reads::is_stream_item(message));
+    let evidence = graph
+        .iter()
+        .map(|message| store.latest_claim(&message.subject, Some("message.sent")))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
         .map(|claim| claim.id)
-        .collect())
+        .collect();
+    Ok((evidence, stream.into_iter().map(|message| message.subject.clone()).collect()))
 }
 
 fn work_wake_deadline(

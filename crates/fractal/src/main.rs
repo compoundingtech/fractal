@@ -2819,7 +2819,7 @@ enum ReplicationCommand {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Plan checkpoints that trim replicated history.
+    /// This member's own trim of replicated history.
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
@@ -2848,28 +2848,8 @@ enum SignaturesCommand {
 
 #[derive(Subcommand)]
 enum CheckpointCommand {
-    /// Show what a checkpoint would drop from this node's store, proved on a copy. Changes nothing.
-    Plan {
-        /// The UTC day that names the checkpoint, such as 2026-09-27. Defaults to the newest due one.
-        #[arg(long)]
-        cut: Option<String>,
-    },
-    /// Show the newest stable checkpoint and who has sealed or verified the one being agreed.
-    Status,
-    /// Stop waiting for an unreachable writer. It fences nothing: what the writer wrote while
-    /// away still replicates when it returns, and its next seal ends the excusal.
-    Excuse {
-        /// The writer, as its node name.
-        writer: String,
-        #[arg(long)]
-        reason: String,
-        /// The person excusing it.
-        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-        #[arg(long = "as")]
-        actor: Option<String>,
-    },
-    /// Go on with checkpoints after a trim stopped because deleting would change the graph.
-    /// The rows stay as they are; the next checkpoint proceeds.
+    /// Go on trimming after a trim stopped because deleting would change the graph. The rows
+    /// stay as they are; the next day's cut proceeds.
     Resume {
         /// What the person found.
         #[arg(long)]
@@ -8136,6 +8116,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -8151,7 +8132,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ) {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
-    spawn_response_expiry(store.clone());
+    spawn_response_expiry_with(store.clone(), config.trim.replay_safe_receipt_window_ms()?.min(i64::MAX as u64) as i64);
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
     fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
@@ -8332,23 +8313,19 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ));
             let activation_store = store.clone();
             use smallclaims::store::checkpoint_agreement::CheckpointPhase;
-            activation_store.checkpoint_worker_phase(if config.checkpoint.enabled || config.trim.local {
+            activation_store.checkpoint_worker_phase(if config.trim.local {
                 CheckpointPhase::Activation
             } else {
                 CheckpointPhase::Disabled
             });
-            // A member that trims locally still runs the pass, which only finishes a trim it had
-            // already committed.
-            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
-                .then(|| fractal_daemon::store::CheckpointContext {
-                    now_unix_ms: 0,
-                    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
-                    scratch: config.state_dir.join("checkpoint"),
-                    reviewer: config
-                        .person
-                        .clone()
-                        .unwrap_or_else(|| "person/operator".into()),
-                });
+            // Every member trims on its own, unless `[trim] local = false` turns it off.
+            if !config.checkpoint.is_default() {
+                stderr_message("st", format_args!("[checkpoint] is ignored: every member trims on its own ([trim])"));
+            }
+            let checkpoint_context = config.trim.local.then(|| fractal_daemon::store::CheckpointContext {
+                now_unix_ms: 0,
+                scratch: config.state_dir.join("checkpoint"),
+            });
             tokio::spawn(fractal_daemon::task_cpu::account("replication.activate", async move {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
@@ -14042,77 +14019,6 @@ fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
 /// The first 12 characters of a digest, enough to tell two apart in a status line.
 fn short_digest(digest: &str) -> &str {
     digest.get(..12).unwrap_or(digest)
-}
-
-fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView) -> String {
-    let names = |names: &std::collections::BTreeSet<String>| {
-        if names.is_empty() {
-            "none".to_owned()
-        } else {
-            names.iter().cloned().collect::<Vec<_>>().join(", ")
-        }
-    };
-    let mut output = format!("CHECKPOINTS  {}\n", status.node);
-    match &status.newest_stable {
-        Some(stable) => output.push_str(&format!(
-            "stable        {} · {} participants\n",
-            stable.checkpoint,
-            stable.terms.participants.len()
-        )),
-        None => output.push_str("stable        none\n"),
-    }
-    output.push_str(&format!(
-        "trimmed       {}\n",
-        status.trimmed.as_deref().unwrap_or("none")
-    ));
-    if status.halted {
-        output.push_str(
-            "halted        a trim found the graph would change; see daemon diagnostics, then \
-             `fractal replication checkpoint resume`\n",
-        );
-    }
-    output.push_str(&format!("participants  {}\n", names(&status.participants)));
-    output.push_str("last daemon start (advertised build)\n");
-    for member in &status.participants {
-        output.push_str(&format!(
-            "  machine_version  {member}: {}\n",
-            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
-        ));
-    }
-    if !status.excused.is_empty() {
-        output.push_str(&format!("excused       {}\n", names(&status.excused)));
-    }
-    if !status.left.is_empty() {
-        output.push_str(&format!("left          {}\n", names(&status.left)));
-    }
-    if let Some(pending) = &status.pending {
-        output.push_str(&format!("pending       {}\n", pending.checkpoint));
-        if pending.local_digest_state == "unavailable" {
-            output.push_str("  local digest unavailable\n");
-        }
-        for (member, build) in &pending.builds {
-            output.push_str(&format!("  seal build  {member}: {build}\n"));
-        }
-        output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
-        output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
-        for (writer, difference) in &pending.disagreeing {
-            output.push_str(&format!("  differs     {writer}: {difference}\n"));
-        }
-        output.push_str(&format!("  verified    {}\n", names(&pending.verified)));
-        for (writer, difference) in &pending.verifications_differ {
-            output.push_str(&format!("  verifies    {writer}: different {difference}\n"));
-        }
-        if !pending.verifications_agree {
-            output.push_str(
-                "  verifications disagree, so this checkpoint is not stable; the next due \
-                 checkpoint tries again\n",
-            );
-        }
-    }
-    if let Some(blocking) = status.blocking_summary() {
-        output.push_str(&format!("  blocking    {blocking}\n"));
-    }
-    output
 }
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
@@ -22558,6 +22464,48 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
     }
 }
 
+/// Valid records' bytes empty after startup, a page per writer batch, each committing its
+/// cursor; then the pages they held go back to the filesystem, one short write at a time
+/// (`record_bytes`). A failed page retries, including after a daemon restart.
+async fn release_valid_record_bytes(store: Arc<Store>) {
+    let (mut emptied, mut bytes) = (0, 0);
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || page_store.release_valid_record_bytes())).await;
+        match result {
+            Ok(Ok(report)) if report.done => break,
+            Ok(Ok(report)) => {
+                emptied += report.emptied;
+                bytes += report.bytes;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            error => {
+                stderr_message("fractal", format_args!("emptying valid record bytes failed: {error:?}"));
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+    // Every start gives free pages back, whether or not this start emptied anything: a start
+    // after the last page of bytes was emptied, but before its pages went back, finishes that.
+    // A store with no free page answers at once.
+    let mut released = 0;
+    loop {
+        let vacuum_store = store.clone();
+        match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || vacuum_store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE))).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(pages)) => released += pages,
+            error => {
+                stderr_message("fractal", format_args!("giving valid record pages back stopped: {error:?}"));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if emptied > 0 || released > 0 {
+        stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    }
+}
+
 /// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
 /// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
 async fn backfill_envelope_signatures(store: Arc<Store>) {
@@ -22886,7 +22834,14 @@ fn maintenance_contention(error: &anyhow::Error) -> bool {
 /// Register before the first rowid deadline read. The callback performs no SQL and never
 /// takes the writer: it only coalesces committed-write notifications. Deadline reads run on a
 /// pooled reader, so unrelated commits add no expiry SQL to the writer path.
+#[cfg(test)]
 fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
+    spawn_response_expiry_with(store, smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS)
+}
+
+/// `replay_safe_window_ms` is `[trim] replay_safe_receipts`: replay-safe receipts older than it
+/// go too, in their own paced chunks.
+fn spawn_response_expiry_with(store: Arc<Store>, replay_safe_window_ms: i64) -> tokio::task::JoinHandle<()> {
     let (changed, receiver) = tokio::sync::watch::channel(());
     let observer = store.observe_commits(move |connection| {
         if connection.is_autocommit() {
@@ -22895,13 +22850,14 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
     });
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
-        expire_completed_responses(store, receiver).await;
+        expire_completed_responses(store, receiver, replay_safe_window_ms).await;
     }))
 }
 
 async fn expire_completed_responses(
     store: Arc<Store>,
     mut changed: tokio::sync::watch::Receiver<()>,
+    replay_safe_window_ms: i64,
 ) {
     let mut clock_deferred = false;
     let mut retry = Duration::from_millis(200);
@@ -22911,7 +22867,11 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || {
+                let ordinary = read_store.next_idempotency_expiry()?;
+                let replay_safe = read_store.next_replay_safe_expiry(replay_safe_window_ms)?;
+                Ok::<_, anyhow::Error>(ordinary.into_iter().chain(replay_safe).min())
+            })).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("fractal", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -22977,7 +22937,9 @@ async fn expire_completed_responses(
         let clean_store = store.clone();
         match clean_store.connection.write_workers().spawn_blocking(move || {
             fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
-                clean_store.cleanup_idempotency(now)
+                // Two short writer transactions, never one long one.
+                clean_store.cleanup_idempotency(now)?;
+                clean_store.cleanup_replay_safe_idempotency(now, replay_safe_window_ms)
             })
         })
         .await
@@ -23292,21 +23254,10 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
     }
 }
 
-/// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
+/// Trim this member's own due cut every ten minutes, on a blocking thread. A capture sweeps
+/// what an older build's checkpoint proof left in the scratch directory under its lock.
 async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
-    store.checkpoint_worker_phase(CheckpointPhase::ScratchCleanup);
-    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
-    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
-    let sweep_store = store.clone();
-    let sweep_dir = context.scratch.clone();
-    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => stderr_message("fractal", format_args!("checkpoint proof startup cleanup failed: {error:#}")),
-        Err(error) => stderr_message("fractal", format_args!("checkpoint proof startup cleanup stopped: {error}")),
-    }
     loop {
         let store = store.clone();
         let context = fractal_daemon::store::CheckpointContext {

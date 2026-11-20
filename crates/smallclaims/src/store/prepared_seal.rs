@@ -148,12 +148,12 @@ pub(crate) fn own_unsigned_envelopes(
     Ok(unsigned)
 }
 
-/// One record of a sealed batch: a claim, encoded as the envelope carries it.
+/// One record of a sealed batch: which claim it holds. A valid record keeps no bytes of its
+/// own; the envelope's payload is the signed encoding (`record_bytes`).
 pub(crate) struct SealedRecord {
     claim_id: String,
     subject: String,
     kind: String,
-    raw: Vec<u8>,
 }
 
 /// One batch sealed into an envelope, with what sealing read to make it.
@@ -248,13 +248,10 @@ pub(crate) fn seal_batch(
     }
     let mut records = Vec::with_capacity(claims.len());
     for claim in &claims {
-        let mut raw = Vec::new();
-        ciborium::into_writer(claim, &mut raw)?;
         records.push(SealedRecord {
             claim_id: claim.id.clone(),
             subject: claim.subject.clone(),
             kind: claim.kind.clone(),
-            raw,
         });
     }
     let claim_rows = claims
@@ -343,7 +340,7 @@ pub(crate) fn write_sealed_batch_tx(
                 batch.sequence,
                 sealed.envelope_hash,
                 position as u64,
-                record.raw,
+                super::record_bytes::VALID_RECORD_RAW,
                 record.claim_id,
                 record.subject,
                 record.kind,
