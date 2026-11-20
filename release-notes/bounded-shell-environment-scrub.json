@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "summary": "The one-time scrub of historical shell environments no longer rewrites the whole store on a member's first start after upgrading. It copies the shell resources table with every environment emptied, drops the old copy under secure_delete, and gives the free list back to the filesystem. A store without incremental auto-vacuum still runs the full VACUUM when it has free pages.",
+  "summary": "The one-time historical shell-environment scrub never runs a whole-database VACUUM at startup. Building on #6886, incremental stores give back their free list; other stores overwrite old free pages with page-sized zero rows before the shell-table copy, then securely drop the scratch table.",
   "replay": {
     "status": "none",
     "detail": "Claims, replication and projections are untouched."
   },
   "schema": {
     "status": "changed",
-    "detail": "shell_resources_v1 and its index shell_resources_host_v1 are rebuilt once, through a temporary shell_resources_scrub_v1 renamed into place in the same transaction. Columns, index and rows are unchanged, except that every environment is emptied, as #6747 already did."
+    "detail": "shell_resources_v1 and its existing index are rebuilt once as in #6886. A transient shell_environment_free_scrub_v1 table consumes old free pages in at most 128-row transactions. No client schema or codegen changes."
   },
   "rules": {
     "status": "none",
@@ -19,11 +19,11 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "A member's first open after upgrading costs the table copy plus giving back its free list, instead of a VACUUM of the whole store. On a copy of a real 57 GB member: the scrub with #6747 was still running after 51 minutes (46 GB WAL); with this change an open that runs the scrub took 3.2 s, and the first open after upgrading, with every other pending migration, took 178 s."
+    "detail": "First open costs the shell-table copy plus free-list cleanup, never a whole-store VACUUM, including with auto_vacuum=NONE. Zero-row allocation is checkpointed every 128 pages; B-tree bookkeeping may grow the file slightly. Historical shell bodies and the table copy remain unbounded."
   },
   "manual": {
-    "status": "none",
-    "detail": "No operator steps."
+    "status": "changed",
+    "detail": "Old free-list pages are scrubbed, not necessarily returned to the filesystem. Bytes in unused portions of pages that other tables reused before secure_delete was enabled remain outside this scrub. An operator-scheduled offline VACUUM can reclaim that space; startup never runs it."
   },
   "recovery": {
     "status": "none",

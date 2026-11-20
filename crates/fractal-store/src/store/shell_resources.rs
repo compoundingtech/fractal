@@ -114,7 +114,8 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 /// - The table is copied with every environment emptied, into fresh pages, and the old copy
 ///   dropped under secure_delete, which zeroes each page it frees: rows, overflow pages and
 ///   free space. Those zeroed pages go back to the filesystem too.
-/// - Any other store keeps the full VACUUM, since its free list can't be given back.
+/// - Other stores consume their old free list with page-sized zero rows before the copy,
+///   then drop that scratch table under secure_delete. No startup path runs VACUUM.
 ///
 /// What this can't reach, and a full VACUUM can: bytes in pages that other tables reused
 /// before secure_delete was on, in the unused part of those pages.
@@ -128,6 +129,8 @@ fn scrub_historical_environments(connection: &Connection) -> Result<()> {
     let incremental = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))? == 2;
     if incremental {
         give_back_free_list(connection)?;
+    } else {
+        erase_free_list(connection)?;
     }
     // Historical JSON bodies remain unbounded; scrubbing preserves their other fields.
     // One transaction, rolled back on any error, so a failed rebuild leaves the table as it was.
@@ -141,11 +144,8 @@ fn scrub_historical_environments(connection: &Connection) -> Result<()> {
         CREATE INDEX shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
     rebuild.commit()?;
     checkpoint_shell_scrub(connection)?;
-    let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     if incremental {
         give_back_free_list(connection)?;
-    } else if free > 0 {
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h017f6a53ca41 owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ "VACUUM")?;
     }
     checkpoint_shell_scrub(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-haceef5fded64 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_scrub_v1(complete) VALUES(1)", [])?;
@@ -158,6 +158,37 @@ fn give_back_free_list(connection: &Connection) -> Result<()> {
     let mut statement = connection.prepare("PRAGMA incremental_vacuum")?;
     let mut steps = statement.query([])?;
     while steps.next()?.is_some() {}
+    Ok(())
+}
+
+/// Overwrite pages freed before secure_delete was enabled, before the table copy can
+/// reuse them. One near-page-sized row needs at least one leaf page; allocating the
+/// initial free-page count therefore consumes the entire old free list. B-tree
+/// bookkeeping can grow the file slightly, but never copies the rest of the store.
+/// A crash leaves only zero rows; the next attempt drops them securely and repeats.
+fn erase_free_list(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4929ecffa855 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_environment_free_scrub_v1;
+        CREATE TABLE shell_environment_free_scrub_v1 (body BLOB NOT NULL);")?;
+    let free: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let mut remaining = free;
+    while remaining > 0 {
+        let batch = remaining.min(128);
+        let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut insert = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hac7744f65d12 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_free_scrub_v1(body) VALUES(zeroblob(?1))")?;
+            for _ in 0..batch {
+                insert.execute(/* sqlite-large-value: allow-for-now lv-ha3413afc70ae owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ [page_size - 100])?;
+            }
+        }
+        transaction.commit()?;
+        checkpoint_shell_scrub(connection)?;
+        remaining -= batch;
+    }
+    let left: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    anyhow::ensure!(left == 0, "shell environment scrub did not overwrite the free list");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7eba39ebc70f owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE shell_environment_free_scrub_v1;")?;
+    checkpoint_shell_scrub(connection)?;
     Ok(())
 }
 
@@ -667,12 +698,25 @@ mod tests {
         // Rewriting the row again frees the pages that held the secret, without zeroing them.
         legacy.execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", []).unwrap();
         legacy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-        drop(legacy);
-        let store = Store::open(&path, "host-a").unwrap();
-        assert!(store.shell_resource("history").unwrap().command.environment.is_empty());
+        let pages: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        let free_before: u64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+        assert!(free_before > 0);
+        // SQLite implements VACUUM using ATTACH; deny it for the entire scrub.
+        legacy.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(context.action, rusqlite::hooks::AuthAction::Attach { .. }) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        }));
+        scrub_historical_environments(&legacy).unwrap();
         assert_no_environment_bytes(&path);
-        let free: i64 = store.connection.write().query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
-        assert_eq!(free, 0, "the free list that held the secret is gone");
+        let pages_after: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        assert!(pages_after <= pages + free_before + 16, "scrub grew beyond its free-list budget");
+        if auto_vacuum == "INCREMENTAL" {
+            let free: i64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+            assert_eq!(free, 0, "the free list that held the secret is gone");
+        }
     }
 
     #[test]
@@ -681,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_scrub_without_incremental_vacuum_still_erases_with_one_vacuum() {
+    fn historical_scrub_without_incremental_vacuum_erases_without_vacuum() {
         scrub_erases_a_freed_secret("NONE");
     }
 
