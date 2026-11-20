@@ -7717,6 +7717,7 @@ impl Store {
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary()?),
+            claim_member_signatures: Vec::new(),
         })
     }
 
@@ -7848,6 +7849,7 @@ impl Store {
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
+                claim_member_signatures: Vec::new(),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -7904,6 +7906,7 @@ impl Store {
                     inventory.public()
                 }
             },
+            claim_member_signatures: self.claim_member_signatures_for_envelopes(&missing)?,
             envelopes: match archive {
                 Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
                 None => self.replica_envelopes(missing)?,
@@ -8382,6 +8385,11 @@ impl Store {
             progress.compare_graphs(equal, now);
         }
         drop(sync);
+        // The writers' signatures of the claims the exchange carries, kept once they verify
+        // (`member_signatures`); a failure here costs only signatures a later exchange brings.
+        if let Err(error) = self.receive_claim_member_signatures(&input.claim_member_signatures) {
+            eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
+        }
         Ok(ReplicationReceipt {
             received,
             duplicate,

@@ -160,6 +160,40 @@ impl Store {
             .map_err(anyhow::Error::msg)?
     }
 
+    /// The writer signatures of every claim the envelopes `envelopes` carry, found by each
+    /// envelope's batch, for an exchange that sends those envelopes.
+    pub fn claim_member_signatures_for_envelopes(
+        &self,
+        envelopes: &[crate::ReplicaEnvelopeId],
+    ) -> Result<Vec<ClaimMemberSignature>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT signatures.claim_id, batches.origin, batches.replica_sequence,
+                    signatures.member_key, signatures.signature
+             FROM replica_envelopes AS envelopes
+             JOIN batches ON batches.id=envelopes.batch_id
+             JOIN claims INDEXED BY claims_batch_index ON claims.batch_id=envelopes.batch_id
+             JOIN claim_member_signatures AS signatures ON signatures.claim_id=claims.id
+             WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?3",
+        )?;
+        let mut found = Vec::new();
+        for envelope in envelopes {
+            let rows = statement.query_map(params![envelope.writer, envelope.sequence, envelope.hash], |row| {
+                Ok(ClaimMemberSignature {
+                    claim_id: row.get(0)?,
+                    writer: row.get(1)?,
+                    sequence: row.get(2)?,
+                    member_key: row.get(3)?,
+                    signature: row.get(4)?,
+                })
+            })?;
+            for row in rows {
+                found.push(row?);
+            }
+        }
+        Ok(found)
+    }
+
     /// The writer signatures this store holds for `claim_ids`, as an exchange carries them.
     pub fn claim_member_signatures_for(&self, claim_ids: &[String]) -> Result<Vec<ClaimMemberSignature>> {
         let connection = self.readers.get();

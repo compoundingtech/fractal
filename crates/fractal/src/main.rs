@@ -8094,6 +8094,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.record_repairs", resolve_record_repairs(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_signatures", sign_own_claims(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -22370,6 +22371,25 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes), deleted {deleted}, and gave {released} free pages back"));
+}
+
+/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
+/// before this build a page at a time, then each new one within seconds of its append. Signing
+/// happens outside the writer; each page stores in one short write.
+async fn sign_own_claims(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || page_store.sign_own_claims())).await;
+        let pause = match result {
+            Ok(Ok(report)) if report.done => Duration::from_secs(5),
+            Ok(Ok(_)) => Duration::from_millis(50),
+            error => {
+                stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
 }
 
 /// Find the records repairs wait for once valid records are gone (`record_bytes`): a page at a
