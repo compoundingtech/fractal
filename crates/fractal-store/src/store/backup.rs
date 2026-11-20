@@ -216,7 +216,7 @@ impl Store {
                 write_record(output, &mut hash, &Record::Signatures(signatures))?;
             }
         }
-        // A trim records its complete certified tombstones before deleting any rows.
+        // A trim records its complete tombstones before deleting any rows.
         // A snapshot between deletion chunks must include that manifest too.
         let checkpoint: Option<(String, u128)> = self
             .readers
@@ -235,8 +235,8 @@ impl Store {
             )
             .optional()?;
         if let Some((checkpoint, cut_unix_ms)) = checkpoint {
-            // The manifest is the sync representation, verified against signed certificate
-            // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
+            // The manifest is the archive's representation of the tombstones; restore records
+            // them as this member's own. No SQL or local checkpoint bookkeeping enters the archive.
             let mut after = None;
             loop {
                 let page = self.manifest_page(
@@ -470,7 +470,10 @@ impl Store {
         // admitted before their arrival. Preserve that history, including doctor residue.
         self.replay_replication_graph()?;
         if let Some(manifest) = checkpoint {
-            self.restore_checkpoint_history(manifest)?;
+            self.restore_checkpoint_history(
+                manifest,
+                header.version >= super::backup_format::VERSION_WITH_LEDGERS,
+            )?;
             self.replay_replication_graph()?;
         }
         self.check_backup_chains(&quarantined)?;
@@ -582,7 +585,7 @@ impl Store {
                     anyhow::ensure!(sequence > 0,
                         "backup writer chain has an invalid root: writer={writer:?} sequence={sequence}");
                     // Retained predecessors must match their exact batch hash. A predecessor
-                    // removed by a verified checkpoint has only its certified wire identity left.
+                    // removed by a trim has only its tombstoned wire identity left.
                     let found: bool =
                         predecessor.query_row(/* sqlite-large-value: allow-for-now lv-haf3f28b6f1dd owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ params![writer, sequence - 1, link], |r| r.get(0))?;
                     if !found && !quarantined.contains_key(&(writer.clone(), sequence - 1, link.clone())) {
@@ -617,7 +620,7 @@ impl Store {
     }
 }
 
-/// The digest of a store's complete admitted envelope log, certified tombstones included: the
+/// The digest of a store's complete admitted envelope log, tombstones included: the
 /// graph's `log_digest`, and each shard's in the same form.
 pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
     log_digest_with_quarantine(store, false)
@@ -663,6 +666,27 @@ fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> 
 mod tests {
     use super::*;
     use crate::backup;
+
+    /// Bind `store`, make it trim, and give it twelve observations of one observer: the newest
+    /// stays, and its trim drops the rest.
+    fn trimming(store: &Store) {
+        store.bind_fleet("test-fleet").unwrap();
+        store.import_retired_identities_paced(|_| {}).unwrap();
+        store.trim_locally(true).unwrap();
+        for index in 0..12 {
+            store
+                .append_as_older_build_for_test(&ClaimInput {
+                    subject: "observer/backup-test".into(),
+                    kind: "observer.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("status".into(), json!(["ok", "changed"][index % 2]))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+    }
 
     fn diagnostic(store: &Store, reason: &str) {
         store
@@ -1389,18 +1413,13 @@ mod tests {
     }
 
     #[test]
-    fn a_trimmed_backup_restores_verified_tombstones_and_the_same_inventory() {
+    fn a_trimmed_backup_restores_its_tombstones_and_the_same_inventory() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open(&root.path().join("source.db"), "alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
         for _ in 0..3 {
             source.checkpoint_step(&context).unwrap();
@@ -1409,7 +1428,7 @@ mod tests {
         assert!(source.checkpointed_envelopes().unwrap() > 0);
         assert_eq!(
             source
-                .restore_checkpoint_history(&CheckpointManifest::default())
+                .restore_checkpoint_history(&CheckpointManifest::default(), true)
                 .unwrap_err()
                 .code,
             "checkpoint-history-exists"
@@ -1434,19 +1453,14 @@ mod tests {
     fn a_backup_during_an_interrupted_trim_preserves_the_complete_log() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
-        for _ in 0..2 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        // The first chunk deletes some of the cut and the trim stops there: the source has
+        // retired only what it deleted, and its archive restores exactly that ledger.
+        source.set_trim_chunk_envelopes(3);
         source.set_trim_fault(Some(TrimFault::AfterChunk(1)));
         assert!(source.checkpoint_step(&context).is_err());
         assert!(source.trimmed_checkpoint().unwrap().is_none());
@@ -1459,40 +1473,23 @@ mod tests {
     }
 
     #[test]
-    fn a_backup_keeps_trimmed_history_when_a_newer_certificate_is_not_applied_yet() {
+    fn a_backup_keeps_trimmed_history_while_a_newer_cut_waits() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let mut context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.path().join("scratch"),
-            reviewer: "person/operator".into(),
         };
-        for _ in 0..3 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        source.checkpoint_step(&context).unwrap();
         let applied = source.trimmed_checkpoint().unwrap().unwrap();
         diagnostic(&source, "after the first trim");
+        // The next day's cut has no claims left to delete today, so it waits unrecorded.
         context.now_unix_ms += 86_400_000;
-        for _ in 0..2 {
-            source.checkpoint_step(&context).unwrap();
-        }
+        source.trim_locally_at_most(0);
+        source.checkpoint_step(&context).unwrap();
         assert_eq!(source.trimmed_checkpoint().unwrap().unwrap(), applied);
-        assert!(
-            source
-                .checkpoint_status(context.now_unix_ms, &context.configured_peers)
-                .unwrap()
-                .newest_stable
-                .unwrap()
-                .terms
-                .cut_unix_ms
-                > applied.cut_unix_ms
-        );
-        let path = root.path().join("certified.jsonl");
+        let path = root.path().join("waiting.jsonl");
         let header = archive(&source, &path);
         let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
@@ -1501,15 +1498,10 @@ mod tests {
 
     fn trimmed_source(root: &Path) -> Store {
         let source = Store::open(&root.join("source.db"), "alder").unwrap();
-        source.bind_fleet("test-fleet").unwrap();
-        for index in 0..12 {
-            diagnostic(&source, &format!("note-{index}"));
-        }
+        trimming(&source);
         let context = CheckpointContext {
             now_unix_ms: now_ms() + 3 * 86_400_000,
-            configured_peers: vec![],
             scratch: root.join("scratch"),
-            reviewer: "person/operator".into(),
         };
         for _ in 0..3 {
             source.checkpoint_step(&context).unwrap();
@@ -2361,17 +2353,14 @@ mod tests {
         }
 
         #[test]
-        fn certified_trim_and_ingest_during_export_preserve_the_old_complete_cut() {
+        fn a_trim_and_ingest_during_export_preserve_the_old_complete_cut() {
             let root = tempfile::tempdir().unwrap();
             let source = Arc::new(Store::open(&root.path().join("source.db"), "alder").unwrap());
-            source.bind_fleet("test-fleet").unwrap();
-            for index in 0..12 { diagnostic(&source, &format!("note-{index}")); }
+            trimming(&source);
             let context = CheckpointContext {
                 now_unix_ms: now_ms() + 3 * 86_400_000,
-                configured_peers: vec![], scratch: root.path().join("scratch"),
-                reviewer: "person/operator".into(),
+                scratch: root.path().join("scratch"),
             };
-            for _ in 0..2 { source.checkpoint_step(&context).unwrap(); }
             struct TrimDuringBackup {
                 source: Arc<Store>, context: CheckpointContext, bytes: Vec<u8>, ran: bool,
             }

@@ -38,7 +38,7 @@ Previously admitted envelopes are not retrospectively removed; doctor exposes ad
 high water. A member that has not learned a writer's key can admit unsigned history, and legacy
 writers cannot be authenticated individually. Disable legacy exchanges after every retained
 writer is admitted and signed. Removing membership does not erase history, rotate the secret or
-stop declared agents. See [Checkpoints](st3/checkpoints.md) before treating removal as an excusal.
+stop declared agents.
 
 ## Files on each machine
 

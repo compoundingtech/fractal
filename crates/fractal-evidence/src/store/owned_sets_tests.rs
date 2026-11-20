@@ -1180,11 +1180,6 @@ fn signed_replication_replay_and_checkpoint_keep_source_winner() {
                 .conflicts
                 .is_empty()
         );
-        let scratch = tempfile::tempdir().unwrap();
-        let (_, _, proof) = store
-            .plan_checkpoint_through(now_ms() + 1_000, None, scratch.path())
-            .unwrap();
-        assert!(proof.passed, "{proof:?}");
         let claims = store
             .claims_for("owned-set/garden", Some("owned-set.revised"))
             .unwrap();
@@ -1445,14 +1440,6 @@ fn a_member_added_only_on_a_losing_partition_retires_through_the_winning_set() {
                 .0
                 .kind,
             "stop"
-        );
-        let scratch = tempfile::tempdir().unwrap();
-        assert!(
-            store
-                .plan_checkpoint_through(now_ms() + 1_000, None, scratch.path())
-                .unwrap()
-                .2
-                .passed
         );
     }
     // A subsequent apply makes the learned retirement an explicit immutable stop reference.
