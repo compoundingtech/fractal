@@ -73,6 +73,11 @@ pub struct Execution {
     pub submission_digest: Option<String>,
     #[serde(default)]
     pub refusal_code: Option<resource_membership::RefusalCode>,
+    #[serde(default)]
+    pub learning_decision: Option<resource_profile_learner::RecordOutcome>,
+    /// Frozen host admission evidence, retained after membership retirement and in receipts.
+    #[serde(default)]
+    pub admission_decision: Option<resource_membership::AdmissionDecision>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -93,6 +98,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS shell_resource_request_cancellation_time_v1
         ON shell_resource_request_cancellations_v1(cancelled_at);")?;
     scrub_historical_environments(connection)?;
+    resource_profile_learner::create_schema(connection)?;
     Ok(())
 }
 
@@ -272,7 +278,8 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
-            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
+            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
+            learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
@@ -376,9 +383,20 @@ impl Store {
         next.command.environment.clear();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
+        // Admission evidence comes from the host membership, never mutable execution input.
+        // Once copied, it remains frozen even after retirement or later host observations.
+        next.admission_decision.clone_from(&previous.admission_decision);
+        if next.admission_decision.is_none() {
+            let decision: Option<String> = transaction.query_row(
+                "SELECT json_extract(body,'$.admissionDecision') FROM resource_memberships_v1 WHERE id=?1 AND host=?2",
+                rusqlite::params![next.command.lane.id, next.command.lane.host], |row| row.get(0),
+            ).optional()?.flatten();
+            next.admission_decision = decision.map(|body| serde_json::from_str(&body)).transpose()?;
+        }
         if next.root_exec_id.is_empty() { next.root_exec_id.clone_from(&next.command.id); }
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") && next.command.parent.is_none() {
             next.receipt_subject = Some(resource_exec_receipts::subject(&self.origin, &next));
+            next.learning_decision = resource_profile_learner::evidence::record_execution(&transaction, &next)?;
         }
         if next == previous { return Ok(false); }
         next.revision += 1;
@@ -456,7 +474,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadResult {
     pub head_start: Option<String>,
@@ -467,6 +485,8 @@ pub struct PayloadResult {
     pub exit_signal: Option<i32>,
     pub wall_duration_ms: u64,
     pub memory_peak_bytes: Option<u64>,
+    #[serde(default, flatten)]
+    pub evidence: resource_profile_learner::evidence::Evidence,
 }
 
 #[cfg(test)]
@@ -489,21 +509,21 @@ mod tests {
     fn future_resource_class_rows_remain_readable_but_cannot_be_submitted() {
         let store = Store::open_memory("host-a").unwrap();
         let mut future = store.submit_shell_resource(command("future"), 1).unwrap();
-        future.command.lane.class = RequestClass::Unknown("recovery".into());
+        future.command.lane.class = RequestClass::Unknown("future-class".into());
         future.refusal_code = Some(resource_membership::RefusalCode::RecoveryNotAllowed);
         store.update_shell_resource(&future).unwrap();
         store.submit_shell_resource(command("current"), 2).unwrap();
         let rows = store.shell_resources("host-a", false).unwrap();
         assert_eq!(rows.len(), 2);
         let future = rows.iter().find(|row| row.command.id == "future").unwrap();
-        assert_eq!(future.command.lane.class, RequestClass::Unknown("recovery".into()));
-        assert_eq!(serde_json::to_value(future).unwrap()["command"]["lane"]["class"], "recovery");
+        assert_eq!(future.command.lane.class, RequestClass::Unknown("future-class".into()));
+        assert_eq!(serde_json::to_value(future).unwrap()["command"]["lane"]["class"], "future-class");
         assert_eq!(store.shell_resource("future").unwrap().command.lane.class, future.command.lane.class);
         assert_eq!(future.refusal_code, Some(resource_membership::RefusalCode::RecoveryNotAllowed));
-        assert!(store.update_shell_resource(future).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.update_shell_resource(future).unwrap_err().to_string().contains("unsupported resource class future-class"));
         let mut request = command("unsupported");
         request.lane.class = future.command.lane.class.clone();
-        assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(store.shell_resource_if_exists("unsupported").unwrap().is_none());
     }
 
@@ -517,12 +537,12 @@ mod tests {
         request.lane.owner.run = "person/operator".into();
         request.request_id = Some(key.to_string());
         let mut execution = store.submit_shell_resource(request, 1).unwrap();
-        execution.command.lane.class = RequestClass::Unknown("recovery".into());
+        execution.command.lane.class = RequestClass::Unknown("future-class".into());
         store.update_shell_resource(&execution).unwrap();
         let before = store.shell_resource(&id).unwrap();
-        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
-        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
         let after = store.shell_resource(&id).unwrap();
         assert_eq!(after, before);
@@ -566,7 +586,8 @@ mod tests {
             &fractal_runtime::Launch::Argv(vec!["/bin/sh".into(), "-c".into(),
                 "test \"$SECRET\" = shell-environment-security-regression-sentinel && test \"$ST3_START_OPERATION\" = \"$SECRET\"".into()]),
             directory.path(), &environment,
-            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None, require_enforced: false },
+            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None,
+                class: RequestClass::Check, require_enforced: false },
             &|| Ok(())).unwrap();
         assert!(generation.start_operation.is_none());
         let exited = runtime.wait_for_exit("secret", &generation.generation_id).unwrap();
@@ -606,6 +627,7 @@ mod tests {
             execution.result = Some(PayloadResult {
                 head_start: None, head_end: None, clean_start: None, clean_end: None,
                 exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
+                evidence: Default::default(),
             });
             store.update_shell_resource(&execution).unwrap();
         }
@@ -799,6 +821,7 @@ mod tests {
         terminal.result = Some(PayloadResult {
             head_start: None, head_end: None, clean_start: None, clean_end: None,
             exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None,
+            evidence: Default::default(),
         });
         store.update_shell_resource(&terminal).unwrap();
         let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
