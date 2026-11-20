@@ -973,9 +973,11 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
       'fail-fast': false,
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
+    // Strict kit plays are CPU-bound: 4 vCPU ubuntu-latest took 9-15 min, 8 vCPU 3 min 45 s
+    // (doc/fleet/factory/test-speed/web-setup-audit). Same shape and queue policy as the Linux stages.
+    'runs-on': [...linuxStageRunner],
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true') }}",
-    'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
     // Signs its own shard's result in shadow (the evidence-signing environment is for the merge queue, main and
