@@ -580,16 +580,19 @@ stored-state reads and writes still grow with the envelope's claims and bytes.
 An out-of-order claim on an already prepared resource subject inserts only its immutable
 canonical sort key during admission. It marks preparation stale and queues the existing
 paged deferred fold instead of rebuilding the subject's entire history inside COMMIT.
-New arrivals reset a staged cursor so it cannot skip an earlier key. Query-only readers
+New arrivals reset a staged cursor only when their key is at or before its folded prefix;
+later keys preserve progress. A persisted round-robin cursor prevents repeatedly restarted
+subjects from starving other subjects. Query-only readers
 use the canonical snapshot fold until publication; writer-context reads report
 `resource-preparation-not-caught-up` rather than doing that unbounded fallback.
 Envelope admission remains atomic, including its source rows and stale marker.
 The deferred worker publishes the complete observation only after its indexed walk finishes.
 Preparation cache version 2 adopts complete version-1 rows without a history rebuild;
 an older binary sees the version change and rebuilds before serving its readers.
-Admission drains this queue through paced background writer loans after releasing its
-transactions and admission mutex, even without checkpointing enabled. Startup admission
-also drains persisted stale marks after an interrupted run.
+After a writer loan returns, the shared writer scheduler queues paced preparation loans,
+including work created by local commits. Foreground operations do not wait for an ever-growing
+queue to empty. On-disk stores also schedule persisted stale marks at startup, even without
+checkpointing or a new replication receive.
 
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope

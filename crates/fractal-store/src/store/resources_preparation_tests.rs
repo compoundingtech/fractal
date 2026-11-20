@@ -1069,7 +1069,7 @@ fn a_delete_that_no_checkpoint_recorded_rebuilds_at_once() {
     transaction.commit().unwrap();
 }
 
-/// New observations restart a deferred fold, without rebuilding history on the writer.
+/// New observations join a deferred fold, without rebuilding history on the writer.
 #[test]
 fn a_new_claim_on_a_deferred_subject_keeps_its_rebuild_deferred() {
     let store = Store::open_memory("example-deferred-new").unwrap();
@@ -1332,10 +1332,9 @@ proptest! {
     }
 }
 
-/// A subject too long for one budget resumes in later transactions. A new claim drops its
-/// staged cursor and starts another bounded walk, never publishing a partial replacement.
+/// A subject resumes across transactions, including claims still ahead of its cursor.
 #[test]
-fn a_staged_rebuild_resumes_across_transactions_and_a_new_claim_drops_its_stage() {
+fn a_staged_rebuild_preserves_its_prefix_when_a_later_claim_arrives() {
     let store = Store::open_memory("example-staged-resume").unwrap();
     let observation = |phase: usize| json!({"fields":{"kind":"custom.example","facts":{"phase":phase}}});
     let ids: Vec<_> = (0..6).map(|phase| append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed", observation(phase))).collect();
@@ -1362,17 +1361,64 @@ fn a_staged_rebuild_resumes_across_transactions_and_a_new_claim_drops_its_stage(
     {
         let mut writer = store.connection.write();
         let transaction = writer.transaction().unwrap();
-        append_claim_tx(&transaction, &store.origin, SUBJECTS[0], "resource.observed", None, &observation(9), &[], None).unwrap();
+        smallclaims::store::canonical::record_position_tx(&transaction, "later-staged", 100).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hac9e50cf070a owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT 'later-staged',batch_id,subject,'resource.observed',origin,?1,'[]','99'
+             FROM claims WHERE id=?2",
+            params![observation(9).to_string(), ids[5]],
+        ).unwrap();
         flush(&transaction).unwrap();
-        assert!(!staged(&transaction), "the new claim dropped the old stage");
+        assert!(staged(&transaction), "a later claim preserves the folded prefix");
         assert!(queued(&transaction, "deferred"));
         assert!(preparation_observation(&transaction, SUBJECTS[0]).is_err());
         transaction.commit().unwrap();
     }
-    assert_eq!(step(), (true, true, true), "the replacement walk remains bounded");
+    assert_eq!(step(), (true, true, true), "the resumed walk remains bounded");
     while step().0 {}
     assert_eq!(step(), (false, false, false), "the complete fold was published");
     assert_eq!(current_rows(&store.readers.get()), whole_rebuilt_rows(&store));
+}
+
+/// Earlier arrivals may invalidate one prefix, but cannot starve another subject.
+#[test]
+fn repeated_earlier_insertions_do_not_starve_other_deferred_subjects() {
+    let store = Store::open_memory("example-staged-fair").unwrap();
+    for subject in [SUBJECTS[0], SUBJECTS[1]] {
+        for time in ["10", "11", "12"] {
+            append_wire(&store, subject, time, "resource.observed",
+                json!({"fields":{"kind":"custom.example","facts":{"phase":time}}}));
+        }
+    }
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h18bb32aab672 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT subject FROM local_resource_preparation",
+        [],
+    ).unwrap();
+    for attempt in 0..12 {
+        assert!(super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap());
+        let id = format!("earlier/{:04}", 9999 - attempt);
+        smallclaims::store::canonical::record_position_tx(&transaction, &id, 0).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hd72749b681fb owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT ?1,batch_id,subject,'resource.observed','fixture',
+                    '{\"fields\":{\"kind\":\"custom.example\",\"facts\":{\"early\":true}}}','[]','1'
+             FROM claims WHERE subject=?2 LIMIT 1",
+            params![id, SUBJECTS[0]],
+        ).unwrap();
+        flush(&transaction).unwrap();
+    }
+    let other_pending: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)",
+        [SUBJECTS[1]], |row| row.get(0),
+    ).unwrap();
+    assert!(!other_pending, "round-robin loans finish the unchanging subject");
+    assert!(queued(&transaction, "deferred"), "the hot subject still needs its prefix");
+    finish_deferred(&transaction);
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
+    assert_eq!(snapshot(&transaction, SUBJECTS[1]), canonical_snapshot(&transaction, SUBJECTS[1]));
+    transaction.rollback().unwrap();
 }
 
 /// A stage is resumed only by the process that made it: opening the store drops it, and the
@@ -1649,10 +1695,10 @@ fn complete_version_one_preparation_is_adopted_without_rebuilding_history() {
 }
 
 #[test]
-fn startup_admission_resumes_preparation_left_stale_by_an_interrupted_drain() {
+fn startup_resumes_preparation_left_stale_by_an_interrupted_drain() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("interrupted-preparation.sqlite3");
-    let expected = {
+    let expected = smallclaims::sqlite::without_deferred_maintenance_for_test(|| {
         let store = Store::open(&path, "preparation-restart").unwrap();
         for phase in 0..3 {
             append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed",
@@ -1667,16 +1713,42 @@ fn startup_admission_resumes_preparation_left_stale_by_an_interrupted_drain() {
         ).unwrap();
         assert!(super::preparation::flush_deferred(&tx, std::time::Duration::ZERO).unwrap());
         assert!(staged(&tx));
+        assert!(preparation_observation(&tx, SUBJECTS[0]).is_err());
         tx.commit().unwrap();
         expected
-    };
+    });
     let store = Store::open(&path, "preparation-restart").unwrap();
-    {
-        let writer = store.connection.write();
-        assert!(preparation_observation(&writer, SUBJECTS[0]).is_err());
+    // Opening the store schedules persisted work without a trim/checkpoint or receive.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "startup drain must finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    // This is the daemon's ordinary startup admission, with no trim/checkpoint worker.
-    store.validate_replication_backlog().unwrap();
-    assert!(!store.runtime.deferred_pending(&store.readers.get()).unwrap());
     assert_eq!(snapshot(&store.readers.get(), SUBJECTS[0]), expected);
+}
+
+#[test]
+fn a_local_out_of_order_commit_schedules_preparation_without_replication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("local-preparation.sqlite3");
+    let store = Store::open(&path, "local-preparation").unwrap();
+    append_wire(&store, SUBJECTS[0], "4102444800000", "resource.observed",
+        json!({"fields":{"kind":"fixture","facts":{"latest":true}}}));
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        append_claim_tx(&tx, &store.origin, SUBJECTS[0], "resource.observed", None,
+            &json!({"fields":{"kind":"fixture","facts":{"earlier":true}}}), &[], None).unwrap();
+        // The shared commit finalizer must arrange follow-up after releasing this loan.
+        flush(&tx).unwrap();
+        assert!(preparation_observation(&tx, SUBJECTS[0]).is_err());
+        tx.commit().unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "local commit drain must finish");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let reader = store.readers.get();
+    assert_eq!(snapshot(&reader, SUBJECTS[0]), canonical_snapshot(&reader, SUBJECTS[0]));
 }

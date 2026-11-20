@@ -620,10 +620,22 @@ fn sql_order(left: &rusqlite::types::Value, right: &rusqlite::types::Value) -> s
 pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
     let deadline = std::time::Instant::now() + budget;
     loop {
-        let subject: Option<String> = transaction
-            .query_row("SELECT subject FROM local_resource_preparation_deferred ORDER BY subject LIMIT 1", [], |row| row.get(0))
-            .optional()?;
+        // Rotate even when a subject needs another page or an earlier insertion restarts it.
+        // Each seek uses the queue's primary key; one hot subject cannot starve its peers.
+        let subject: Option<String> = transaction.query_row(
+            "SELECT COALESCE(
+                (SELECT subject FROM local_resource_preparation_deferred
+                 WHERE subject > COALESCE((SELECT value FROM meta WHERE key='preparation_drain_cursor'),'')
+                 ORDER BY subject LIMIT 1),
+                (SELECT subject FROM local_resource_preparation_deferred ORDER BY subject LIMIT 1))",
+            [], |row| row.get(0),
+        )?;
         let Some(subject) = subject else { return Ok(false) };
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hfa732c67215c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('preparation_drain_cursor',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [&subject],
+        )?;
         if !step_deferred(transaction, &subject, deadline)? {
             return Ok(true);
         }
@@ -812,8 +824,12 @@ fn defer_insert(transaction: &Transaction<'_>, subject: &str, id: &str, key: &[u
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hd3082b2cbd8e owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_resource_preparation_stale(subject) VALUES(?1)", [subject],
     )?;
-    // The new key can precede the staged cursor. Restart rather than publish a partial fold.
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0479515b6e53 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
+    // A later key is still ahead of the staged cursor and needs no restart.
+    // Earlier keys invalidate the prefix; never publish a fold that omits them.
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h03205209a9fc owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1 AND after_key>=?2",
+        params![subject, key],
+    )?;
     Ok(())
 }
 
