@@ -1075,8 +1075,11 @@ fn the_sweep_forgets_what_an_older_trim_left_behind_once() {
     assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), left);
     assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
     assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    let kept_links = verdict_links(&store, &kept);
+    assert!(verdict_links(&store, &dropped) > 0, "the older trim left the dropped claims' links");
     sweep_links(&store);
     assert_eq!(verdict_links(&store, &dropped), 0);
+    assert_eq!(verdict_links(&store, &kept), kept_links, "the sweep keeps every live claim's links");
     assert_eq!(authority(&store), before);
     assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
