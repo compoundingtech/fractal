@@ -251,6 +251,11 @@ impl Fence {
         });
         // A failed/unusable cut is a stale attempt, not a new public error. Reader guards and
         // its pin have ended before queueing validation. The two-attempt caller owns fallback.
+        #[cfg(test)]
+        if !matches!(&value, Ok(Some(_))) {
+            eprintln!("[TMP] preparation snapshot usable=false error={:?} completion={:?}",
+                value.as_ref().err(), completion_state::current(&store.readers.get()));
+        }
         prepared.value = value.ok().flatten();
         prepared
     }
@@ -266,6 +271,9 @@ impl Fence {
             || !Arc::ptr_eq(&self.owner, &prepared.owner)
             || prepared.value.is_none()
         {
+            #[cfg(test)]
+            eprintln!("[TMP] fence ownership/value refusal: has_value={} cut={:?}",
+                prepared.value.is_some(), prepared.cut);
             return false;
         }
         let Some(expected) = &prepared.cut else {
@@ -273,7 +281,12 @@ impl Fence {
         };
         // Native values from THIS transaction close the same-batch gap. No committed hint
         // participates: earlier job/trigger/repair/delete DML changes the counter immediately.
-        NativeCut::read(connection).as_ref() == Some(expected)
+        let actual = NativeCut::read(connection);
+        #[cfg(test)]
+        if actual.as_ref() != Some(expected) {
+            eprintln!("[TMP] fence changed expected={expected:?} actual={actual:?}");
+        }
+        actual.as_ref() == Some(expected)
     }
 }
 
