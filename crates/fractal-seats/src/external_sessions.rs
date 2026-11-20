@@ -24,6 +24,10 @@ use crate::native_views::{MAX_OMP_EVENT_IDENTITY_BYTES, MAX_TIMELINE_VALUE_BYTES
 pub use fractal_missions::external_sessions::*;
 pub use fractal_missions::external_sessions::{ExternalDriver, ExternalProcess, ExternalSession, LineTimelineFold, NativeLocator, TimelineKey, TimelineOrder, TimelineSlice, digest, timeline_key, timestamp};
 
+mod evidence;
+mod inventory;
+pub use inventory::DiscoveryError;
+pub use evidence::EvidenceError;
 const MAX_DISCOVERED_FILES: usize = 10_000;
 
 pub const MAX_EXPOSED_HISTORY: usize = 2_000;
@@ -105,58 +109,13 @@ struct SessionMetadata {
 }
 
 pub fn discover(home: Option<&Path>, include_history: bool) -> Result<ExternalDiscovery> {
-    let Some(home) = home else {
-        return Ok(ExternalDiscovery::default());
-    };
-    static CACHE: LazyLock<Mutex<Option<(PathBuf, bool, Instant, ExternalDiscovery)>>> =
-        LazyLock::new(|| Mutex::new(None));
-    let cached = {
-        let cache = CACHE.lock().expect("external session cache mutex poisoned");
-        cache
-            .as_ref()
-            .and_then(|(cached_home, cached_history, created, discovery)| {
-                (cached_home == home
-                    && *cached_history == include_history
-                    && created.elapsed() <= DISCOVERY_CACHE_TTL)
-                    .then(|| discovery.clone())
-            })
-    };
-    if let Some(discovery) = cached {
-        return Ok(discovery);
-    }
-    // A historical inventory may be waiting on cold storage. Do not make native-only
-    // requests wait behind it by holding the cache mutex while discovering files.
-    let discovery = if include_history {
-        // Live transcripts are read now; saved history comes from the background inventory,
-        // so a cold history tree never holds a request past HISTORY_WAIT.
-        let candidates = home_processes(home)?;
-        let mut files = discover_files(home, false, &candidates)?;
-        let live = files
-            .iter()
-            .map(|item| (item.transcript.clone(), item.native_id.clone()))
-            .collect::<BTreeSet<_>>();
-        files.extend(
-            historical_files(home)?
-                .iter()
-                .filter(|item| !live.contains(&(item.transcript.clone(), item.native_id.clone())))
-                .cloned(),
-        );
-        assemble_discovery(files, candidates, None, true)?
-    } else {
-        discover_uncached(home, None, false)?
-    };
-    *CACHE.lock().expect("external session cache mutex poisoned") = Some((
-        home.to_owned(),
-        include_history,
-        Instant::now(),
-        discovery.clone(),
-    ));
-    Ok(discovery)
+    inventory::discover(home, include_history, false)
 }
 
 #[derive(Default)]
 struct HistoryInventory {
     files: Option<(Instant, Arc<Vec<SessionMetadata>>)>,
+    index: Option<Arc<BTreeMap<String, Vec<SessionMetadata>>>>,
     error: Option<String>,
     refreshing: bool,
     completed: u64,
@@ -171,7 +130,10 @@ static HISTORY: LazyLock<(Mutex<HashMap<PathBuf, HistoryInventory>>, Condvar)> =
 pub fn start_history_inventory(home: Option<&Path>) {
     if let Some(home) = home {
         let mut inventories = HISTORY.0.lock().expect("history inventory mutex poisoned");
-        start_history_refresh(inventories.entry(home.to_owned()).or_default(), home);
+        let inventory = inventories.entry(home.to_owned()).or_default();
+        if inventory.files.as_ref().is_none_or(|(at, _)| at.elapsed() > DISCOVERY_CACHE_TTL) {
+            start_history_refresh(inventory, home);
+        }
     }
 }
 
@@ -183,6 +145,13 @@ fn start_history_refresh(inventory: &mut HistoryInventory, home: &Path) {
     let home = home.to_owned();
     std::thread::spawn(move || {
         let result = discover_files(&home, true, &[]);
+        let index = result.as_ref().ok().map(|files| {
+            let mut index = BTreeMap::<String, Vec<SessionMetadata>>::new();
+            for file in files {
+                index.entry(external_session_id(file.driver, &file.native_id)).or_default().push(file.clone());
+            }
+            Arc::new(index)
+        });
         let (lock, ready) = &*HISTORY;
         let mut inventories = lock.lock().expect("history inventory mutex poisoned");
         let inventory = inventories.entry(home).or_default();
@@ -190,6 +159,7 @@ fn start_history_refresh(inventory: &mut HistoryInventory, home: &Path) {
         inventory.completed += 1;
         match result {
             Ok(files) => {
+                inventory.index = index;
                 inventory.files = Some((Instant::now(), Arc::new(files)));
                 inventory.error = None;
             }
@@ -229,11 +199,9 @@ fn historical_files(home: &Path) -> Result<Arc<Vec<SessionMetadata>>> {
     match (&inventory.files, &inventory.error) {
         (Some((_, files)), _) => Ok(files.clone()),
         (None, Some(error)) => {
-            anyhow::bail!("reading saved native session transcripts failed: {error}")
+            return Err(DiscoveryError::Failed(error.clone()).into());
         }
-        (None, None) => anyhow::bail!(
-            "st is still reading saved native session transcripts in the background; retry shortly"
-        ),
+        (None, None) => Err(DiscoveryError::HistoryPending.into()),
     }
 }
 
@@ -244,7 +212,7 @@ pub fn discover_fresh(
     let Some(home) = home else {
         return Ok(ExternalDiscovery::default());
     };
-    Ok(discover_uncached(home, None, include_history)?)
+    inventory::discover(Some(home), include_history, true)
 }
 
 fn discover_uncached(
@@ -252,9 +220,19 @@ fn discover_uncached(
     strict_id: Option<&str>,
     include_history: bool,
 ) -> Result<ExternalDiscovery> {
+    let started = Instant::now();
     let candidates = home_processes(home)?;
-    let files = discover_files(home, include_history, &candidates)?;
-    assemble_discovery(files, candidates, strict_id, include_history)
+    tracing::debug!(phase = "processes", elapsed_ms = started.elapsed().as_millis() as u64, "external discovery");
+    let files = discover_files(home, false, &candidates)?;
+    tracing::debug!(phase = "live_transcripts", elapsed_ms = started.elapsed().as_millis() as u64, "external discovery");
+    let mut discovery = assemble_discovery(files, candidates, strict_id, include_history)?;
+    if include_history {
+        let live = discovery.sessions.iter().map(|session| session.id.clone()).collect::<BTreeSet<_>>();
+        let saved = assemble_discovery(historical_files(home)?.as_ref().clone(), Vec::new(), strict_id, true)?;
+        discovery.sessions.extend(saved.sessions.into_iter().filter(|session| !live.contains(&session.id)));
+    }
+    tracing::debug!(phase = "complete", elapsed_ms = started.elapsed().as_millis() as u64, "external discovery");
+    Ok(discovery)
 }
 
 fn assemble_discovery(
@@ -281,16 +259,24 @@ fn assemble_discovery(
         .map(|candidate| (candidate.process.pid, candidate))
         .collect::<BTreeMap<_, _>>();
     let mut matched_roots = BTreeSet::new();
+    let omp_pids = candidates.iter().filter(|candidate| candidate.driver == ExternalDriver::Omp)
+        .map(|candidate| candidate.process.pid).collect::<Vec<_>>();
+    let omp_files = evidence::open_files(&omp_pids)?;
     let mut sessions = Vec::new();
     for item in metadata {
         let process = candidates.iter().find_map(|candidate| {
-            if candidate.driver != item.driver
-                || !(candidate.process.command.contains(&item.native_id)
-                    || candidate
-                        .process
-                        .command
-                        .contains(item.transcript.to_string_lossy().as_ref()))
-            {
+            let matches = if item.driver == ExternalDriver::Omp {
+                omp_files.get(&candidate.process.pid).is_some_and(|files| {
+                    files.transcripts.len() == 1 && files.transcripts.iter().any(|path| {
+                        crate::native_resume::pi_family_reported_transcript(path, &item.native_id)
+                            .is_some_and(|path| fs::canonicalize(&item.transcript).ok().as_ref() == Some(&path))
+                    })
+                })
+            } else {
+                candidate.process.command.contains(&item.native_id)
+                    || candidate.process.command.contains(item.transcript.to_string_lossy().as_ref())
+            };
+            if candidate.driver != item.driver || !matches {
                 return None;
             }
             let root = process_root(candidate, &candidate_by_pid);
@@ -351,12 +337,33 @@ fn resolve_duplicate_sessions(
         }
         let driver = group[0].driver;
         let native_id = &group[0].native_id;
+        if driver == ExternalDriver::Omp
+            && strict_id == Some(external_session_id(driver, native_id).as_str())
+        {
+            let mut identities = BTreeSet::new();
+            let mut unique = Vec::with_capacity(group.len());
+            for item in group {
+                #[cfg(unix)]
+                let identity = {
+                    use std::os::unix::fs::MetadataExt as _;
+                    let metadata = fs::metadata(&item.transcript)?;
+                    (metadata.dev(), metadata.ino())
+                };
+                #[cfg(not(unix))]
+                let identity = fs::canonicalize(&item.transcript)?;
+                if identities.insert(identity) { unique.push(item); }
+            }
+            if unique.len() == 1 {
+                selected.push(unique.pop().expect("one physical transcript"));
+                continue;
+            }
+            return Err(AmbiguousSession(unique[0].native_id.clone()).into());
+        }
         let process_cwd = candidates
             .iter()
             .find(|candidate| {
-                candidate.driver == driver
-                    && !candidate.managed_by_st3
-                    && candidate.process.command.contains(native_id)
+                driver != ExternalDriver::Omp && candidate.driver == driver
+                    && !candidate.managed_by_st3 && candidate.process.command.contains(native_id)
             })
             .and_then(|candidate| candidate.process.cwd.as_deref())
             .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
@@ -410,7 +417,7 @@ pub fn find_conversation(
     if !id.starts_with("session/external-") {
         return Ok(None);
     }
-    Ok(discover(home, true)?.into_conversation(id))
+    inventory::find(home, id, false)
 }
 
 /// Resolve an already-bound managed transcript without inventorying every native session
@@ -795,11 +802,16 @@ pub fn omp_process_transcript(
         for provider in linux_child_processes(driver) {
             let Some(provider_start) = linux_process_start_ticks(provider) else { continue; };
             let Some(provider_argv) = arguments(provider) else { continue; };
-            if !account_matches(provider, account) {
+            if driver_for_command(&provider_argv.join(" ")) != Some(ExternalDriver::Omp)
+                || !account_matches(provider, account)
+            {
                 continue;
             }
-            let Some(path) = crate::native_resume::omp_resume_path(&provider_argv)
-                .and_then(|path| crate::native_resume::pi_family_reported_transcript(&path, current_native_id))
+            let files = evidence::open_files(&[provider]).ok()?;
+            let paths = &files.get(&provider)?.transcripts;
+            if paths.len() != 1 { continue; }
+            let Some(path) = paths.iter().next()
+                .and_then(|path| crate::native_resume::pi_family_reported_transcript(path, current_native_id))
             else {
                 continue;
             };
@@ -914,8 +926,7 @@ pub fn find_fresh(home: Option<&Path>, id: &str) -> Result<Option<ExternalSessio
     let Some(home) = home else {
         return Ok(None);
     };
-    Ok(discover_uncached(home, Some(id), true)?
-        .into_conversation(id)
+    Ok(inventory::find(Some(home), id, true)?
         .and_then(ExternalConversation::into_readable_session))
 }
 
@@ -1470,11 +1481,18 @@ fn discover_files(
             Vec::new()
         };
         let mut seen = BTreeSet::new();
+        let omp_pids = candidates.iter().filter(|candidate| candidate.driver == ExternalDriver::Omp)
+            .map(|candidate| candidate.process.pid).collect::<Vec<_>>();
+        let open_files = evidence::open_files(&omp_pids)?;
         for candidate in candidates
             .iter()
             .filter(|candidate| !candidate.managed_by_st3)
         {
-            for token in candidate.process.command.split_whitespace() {
+            let paths = if candidate.driver == ExternalDriver::Omp {
+                open_files.get(&candidate.process.pid).map(|files| files.transcripts.iter()
+                    .filter_map(|path| path.to_str()).collect::<Vec<_>>()).unwrap_or_default()
+            } else { candidate.process.command.split_whitespace().collect::<Vec<_>>() };
+            for token in paths {
                 let token = token.trim_matches(['"', '\'']);
                 let token = if token.starts_with('-') {
                     token.split_once('=').map_or(token, |(_, path)| path)
@@ -1575,20 +1593,29 @@ fn open_opencode_database(path: &Path) -> Result<Connection> {
 
 fn discover_opencode_sessions(home: &Path) -> Result<Vec<SessionMetadata>> {
     let database = home.join(".local/share/opencode/opencode.db");
+    read_opencode_sessions(&database, None)
+}
+
+fn read_opencode_sessions(database: &Path, native_id: Option<&str>) -> Result<Vec<SessionMetadata>> {
     if !database.is_file() {
         return Ok(Vec::new());
     }
     let file_metadata = fs::metadata(&database)?;
     let database_updated_at = system_time_ms(file_metadata.modified().unwrap_or(UNIX_EPOCH));
     let connection = open_opencode_database(&database)?;
-    let mut statement = connection.prepare(
+    let sql = if native_id.is_some() {
         "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
                 COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
          FROM session s LEFT JOIN message m ON m.session_id = s.id \
-         GROUP BY s.id \
-         ORDER BY s.time_updated DESC LIMIT ?1",
-    )?;
-    let rows = statement.query_map(params![MAX_EXPOSED_HISTORY as i64], |row| {
+         WHERE s.id = ?1 GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+    } else {
+        "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
+                COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
+         FROM session s LEFT JOIN message m ON m.session_id = s.id \
+         WHERE ?1 IS NULL GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+    };
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map(params![native_id, MAX_EXPOSED_HISTORY as i64], |row| {
         let native_id: String = row.get(0)?;
         let directory: Option<String> = row.get(1)?;
         let title: Option<String> = row.get(2)?;
@@ -1626,7 +1653,7 @@ fn discover_opencode_sessions(home: &Path) -> Result<Vec<SessionMetadata>> {
         found.push(SessionMetadata {
             driver: ExternalDriver::OpenCode,
             native_id,
-            transcript: database.clone(),
+            transcript: database.to_owned(),
             codex_home: None,
             cwd: directory
                 .filter(|value| !value.trim().is_empty())
@@ -1966,16 +1993,11 @@ fn linux_processes() -> Result<Vec<ProcessCandidate>> {
 
 #[cfg(not(target_os = "linux"))]
 fn ps_processes() -> Result<Vec<ProcessCandidate>> {
-    let output = crate::environment::command("ps")?
-        .args(["-axo", "pid=,ppid=,lstart=,command="])
-        .output()
-        .context("list local harness processes")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "ps failed while listing harness processes"
-    );
+    let mut command = crate::environment::command("ps")?;
+    command.args(["-axo", "pid=,ppid=,lstart=,command="]);
+    let output = evidence::output(&mut command, Duration::from_secs(2))?;
     let mut found = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in String::from_utf8_lossy(&output).lines() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
         if fields.len() < 8 {
             continue;
@@ -1992,7 +2014,7 @@ fn ps_processes() -> Result<Vec<ProcessCandidate>> {
         let Some(driver) = driver_for_command(&command) else {
             continue;
         };
-        let cwd = process_cwd_from_lsof(pid);
+        let cwd = None;
         let fingerprint = process_fingerprint(pid, started_at_unix_ms, &command);
         found.push(ProcessCandidate {
             driver,
@@ -2008,22 +2030,14 @@ fn ps_processes() -> Result<Vec<ProcessCandidate>> {
             },
         });
     }
+    let pids = found.iter().map(|candidate| candidate.process.pid).collect::<Vec<_>>();
+    let files = evidence::open_files(&pids)?;
+    for candidate in &mut found {
+        candidate.process.cwd = files.get(&candidate.process.pid).and_then(|files| files.cwd.clone());
+    }
     Ok(found)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn process_cwd_from_lsof(pid: u32) -> Option<PathBuf> {
-    let output = crate::environment::command("lsof")
-        .ok()?
-        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-        .output()
-        .ok()?;
-    output.status.success().then_some(())?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix('n'))
-        .map(PathBuf::from)
-}
 
 fn driver_for_command(command: &str) -> Option<ExternalDriver> {
     let tokens = command.split_whitespace().collect::<Vec<_>>();
@@ -2934,7 +2948,7 @@ mod tests {
         let transcript = root.path().join("external.jsonl");
         fs::write(&transcript, "{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
         let provider_script = root.path().join("provider.sh");
-        fs::write(&provider_script, "sleep 30\n:\n").unwrap();
+        fs::write(&provider_script, "exec 3< \"$2\"\nsleep 30\n:\n").unwrap();
         let bash = path_executable("bash");
         let runtime = Runtime {
             driver: std::process::Command::new(&bash)
@@ -3100,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn native_only_inventory_reads_explicit_live_transcripts_not_history_or_attachments() {
+    fn native_only_inventory_joins_open_transcripts_not_launch_arguments() {
         let home = tempfile::tempdir().unwrap();
         let project = home.path().join(".omp/agent/sessions/project");
         let attachment = project.join("attachments");
@@ -3115,11 +3129,12 @@ mod tests {
         ] {
             fs::write(path, format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\n")).unwrap();
         }
+        let _open = File::open(&active).unwrap();
         let candidate = |command: String| ProcessCandidate {
             driver: ExternalDriver::Omp,
             managed_by_st3: false,
             process: ExternalProcess {
-                pid: 42,
+                pid: std::process::id(),
                 parent_pid: 1,
                 started_at_unix_ms: 1,
                 fingerprint: "live".into(),
@@ -3137,6 +3152,9 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].native_id, "active");
         assert_eq!(found[0].transcript, active);
+        drop(_open);
+        assert!(discover_files(home.path(), false, &candidates).unwrap().is_empty(),
+            "launch arguments alone are not current session evidence");
     }
 
     #[cfg(unix)]
@@ -3254,8 +3272,8 @@ mod tests {
 
         stall(None);
         let started = Instant::now();
-        let error = historical_files(home.path()).unwrap_err().to_string();
-        assert!(error.contains("retry shortly"), "{error}");
+        let error = historical_files(home.path()).unwrap_err();
+        assert!(matches!(error.downcast_ref::<DiscoveryError>(), Some(DiscoveryError::HistoryPending)));
         assert!(started.elapsed() < HISTORY_WAIT + Duration::from_secs(1));
 
         let expired = Instant::now().checked_sub(DISCOVERY_CACHE_TTL * 2).unwrap();
@@ -3274,7 +3292,7 @@ mod tests {
         fs::create_dir_all(&active).unwrap();
         fs::create_dir_all(&stale).unwrap();
         let metadata = |workspace: &Path, modified| SessionMetadata {
-            driver: ExternalDriver::Omp,
+            driver: ExternalDriver::Codex,
             native_id: "shared-id".into(),
             transcript: workspace.join("shared-id.jsonl"),
             codex_home: None,
@@ -3285,7 +3303,7 @@ mod tests {
             revision: format!("{modified}"),
         };
         let process = ProcessCandidate {
-            driver: ExternalDriver::Omp,
+            driver: ExternalDriver::Codex,
             managed_by_st3: false,
             process: ExternalProcess {
                 pid: 42,
@@ -3293,11 +3311,11 @@ mod tests {
                 started_at_unix_ms: 1,
                 fingerprint: "fingerprint".into(),
                 cwd: Some(active.clone()),
-                command: "agent-omp --resume shared-id".into(),
+                command: "codex resume shared-id".into(),
                 exact_session: true,
             },
         };
-        let id = external_session_id(ExternalDriver::Omp, "shared-id");
+        let id = external_session_id(ExternalDriver::Codex, "shared-id");
         let selected = resolve_duplicate_sessions(
             vec![metadata(&active, 10), metadata(&stale, 20)],
             &[process.clone()],
