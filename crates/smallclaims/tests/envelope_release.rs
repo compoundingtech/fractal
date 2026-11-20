@@ -309,3 +309,39 @@ fn an_envelope_younger_than_the_minimum_age_stays() {
     assert_eq!(alder.released_envelopes().unwrap(), 0);
     assert!(release_all(&alder) > 0, "the same envelopes go once old enough");
 }
+
+/// An envelope is released only once every claim it carries has a stored writer signature: one
+/// whose claim lost its signature stays, and the others go.
+#[test]
+fn an_envelope_with_a_claim_without_its_writer_signature_stays() {
+    let (alder, _key) = alder_at(Store::open_memory("alder", Arc::new(Plain)).unwrap(), 6);
+    let unsigned: String = alder
+        .readers
+        .get()
+        .query_row(
+            "SELECT id FROM claims WHERE origin='alder' AND kind='example.note' ORDER BY store_index LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    alder.connection.write().execute("DELETE FROM claim_member_signatures WHERE claim_id=?1", [&unsigned]).unwrap();
+    assert!(release_all(&alder) > 0);
+    assert_eq!(
+        count(&alder, &format!("SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.id='{unsigned}'")),
+        0,
+        "the unsigned claim's envelope stays"
+    );
+    assert_eq!(
+        count(&alder, &format!("SELECT COUNT(*) FROM replica_envelopes JOIN claims USING(batch_id) WHERE claims.id='{unsigned}'")),
+        1
+    );
+    assert_eq!(
+        count(
+            &alder,
+            "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id)
+             WHERE NOT EXISTS(SELECT 1 FROM claim_member_signatures WHERE claim_id=claims.id)"
+        ),
+        0,
+        "every released claim has its writer signature"
+    );
+}
