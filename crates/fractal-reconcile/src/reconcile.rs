@@ -717,12 +717,14 @@ pub trait RuntimeControl: Send + Sync + 'static {
     }
 }
 
+type ShellRetirements = Arc<Mutex<BTreeMap<(String, Option<String>), Option<Result<bool>>>>>;
+
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
-    shell_retirements: Arc<Mutex<BTreeMap<(String, Option<String>), Option<Result<bool>>>>>,
+    shell_retirements: ShellRetirements,
 }
 
 impl NativeRuntime {
