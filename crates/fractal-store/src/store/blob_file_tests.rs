@@ -206,3 +206,30 @@ fn a_crash_after_the_copy_and_before_the_emptying_finishes_on_the_next_step() {
     assert_eq!(row(&store, &hash).0, 0);
     assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
 }
+
+#[test]
+fn a_row_keeps_its_bytes_until_a_checkpoint_has_put_the_copy_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let body = b"bytes whose copy is not yet on disk".repeat(30);
+    let hash = document(&store, "doc/example/undurable", &body);
+    let later = start_window(&store) + WINDOW_MS;
+    // A reader of the blob file whose snapshot predates the copy: no checkpoint can backfill the
+    // frames the copy commits while it reads, so the copy is committed but not in the file.
+    let reader = rusqlite::Connection::open(blob_file::location(&path)).unwrap();
+    reader.execute_batch("BEGIN; SELECT count(*) FROM blobs;").unwrap();
+    let copy = store.move_blob_bytes_step(later, WINDOW_MS, Duration::from_secs(1)).unwrap();
+    assert_eq!((copy.copied, copy.rows, copy.more), (1, 0, true), "the copy");
+    for _ in 0..3 {
+        let step = store.move_blob_bytes_step(later, WINDOW_MS, Duration::from_secs(1)).unwrap();
+        assert_eq!((step.rows, step.more), (0, true), "nothing is emptied while the copy's frames are not backfilled");
+        assert_eq!(row(&store, &hash).0, body.len() as i64, "the row keeps its own bytes");
+    }
+    // The reader ends; the next checkpoint backfills and syncs the copy, and the row lets go.
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    assert_eq!(move_all(&store, later), (1, body.len() as u64));
+    assert_eq!(row(&store, &hash).0, 0);
+    assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
+}
