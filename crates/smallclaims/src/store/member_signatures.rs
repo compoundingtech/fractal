@@ -11,7 +11,7 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-pub const SCHEMA: &str = "
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc057e3fd627d owner=smallclaims::store::member_signatures TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_member_signatures (
     id INTEGER PRIMARY KEY,
     claim_id TEXT NOT NULL UNIQUE,
@@ -100,7 +100,7 @@ impl Store {
                     insert_signature_tx(tx, signature)?;
                 }
                 tx.execute(
-                    "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    /* sqlite-large-value: allow-for-now lv-hf875f5474570 owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     params![SIGN_CURSOR, through.to_string()],
                 )?;
                 Ok(())
@@ -208,7 +208,7 @@ impl Store {
         let mut found = Vec::new();
         for claim_id in claim_ids {
             if let Some(signature) = statement
-                .query_row([claim_id], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-h4f1be29c47a1 owner=smallclaims::store::member_signatures TODO=trace-statement-and-value-representation */ [claim_id], |row| {
                     Ok(ClaimMemberSignature {
                         claim_id: row.get(0)?,
                         writer: row.get(1)?,
@@ -228,7 +228,7 @@ impl Store {
 
 fn insert_signature_tx(connection: &Connection, signature: &ClaimMemberSignature) -> Result<usize> {
     Ok(connection.execute(
-        "INSERT OR IGNORE INTO claim_member_signatures(claim_id, member_key, signature) VALUES (?1, ?2, ?3)",
+        /* sqlite-large-value: allow-for-now lv-hcf3fa63cc69a owner=smallclaims::store::member_signatures TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_member_signatures(claim_id, member_key, signature) VALUES (?1, ?2, ?3)",
         params![signature.claim_id, signature.member_key, signature.signature],
     )?)
 }
