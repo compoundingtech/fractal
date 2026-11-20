@@ -678,6 +678,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st conversations reply-in-thread": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st conversations search": {
         "actor": "optional",
         "accepts_person": true,
@@ -2983,6 +2992,15 @@
         "ignores_actor": false
       },
       "st work handoff": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st work link-thread": {
         "actor": "required",
         "accepts_person": true,
         "can_carry_person": true,

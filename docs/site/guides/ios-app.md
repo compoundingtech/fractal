@@ -26,6 +26,12 @@ pnpm run pods
 
 Prebuild regenerates the ignored native project. Keep lasting native changes in checked-in Expo modules or configuration, not just generated files. Open the generated `.xcworkspace` in Xcode, not the project without CocoaPods.
 
+The screenshot helper isolates the native tool environment. When the caller sets
+`GIT_CONFIG_GLOBAL`, it preserves that exact value for CocoaPods' Git subprocesses,
+without inheriting `SSH_AUTH_SOCK`. This keeps the caller's configured Git transport
+instead of silently falling back to a different user configuration. Standalone and
+CI callers that do not set this override need not add one.
+
 ## Simulator
 
 Select the app scheme and an installed iPhone simulator in Xcode, use Debug, and run. Keep ordinary simulator signing enabled; disabling signing prevents usable Keychain storage and pairing.

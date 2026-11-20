@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { plainError, type ClientConnection } from '../../../clients/typescript/fractal-client';
-import { ActionSheetIOS, Alert, ScrollView, Switch, Text, View } from 'react-native';
+import { ScrollView, Switch, Text, View } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
 import { useGatewayDraft } from '../gatewayDraft';
@@ -118,7 +119,7 @@ export function FleetScreen() {
       <SectionHeader title="devices" count={data.devices.length} />
       {data.devices.map(device => <ListRow key={device.id} title={deviceTitle(device, caps?.session_actor)} second={`${deviceDetail(device, now)} · ${device.scopes.join(', ')}${device.push ? device.push.registered ? ` · push registered${device.push.environment ? ` (${device.push.environment})` : ''}` : ' · push not registered' : ''}`} />)}
       <SectionHeader title="tab order" />
-      {order.map(tab => <ListRow key={tab} title={tab} right={<T dim>{order.indexOf(tab) + 1}</T>} onPress={() => ActionSheetIOS.showActionSheetWithOptions(
+      {order.map(tab => <ListRow key={tab} title={tab} right={<T dim>{order.indexOf(tab) + 1}</T>} onPress={() => showOwnedActionSheet(
         { title: `Move ${tab}`, options: ['Move up', 'Move down', 'Cancel'], cancelButtonIndex: 2, disabledButtonIndices: [...(order.indexOf(tab) === 0 ? [0] : []), ...(order.indexOf(tab) === TABS.length - 1 ? [1] : [])] },
         index => { if (index === 0) actions.moveTab(tab, -1); if (index === 1) actions.moveTab(tab, 1); },
       )} />)}
@@ -171,7 +172,7 @@ function CarrierSection() {
     const first = unpaired ? (member.device ? null : 'Pair this phone with it') : 'Use this member';
     const options = [...(first ? [first] : []), 'Move up', 'Move down', 'Rename', 'Remove', 'Cancel'];
     const at = first ? 0 : -1;
-    ActionSheetIOS.showActionSheetWithOptions({ title: member.name, options, destructiveButtonIndex: options.length - 2, cancelButtonIndex: options.length - 1 }, picked => {
+    showOwnedActionSheet({ title: member.name, options, destructiveButtonIndex: options.length - 2, cancelButtonIndex: options.length - 1 }, picked => {
       const choice = picked - at;
       if (choice === 0) { if (unpaired) { setPairing({ id: '', code: '', fingerprint: '' }); actions.startMemberPairing(index); } else actions.pickFabricMember(index); }
       else if (choice === 1) void actions.moveFabricMember(index, -1);

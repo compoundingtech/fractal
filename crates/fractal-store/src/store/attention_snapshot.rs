@@ -17,6 +17,66 @@ pub(super) struct OperationalFault {
     pub(super) suppress_generic_delivery: bool,
 }
 
+fn fold_operational_failures(claims: impl IntoIterator<Item = ClaimRecord>) -> Vec<AttentionRequestView> {
+        let mut episodes: BTreeMap<String, AttentionRequestView> = BTreeMap::new();
+        for claim in claims {
+            let f = &claim.body["fields"];
+            let episode = f["episode"].as_str().unwrap_or_default();
+            if claim.kind == "operational.recovered" {
+                if let Some(kept) = episodes.get_mut(episode)
+                    && f["failure"] == kept.request
+                {
+                    kept.status = "resolved".into();
+                    kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
+                }
+                continue;
+            }
+            episodes.insert(
+                episode.into(),
+                AttentionRequestView {
+                    subject: episode.into(),
+                    request: claim.id.clone(),
+                    reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
+                    title: f["title"].as_str().unwrap_or_default().into(),
+                    reason: f["reason"].as_str().unwrap_or_default().into(),
+                    severity: f["severity"].as_str().unwrap_or("error").into(),
+                    targets: serde_json::from_value(f["targets"].clone())
+                        .unwrap_or_else(|_| vec![claim.subject.clone()]),
+                    actor: claim.actor.clone().unwrap_or_default(),
+                    status: "pending".into(),
+                    outcome: None,
+                    resolution_reason: None,
+                    requested_at_unix_ms: claim.accepted_at_unix_ms,
+                    resolved_at_unix_ms: None,
+                    until: None,
+                    step: None,
+                    step_attempt: None,
+                    closed_by: None,
+                },
+            );
+        }
+        episodes.into_values().collect()
+}
+
+pub(super) fn operational_failure_at(
+    connection: &Connection,
+    opening: &ClaimRecord,
+) -> Result<Option<AttentionRequestView>> {
+    if opening.kind != "operational.failure" {
+        return Ok(None);
+    }
+    let Some(episode) = opening.body["fields"]["episode"].as_str() else { return Ok(None) };
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h901f68d5f5cf owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+         FROM claims INDEXED BY claims_operational_episode_index
+         WHERE kind IN ('operational.failure','operational.recovered')
+           AND json_extract(body,'$.fields.episode')=?1 ORDER BY CANONICAL_ASC(claims)",
+    ))?;
+    let claims = query.query_map([episode], claim_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(fold_operational_failures(claims).into_iter().next())
+}
+
 /// Phase routing is an origin-attested property of the canonical failure, not of
 /// the member which happens to project it or of an episode prefix alone.
 fn readiness_phase_delivery(
@@ -188,9 +248,19 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
+        self.attention_collection_snapshot_with_context(person, now, |_| Ok(()))
+    }
+
+    /// Preserve raw discussion evidence while retaining the collection's eligibility fence.
+    pub fn attention_collection_snapshot_with_context(
+        &self,
+        person: Option<&str>,
+        now: u128,
+        context: impl FnMut(&AttentionItemView) -> Result<()>,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
         // upper bound to -1 by passing u128::MAX through that reducer.
-        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
+        let eventual = self.attention_snapshot_with_context(person, i64::MAX as u128, context)?;
         let connection = self.readers.get();
         let subjects: BTreeSet<_> = eventual.iter()
             .filter(|item| item.kind == "person-step")
@@ -253,6 +323,16 @@ impl Store {
             .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.harness_prompt_items_for_seats_at(&connection, seats, person, as_of)
+    }
+
+    pub(super) fn harness_prompt_items_for_seats_at(
+        &self,
+        connection: &Connection,
+        seats: Vec<String>,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
@@ -279,10 +359,10 @@ impl Store {
         };
         let mut items = Vec::new();
         for seat in seats {
-            if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
+            if let Some(item) = self.screen_prompt_item(connection, &seat, person)? {
                 items.push(item);
             }
-            items.extend(self.denial_items(&connection, &seat, person)?);
+            items.extend(self.denial_items(connection, &seat, person)?);
             let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
                 continue;
             };
@@ -298,7 +378,7 @@ impl Store {
                          AND json_extract(body, '$._operation.id')=?1)",
                 )?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h5f2b2d51372d owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [native_prompt_gone_operation(&claim)], |row| row.get(0))?;
-            if gone || native_prompt_answer(&connection, &claim)?.is_some() {
+            if gone || native_prompt_answer(connection, &claim)?.is_some() {
                 continue;
             }
             // Only the running incarnation's prompt waits: a restarted seat's old prompt is gone.
@@ -307,15 +387,15 @@ impl Store {
             };
             if runtime["status"] != "running"
                 || runtime["incarnation_id"] != harness["incarnation_id"]
-                || !person_work::declaration_live(&connection, &seat)?
+                || !person_work::declaration_live(connection, &seat)?
             {
                 continue;
             }
             let ask = harness["ask"].as_str().unwrap_or("unknown");
             let owner = if ask == "question" {
-                self.question_principal(&seat)?
+                self.question_principal_at(connection, &seat)?
             } else {
-                self.agent_person(&seat)?
+                agent_person_at(connection, &seat)?
             };
             let missing_principal = ask == "question" && owner.is_none();
             let owner = match owner {
@@ -338,7 +418,7 @@ impl Store {
                 .unwrap_or("its terminal shows a prompt");
             let answerable = !missing_principal && answerable(&harness, as_of);
             // The exact call it asks about, as its hook or driver named it for this observation.
-            let call = prompt_call(&connection, &seat, &harness)?;
+            let call = prompt_call(connection, &seat, &harness)?;
             items.push(AttentionItemView {
                 deadline_unix_ms: None,
                 default_answer: None,
@@ -631,44 +711,7 @@ impl Store {
         let claims = query
             .query_map([], claim_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut episodes: BTreeMap<String, AttentionRequestView> = BTreeMap::new();
-        for claim in claims {
-            let f = &claim.body["fields"];
-            let episode = f["episode"].as_str().unwrap_or_default();
-            if claim.kind == "operational.recovered" {
-                if let Some(kept) = episodes.get_mut(episode) {
-                    if f["failure"] == kept.request {
-                        kept.status = "resolved".into();
-                        kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
-                    }
-                }
-                continue;
-            }
-            episodes.insert(
-                episode.into(),
-                AttentionRequestView {
-                    subject: episode.into(),
-                    request: claim.id.clone(),
-                    reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
-                    title: f["title"].as_str().unwrap_or_default().into(),
-                    reason: f["reason"].as_str().unwrap_or_default().into(),
-                    severity: f["severity"].as_str().unwrap_or("error").into(),
-                    targets: serde_json::from_value(f["targets"].clone())
-                        .unwrap_or_else(|_| vec![claim.subject.clone()]),
-                    actor: claim.actor.clone().unwrap_or_default(),
-                    status: "pending".into(),
-                    outcome: None,
-                    resolution_reason: None,
-                    requested_at_unix_ms: claim.accepted_at_unix_ms,
-                    resolved_at_unix_ms: None,
-                    until: None,
-                    step: None,
-                    step_attempt: None,
-                    closed_by: None,
-                },
-            );
-        }
-        let episodes = episodes.into_values().collect::<Vec<_>>();
+        let episodes = fold_operational_failures(claims);
         *kept.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::new(episodes.clone())));
         Ok(episodes)
     }
@@ -1129,12 +1172,11 @@ impl Store {
                 if !matches!(view.status.as_str(), "failed" | "cancelled") {
                     continue;
                 }
-                if let Some(item) = self.stopped_loop_item(&run, &view, spec)? {
-                    if item.requested_at_unix_ms <= as_of
-                        && person.is_none_or(|person| person == item.person)
-                    {
-                        items.push(item);
-                    }
+                if let Some(item) = self.stopped_loop_item(&run, &view, spec)?
+                    && item.requested_at_unix_ms <= as_of
+                    && person.is_none_or(|person| person == item.person)
+                {
+                    items.push(item);
                 }
             }
         }
@@ -1308,7 +1350,9 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || {
+            claim_by_id_tx(connection, &failure.request)
+        })? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -1594,18 +1638,16 @@ impl Store {
         if matches!(
             f["condition"].as_str(),
             Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
-        ) {
-            if self
-                .current_harness(source)?
-                .is_some_and(|harness| harness.is_ready())
-            {
-                return Ok(None);
-            }
+        ) && self
+            .current_harness(source)?
+            .is_some_and(|harness| harness.is_ready())
+        {
+            return Ok(None);
         }
-        if let Some(revision) = f["source_revision"].as_str() {
-            if self.selected_desired_token(source)?.as_deref() != Some(revision) {
-                return Ok(None);
-            }
+        if let Some(revision) = f["source_revision"].as_str()
+            && self.selected_desired_token(source)?.as_deref() != Some(revision)
+        {
+            return Ok(None);
         }
         if let Some(incarnation) = f["incarnation"].as_str() {
             if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
@@ -1897,7 +1939,10 @@ pub fn person_attention_item(
             .and_then(agent)
         {
             Some(actor) => Some(actor),
-            None => conversation_agent(connection, None, Some(&view.run))?,
+            None => match ask.as_ref().map(|ask| cancelled_ask_conversation(connection, ask)).transpose()?.flatten() {
+                Some(agent) => Some(agent),
+                None => conversation_agent(connection, None, Some(&view.run))?,
+            },
         },
         requester_id: ask.and_then(|ask| ask.actor),
         launch_id: None,
@@ -1927,6 +1972,29 @@ pub fn person_attention_item(
         )],
         request,
     }))
+}
+
+/// A cancellation notice is published by the runtime, but still belongs to the original
+/// asker's conversation. Read the immutable source even after that agent has stopped; a
+/// presentation link neither revives the ask nor grants permission to answer it.
+fn cancelled_ask_conversation(connection: &Connection, update: &ClaimRecord) -> Result<Option<String>> {
+    if update.actor.as_deref() != Some("daemon/runtime") || !person_work::is_update(update) {
+        return Ok(None);
+    }
+    let fields = &update.body["fields"];
+    let Some(about) = fields["request"]["about"].as_str() else { return Ok(None) };
+    smallclaims::touched::note_read(|| about.to_owned());
+    let Some(original) = person_work::request(connection, about)? else { return Ok(None) };
+    // `about` alone is descriptive context, not proof of a cancellation's source. Bind the
+    // runtime's stable notice key and recipient to that canonical asking claim.
+    if fields["key"] != format!("st3-ask-ended:{}", original.id)
+        || fields["person"] != original.body["fields"]["person"]
+        || original.accepted_at_unix_ms > update.accepted_at_unix_ms
+        || person_work::is_update(&original)
+    {
+        return Ok(None);
+    }
+    Ok(original.actor.as_deref().and_then(agent))
 }
 
 /// The live agents whose declaration carries `handles-faults`, by subject.
@@ -2127,7 +2195,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(None);
         };
         if person.is_some_and(|person| person != owner) {
@@ -2303,7 +2371,7 @@ impl Store {
         if denials.is_empty() || !person_work::declaration_live(connection, seat)? {
             return Ok(Vec::new());
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(Vec::new());
         };
         if person.is_some_and(|person| person != owner) {

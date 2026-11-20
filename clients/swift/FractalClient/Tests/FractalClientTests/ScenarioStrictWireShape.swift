@@ -68,7 +68,11 @@ struct ScenarioStrictWireShape {
             "details": object(["missions": resourceList, "work": resourceList,
                 "launches": array(ref("Launch")), "launch_variants": array(ref("LaunchVariant")),
                 "resources": resourceList]),
-            "attention": object(["attention": resourceList, "messages": resourceList]),
+            "attention": object(["attention": resourceList, "messages": resourceList, "resources": resourceList,
+                "topic_threads": array(object([
+                    "origin_attention_id": string, "summary": ref("ThreadSummary"),
+                    "events": array(ref("ThreadTimelineEvent")),
+                ]))]),
             "conversation": object(["threads": array(thread)]),
             "terminal": object(["terminals": array(terminal)]),
             "sync": object(["capabilities": ref("Capabilities"), "expected": array(object([

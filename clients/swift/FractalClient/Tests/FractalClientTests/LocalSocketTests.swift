@@ -109,6 +109,37 @@ final class LocalSocketTests: XCTestCase {
         XCTAssertEqual(close.1, [0x03, 0xE8])
     }
 
+    func testThreadTimelineUsesTheSharedLocalProtocolSocket() async throws {
+        let server = try ScriptedDaemon()
+        let frame = Array(#"{"kind":"snapshot","id":"timeline","snapshot":{"id":"snapshot/local/1/revision","host_id":"local","store_index":1,"projection_version":"v1","created_at":"2026-10-04T08:00:00Z"},"items":[{"kind":"thread.renamed","id":"claim/rename","actor_id":"person/ada","accepted_at_unix_ms":1000,"previous_title":"Original title","title":"Reviewed title"}],"order":["claim/rename"],"has_more":false}"#.utf8)
+        let served = server.serve { connection -> (ScriptedDaemon.Request, [UInt8], UInt8) in
+            let request = try connection.readRequest()
+            let key = try XCTUnwrap(request.headers["sec-websocket-key"])
+            try connection.write(Array("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\nsec-websocket-protocol: fractal.client.collections.v0\r\nsec-websocket-accept: \(LocalWebSocket.acceptValue(key: key))\r\n\r\n".utf8))
+            let subscribe = try connection.readFrame()
+            try connection.writeFrame(opcode: 0x1, payload: frame)
+            try connection.writeFrame(opcode: 0x8, payload: [0x03, 0xE8])
+            return (request, subscribe.payload, try connection.readFrame().opcode)
+        }
+        let client = FractalClient(localSocketPath: server.path, person: "person/ada")
+        var frames: [ThreadCollectionFrame<ThreadTimelineEvent>] = []
+        for try await frame in await client.threadTimelineStream(threadID: "thread/example", subscriptionID: "timeline", limit: 7) {
+            frames.append(frame)
+        }
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames.first?.items?.first?.kind, .renamed)
+        XCTAssertEqual(frames.first?.items?.first?.previousTitle, "Original title")
+        XCTAssertEqual(frames.first?.items?.first?.title, "Reviewed title")
+        let (request, subscribe, closeOpcode) = try await served.value
+        XCTAssertEqual(request.line, "GET /v1/client/collections/stream HTTP/1.1")
+        XCTAssertEqual(request.headers["x-st3-person"], "person/ada")
+        XCTAssertNil(request.headers["authorization"])
+        XCTAssertEqual(request.headers["sec-websocket-protocol"], "fractal.client.collections.v0")
+        let command = try JSONDecoder().decode([String: JSONValue].self, from: Data(subscribe))
+        XCTAssertEqual(command, ["kind": .string("subscribe"), "id": .string("timeline"), "collection": .string("thread-timeline"), "subject": .string("thread/example"), "limit": .number(7)])
+        XCTAssertEqual(closeOpcode, 0x8)
+    }
+
     func testARefusedUpgradeThrowsTheDaemonsError() async throws {
         let server = try ScriptedDaemon()
         let refusal = Array(#"{"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/refused","code":"forbidden","message":"a bound agent cannot act as person/ada","retryable":false,"details":{}}"#.utf8)

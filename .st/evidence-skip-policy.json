@@ -377,6 +377,7 @@
         ".cargo",
         ".config/nextest.toml",
         ".github/fleet-compat-baseline.json",
+        ".github/thread-floor-v22-compat-baseline.json",
         "Cargo.lock",
         "Cargo.toml",
         "apps/ios/fixtures/observation-minute.json",

@@ -229,12 +229,11 @@ fn inventory(
             if message.from != session.authority_actor && message.to != session.authority_actor {
                 continue;
             }
-            let claim = state
-                .store
-                .claims_for(&message.subject, Some("message.sent"))?
-                .into_iter()
-                .min_by_key(|claim| claim.store_index);
-            let Some(claim) = claim else {
+            let claims = state.store.claims_for(&message.subject, Some("message.sent"))?;
+            if claims.iter().any(|claim| fractal_schema::threads::message_has_relation(&claim.body)) {
+                continue;
+            }
+            let Some(claim) = claims.into_iter().min_by_key(|claim| claim.store_index) else {
                 continue;
             };
             let agent = [&message.from, &message.to]
@@ -996,6 +995,40 @@ mod tests {
             Some(native["page"]["next_cursor"].as_str().unwrap().to_owned()), 1,
             "grant-a-policy-1").await.unwrap_err();
         assert_eq!(error.code, "validation-failed");
+    }
+
+    #[tokio::test]
+    async fn ordinary_search_leaves_thread_mail_in_its_thread() {
+        use crate::store::thread_metadata::{Edit, PersonAuthority, apply};
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let person = "person/alex";
+        let agent = "agent/sender";
+        let thread = "thread/private-search";
+        state.store.configure_thread_write_rollout([]);
+        apply(&state.store, person, thread, "create-private-search", Edit::Create {
+            agent, title: "Search test",
+        }).unwrap();
+        crate::store::thread_delivery::append_reply(
+            &state.store,
+            &ClaimInput {
+                subject: "message/thread-search".into(), kind: "message.sent".into(), actor: Some(person.into()),
+                fields: serde_json::from_value(json!({
+                    "from": person, "to": agent, "content": "orchid private thread", "status": "sent",
+                    "thread_id": thread,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some("send-private-search".into()),
+            },
+            PersonAuthority::TrustedLocal,
+            None,
+        ).unwrap();
+        claim(&state, "message/ordinary-search", "message.sent",
+            json!({"from":person, "to":agent, "content":"orchid ordinary mail"}));
+        let native = read(&state, person, query("orchid", 200)).await.unwrap();
+        let items = native["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{native}");
+        assert_eq!(items[0]["entry_id"], "message/ordinary-search");
+        assert!(!native.to_string().contains("private thread"));
     }
 
     #[tokio::test]

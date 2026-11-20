@@ -409,6 +409,62 @@
       "behavior": "stale fence refused; accepted after restart; replay after restart has no duplicate writes"
     },
     {
+      "action": "thread.start",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
+      "action": "thread.reply",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
+      "action": "thread.read",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
+      "action": "thread.mark-unread",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::thread_unread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client with an owned thread and admitted incoming anchor: stale fence refuses without writes; mark survives full daemon/store restart; identical-key replay preserves operation ID and affected IDs without extra store writes. Summary supplies the opaque signed mark ID used to clear; natural unread and message history remain unchanged."
+    },
+    {
+      "action": "thread.clear-unread",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::thread_unread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client clears the opaque mark ID observed from Summary: stale fence refuses without writes; cleared state survives full daemon/store restart; identical-key replay preserves operation ID and affected IDs without extra store writes. Natural unread and message history remain unchanged."
+    },
+    {
+      "action": "thread.rename",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
+      "action": "thread.close",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
+      "action": "thread.reopen",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
+    },
+    {
       "action": "work.ask",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::person_work_actions_survive_stale_fences_and_restarts"
@@ -853,11 +909,11 @@
     },
     {
       "command": "st alerts discuss",
-      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in Fractal TUI",
+      "description": "Start a durable thread about an Inbox item with its responsible agent",
       "tests": [
-        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_tui_chat_about_this_sends"
+        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_starts_a_durable_inbox_thread_and_retries_exactly"
       ],
-      "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
+      "verification": "real CLI over private Unix socket; exact Inbox source/episode and responsible agent; durable first message; exact-key replay without duplication; changed input and recipient overrides refused"
     },
     {
       "command": "st alerts dismiss",
@@ -1073,6 +1129,14 @@
         "crates/fractal/tests/action_coverage.rs::cli_send_reply_read_archive_search_and_attachments_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st conversations reply-in-thread",
+      "description": "Send a conversation reply to an existing topic thread from its bound agent",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::bound_work_link_thread_cli_attaches_exact_pending_episode_without_reopening"
+      ],
+      "verification": "Real CLI over private Unix socket, native agent binding, exact thread delivery and closed-state preservation; does not claim a full daemon restart."
     },
     {
       "command": "st conversations search",
@@ -3117,6 +3181,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened and replayed between actions"
     },
     {
+      "command": "st work link-thread",
+      "description": "Attach one pending ask episode to an existing thread as its requesting agent",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::bound_work_link_thread_cli_attaches_exact_pending_episode_without_reopening"
+      ],
+      "verification": "Real bound-agent CLI over private Unix socket; exact ask episode, actor refusal, original receipt replay and no implicit reopen; does not claim a full daemon restart."
+    },
+    {
       "command": "st work ls",
       "description": "List current actionable work; use --as to filter one agent or --all for history",
       "tests": [
@@ -3384,14 +3456,6 @@
         "crates/fractal/tests/action_coverage.rs::pairing_revocation_survives_stale_fences_and_restarts"
       ],
       "verification": "live UI adapter across daemon restart"
-    },
-    {
-      "effect": "Discuss",
-      "tests": [
-        "crates/fractal-tui/src/ui/live.rs::live_sends_retries_discussions_and_creation_survive_daemon_restarts",
-        "crates/fractal/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts"
-      ],
-      "verification": "live UI adapter plus daemon restart"
     },
     {
       "effect": "EditArrangement",
@@ -3668,7 +3732,7 @@
     {
       "action": "ToggleConversationFirst",
       "tests": [
-        "crates/fractal-tui/src/ui/glass.rs::opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first",
+        "crates/fractal-tui/src/ui/glass.rs::opening_an_agent_respects_the_default_and_stored_terminal_choice",
         "crates/fractal-tui/tests/support/attach_default.rs::attach_default_probe"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
@@ -3679,6 +3743,15 @@
         "crates/fractal-tui/src/ui/glass.rs::terminal_fallback_defaults_on_and_the_palette_changes_it_locally"
       ],
       "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
+    },
+    {
+      "action": "ThreadReading",
+      "tests": [
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_pre_palette_visible_anchor_evidence",
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_explicit_clear_available_with_no_visible_body",
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_marks_only_presented_replies_read_before_auto_read_dwell"
+      ],
+      "verification": "real palette Enter dispatch queues MarkUnread at the pre-menu visible anchor, ClearUnread for exactly the observed reminders, or MarkRead for only presented replies before auto-read dwell without reading loaded unseen history"
     },
     {
       "action": "Name",

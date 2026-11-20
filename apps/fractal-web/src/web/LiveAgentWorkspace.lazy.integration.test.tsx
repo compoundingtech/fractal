@@ -5,13 +5,14 @@ import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Atom from 'effect/reactivity/Atom'
+import { useAtomValue } from '@effect/atom-react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as PaneModule from './ConversationPane.tsx'
 import type * as WorkspaceModule from './LiveAgentWorkspace.tsx'
 import type * as FallbackModule from './ConversationPaneFallback.tsx'
 import type * as LazyChunkModule from '@fractal/ui/lazy-chunk'
 import type { UxTelemetry } from '../telemetry/ux.ts'
-import type { Feed, Fleet } from '../data/source.ts'
+import type { Feed, Fleet, Grants } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import { openAgent } from '@fractal/sdk/read'
@@ -55,8 +56,11 @@ let gatewayObservation: FeedSyncObservation | undefined
 const reconnect = vi.fn()
 const askingAgents: ReadonlySet<string> = new Set()
 const waitingFeed = Atom.make({ _tag: 'Waiting' } as const)
+// No write capability is granted by this read-only shell fixture.
+const grants = Atom.make<Grants>({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' })
 vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
+  useGrants: () => useAtomValue(grants),
   // Rows read their own agent feed; serve it from the mocked roster.
   useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
@@ -67,7 +71,7 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, terminal: () => waitingFeed, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
+  useDataSource: () => ({ gateway: 'alpha.example', grants, reconnect, prefetchTerminal: terminalPrefetch, terminal: () => waitingFeed, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
   useFeedInterest: () => {},
 }))
 

@@ -50,6 +50,7 @@
     { "file": "timeline-conformance.json", "definition": "TimelinePage" },
     { "file": "response-evidence.json", "definition": "GoldenResponseEvidence" },
     { "file": "notice-conformance.json", "definition": "NoticeSnapshot" },
+    { "file": "thread-start-refusals.json", "definition": "ErrorEnvelope" },
     { "file": "timeline-relay-omission.json", "definition": "Envelope" },
     { "file": "timeline-delivery-links.json", "definition": "Envelope" },
     { "file": "timeline-message-participants.json", "definition": "Envelope" },

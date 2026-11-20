@@ -269,6 +269,40 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn github_plugin_{name}(&self, owner: &str, repo: &str, {parameter}: u64) -> Result<Envelope<serde_json::Value>, ClientError> {{ self.get(&format!(\"{route}\", percent_encode(owner), percent_encode(repo))).await }}")?;
             continue;
         }
+        if id == "thread.list" {
+            writeln!(out, r#"    pub async fn thread_list(&self, agent_id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{ self.thread_list_in(ThreadListScope::Agent(agent_id), cursor, limit).await }}
+    pub async fn thread_list_in(&self, scope: ThreadListScope<'_>, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{
+        let selection = match scope {{
+            ThreadListScope::Agent(id) => format!("agent_id={{}}", percent_encode(id)),
+            ThreadListScope::Inbox {{ source, episode }} => format!("origin_source={{}}&origin_episode={{}}", percent_encode(source), percent_encode(episode)),
+            ThreadListScope::Mission(id) => format!("mission_id={{}}", percent_encode(id)),
+            ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+            ThreadListScope::MarkedUnread => "marked_unread=true".into(),
+        }};
+        let mut path = format!("/v1/client/threads?{{selection}}");
+        if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }}
+        if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }}
+        self.get(&path).await
+    }}"#)?;
+            continue;
+        }
+        if id == "thread.start-context" {
+            writeln!(out, r#"    pub async fn thread_start_context(&self, source_id: &str, episode: &str) -> Result<Envelope<ThreadStartContext>, ClientError> {{ self.get(&format!("/v1/client/threads/start-context?source_id={{}}&episode={{}}", percent_encode(source_id), percent_encode(episode))).await }}"#)?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, r#"    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {{ self.get(&format!("/v1/client/threads/{{}}", thread_path_segment(id)?)).await }}"#)?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    pub async fn thread_request_history(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<RequestHistoryPage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/request-history", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, r#"    pub async fn thread_timeline(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            writeln!(out, r#"    pub async fn thread_timeline_around(&self, id: &str, message_id: &str, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline?around={{}}", thread_path_segment(id)?, percent_encode(message_id)); if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
@@ -483,6 +517,16 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let request = self.prepare_message_send(id,idempotency_key,fence,parameters)?; self.action_internal(&request).await }}"
             )?;
+        } else if action == "thread.start" || action == "thread.reply" {
+            let (recipient, prepare) = if action == "thread.start" {
+                ("", "self.prepare_thread_start(&idempotency_key, &mut parameters)")
+            } else {
+                ("let agent_id = self.thread_get(&parameters.target_id).await?.value.agent_id;", "self.prepare_thread_reply(&idempotency_key, &agent_id, &mut parameters)")
+            };
+            writeln!(
+                out,
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && self.signing_device.is_some() {{ {recipient} {prepare}.map_err(|error| ClientError::Protocol(error.to_string()))?; }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+            )?;
         } else {
             writeln!(
                 out,
@@ -510,6 +554,39 @@ fn swift_operation_methods(
                 .replace("{repo}", "\\(Self.routedSessionID(repo))")
                 .replace(&format!("{{{parameter}}}"), &format!("\\({swift_parameter})"));
             writeln!(out, "    public func {method}(owner: String, repo: String, {swift_parameter}: UInt64) async throws -> Envelope<JSONValue> {{ try await get(\"{route}\") }}")?;
+            continue;
+        }
+        if id == "thread.list" {
+            writeln!(out, r#"    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{ try await threadList(in: .agent(agentID), cursor: cursor, limit: limit) }}
+    public func threadList(in scope: ThreadListScope, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{
+        var query: [URLQueryItem]
+        switch scope {{
+        case .agent(let id): query = [.init(name: "agent_id", value: id)]
+        case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
+        case .mission(let id): query = [.init(name: "mission_id", value: id)]
+        case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        case .markedUnread: query = [.init(name: "marked_unread", value: "true")]
+        }}
+        if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}
+        if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}
+        return try await get("v1/client/threads", query: query)
+    }}"#)?;
+            continue;
+        }
+        if id == "thread.start-context" {
+            writeln!(out, r#"    public func threadStartContext(sourceID: String, episode: String) async throws -> Envelope<ThreadStartContext> {{ try await get("v1/client/threads/start-context", query: [.init(name: "source_id", value: sourceID), .init(name: "episode", value: episode)]) }}"#)?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, r#"    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> {{ try await get("v1/client/threads/\(try Self.routedThreadID(id))") }}"#)?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    public func threadRequestHistory(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<RequestHistoryPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/request-history", query: query) }}"#)?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil, around: String? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let around {{ query.append(.init(name: "around", value: around)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -937,6 +1014,26 @@ fn validate_surfaces(
         "DocumentReferences",
         "MessageBody",
         "AgentDeclaration",
+        "ThreadStartRecipient",
+        "ThreadStartContext",
+        "ThreadSummary",
+        "ThreadUnreadMark",
+        "ThreadUnreadReminder",
+        "ThreadMarkUnreadParameters",
+        "ThreadClearUnreadParameters",
+        "ThreadSummaryPage",
+        "ThreadTimelineAnchor",
+        "ThreadTimelinePage",
+        "SourceEpisode",
+        "HistoricalReference",
+        "RequestHistoryItem",
+        "RequestHistoryRelation",
+        "SourceEpisodeGroup",
+        "RequestHistoryPage",
+        "ThreadTargetParameters",
+        "ThreadRenameParameters",
+        "ThreadStartParameters",
+        "ThreadReplyParameters",
         "AgentWorkspace",
         "StatusHistory",
         "StatusTransition",
@@ -1804,6 +1901,26 @@ fn typescript_operation_methods(
         } else {
             path.to_owned()
         };
+        if id == "thread.list" {
+            writeln!(out, "    async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummaryPage>> {{ return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.start-context" {
+            writeln!(out, "    async threadStartContext(sourceID: string, episode: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadStartContext>> {{ return this.get('/v1/client/threads/start-context' + query({{ source_id: sourceID, episode }}), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, "    async threadGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummary>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, "    async threadRequestHistory(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<RequestHistoryPage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/request-history` + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; around?: never; limit?: number }} | {{ around: string; cursor?: never; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<OrderedMembershipPage>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}/memberships` + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
@@ -2001,6 +2118,37 @@ mod tests {
     use super::*;
     use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn thread_start_context_emits_typed_clients_and_attention_recipient() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let operation = reads.iter().find(|read| read["id"] == "thread.start-context").unwrap();
+        assert_eq!(operation["response"], "ThreadStartContext");
+        assert_eq!(operation["query"].as_object().unwrap().len(), 2);
+        for (client, signature) in [
+            (rust_operation_methods(reads, actions)?, "thread_start_context(&self, source_id: &str, episode: &str) -> Result<Envelope<ThreadStartContext>"),
+            (swift_operation_methods(reads, actions)?, "threadStartContext(sourceID: String, episode: String) async throws -> Envelope<ThreadStartContext>"),
+            (typescript_operation_methods(reads, actions)?, "threadStartContext(sourceID: string, episode: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadStartContext>>"),
+        ] {
+            assert!(client.contains(signature), "missing typed start-context method");
+            assert!(client.contains("/threads/start-context"));
+            assert!(client.contains("source_id"));
+            assert!(client.contains("episode"));
+        }
+        let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        assert!(models.contains("export type ThreadStartContext"));
+        assert!(models.contains("start_recipient?: ThreadStartRecipient"));
+        assert!(RUST_MODELS_TEMPLATE.contains("pub start_recipient: Option<ThreadStartRecipient>"));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("public let startRecipient: ThreadStartRecipient?"));
+        Ok(())
+    }
 
     #[test]
     fn person_pins_identity_is_shared_by_generated_clients() -> Result<()> {

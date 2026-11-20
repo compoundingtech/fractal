@@ -1,6 +1,7 @@
 import { markdownSource, optionalSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useMemo, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, useWindowDimensions, View } from 'react-native';
+import { Linking, Pressable, ScrollView, useWindowDimensions, View } from 'react-native';
+import { OwnedAlert as Alert } from '../ownedPresentationNative';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { ANSWERS, alertsIn, answerLabel, askDeadline, requestImages, cleanMessageText, isRequest, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, servedAnswers, servedPrompt, spaced, yesNo, ago, type KeptAttention } from '@fractal/views';

@@ -6,6 +6,7 @@
 
 use super::text::{self, run};
 use super::theme;
+use fractal_conversation_ui::doc::{Doc as SharedDoc, Target as SharedTarget};
 use ratatui::style::{Color, Modifier, Style};
 use fractal_conversation_ui::text::{Line, Span};
 
@@ -70,8 +71,6 @@ pub enum Hit {
     Pane(fractal_conversation_ui::PaneIntent),
     JumpLatest,
     Composer,
-    ChatComposer,
-    ChatEnter,
     Help,
     Open(String),
     /// Show a popover card for a graph subject.
@@ -110,21 +109,33 @@ pub enum Hit {
     Document(super::documents::Tap),
     /// An Availability pane button: pressing its key.
     Availability(char),
+    Thread(String, super::thread::Tap),
+    /// Meaningful body text, indexed among nonblank rendered body lines (zero based).
+    ThreadBody {
+        host: String,
+        thread: String,
+        message: String,
+        body_row: usize,
+        body_rows: usize,
+        body_start: usize,
+        body_end: usize,
+        digest: [u8; 32],
+    },
 }
 
-pub type Target = fractal_conversation_ui::doc::Target<Hit>;
-pub type Doc = fractal_conversation_ui::doc::Doc<Hit>;
+pub type Target = SharedTarget<Hit>;
+pub type Doc = SharedDoc<Hit>;
 
 /// Shell-only cards, graph fields and buttons layered on the shared document.
-pub trait DocExt {
+pub trait DocExt<H = Hit> {
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style);
     fn section(&mut self, title: &str, count: Option<usize>, width: usize);
-    fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]);
-    fn buttons_fit(&mut self, buttons: &[(&str, &str, Hit, Color)], width: usize);
-    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize);
+    fn buttons(&mut self, buttons: &[(&str, &str, H, Color)]);
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, H, Color)], width: usize);
+    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize);
 }
 
-impl DocExt for Doc {
+impl<H: Clone> DocExt<H> for SharedDoc<H> {
     /// A "label   value" row with the value wrapped under itself.
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style) {
         let label = format!("{label:<10}");
@@ -152,7 +163,7 @@ impl DocExt for Doc {
         self.lines.push(Line::from(spans));
     }
     /// A row of buttons. Each is `[key label]`, and clicking it presses the key.
-    fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]) {
+    fn buttons(&mut self, buttons: &[(&str, &str, H, Color)]) {
         let line = self.lines.len();
         let mut spans = Vec::new();
         let mut column = 0u16;
@@ -161,7 +172,7 @@ impl DocExt for Doc {
                 spans.push(Span::raw("  "));
                 column += 2;
             }
-            let key_text = format!(" {key} ");
+            let key_text = if key.is_empty() { String::new() } else { format!(" {key} ") };
             let label_text = format!(" {label} ");
             let width = (text::width(&key_text) + text::width(&label_text)) as u16;
             spans.push(Span::styled(
@@ -175,7 +186,7 @@ impl DocExt for Doc {
                 label_text,
                 Style::default().fg(*color).bg(theme::SURFACE0),
             ));
-            self.targets.push(Target {
+            self.targets.push(SharedTarget {
                 line,
                 column,
                 width,
@@ -186,11 +197,11 @@ impl DocExt for Doc {
         self.lines.push(Line::from(spans));
     }
     /// Place whole buttons on the same row when the available cells allow it.
-    fn buttons_fit(&mut self, buttons: &[(&str, &str, Hit, Color)], width: usize) {
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, H, Color)], width: usize) {
         let mut start = 0;
         let mut used = 0;
         for (index, (key, label, _, _)) in buttons.iter().enumerate() {
-            let button_width = text::width(key) + text::width(label) + 4;
+            let button_width = text::width(label) + 2 + if key.is_empty() { 0 } else { text::width(key) + 2 };
             if index > start && used + 2 + button_width > width {
                 self.buttons(&buttons[start..index]);
                 start = index;
@@ -203,9 +214,10 @@ impl DocExt for Doc {
         }
     }
 
+
     /// A card in deck's style: a rounded frame with its title in the top edge. A heavy
     /// card (thick frame, coloured) is reserved for the thing that needs a person.
-    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize) {
+    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize) {
         let width = width.max(8);
         let (tl, tr, bl, br, h, v) = if heavy {
             ("┏", "┓", "┗", "┛", "━", "┃")
@@ -226,7 +238,7 @@ impl DocExt for Doc {
         let base = self.lines.len();
         let inner_width = width.saturating_sub(4);
         for target in inner.targets {
-            self.targets.push(Target {
+            self.targets.push(SharedTarget {
                 line: base + target.line,
                 column: target.column + 2,
                 ..target
@@ -290,6 +302,15 @@ mod tests {
                 .map(|target| &target.hit),
             Some(&Hit::Key('a'))
         );
+    }
+
+    #[test]
+    fn keyless_buttons_keep_their_exact_mouse_target_without_advertising_a_shortcut() {
+        let mut doc = Doc::new();
+        doc.buttons_fit(&[("", "Close thread", Hit::Key('z'), theme::ACCENT)], 14);
+        assert_eq!(doc.lines[0].to_string(), " Close thread ");
+        assert_eq!(doc.targets[0].width, 14);
+        assert_eq!(doc.targets[0].hit, Hit::Key('z'));
     }
 
     #[test]

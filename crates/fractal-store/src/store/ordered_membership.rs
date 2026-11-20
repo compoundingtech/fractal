@@ -558,9 +558,14 @@ pub fn items_at(connection: &Connection, container: &str, through: u64, after: O
 
 impl Store {
     pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError> {
+        self.edit_ordered_memberships_with_authority(input, expected, None)
+    }
+    pub fn edit_ordered_memberships_with_authority(&self, input: &ClaimInput, expected: &BTreeMap<String,String>,
+        authority: Option<&ClaimAdmission<'_>>) -> Result<ClaimRecord,FractalError> {
         if input.kind != "ordered-membership.edited" { return Err(FractalError::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
-        append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected),None).map(|(claim,_)| claim)
+        append_claim_with_commit_context(&self.graph,input,None,None,Some(expected),None,
+            ClaimCommitContext { authority, ..Default::default() }).map(|(claim,_)| claim)
     }
     /// Metadata and keyset rows share a short transaction, including when nested in an API read.
     /// No transaction or result is retained for a subsequent request.

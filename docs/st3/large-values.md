@@ -276,6 +276,40 @@ those limits are the producer's own and are not a general bound. It also owns
 one `subject@revision`. Both keep the existing inline blob and claim-body representations; the
 eventual chunked or referenced blob format must keep sha256 identity and claim-referenced
 replication and retention.
+### Inbox discussion and generic thread-origin inventory review
+
+These entries retain transitional debt under their source-module maintainers.
+They establish neither a byte bound nor a permanent exemption. The discussion
+resolver and evidence reads retain the caller's supplied connection; configuration
+and its materialized-row invalidation remain one writer transaction. Existing
+history, signed envelopes and pairing records are unchanged.
+
+| Site | Actual producer, values and access | Remaining representation work |
+| --- | --- | --- |
+| `lv-h023477cfb471` | `fractal_seats::store::person_work`: test-only insertion of one fixed unresolved replica envelope (`raw = '{}'`) and known subject hints to exercise fallback refusal. | Keep the fixture tied to actual envelope columns; the fixture does not qualify arbitrary replication values as bounded. |
+| `lv-heb39719bc8fc` | `fractal_store::store::attention_ivm`: three fixed trigger definitions propagate replica subject hints into dirty-row dependencies. They copy identifiers, not raw envelope bytes; identifier bytes and invalidation fanout remain unproven. | Follow exact-wire identity dependencies into a bounded representation and keyed invalidation/reclamation; preserve insert, update and delete invalidation. |
+| `lv-h59b064d8f339` | `fractal_store::store::attention_ivm::tests`: one fixed replica fixture with the tested lifecycle state and fallback agent bound as parameters. | Maintain the real envelope dependency shape without treating the test's short values as production bounds. |
+| `lv-hcda7c845be22` | The same test module deletes that exact fixed fixture record to verify recovery invalidation. | Keep deletion coupled to the real replica lifecycle; no general deletion-cost exemption follows. |
+| `lv-h6a5073273ece` | The same test module renames the identity relation using constant table names to expose a genuine database error. This is an isolated failure fixture, not a production schema migration. | Keep the fixture isolated; its metadata operation does not prove bounds on stored identity values or cleanup work. |
+| `lv-h901f68d5f5cf` | `fractal_store::store::attention_snapshot`: the canonical operational-episode fold reads matching failure/recovery claims, including their bodies, dependencies, identifiers and timestamps. An episode filter supplies no bound on row count or historical body bytes. | Trace the fold into an incremental episode projection or references while preserving canonical failure/recovery selection and historical fields. |
+| `lv-h75808bdc9a86` | `fractal_store::store::inbox`: one daemon-local metadata key stores a schema-validated agent identifier. Subject-family validation is not an encoded-byte bound. | Preserve local configuration semantics while establishing a bounded identifier/reference representation. |
+| `lv-h79674b576f3f` | The same module deletes that single constant metadata key when configuration is cleared. | Retain exact-key cleanup and qualify its physical value/index costs with the metadata representation. |
+| `lv-h85f3f02d66ef` | The same transaction invalidates all existing materialized Inbox rows after policy changes, copying family/source identifiers into the dirty set. Row count and identifier bytes are not bounded by a client page size. | Qualify policy-change fanout and keyed reclamation without separating publication from its atomic invalidation. |
+| `lv-h9ee9e75a9561` | `fractal_store::store::thread_inbox_source`: a canonical prepared lookup selects the latest preview/proposal claim ID for an exact source and one of two fixed claim kinds. It selects no claim body; one row still does not prove identifier byte bounds. | Trace the dynamic canonical statement and returned identity into the durable evidence/reference representation. |
+| `lv-h6c3a55133316` | The same lookup's execution/bind sink supplies the source identifier and fixed claim kind, returning the claim ID above. | Preserve source/episode authority and the caller's transaction cut when qualifying bind and result identities. |
+| `lv-h60845d471cc3` | `fractal_store::store::thread_metadata`: index declarations now include generic origin/episode keys and the operational episode index. Person, agent, origin, episode, mission and subject keys remain variable; historical ask-field aliases remain indexed readers. Replaces `lv-h5154252ff8aa`. | Qualify every variable index key or replace it with a bounded reference; retain generic/historical lookup semantics and account for index installation. |
+| `lv-h10da3f869f76` | The same module binds serialized source/episode/link tuples to the unread-origin query. It returns positions and subject/link identities, not full claims. Its internal caller set has no universal page-size or encoded-byte bound. Replaces `lv-haed978c23ed6`. | Trace the batch parameter and result identities into bounded physical units without losing exact episode matching or old ask-linked history. |
+
+The evidence reader also avoids loading the complete custom-source body: it
+projects only the provenance object needed to pin admitted claim IDs. Missing,
+null, array and scalar provenance retain the previous empty-evidence behavior.
+Provenance entries and their identifiers still have no proven byte bound; this
+projection reduces copied data rather than qualifying it as bounded. A future
+representation change must preserve exact evidence and the admission transaction.
+
+The column/index catalog is derived by the owning lexical inventory functions
+after reviewing these declarations. The two superseded markers and records are
+removed; unchanged reviewed records, manual flows and `reviewed_base` remain.
 
 ### Client operation admission inventory (PR #5921)
 
@@ -1029,6 +1063,168 @@ generation on a causally backed late effect conflict. Run identity and timestamp
 TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
+
+## Causal thread metadata snapshot inventory review
+
+`fractal_store::store::thread_metadata_snapshot` owns `lv-h2488f1c93c2b`
+in the [metadata snapshot reader](../../crates/fractal-store/src/store/thread_metadata_snapshot.rs).
+It replaces the removed timestamp-tip read sites `lv-h7f574845282c` and
+`lv-h9d96c131cb28` in `fractal_store::store::thread_metadata`. The new read binds
+one exact thread subject and selects retained creation, title and lifecycle claims,
+including IDs, bodies, predecessor arrays, operation state and canonical eligibility.
+It also retains repaired and noncanonical intermediates because their immutable
+predecessor edges can connect effective causal successors to older field claims.
+Conversation ownership is checked before exposing the summary or admitting an edit;
+the snapshot, authority check, revision comparison and appended frontier parents
+remain on the caller's admitted connection and transaction cut.
+
+The complete causal history is required to distinguish concurrent edits from
+causal successors and to fail closed on missing ancestry. Truncating this query
+with a row limit would change those semantics. Exact-subject and kind filtering
+do not bound historical row count, body/predecessor bytes, canonical ordering work
+or the in-memory graph and returned identifiers. The separate foreign-parent
+probe reads only an existence scalar; it does not copy that parent's claim body.
+This exception establishes neither a size nor an execution-cost bound.
+
+The module maintainer retains `trace-statement-and-value-representation`: trace
+these retained values and graph costs into a bounded/reference representation or
+an incremental causal projection. Preserve complete frontier ancestry, repaired
+intermediates, canonical concurrent ties, effective field selection, missing-parent
+refusal and snapshot CAS under replication, restart and reclamation. This review
+changes no schema declarations, logical limits, claim formats or authority rules.
+
+### Thread unread reminder routing headers
+
+`fractal_store::store::thread_reading` owns `lv-h47f366444514` and
+`lv-he08523974536`. The first selects signed reminder operation IDs, owner/actor,
+anchor IDs and observed operation references for one indexed thread subject. The
+second point-selects only signed message routing headers (actor/from/to/thread
+and batch), never returning message content. It requires current eligible routing
+for a new mark, while retained reminders may use admitted historical routing
+solely to prove owner/thread scope after the anchor becomes unavailable. Both retain existing claim JSON and TEXT
+identity representations and use the existing subject/kind and operation indexes;
+no new persisted columns or keys are added. Header work is independent of message
+body history, but reminder history and reference bytes remain variable inline
+values. The owning store maintainer retains the
+`trace-statement-and-value-representation` follow-up: a future prepared/reference
+representation must preserve exact observed operation identity, owner/thread
+validation, pending dependency resolution, and canonical anchor selection.
+
+The existing `flow-h1f241b496964` admission flow now also validates the named
+reminder person against its signed actor before append; its producer, dependency
+and inline body/predecessor representation are unchanged.
+
+### Marked thread collection and anchor windows
+
+`fractal_store::store::thread_metadata` owns `lv-h6a3f9c9e7395`, replacing
+`lv-h94fc80261c45` (previously `lv-h60845d471cc3`), and `lv-h73dc5806dc06`. The added partial owner/time index keeps
+existing actor, accepted-time TEXT, and thread subject keys for unread-mark claims.
+Its bounded candidate reader finds original equivalent operation receipts through
+the existing operation index and rechecks the owner-scoped overlay before serving
+a thread. It includes old Closed threads independently of ordinary/recent pages.
+Keys and inline claim JSON remain variable; no physical byte bound is claimed.
+
+`fractal_store::store::thread_reading` owns `lv-hc5e92b33924f`: it reads the earliest
+unrepaired equivalent receipt time for an active stable operation ID, using the
+existing operation index. It never stores a new authored clock or presents a retry
+as a new manual mark. `trace-statement-and-value-representation` must preserve
+operation identity/digest equivalence, repair exclusion and deterministic ordering.
+
+`fractal_store::store::thread_message_window` owns `lv-hbc0b493bd9e2` and the retained
+`lv-he5a2848d26a3`. An anchor point lookup verifies current canonical message
+membership before returning a bounded window. Both timeline directions seek the
+thread routing/accepted-time index, return at most the requested bounded neighbors,
+and derive adjacent cursors from the returned edges. The original inline bodies,
+predecessors and routing keys remain unchanged, with their existing variable-value
+debt. Missing/unavailable anchors return only an owner-authorized private intent
+state and no body. The follow-up must preserve snapshot cuts, current read authority,
+unknown causal dependencies and separate immutable receipt behavior.
+
+### Retained discussion history inventory review (PR #6609)
+
+The producer-module maintainers named by these markers retain representation
+ownership. The identity-only reader precedent is `lv-h9ee9e75a9561`: a canonical
+exact-source lookup returns a claim ID, not a body, but does not prove identifier
+bytes bounded. The index precedent is `lv-h34f56ac109e6`: author, recipient,
+session, accepted-time and source identity keys remain inline without a byte-size
+proof. As with its seek sink `lv-h84e689b7b7df`, the dynamic readers below must
+trace their specific templates, bindings and returned identities into a bounded
+or referenced representation while preserving canonical ordering and authority.
+These registrations are transitional debt, not permanent size exemptions.
+
+| Site (source lines at the reviewed base) | Decision and actual value flow | Owning representation work |
+| --- | --- | --- |
+| `discussion_source.rs:97`, `lv-hc47c843b6e24` | Register the batched canonical opening reader. `inputs_preflight` admits at most 512 proof entries and 256 KiB of body/predecessor/source/registration/revision bytes per key on the same connection before hydration. | Trace canonical SQL, input JSON and variable identity/time/index keys; preserve exact opening recipient and current-policy proof. |
+| `discussion_source.rs:228`, `lv-he4c4feee0f53` | Register the authored-generation fold after that same preflight. It reads pinned revision, creation and lifecycle bodies, not today's title/goals, to reconstruct original materialization variables. | Reference identity/time keys without losing revision hash, original recipient, carry/retry epochs or evidence. |
+| `discussion_source.rs:414`, `lv-hf94cc9554b5c` | Register the carried-epoch reader. It projects only status, attempt, epoch and handoff recipient from preflight-admitted subjects; cycle detection and the existing 512-claim limit bound chain traversal. | Trace returned identities and canonical ordering keys while preserving exact predecessor readiness. |
+| `discussion_source.rs:488`, `lv-he9e177bb34b5` | Register metadata preflight: recursive subjects, scalar body/predecessor/source/manifest/revision byte counts and one extra row establish refusal before payload hydration. | Trace reference keys and recursive/index work; scalar results are not a physical storage-size or execution-cost proof. |
+| `discussion_source.rs:548`, `lv-hef0e1c1afcc5` | Register notice snapshot hydration through the pinned creation dependency, after snapshot source/claim bytes pass preflight. | Trace dependency/claim/time identities while preserving indexed source lookup, registration and native owner-chain authority. |
+| `discussion_source.rs:591`, `lv-hd93815b8fb9e` | Register the canonical latest snapshot ID lookup, not an all-body history fold; its subject was metadata-admitted before hydration. | Reference exact snapshot/registration/time keys without changing delivery policy or the caller's transaction cut. |
+| `person_work_history.rs:16`, `lv-hf08b64fbbc13` | Register a canonical first ask ID lookup for one exact source; it selects no body. | Trace source/result IDs and canonical time keys into bounded references, preserving first-opening identity. |
+| `person_work_history.rs:74`, `lv-h86326f6e2d00` | Register the reviewed response reader unchanged: CASE caps body transfer at 256 KiB and the 257th row is a completeness sentinel. Predecessors remain inline and are not CASE-bounded. | Trace source/claim/time identities and predecessor bytes; preserve exact episode/attempt, legacy causal fences and standing-answer selection. |
+| `person_work_history.rs:128`, `lv-hca314f305a19` | Register the reviewed clock reader unchanged: body CASE and row limits remain, but predecessors are hydrated without a byte guard. The person's clock subject is outside discussion preflight. | Trace person, claim and time identities and predecessor bytes; preserve history cut and effective-deadline folding. |
+| `thread_metadata.rs:11`, `lv-h6a3f9c9e7395` | Refresh stale `lv-h94fc80261c45` and its seven declaration identities; catalog the existing history-link index as the eighth declaration. All are existing person, agent, origin, episode, mission, thread, ask, actor, time and subject keys, not new payload copies. | Chunk/reference every variable index key while preserving current and historical lookup predicates and accounting for installation/reclamation. |
+| `step_history.rs:60`, `lv-h4563bdfd1a41` | Register seven fixed lifecycle-kind queries: body CASE bounds each value to 256 KiB, the fold caps cumulative body bytes at 2 MiB, and each kind has one extra completeness row. Source/claim/time keys remain variable. | Trace canonical template, bindings and result identities while preserving sparse openings, lifecycle ordering and fail-closed completeness. |
+| `retained_person_history_tests.rs:57`, `lv-h1f45e6a5ac2b` | Safe isolated fixture: writes fixed short title/goals poison to the generated step subject, proving current projection text is not historical authority. | Keep fixture corruption equivalent through projection/reference conversion; no production input bound follows. |
+| `retained_person_history_tests.rs:93`, `lv-hb9e6da379626` | Safe isolated fixture: deletes state claims for one generated step subject to remove opening authority. | Preserve missing-opening refusal; no production reclamation-cost exemption follows. |
+| `retained_person_history_tests.rs:96`, `lv-h183342751f10` | Safe isolated fixture: deletes the freshly constructed fixed mission revision to prove missing-definition refusal. | Preserve missing-definition evidence through revision storage/reclamation changes. |
+| `retained_person_history_tests.rs:178`, `lv-h1d9b8f7ed61a` | Safe isolated fixture: replaces two literal strings in the finite checked-in definition body, invalidating revision/recipient proof. | Preserve exact revision-hash tampering coverage; this is not an arbitrary production body writer. |
+| `retained_person_history_tests.rs:192`, `lv-h2521fbe7a12d` | Safe isolated fixture: writes fixed goals poison on the generated interpolation step. | Preserve historical-versus-current materialization assertions through projection changes. |
+| `retained_person_history_tests.rs:196`, `lv-hb919d6131460` | Safe isolated fixture: replaces the single run's requester with literal `person/other`. | Preserve original creation-context interpolation despite current-requester corruption. |
+| `retained_person_history_tests.rs:235`, `lv-h6b15e35e002a` | Safe isolated fixture: removes predecessor state after two fixed revisions to prove carried READY cannot use successor projection or syntactic coordinates. | Preserve exact carried-source refusal through state storage/reclamation changes. |
+| `thread_fence_tests.rs:240`, `lv-h3b1364f4650e` | Safe finite `custom-review.json` manifest fixture follows real document hashing, registration and fixed requested/answered claims. | Preserve manifest hash/document identity; the fixed test input is not a production size bound. |
+| `thread_fence_tests.rs:563`, `lv-h9cebb1c8e2d9` | Safe finite manifest fixture changes only the attention episode expression to the request title field, testing literal non-claim episode authority. | Preserve modified manifest identity and exact non-claim episode matching. |
+| `thread_fence_tests.rs:815`, `lv-hf5d474418b48` | Safe assertion-only refusal JSON: normalize request ID and compare expected responses in memory; included values never reach a persistence sink. | Re-review any future SQL/persistence consumer rather than treating the include marker as a permanent exemption. |
+| `thread_fence_tests.rs:961`, `lv-h374311c02b6a` | Safe finite notice fixture: only `snapshot.input` is cloned, recipient/source replaced with constants, then real notice/snapshot claims carry its fixed fields and returned creation ID. | Preserve native notice creation/projection identity; arbitrary production notice body/link bytes are not qualified. |
+| `thread_request_history_tests.rs:280`, `lv-h9ce35b9b6628` | Safe fixed registration fixture follows real manifest-document publication and one literal requested/answered episode, asserting unsupported custom history. | Preserve registration identity and unsupported-history behavior through representation changes. |
+
+The existing payload SQL bytes and bounds remain unchanged. The predecessor-hydration
+risk remains separate: both retained response and clock queries select the complete
+`predecessors` TEXT value, then `claim_from_row` decodes it; a body CASE and a row
+limit do not bound that value. Discussion preflight checks response-subject bytes,
+but the clock reader uses the person's different subject and lacks that preflight.
+Registration records existing debt, not a claim that those cells are safe or bounded.
+
+The catalog refresh is limited to `thread_metadata`; unchanged review provenance,
+source records and manual flows are retained. Reconciliation uses the composed source
+after merging TUI commit `9d382dc920fadaa048238f84646c48ceb23785b7`, not a union of
+parent inventories. Its assertion-only `thread-start-refusals.json` include in
+`fractal-tui/src/ui/threads_live/tests.rs` parses error envelopes in memory. The
+SQLite inventory does not cover `include_str!` in crates without a declared SQLite
+dependency, so that TUI include requires no additional SQLite site record; its
+separate Rust test-input declaration is supplied by the merged change.
+
+### Bounded runtime history authority
+
+The engineering RCA `retained-runtime-9e3-rca@06509323` separates the canonical
+runtime opening's routing authority from payload availability. The shared
+discussion qualifier now records typed within-budget, over-budget and invalid-key
+preflight outcomes. Its history-only entry point may return an authorized
+payload-over-budget outcome only after a bounded header projection proves the
+exact canonical unrepaired `work.person-asked` opening, immutable original person,
+current step recipient policy, and accepted-time cut. Persistent repaired IDs are
+excluded even after receipt cleanup. Explicit operation metadata additionally
+requires an active operation with the exact canonical opening and request digest;
+legacy openings without operation metadata keep their existing admission form.
+Unknown, missing, foreign or over-budget header authority remains absent.
+
+`fractal_store::store::discussion_source` owns `lv-h7c1ab81ff9e3`, the dynamic
+bounded header reader. It selects only original recipient, current recipient and
+accepted time, never the opening body or predecessors. SQL CASE expressions
+return these fields only when their combined encoded bytes fit the existing
+256 KiB proof budget. Existing claim identity and canonical index keys remain
+inline; the module retains `trace-statement-and-value-representation` to qualify
+their physical representation and ordering costs without weakening recipient
+proof or changing canonical selection.
+
+Only authorized history reads map that outcome to the existing unavailable
+payload with `ReadBoundExceeded` and `complete: false`. Start and start-context
+continue to call the full qualifier, whose payload input is null for every
+over-budget key; the narrow header result cannot construct a
+`QualifiedDiscussionSource` or grant a send. No bound, protocol or public error
+kind changes. Missing-content fixture mutations retain person and attempt authority;
+oversized-opening coverage distinguishes verified owners from missing or foreign
+original authority and keeps the full Start boundary closed.
 
 ### Shell request identity and cancellation (#6762)
 

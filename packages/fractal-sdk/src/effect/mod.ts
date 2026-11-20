@@ -23,6 +23,11 @@
  */
 import {
   ClientError,
+  applyWindow,
+  type CollectionWindow,
+  type ThreadCollectionContext,
+  type ThreadSummary as ThreadSummaryWire,
+  type ThreadTimelineEvent as ThreadTimelineEventWire,
   type CollectionSocket,
   type CollectionFilters,
   type CollectionFrame,
@@ -39,6 +44,8 @@ import {
   decodeUnknownSync,
   Resource,
   Runtime,
+  ThreadSummary,
+  ThreadTimelineEvent,
 } from '@fractal/client/schema/read'
 import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
@@ -182,9 +189,15 @@ export type FollowSpec =
       readonly collection: CollectionName
       readonly limit: number
       readonly filters?: CollectionFilters
+      /** Opt in to the daemon-owned aggregate for existing attention rows. */
+      readonly attentionThreadHints?: true
       /** Local decoder identity, never serialized; different typed descriptors remain independent. */
       readonly descriptor?: string
     }
+  | ({ readonly _tag: 'ThreadSummary'; readonly limit: number } & (
+      { readonly context: ThreadCollectionContext } | { readonly thread: string }
+    ))
+  | { readonly _tag: 'ThreadTimeline'; readonly thread: string; readonly limit: number }
   | { readonly _tag: 'Conversation'; readonly ref: string }
   | {
       readonly _tag: 'Terminal'
@@ -197,12 +210,22 @@ export type FollowSpec =
 export const followKey = (spec: FollowSpec): string => {
   switch (spec._tag) {
     case 'Window':
-      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}`
+      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}${spec.attentionThreadHints === true ? ':thread-hints' : ''}`
+    case 'ThreadSummary':
+      return 'thread' in spec ? `threads:subject:${spec.thread}:${spec.limit}` : `threads:${JSON.stringify(spec.context)}:${spec.limit}`
+    case 'ThreadTimeline':
+      return `thread-timeline:${spec.thread}:${spec.limit}`
     case 'Conversation':
       return `conversation:${spec.ref}`
     case 'Terminal':
       return `terminal:${spec.runtime}`
   }
+}
+
+export interface ThreadWindow<Row> {
+  readonly items: readonly Row[]
+  readonly hasMore: boolean
+  readonly snapshotId: string
 }
 
 /** A collection window: decoded rows in the server's order. */
@@ -272,6 +295,12 @@ export class Fractal extends Context.Service<
     /** Typed descriptors share the existing scoped window ingest and multiplexed socket. */
     readonly watch: <TResource>(descriptor: FollowDescriptor<TResource>) =>
       Stream.Stream<FollowEvent<WindowValue<TResource>>>
+    readonly followThreadSummaries: (
+      spec: Extract<FollowSpec, { _tag: 'ThreadSummary' }>,
+    ) => Stream.Stream<FollowEvent<ThreadWindow<ThreadSummary>>>
+    readonly followThreadTimeline: (
+      spec: Extract<FollowSpec, { _tag: 'ThreadTimeline' }>,
+    ) => Stream.Stream<FollowEvent<ThreadWindow<ThreadTimelineEvent>>>
     readonly followConversation: (
       spec: Extract<FollowSpec, { _tag: 'Conversation' }>,
     ) => Stream.Stream<FollowEvent<ConversationChunk>>
@@ -334,8 +363,8 @@ export interface FractalOptions {
   /** Socket slots: the daemon's subscription cap (8 on current daemons). */
   readonly maxFollows: number
   /**
-   * Conversation follows' dedicated subscription slots; window and terminal follows own
-   * the remaining slots, so neither side
+   * Agent conversations and topic thread follows share a dedicated lane. Other windows and
+   * terminal follows own the remaining slots, so neither side
    * can starve the other. Undefined shares one pool across every follow; `'advertised'`
    * derives the whole budget from the daemon's advertised collections capability once the
    * connect probe answers (v1 raises the cap to 16), before the first follow can open.
@@ -440,7 +469,8 @@ const tracedStream = (
     }
   return {
     ...stream,
-    subscribe: issue(stream.subscribe),
+    // The tracing wrapper forwards all arguments, including the typed overloads.
+    subscribe: issue(stream.subscribe) as CollectionStream['subscribe'],
     subscribeGlasses: issue(stream.subscribeGlasses),
     subscribeArrangements: issue(stream.subscribeArrangements),
     subscribeOrderedMemberships: issue(stream.subscribeOrderedMemberships),
@@ -556,6 +586,7 @@ const make = (options: FractalOptions) =>
       reportFollows()
       settleBudget()
     }
+    let attentionThreadHintsGranted = false
     const channel = yield* makeChannel({
       client,
       socket,
@@ -563,11 +594,15 @@ const make = (options: FractalOptions) =>
       commandTraceContext: () => outbound,
       ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
       onCapabilities: (envelope: AdvertisedEnvelope) => {
+        attentionThreadHintsGranted = envelope.value.capabilities.some(capability =>
+          capability.id === 'collection.attention.thread-hints' && capability.state === 'granted' && capability.version >= 1,
+        )
         Effect.runFork(Deferred.succeed(firstProbe, undefined))
         if (options.conversationSlots === 'advertised')
           acceptBudget(advertisedSubscriptionLimit(envelope))
       },
       onProbeFailure: () => {
+        attentionThreadHintsGranted = false
         Effect.runFork(Deferred.fail(firstProbe, new AttachFailure({ message: 'Roster discovery is unavailable.' })))
         // A refused or unavailable first probe still releases every admission waiter.
         // Permanent rejection is reported by the channel to each follow, not hidden
@@ -719,7 +754,9 @@ const make = (options: FractalOptions) =>
               publishSync()
             }
           }))
-          const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
+          const lane = spec._tag === 'Conversation' || spec._tag === 'ThreadSummary' || spec._tag === 'ThreadTimeline'
+            ? 'conversation'
+            : 'shared'
           // Under `'advertised'`, no follow admits before the connect probe fixes the budget:
           // a subscribe cannot send before that probe opens the socket anyway.
           if (options.conversationSlots === 'advertised') yield* Deferred.await(budgetKnown)
@@ -756,7 +793,7 @@ const make = (options: FractalOptions) =>
                 ? early?.wouldAdopt({ kind: 'subscribe', collection: spec.collection, limit: spec.limit, ...spec.filters })
                 : undefined
               const current = firstFrames.begin({
-                kind: spec._tag === 'Window' ? 'window' : spec._tag === 'Conversation' ? 'conversation' : 'terminal',
+                kind: spec._tag === 'Conversation' ? 'conversation' : spec._tag === 'Terminal' ? 'terminal' : 'window',
                 label: spec._tag === 'Window' ? spec.collection : spec._tag.toLowerCase(),
                 ...(adopted === undefined ? {} : { adopted }),
               })
@@ -925,8 +962,13 @@ const make = (options: FractalOptions) =>
             },
           })
           return {
-            subscribe: ({ stream, id }) =>
-              Effect.sync(() => stream.subscribe(id, spec.collection, spec.limit, spec.filters)),
+            subscribe: ({ stream, id }) => Effect.sync(() => {
+              if (spec.collection === 'attention' && spec.attentionThreadHints === true && attentionThreadHintsGranted) {
+                stream.subscribe(id, 'attention', spec.limit, { ...spec.filters, attention_thread_hints: true })
+              } else {
+                stream.subscribe(id, spec.collection, spec.limit, spec.filters)
+              }
+            }),
             onData: (frame) => {
               ingest.accept(frame)
               return undefined
@@ -938,6 +980,50 @@ const make = (options: FractalOptions) =>
 
     const followWindow = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
       watch(collectionWindow(spec))
+
+    const followThreadSummaries = (spec: Extract<FollowSpec, { _tag: 'ThreadSummary' }>) =>
+      follow<ThreadWindow<ThreadSummary>>({
+        spec,
+        makeProtocol: (observe) => {
+          let window: CollectionWindow<ThreadSummaryWire> | undefined
+          return {
+            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'threads', spec.limit, 'thread' in spec ? { subject: spec.thread } : { thread_context: spec.context })),
+            onData: (frame) => {
+              if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'threads') return
+              window = applyWindow(window, frame)
+              if (window === undefined) return
+              try {
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadSummary)(row)), hasMore: window.hasMore, snapshotId: window.snapshot.id }, window.snapshot)
+              } catch {
+                return new DecodeFailure({ message: 'Thread summaries could not be decoded' })
+              }
+            },
+            reset: () => { window = undefined },
+          }
+        },
+      })
+
+    const followThreadTimeline = (spec: Extract<FollowSpec, { _tag: 'ThreadTimeline' }>) =>
+      follow<ThreadWindow<ThreadTimelineEvent>>({
+        spec,
+        makeProtocol: (observe) => {
+          let window: CollectionWindow<ThreadTimelineEventWire> | undefined
+          return {
+            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'thread-timeline', spec.limit, { subject: spec.thread })),
+            onData: (frame) => {
+              if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'thread-timeline') return
+              window = applyWindow(window, frame)
+              if (window === undefined) return
+              try {
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadTimelineEvent)(row)), hasMore: window.hasMore, snapshotId: window.snapshot.id }, window.snapshot)
+              } catch {
+                return new DecodeFailure({ message: 'Thread history could not be decoded' })
+              }
+            },
+            reset: () => { window = undefined },
+          }
+        },
+      })
 
     const followConversation = (spec: Extract<FollowSpec, { _tag: 'Conversation' }>) =>
       follow<ConversationChunk>({
@@ -1147,12 +1233,16 @@ const make = (options: FractalOptions) =>
         ),
       ),
       followWindow,
+      followThreadSummaries,
+      followThreadTimeline,
       watch,
       followConversation,
       followTerminal,
       setVisible: (spec, visible) =>
         Effect.sync(() => {
-          const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
+          const lane = spec._tag === 'Conversation' || spec._tag === 'ThreadSummary' || spec._tag === 'ThreadTimeline'
+            ? 'conversation'
+            : 'shared'
           admission.setVisible({ key: followKey(spec), visible })
           for (const key of admission.resizeLane(lane, admission.laneCap(lane)))
             open.get(key)?.evict()

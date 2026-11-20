@@ -1,7 +1,9 @@
 import { markdownSource, optionalSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { Alert, Linking, Pressable, ScrollView, SectionList, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Linking, Pressable, ScrollView, SectionList, TextInput, View } from 'react-native';
+import { OwnedAlert as Alert } from '../ownedPresentationNative';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useHeaderHeight } from '@react-navigation/elements';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
@@ -15,6 +17,8 @@ import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
 import { AvailabilitySection } from './Availability';
+import { threadViewportChanged, ThreadViewport } from '../threadViewport';
+import { InboxThread, PendingInboxThreads, ThreadGroup } from './Threads';
 import { AutoResolvedSection, useAutoResolvedRows, useOverride } from './AutoResolved';
 import { closedOverride, OVERRIDE_TITLE } from '../autoResolved';
 import { theme } from '../theme';
@@ -26,6 +30,7 @@ export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability, readAutoResolved } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
+  const threadViewport = useMemo(() => ({ get current() { return list.current?.getScrollResponder() ?? null; } }), []);
   useDebugScroll(list as never);
   const readExtra = useCallback(() => Promise.all([readAvailability(), readAutoResolved()]).then(() => {}), [readAvailability, readAutoResolved]);
   const refresh = useRefresh([], readExtra);
@@ -33,7 +38,9 @@ export function NowScreen() {
   useFocusEffect(useCallback(() => { void readAutoResolved(); }, [readAutoResolved]));
   const override = useOverride();
   const autoRows = useAutoResolvedRows();
-  const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
+  // The item's own agent conversation first, else the agent that asked or published it.
+  const agentOf = (row: HomeRow) => (row.item.conversation_id?.startsWith('agent/') ? row.item.conversation_id : undefined)
+    ?? [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
   const requesterOf = (row: HomeRow) => {
     const id = row.item.requester_id ?? row.item.source_id;
@@ -77,6 +84,7 @@ export function NowScreen() {
     <SectionList
       ref={list}
       contentInsetAdjustmentBehavior="automatic"
+      onScroll={() => threadViewportChanged(threadViewport)} scrollEventThrottle={100}
       sections={sections}
       keyExtractor={row => row.item.id}
       stickySectionHeadersEnabled={false}
@@ -92,7 +100,7 @@ export function NowScreen() {
       ]}>
         <GroupedRow
           title={row.title}
-          context={[`Kind: ${row.kind}`, `From: ${requesterOf(row)}`, row.waiting, `Waited ${row.age}`].filter(Boolean).join(' · ')}
+          context={[`Kind: ${row.kind}`, `From: ${requesterOf(row)}`, row.waiting, !row.item.closedElsewhere && row.item.thread_unread ? 'Unread thread replies' : undefined, `Waited ${row.age}`].filter(Boolean).join(' · ')}
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
@@ -100,8 +108,13 @@ export function NowScreen() {
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
+        <PendingInboxThreads onOpen={(id, title) => navigation.navigate('Thread', { id, title })} />
         <AutoResolvedSection rows={autoRows} />
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
+        <ThreadViewport viewport={threadViewport}>
+          <ThreadGroup title="Marked unread" context={{ marked_unread: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
+          <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
+        </ThreadViewport>
       </View>}
       style={{ flex: 1 }}
     />
@@ -112,6 +125,24 @@ export function NowScreen() {
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
   const { data, busy, status, actions, hasSynced, loadErrors, overridePending } = useStore();
   useMissionsOnFocus();
+  // Pulling also reloads the item's threads, which show no manual refresh while followed.
+  const refresh = useRefresh();
+  const requestScroll = useRef<ScrollView>(null);
+  const headerHeight = useHeaderHeight();
+  useFocusEffect(useCallback(() => {
+    // The only inline text input on an Inbox request is its thread composer.
+    // Reveal it at the foot of the request after the keyboard reduces the view.
+    let frame: number | undefined;
+    const listener = Keyboard.addListener('keyboardDidShow', () => {
+      if (TextInput.State.currentlyFocusedInput()) {
+        frame = requestAnimationFrame(() => requestScroll.current?.scrollToEnd({ animated: false }));
+      }
+    });
+    return () => {
+      listener.remove();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, []));
   const autoRows = useAutoResolvedRows();
   const override = useOverride();
   const found = data.attention.find(candidate => candidate.id === route.params.id);
@@ -121,9 +152,15 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const item = found ?? kept.current;
   if (!item) return <Screen><Banners /><Empty text={loadErrors.attention ? 'This alert could not be loaded.' : !hasSynced ? 'Checking for this alert…' : status !== 'online' ? 'This alert is not in the offline snapshot. Reconnect to check it.' : 'This item is no longer open.'} /></Screen>;
   const row = detailRow(item);
-  const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
-  const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
+  const publisherId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
+  const publisher = publisherId ? data.agents.find(candidate => candidate.id === publisherId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
+  const agentId = item.conversation_id?.startsWith('agent/') && item.conversation_id.length > 'agent/'.length
+    ? item.conversation_id : undefined;
+  const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
+  const threadEntry = <ThreadViewport viewport={requestScroll}><InboxThread sourceId={item.source_id}
+    origin={item.source_id && item.episode ? { sourceId: item.source_id, episode: item.episode } : undefined}
+    initialTitle={item.title} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /></ThreadViewport>;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it. One Fractal
   // resolved by its deadline may still take the person's own answer instead of the default.
@@ -131,11 +168,13 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     const overridable = closedOverride(item, autoRows);
     return <Screen>
       <Banners />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}
+        onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
         <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={markdownSource(item.detail)} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
+        {threadEntry}
         {overridable ? <>
           <T dim>Fractal resolved it by its deadline{overridable.ask.default_answer ? ` with the default “${overridable.ask.default_answer.label}”` : ''}.</T>
           <Button label={OVERRIDE_TITLE} disabled={busy || status !== 'online' || overridePending.has(overridable.ask.episode)} onPress={() => override(overridable)} />
@@ -146,10 +185,11 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     </Screen>;
   }
   if (item.update) {
-    const from = agent ? agentName(agent) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
+    const from = publisher ? agentName(publisher) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
     return <Screen>
       <Banners />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}
+        onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
         <T><T bold color={theme[row.color]}>{row.glyph} update</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>from  </T><T bold color={theme.person}>{from}</T></T>
@@ -158,49 +198,56 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.update.subjects?.map((subject, index) => subject.url
           ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
           : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}
+        {threadEntry}
         <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Now until you mark it read.'}</T>
         {item.closedElsewhere
           ? <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
           : item.actions.includes('work.done') ? <Button label="mark read" disabled={busy || status !== 'online'} onPress={() => void actions.done(item, 'Read', 'read').then(done => { if (done) navigation.goBack(); })} /> : null}
-        {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
+        {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
         <T dim selectable>{item.id}</T>
       </ScrollView>
     </Screen>;
   }
   if (isRequest(item.attention_kind) && item.actions.includes('work.done')) {
-    const from = agent ? agentName(agent) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
+    const from = publisher ? agentName(publisher) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
     return <Screen>
       <Banners />
       {/* Automatic insets keep the end of a long request clear of the floating tab bar. */}
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
-        <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
-        <T bold selectable>{row.title}</T>
-        <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
-        {item.request ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => navigation.goBack()} /> : <>
-          <RequestQuestion text={cleanMessageText(optionalSource(item.detail) ?? '')} />
-          <T bold color={theme.person}>{from} is waiting on you.</T>
-          <RequestAnswers item={item} from={from} onAnswered={() => navigation.goBack()} />
-        </>}
-        {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
-        {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-        {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
-        <T dim selectable>{item.id}</T>
-      </ScrollView>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
+        <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}
+          onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
+          <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
+          <T bold selectable>{row.title}</T>
+          <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
+          {item.request ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => navigation.goBack()} /> : <>
+            <RequestQuestion text={cleanMessageText(optionalSource(item.detail) ?? '')} />
+            <T bold color={theme.person}>{from} is waiting on you.</T>
+            <RequestAnswers item={item} from={from} onAnswered={() => navigation.goBack()} />
+          </>}
+          {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
+          {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
+          {threadEntry}
+          {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
+          <T dim selectable>{item.id}</T>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Screen>;
   }
   return <Screen>
     <Banners />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}
+      onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
       <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {attentionKindLabel(item.attention_kind)} · {item.priority} · waited {row.age}</T></T>
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
         // A prompt is allowed from its conversation, where the call it asks about is shown.
-        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} seats={[]} />
+        ? <AlertBody item={item} from={publisher ? agentName(publisher) : item.source_id} seats={[]} />
         : item.detail ? <Markdown text={markdownSource(item.detail)} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {markdownSource(item.because)}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
+      {threadEntry}
       {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-      {agentId ? <Button label={`chat with ${agent ? agentName(agent) : agentId}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
+      {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
       <T dim selectable>{item.id}{item.source_id !== item.id ? ` · from ${item.source_id}` : ''}</T>
       {item.actions.includes('work.done') ? <Button label={attentionActionLabel('work.done').toLowerCase()} disabled={busy || status !== 'online'} onPress={() => Alert.prompt('Complete step', item.title, summary => { if (summary.trim()) void actions.done(item, summary).then(done => { if (done) navigation.goBack(); }); })} /> : null}
       {item.actions.includes('message.read') ? <Button label="dismiss: mark read" disabled={busy || status !== 'online'} onPress={() => void actions.markRead(item).then(done => { if (done) navigation.goBack(); })} /> : null}

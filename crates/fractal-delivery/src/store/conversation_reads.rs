@@ -226,14 +226,19 @@ impl ConversationReadsStore for Store {
     /// Read one immutable canonical message's text without copying an oversized payload.
     /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
     fn conversation_message_text_bounded(&self, id: &str, max_bytes: usize) -> Result<Option<(usize, Option<String>)>> {
+        // A valid generic conversation handle must not reopen a thread-private message.
+        let private_fields = serde_json::to_string(fractal_schema::threads::MESSAGE_RELATION_FIELDS)?;
         self.readers.get().prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-hf04a4cb414e1 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */
+            /* sqlite-large-value: allow-for-now lv-hdd31f419d9ca owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */
             "WITH message AS (SELECT CASE WHEN json_type(body,'$.fields') IS NULL
                 THEN json_extract(body,'$.content') ELSE json_extract(body,'$.fields.content') END AS text
-                FROM claims WHERE id=?1 AND kind='message.sent')
+                FROM claims WHERE id=?1 AND kind='message.sent'
+                  AND NOT EXISTS (SELECT 1 FROM json_each(?3) AS field
+                    WHERE json_type(claims.body,'$.' || field.value) IS NOT NULL
+                       OR json_type(claims.body,'$.fields.' || field.value) IS NOT NULL))
              SELECT length(CAST(text AS BLOB)), CASE WHEN length(CAST(text AS BLOB))<=?2 THEN text END
              FROM message WHERE typeof(text)='text'",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-h19f57aa0a64e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![id, max_bytes], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hd16b68d04772 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![id, max_bytes, private_fields], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
     }
 
     /// Resolve one conversation identity without constructing the owner collection.

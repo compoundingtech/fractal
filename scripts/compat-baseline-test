@@ -93,6 +93,20 @@ class BundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 self.run_loader()
 
+    def test_pinned_executable_hash_is_checked_even_on_an_installed_hit(self):
+        self.pin["bundles"][self.target]["elf_sha256"] = hashlib.sha256(
+            (self.package / "bin/st3").read_bytes()).hexdigest()
+        self.run_loader()
+        installed = self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3"
+        installed.write_text("#!/bin/sh\nexit 1\n")
+        with self.assertRaisesRegex(ValueError, "executable SHA-256 mismatch"):
+            self.run_loader()
+
+    def test_pinned_executable_hash_mismatch_refuses_a_fresh_archive(self):
+        self.pin["bundles"][self.target]["elf_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "executable SHA-256 mismatch"):
+            self.run_loader()
+
     def test_download_timeout_does_not_publish(self):
         self.remote_bundle()
         with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")), \

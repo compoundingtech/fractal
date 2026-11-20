@@ -545,8 +545,6 @@ pub struct Drafts<'a> {
     pub noted_answers: Vec<String>,
     /// Why the last answer to this request was not sent; stays until the next attempt.
     pub answer_error: Option<&'a str>,
-    /// "Chat about this": who it goes to, the draft, and the thread so far.
-    pub chat: Option<Chat<'a>>,
     /// A prompt's form: its mark, whether it has the keys, and a question's choices.
     pub form: super::alerts::FormState<'a>,
     /// The auto-resolved ask behind the row (its own, or a closed row of the same episode), and
@@ -554,12 +552,23 @@ pub struct Drafts<'a> {
     pub overriding: Option<Overriding<'a>>,
 }
 
-pub struct Chat<'a> {
-    pub to: String,
-    pub text: &'a str,
-    pub cursor: usize,
-    pub editing: bool,
-    pub thread: Vec<Line<'static>>,
+fn subject_label(world: &World, subject: &str) -> String {
+    if subject.starts_with("agent/") {
+        return world.agents.items().iter().find(|agent| agent.id == subject)
+            .map_or_else(|| "an agent".into(), |agent| agent.name.clone());
+    }
+    if subject.starts_with("step-run/") || subject.starts_with("step/") {
+        return world.missions.items().iter().find_map(|mission| {
+            mission.steps.iter().find(|step| step.id == subject).map(|step| {
+                mission.step_metadata.get(&step.id)
+                    .and_then(|metadata| metadata.title.as_deref())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or("a step")
+                    .to_owned()
+            })
+        }).unwrap_or_else(|| "a step".into());
+    }
+    subject.to_owned()
 }
 
 /// A clickable reference to a graph subject; clicking it opens a popover.
@@ -1309,14 +1318,14 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             .iter()
             .find(|candidate| &candidate.id == mission)
             .map(|candidate| candidate.title.clone())
-            .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+            .unwrap_or_else(|| "a mission".into());
         link(&mut card, "mission  ", &label, mission);
     }
     // The step that waits on this ask, and what it is for: what answering lets go on.
     if let Some(blocked) = &item.blocked {
         card.lines(text::wrap(
             &[
-                text::run(blocked.step.clone(), theme::soft()),
+                text::run(subject_label(world, &blocked.step), theme::soft()),
                 text::run(
                     if blocked.goal.is_empty() {
                         String::new()
@@ -1334,13 +1343,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         ));
     }
     if let Some(agent) = &item.agent {
-        let label = world
-            .agents
-            .items()
-            .iter()
-            .find(|candidate| &candidate.id == agent)
-            .map(|candidate| candidate.name.clone())
-            .unwrap_or_else(|| agent.trim_start_matches("agent/").to_owned());
+        let label = subject_label(world, agent);
         link(&mut card, "agent    ", &label, agent);
     }
     if let AttentionKind::Request { from, from_id, .. } = &item.kind
@@ -1921,8 +1924,11 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         if target.starts_with("agent/")
             || target.starts_with("mission/")
             || target.starts_with("attention/")
+            || target.starts_with("step-run/")
+            || target.starts_with("step/")
         {
-            link(&mut card, &prefix, target, target);
+            let label = subject_label(world, target);
+            link(&mut card, &prefix, &label, target);
         } else {
             card.line(Line::from(vec![
                 span(prefix, theme::dim()),
@@ -1934,59 +1940,9 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         }
     }
     card.blank();
-    // Every item: talk to whoever can act on it, or go to what it is about.
-    if let Some(chat) = &drafts.chat {
-        card.section(&format!("chat with {} about this", chat.to), None, inner);
-        if chat.thread.is_empty() {
-            card.wrap(
-                &[run(
-                    format!(
-                        "{} gets this item as context: its title, mission and question.",
-                        chat.to
-                    ),
-                    theme::dim(),
-                )],
-                inner,
-            );
-        } else {
-            card.lines(chat.thread.iter().cloned());
-        }
-        card.blank();
-        let box_drafts = Drafts {
-            text: Some(chat.text),
-            cursor: chat.cursor,
-            editing: chat.editing,
-            answering: None,
-            note_answer: None,
-            noted_answers: Vec::new(),
-            answer_error: None,
-            confirm: None,
-            chat: None,
-            form: Default::default(),
-            overriding: None,
-        };
-        let first_target = card.targets.len();
-        text_box(
-            &mut card,
-            &format!("message {}", chat.to),
-            &box_drafts,
-            "",
-            inner,
-        );
-        card.buttons(&[
-            ("enter", "Send", Hit::Enter, theme::ACCENT),
-            ("esc", "Close chat", Hit::Escape, theme::OVERLAY1),
-        ]);
-        // The chat's box and Send are its own: a click on them never reaches a request's note.
-        for target in &mut card.targets[first_target..] {
-            target.hit = match target.hit {
-                Hit::Composer => Hit::ChatComposer,
-                Hit::Enter => Hit::ChatEnter,
-                ref other => other.clone(),
-            };
-        }
-    } else if !drafts.editing && drafts.confirm.is_none() {
-        let mut buttons = vec![("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)];
+    // Thread controls are composed below the item by the shared thread component.
+    if !drafts.editing && drafts.confirm.is_none() {
+        let mut buttons = Vec::new();
         if item.mission.is_some() || item.agent.is_some() {
             buttons.push((
                 "g",
@@ -2153,7 +2109,6 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             });
         }
         let (glyph, color) = agent_glyph(agent.state, spinner);
-        let path = agent.id.strip_prefix("agent/").unwrap_or(&agent.id);
         let mut first = vec![
             span(format!(" {glyph} "), theme::strong(color)),
             span(agent.name.clone(), theme::bold()),
@@ -2164,14 +2119,14 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             index: ids.len(),
             first,
             right,
-            // What its step last reported leads; the path says who it is when nothing was said.
+            // What its step last reported leads; otherwise repeat the readable agent name.
             second: match &agent.details.progress {
                 Some(progress) => vec![span(
                     format!("   {}", text::truncate(progress, width.saturating_sub(4))),
                     theme::soft(),
                 )],
                 None => vec![span(
-                    format!("   {}", text::truncate(path, width.saturating_sub(4))),
+                    format!("   {}", text::truncate(&agent.name, width.saturating_sub(4))),
                     theme::dim(),
                 )],
             },
@@ -2250,7 +2205,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
     ));
     first.push(span(format!("{model} · {} ", agent.host), theme::dim()));
     doc.line(Line::from(first));
-    let mut second = vec![span(format!("   {}", agent.id), theme::dim())];
+    let mut second = vec![span(format!("   {}", agent.name), theme::dim())];
     if let Some(tree) = &agent.worktree {
         second.push(span(format!("  ·  {tree}"), theme::dim()));
     }
@@ -2294,7 +2249,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
             .iter()
             .find(|candidate| &candidate.id == mission)
             .map(|candidate| candidate.title.clone())
-            .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+            .unwrap_or_else(|| "a mission".into());
         link(
             &mut doc,
             "   mission ",
@@ -2423,14 +2378,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
                     format!("   {}", text::truncate(&progress, width.saturating_sub(4))),
                     theme::soft(),
                 )],
-                None => vec![span(
-                    format!(
-                        "   {} · {}",
-                        mission.id.trim_start_matches("mission/"),
-                        mission.age
-                    ),
-                    theme::dim(),
-                )],
+                None => vec![span(format!("   {}", mission.age), theme::dim())],
             },
             children: Vec::new(),
         });
@@ -3310,7 +3258,6 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             span(agent.name.clone(), theme::bold()),
             span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
         ]));
-        doc.line(Line::from(span(agent.id.clone(), theme::dim())));
         doc.blank();
         doc.field(
             "harness",
@@ -3335,7 +3282,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 .iter()
                 .find(|candidate| &candidate.id == mission)
                 .map(|candidate| candidate.title.clone())
-                .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+                .unwrap_or_else(|| "a mission".into());
             doc.field("doing", &format!("{title} › {step}"), width, theme::text());
         }
         doc.field(
@@ -3492,7 +3439,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 .iter()
                 .find(|candidate| &candidate.id == mission)
                 .map(|candidate| candidate.title.clone())
-                .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+                .unwrap_or_else(|| "a mission".into());
             link(&mut doc, "", &format!("{title} › {step}"), mission);
             if let Some(goal) = &details.goal {
                 details_text(&mut doc, goal, theme::soft(), width, expanded, &agent.id);
@@ -3598,14 +3545,6 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     if let Some(under) = &details.under {
         field(&mut doc, "under", Some(under));
     }
-    doc.blank();
-    doc.lines(text::wrap(
-        &[run(agent.id.clone(), theme::dim())],
-        width,
-        &[],
-        &[],
-        None,
-    ));
     doc
 }
 
@@ -3782,7 +3721,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                 mission.id.clone(),
                 vec![
                     span(format!("{glyph} "), theme::strong(color)),
-                    span(path.last().cloned().unwrap_or_default(), theme::bold()),
+                    span(mission.title.clone(), theme::bold()),
                 ],
                 vec![span(
                     format!("{} {done}/{total}", human_mission_label(mission)),
@@ -3947,6 +3886,139 @@ mod tree_tests {
     use super::*;
 
     #[test]
+    fn demo_alert_related_agent_uses_the_thread_sender_name() {
+        let world = crate::ui::demo::world();
+        let item = &world.attention.items()[0];
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+            form: Default::default(),
+            overriding: None,
+        };
+        let doc = home_detail(&world, Some(&item.id), 120, &drafts);
+        let text = doc.lines.iter().map(|line| {
+            line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Atlas Builder"), "{text}");
+        assert!(!text.contains("agent/example/atlas/builder"), "{text}");
+        assert!(matches!(item.kind, AttentionKind::Request { .. }));
+        assert!(text.contains("Thread the session through"), "{text}");
+        assert!(!text.contains("older, or has not presented it yet"), "{text}");
+        assert!(doc.targets.iter().any(|target| target.hit == Hit::Peek("agent/example/atlas/builder".into())));
+    }
+
+    #[test]
+    fn agent_header_details_and_peek_never_render_the_agent_id() {
+        let world = crate::ui::demo::world();
+        let agent = &world.agents.items()[0];
+        for doc in [
+            agent_header(&world, agent, 160, "·"),
+            agent_details(&world, agent, 160, "·"),
+            peek(&world, &agent.id, 160, "·"),
+        ] {
+            let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+            assert!(!shown.contains(&agent.id), "{shown}");
+        }
+    }
+
+    #[test]
+    fn inbox_related_steps_show_the_mission_step_name_or_a_neutral_label() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(missions) = &mut world.missions else { panic!() };
+        let mission = &mut missions[0];
+        let opaque_id = "d415892ea7a1dab11e6ba7ed22a8eb13";
+        let step_id = mission.steps[0].id.clone();
+        let expected = "Choose the delivery target";
+        let mut raw: fractal_client::Mission = serde_json::from_value(serde_json::json!({
+            "id": mission.id, "kind": "mission", "revision": "r1",
+            "updated_at": "2026-11-15T10:00:00Z",
+            "title": format!("person-ask/{opaque_id}"), "state": "running",
+            "mission_revision": "r1",
+            "run_details": [{
+                "id": "mission-run/example/ask", "requester": "person/example",
+                "status": "running", "phase": "normal",
+                "progress": {"done": 0, "total": 1}, "current_steps": [],
+                "must_act": "you", "state_since": "2026-11-15T10:00:00Z",
+                "steps": [{
+                    "id": step_id, "path": "ask", "title": expected,
+                    "state": "claimed", "attempt": 1,
+                    "since": "2026-11-15T10:00:00Z", "goals": ["Choose a target."]
+                }]
+            }]
+        })).unwrap();
+        mission.title = crate::mission_display_label(&raw);
+        assert_eq!(mission.title, expected);
+        raw.run_details[0].steps.as_mut().unwrap()[0].title = None;
+        assert_eq!(crate::mission_display_label(&raw), "Choose a target.");
+        raw.run_details[0].steps.as_mut().unwrap()[0].goals.clear();
+        assert_eq!(crate::mission_display_label(&raw), "Untitled mission");
+        mission.step_metadata.entry(step_id.clone()).or_default().title = Some(expected.into());
+        let Load::Ready(items) = &mut world.attention else { panic!() };
+        items[0].related = vec![(step_id.clone(), None), ("step-run/missing".into(), None)];
+        items[0].blocked = Some(Blocked { step: "step-run/missing".into(), goal: String::new() });
+        items[0].raised_by = Some("Atlas/Manager".into());
+        let id = items[0].id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+            form: Default::default(),
+            overriding: None,
+        };
+        let doc = home_detail(&world, Some(&id), 200, &drafts);
+        let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains(expected), "{shown}");
+        assert!(shown.contains("raised by Atlas/Manager"), "{shown}");
+        assert!(!shown.contains("agent/"), "{shown}");
+        assert!(!shown.contains(opaque_id), "{shown}");
+        assert!(!shown.contains(&opaque_id.to_ascii_uppercase()), "{shown}");
+        let listing = missions_list(&world, 200, "·", false);
+        let rows = listing.items.iter().filter_map(|item| match item {
+            Item::Row { first, right, second, .. } => Some(first.iter().chain(right).chain(second)
+                .map(|span| span.content.as_ref()).collect::<String>()),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains(expected), "{rows}");
+        assert!(!rows.to_ascii_lowercase().contains(opaque_id), "{rows}");
+        assert!(shown.contains("a step"), "{shown}");
+        assert!(!shown.contains(&step_id), "{shown}");
+        assert!(!shown.contains("step-run/missing"), "{shown}");
+        let Load::Ready(missions) = &mut world.missions else { panic!() };
+        missions[0].step_metadata.get_mut(&step_id).unwrap().title = None;
+        let shown = home_detail(&world, Some(&id), 200, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("a step"), "{shown}");
+        assert!(!shown.contains(opaque_id), "{shown}");
+    }
+
+    #[test]
+    fn inbox_unresolved_missions_use_neutral_labels_and_keep_navigation_ids() {
+        let hash = "d415892ea7a1dab11e6ba7ed22a8eb13";
+        let mission_id = format!("mission/person-ask/{hash}");
+        for missions in [Load::Ready(Vec::new()), Load::Loading, Load::Failed("Unavailable".into())] {
+            let mut world = crate::ui::demo::world();
+            world.missions = missions;
+            let Load::Ready(items) = &mut world.attention else { panic!() };
+            let item = &mut items[0];
+            item.mission = Some(mission_id.clone());
+            item.related.clear();
+            item.blocked = None;
+            let id = item.id.clone();
+            let drafts = Drafts {
+                text: None, cursor: 0, editing: false, confirm: None,
+                answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+                form: Default::default(),
+                overriding: None,
+            };
+            let doc = home_detail(&world, Some(&id), 200, &drafts);
+            let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+            assert!(shown.contains("mission  a mission"), "{shown}");
+            assert!(!shown.contains(&mission_id), "{shown}");
+            assert!(!shown.to_ascii_lowercase().contains(hash), "{shown}");
+            assert!(doc.targets.iter().any(|target| target.hit == Hit::Peek(mission_id.clone())));
+        }
+    }
+
+    #[test]
     fn attention_identity_labels_named_st_are_not_product_names() {
         let mut world = crate::ui::demo::test_world();
         let Load::Ready(items) = &mut world.attention else {
@@ -3959,7 +4031,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(), overriding: None,
+            form: Default::default(), overriding: None,
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3988,7 +4060,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(), overriding: None,
+            form: Default::default(), overriding: None,
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -4575,7 +4647,6 @@ mod request_notes {
             note_answer: case.note.map(Into::into),
             noted_answers: case.noted.iter().map(|id| (*id).to_owned()).collect(),
             answer_error: case.error,
-            chat: None,
             form: Default::default(),
             overriding: None,
         };

@@ -140,16 +140,20 @@
           "custom.reply"
         ],
         "age": "1m",
-        "agent": null,
+        "agent": "agent/example/atlas/builder",
         "blocked": null,
-        "conversations": [],
+        "conversations": [
+          "agent/example/atlas/builder"
+        ],
         "deadline": null,
         "id": "attention/scenario-fleet-mid-refactor-worker-typecheck",
         "kind": {
-          "alert": true,
-          "kind": "unplaced",
-          "text": "syncAvatars calls loadUser without the session. Thread the session through, or keep a one-argument overload?",
-          "why": "Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts."
+          "from": "An agent",
+          "from_id": "agent/example/atlas/builder",
+          "images": [],
+          "kind": "request",
+          "question": "syncAvatars calls loadUser without the session. Thread the session through, or keep a one-argument overload?",
+          "structured": null
         },
         "mission": "mission/example/atlas/load-user-rename",
         "raised_by": null,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
+import { ConversationAttempts } from './conversationAttempts.ts';
 
 const source = readFileSync(new URL('./screens/Conversation.tsx', import.meta.url), 'utf8');
 const start = source.indexOf('  function sendAgain(item: Pending) {');
@@ -19,10 +20,12 @@ test('Send as new resolves the current member when the person confirms, not when
   const actionsRef = { current: oldActions };
   let buttons;
   const settled = [];
-  const sendAgain = new Function('actionsRef', 'actions', 'Alert', 'setPending', 'settle', 'setSendIssue', `return (${confirmation});`)(
+  const attempts = new ConversationAttempts(() => undefined, error => ({ how: 'failed', error: String(error) }));
+  await attempts.send('pending/1', {}, async () => ({ how: 'unconfirmed' }));
+  const sendAgain = new Function('actionsRef', 'actions', 'Alert', 'attempts', 'settle', 'setSendIssue', `return (${confirmation});`)(
     actionsRef, oldActions,
     { alert: (_title, _body, options) => { buttons = options; } },
-    () => {}, (...args) => settled.push(args), () => {},
+    attempts, (...args) => settled.push(args), () => {},
   );
   const item = {
     id: 'pending/1', pickedImages: [{ base64: 'image' }],

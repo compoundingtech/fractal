@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { FractalClient } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { Schema } from 'effect'
@@ -40,17 +42,21 @@ const firstSendBody = (action: typeof request) => {
     idempotency_key: expect.stringMatching(/^[0-9a-f-]{36}$/),
   }
 }
-const ack = {
-  kind: 'action-result', action_id: 'action/returned', operation_id: 'operation/returned',
-  snapshot_id: 'snapshot/returned', affected_ids: ['message/returned'], status: 'accepted',
+const acknowledgement = (init: RequestInit | undefined, status = 'completed') => {
+  const action = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(init?.body)))
+  const messageId = `message/${createHash('sha256').update(action.idempotency_key).digest('hex').slice(0, 16)}`
+  return {
+    kind: 'action-result', action_id: action.id, operation_id: 'operation/returned',
+    snapshot_id: 'snapshot/returned', affected_ids: [messageId], status,
+  }
 }
 
 const attachmentClient = ({
   states = {},
   preflight,
-  reply = (url: URL) => Response.json({
+  reply = (url: URL, init?: RequestInit) => Response.json({
     api_version: 'st3.client.v0', snapshot: { id: 'snapshot/native' },
-    value: url.pathname.endsWith('/chunk') ? chunk : url.pathname.endsWith('/actions') ? ack : upload,
+    value: url.pathname.endsWith('/chunk') ? chunk : url.pathname.endsWith('/actions') ? acknowledgement(init) : upload,
   }),
 }: {
   readonly states?: Readonly<Record<string, string>>
@@ -181,13 +187,37 @@ describe('native attachment port', () => {
     expect(calls[1]?.init?.method).toBe('GET')
   })
 
-  it.each(['accepted', 'completed', 'rejected'])('preserves the real %s acknowledgement and sends all request identities/references unchanged', async (status) => {
-    const actual = { ...ack, status }
-    const { port, calls } = attachmentClient({ reply: () => Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: actual }) })
+  it.each(['completed', 'rejected'])('preserves the real %s acknowledgement and sends all request identities/references unchanged', async (status) => {
+    let actual: ReturnType<typeof acknowledgement> | undefined
+    const { port, calls } = attachmentClient({ reply: (_url, init) => {
+      actual = acknowledgement(init, status)
+      return Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: actual })
+    } })
     expect(await port.send(request)).toEqual({ _tag: 'Success', value: Native.decodeUnknownSync(Native.ActionResult)(actual) })
     expect(calls.map(({ url }) => url.pathname)).toEqual(['/v1/client/capabilities', '/v1/client/actions'])
     expect(calls[1]?.init?.method).toBe('POST')
     expect(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(calls[1]?.init?.body)).toEqual(firstSendBody(request))
+  })
+
+  it('keeps a nonterminal accepted receipt unconfirmed rather than claiming delivery', async () => {
+    const { port, calls } = attachmentClient({ reply: (_url, init) => Response.json({
+      api_version: 'st3.client.v0', snapshot: {}, value: acknowledgement(init, 'accepted'),
+    }) })
+    expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(calls).toHaveLength(2)
+  })
+
+  it.each(['action', 'message'])('keeps a receipt for a different %s unconfirmed', async (identity) => {
+    const { port, calls } = attachmentClient({ reply: (_url, init) => {
+      const value = acknowledgement(init)
+      return Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: {
+        ...value,
+        action_id: identity === 'action' ? 'action/other' : value.action_id,
+        affected_ids: identity === 'message' ? ['message/other'] : value.affected_ids,
+      } })
+    } })
+    expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(calls).toHaveLength(2)
   })
 
   it('carries an explicit retry key unchanged instead of generating a fresh one', async () => {
@@ -269,7 +299,7 @@ describe('native attachment port', () => {
 
   it('never retries an uncertain send or claims it was delivered', async () => {
     const { port, calls } = attachmentClient({ reply: () => Promise.reject(new Error('Connection lost after submit')) })
-    expect(await port.send(request)).toEqual({ _tag: 'Refused', reason: 'failed', detail: 'Connection lost after submit' })
+    expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
     expect(calls).toHaveLength(2)
   })
 

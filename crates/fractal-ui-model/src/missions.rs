@@ -143,6 +143,9 @@ impl Step {
 /// Raw step facts, independent of state-specific blocker presentation and queue notes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct StepMetadata {
+    /// Human title for related-step links; never part of the serialized view contract.
+    #[serde(skip)]
+    pub title: Option<String>,
     /// st retains the last reason even after a step moves on or ends.
     pub blocked_reason: Option<String>,
     pub last_progress: Option<String>,
@@ -383,6 +386,7 @@ pub fn adapt<'a>(
                     (
                         step.id.clone(),
                         StepMetadata {
+                            title: step.title.clone(),
                             blocked_reason: step.blocked_reason.clone(),
                             last_progress: step.last_progress.clone(),
                             nudged: step.nudged_at.as_deref().map(|at| display.age(at, now)),

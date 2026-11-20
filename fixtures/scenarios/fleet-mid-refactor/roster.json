@@ -304,6 +304,18 @@
         "id": "arrangement/person/ada/01b8dd57-f7a0-7631-9afa-2593589179f4",
         "kind": "arrangement",
         "owner": "person/ada",
+        "resolved": {
+          "folders": {
+            "agent/example/atlas/builder": "01b8dd57-f7a0-7c73-af03-a1796ed26593",
+            "agent/example/atlas/migrator": "01b8dd57-f7a0-7c73-af03-a1796ed26593",
+            "agent/example/atlas/reviewer": "01b8dd57-f7a0-7a7d-ab4a-98b693130b6c"
+          },
+          "parents": {
+            "01b8dd57-f7a0-7763-8687-4256d6b344fa": null,
+            "01b8dd57-f7a0-7a7d-ab4a-98b693130b6c": "01b8dd57-f7a0-7763-8687-4256d6b344fa",
+            "01b8dd57-f7a0-7c73-af03-a1796ed26593": "01b8dd57-f7a0-7763-8687-4256d6b344fa"
+          }
+        },
         "revision": "arrangement-1",
         "updated_at": "2030-01-01T11:59:00.000Z"
       }

@@ -78,7 +78,7 @@ pub fn retired_subjects_at(
         .collect::<rusqlite::Result<BTreeSet<_>>>()?)
 }
 
-fn retired(recipient: &str, claim: &ClaimRecord) -> FractalError {
+pub(super) fn retired(recipient: &str, claim: &ClaimRecord) -> FractalError {
     MessageSendRefusal::Retired {
         recipient: recipient.into(),
         successor: claim.body["fields"]["successor"]
@@ -123,8 +123,20 @@ pub fn admit_recipient(
     connection: &Connection,
     recipient: Option<&str>,
 ) -> Result<(), FractalError> {
+    if let Some(claim) = terminal_retirement_at(connection, recipient)? {
+        return Err(retired(&claim.subject, &claim));
+    }
+    Ok(())
+}
+
+/// Return terminal evidence only after the same authoritative lifecycle admission
+/// checks used by first-send. Missing declarations and runtime observations are not proof.
+pub fn terminal_retirement_at(
+    connection: &Connection,
+    recipient: Option<&str>,
+) -> Result<Option<ClaimRecord>, FractalError> {
     let Some(recipient) = recipient.filter(|to| to.starts_with("agent/")) else {
-        return Ok(());
+        return Ok(None);
     };
     let recipient_identity = identities::resolve_reference_conn(connection, recipient)?;
     let recipient = recipient_identity.as_str();
@@ -166,9 +178,9 @@ pub fn admit_recipient(
         {
             return Err(unavailable(recipient, LifecycleUnavailableReason::Conflict));
         }
-        return Err(retired(recipient, &claim));
+        return Ok(Some(claim));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// A read or close is admitted against the recipient's terminal claim in the same writer

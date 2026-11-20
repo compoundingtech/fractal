@@ -3690,7 +3690,8 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             client_json_person(app.clone(), "/v1/client/capabilities", agent).await;
         for capability in capabilities["value"]["capabilities"].as_array().unwrap() {
             let id = capability["id"].as_str().unwrap();
-            if id == "assistant.grants.v1" {
+            // Agent projection access does not grant a person's private thread associations.
+            if matches!(id, "assistant.grants.v1" | "collection.attention.thread-hints") {
                 assert_eq!(capability["state"], "ungranted", "{agent}: {capability}");
                 continue;
             }

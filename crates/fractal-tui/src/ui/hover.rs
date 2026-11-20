@@ -54,7 +54,7 @@ impl Ui {
     }
 
     /// No cloned Hit, pane, subject, or world lookup on the motion path.
-    pub(super) fn mouse_moved(&self, mouse: MouseEvent) -> bool {
+    pub(super) fn mouse_moved(&mut self, mouse: MouseEvent) -> bool {
         let point = (mouse.column, mouse.row);
         if !self.hover.pressed.get() {
             self.hover.pointer.set(Some(point));
@@ -64,6 +64,17 @@ impl Ui {
         if changed {
             self.hover.target.set(next);
         }
+        let thread_changed = {
+            let info = self.frame.borrow();
+            let message = next.and_then(|target| match &info.hits[target.index].1 {
+                Hit::Thread(
+                    _,
+                    thread::Tap::MessageHeader(id) | thread::Tap::Reply { message: id, .. },
+                ) => Some(id.as_str()),
+                _ => None,
+            });
+            self.threads.hover(message)
+        };
         // Terminal-body motion stays with its program. The rendered frame caches its body,
         // avoiding focus/pane allocations and preventing motion through a floating overlay.
         if let Some(body) = self.frame.borrow().terminal_motion
@@ -81,7 +92,7 @@ impl Ui {
         {
             native.mouse(mouse, point.0 - body.x, point.1 - body.y);
         }
-        changed
+        changed || thread_changed
     }
 
     pub(super) fn draw_hover(&self, buf: &mut Buffer) {
@@ -298,6 +309,37 @@ mod tests {
             "outside the window clears hover"
         );
         assert!(ui.hover.target.get().is_none());
+    }
+
+    #[test]
+    fn live_motion_keeps_thread_reply_visible_from_header_to_button() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.frame.borrow_mut().area = Rect::new(0, 0, 30, 4);
+        ui.hit(
+            Rect::new(0, 0, 20, 1),
+            Hit::Thread(
+                "home".into(),
+                thread::Tap::MessageHeader("message/one".into()),
+            ),
+        );
+        assert!(ui.input_event(motion(3, 0)));
+        assert!(!ui.threads.hover(Some("message/one")));
+        assert!(!ui.input_event(motion(4, 0)));
+
+        ui.hit(
+            Rect::new(12, 0, 8, 1),
+            Hit::Thread(
+                "home".into(),
+                thread::Tap::Reply {
+                    thread: "thread/one".into(),
+                    message: "message/one".into(),
+                },
+            ),
+        );
+        assert!(ui.input_event(motion(14, 0)));
+        assert!(!ui.threads.hover(Some("message/one")));
+        assert!(ui.input_event(motion(20, 0)));
+        assert!(!ui.threads.hover(None));
     }
 
     #[test]

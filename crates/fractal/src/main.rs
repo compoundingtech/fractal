@@ -4391,8 +4391,7 @@ enum AttentionCommand {
         #[arg(long = "as", value_parser = parse_person_subject)]
         actor: Option<String>,
     },
-    /// Chat about an alert: send a message to the agent whose conversation it belongs to, titled
-    /// after it, with a reference to what it is about. This is what "Chat about this" does in the Fractal terminal UI.
+    /// Start a durable thread about an Inbox item with its responsible agent.
     Discuss(AttentionDiscussArgs),
     /// Legacy mutation: returns attention-migrated. Use work ask or remedy the source.
     Request(AttentionRequestArgs),
@@ -4456,17 +4455,13 @@ struct AttentionDiscussArgs {
     /// The item to talk about: its `attention/...` ID from `fractal alerts ls`.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
     subject: String,
-    /// What to say. The message also names the item, so the agent knows what it is about.
+    /// The first message in the thread. Its origin retains the exact Inbox item and episode.
     #[arg(short = 'm', long)]
     body: String,
-    /// Who to talk to. By default the agent that asked for the item.
-    #[arg(long)]
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
-    to: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
     #[arg(long = "as", value_parser = parse_person_subject)]
     actor: Option<String>,
-    /// Name this message for retries, as `conversations send --idempotency-key` does.
+    /// Deduplicate this start while its Inbox episode, title and responsible agent stay unchanged.
     #[arg(long)]
     idempotency_key: Option<String>,
 }
@@ -4557,6 +4552,8 @@ enum WorkCommand {
     ///
     /// Puts a structured request on the person's home.
     Ask(WorkAskArgs),
+    /// Attach one pending ask episode to an existing thread as its requesting agent.
+    LinkThread(WorkThreadLinkArgs),
     /// Bring a person information they asked for. Nothing waits on it; it clears once read.
     Update(WorkUpdateArgs),
     /// Complete a person-assigned step with a response.
@@ -4693,6 +4690,20 @@ struct WorkAcknowledgeArgs {
     /// The message ID from the handoff note or work show.
     #[arg(long)]
     message: String,
+}
+
+#[derive(Args)]
+struct WorkThreadLinkArgs {
+    /// Exact ask step-run ID returned by work ask.
+    ask: String,
+    /// Exact existing thread ID. Closed threads are eligible.
+    #[arg(long)]
+    thread: String,
+    /// ID of the work.person-asked claim for this ask, visible in its trace.
+    #[arg(long)]
+    episode: String,
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -5010,6 +5021,19 @@ enum MessageCommand {
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
     /// which rereads its context. A reply that only acknowledges or reports is `--kind silent`.
     Reply(MessageReplyArgs),
+    /// Send a conversation reply to an existing topic thread from its bound agent.
+    ReplyInThread {
+        thread: String,
+        /// Quote a canonical message in this thread.
+        #[arg(long)]
+        quote: Option<String>,
+        /// Reply text, or - to read UTF-8 from stdin without trimming.
+        #[arg(short = 'm', long)]
+        body: String,
+        /// Reuse the same key if the outcome of this request is uncertain.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
     ///
     /// The reply is marked read for the waiting agent, so native delivery does not hand it over
@@ -6877,6 +6901,7 @@ fn guard_mutating_cli_actor(
         },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
+            WorkCommand::LinkThread(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
             WorkCommand::Override(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
@@ -7542,6 +7567,7 @@ fn open_daemon_store(
         None => Store::open(&config.store_path(), &config.node)?,
     };
     store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
+    store.configure_inbox_fallback_agent(config.inbox_fallback_agent.as_deref())?;
     store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
@@ -7977,6 +8003,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "idle_residency": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 2,
+                    "thread_read_privacy": fractal_schema::threads::READ_PRIVACY_VERSION,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -8053,6 +8080,14 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::sekrets::client::socket_path(),
     );
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
+    if config.thread_writes
+        && !store.initialize_thread_write_rollout(
+            fractal_schema::threads::READ_PRIVACY_VERSION,
+            config.peers.iter().map(|peer| peer.name.clone()),
+        )
+    {
+        stderr_message("fractal", format_args!("thread writes require an upgraded local privacy reader"));
+    }
     let state = AppState {
         owning_person: config.person.clone(),
         browser_pairing_login: config.browser_pairing_login.clone(),
@@ -10968,6 +11003,25 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     Ok(client
         .with_endpoint(endpoint.clone())
         .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
+}
+
+async fn submit_thread_action(
+    endpoint: &Endpoint,
+    actor: &str,
+    kind: &str,
+    key: &str,
+    parameters: Value,
+) -> Result<Value> {
+    let client = execution_client(endpoint, actor.to_owned())?;
+    let capability = generated_client(endpoint, Some(actor))?.capabilities().await?;
+    client.post("/v1/client/actions", &json!({
+        "api_version": CLIENT_V0_API_VERSION,
+        "id": format!("action/{}", hex::encode(Sha256::digest(key))),
+        "type": kind,
+        "idempotency_key": key,
+        "fence": { "snapshot_id": capability.snapshot.id },
+        "parameters": parameters,
+    })).await
 }
 
 /// The actor of a terminal or client-v0 command: an explicit person, agent or run, else the
@@ -18800,12 +18854,13 @@ fn pi_family_message_frame(
             fractal_drivers::ding::NotificationMetadata {
                 attachments,
                 assistant: message.assistant_metadata().as_ref(),
+                delivery_thread: message.delivery_thread.as_deref(),
             },
         ), &message.tags.iter().filter(|tag| tag.as_str() != fractal_daemon::silent::SILENT_TAG || fractal_daemon::silent::is_held(message)).cloned().collect::<Vec<_>>()),
         "meta": {
             "from": message.from,
             "messageId": message.subject,
-            "threadId": message.in_reply_to.clone().unwrap_or_else(|| message.subject.clone()),
+            "threadId": message.delivery_thread.as_ref().or(message.in_reply_to.as_ref()).unwrap_or(&message.subject),
             "identity": identity,
             "inputIncarnation": incarnation,
         },
@@ -21127,6 +21182,9 @@ fn native_queued_message(
             })
             .cloned(),
     );
+    if let Some(thread) = &view.delivery_thread {
+        tags.push(format!("{}{thread}", fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG));
+    }
     tags.extend(
         attachments
             .iter()
@@ -21440,7 +21498,12 @@ async fn forward_projected_messages_reporting(
                     } else {
                         message.content.clone()
                     };
-                    let mut tags = message.tags.clone();
+                    let prefix = fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG;
+                    let mut tags: Vec<_> = message.tags.iter()
+                        .filter(|tag| !tag.starts_with(prefix)).cloned().collect();
+                    if let Some(thread) = &message.delivery_thread {
+                        tags.push(format!("{prefix}{thread}"));
+                    }
                     tags.push(format!("{TAG_PREFIX}{}", message.subject));
                     tags.push(format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, message.to));
                     tags.push(format!(

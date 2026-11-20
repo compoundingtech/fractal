@@ -85,6 +85,16 @@ const changes: AutoResolvedAsk = {
 }
 
 describe('Auto-resolved section', () => {
+  it('opens the resolved source independently of its override controls', async () => {
+    const onSelect = vi.fn()
+    const onOverride = vi.fn(async (): Promise<AlertActionResult> => ({ _tag: 'Sent' }))
+    await act(async () => root.render(<AutoResolvedSection read={seen([first])} now={now} onSelect={onSelect} onOverride={onOverride} />))
+    await press(first, first.title)
+    expect(onSelect).toHaveBeenCalledWith(`auto-resolved:${first.resolution_id}`)
+    expect(onOverride).not.toHaveBeenCalled()
+    expect(buttons(first).map(button => button.textContent)).toEqual([first.title, 'Merge', 'Drop'])
+  })
+
   it('shows what the default was, who asked, when, and the other answers with what overriding does', async () => {
     await show(seen([first]), async () => ({ _tag: 'Sent' }))
     expect(host.querySelector('h3')?.textContent).toBe('Auto-resolved')

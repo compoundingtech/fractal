@@ -78,7 +78,7 @@ export const Light: Story = { args: { initialScheme: 'light' }, play: openEscape
 export const FullControl: Story = { args: { grants: full }, play: async ({ canvasElement }) => {
   await userEvent.click(within(canvasElement).getByRole('button', { name: 'Settings' }))
   const dialog = await within(document.body).findByRole('dialog', { name: 'Settings' })
-  await expect(within(dialog).getByRole('region', { name: 'Device and connection' })).toHaveTextContent('Full control')
+  await expect(within(dialog).getByRole('region', { name: 'Device and connection' })).toHaveTextContent('All listed controls granted')
 } }
 export const Availability: Story = { args: { availability: 'away' }, play: async ({ canvasElement }) => {
   await userEvent.click(within(canvasElement).getByRole('button', { name: 'Settings' }))

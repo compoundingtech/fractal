@@ -1402,7 +1402,13 @@ fn harness_bodies(
     // st's own notes beside a delivery tell the agent something; the person never typed them.
     let mut text = text
         .lines()
-        .filter(|line| !ST_DELIVERY_NOTES.contains(&line.trim()))
+        .filter(|line| {
+            let line = line.trim();
+            !(ST_DELIVERY_NOTES.contains(&line)
+                || !enveloped.is_empty()
+                    && line.starts_with("Reply in this topic with `fractal conversations reply-in-thread ")
+                    && line.ends_with("Any new question or decision goes through a native work ask."))
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if filters.contains(&crate::DisplayFilter::ContextBlocks) {
