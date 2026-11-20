@@ -86,7 +86,7 @@ head: it tests that head merged with the current base. The merge queue combines 
 the current `main`; the head does not need to be rebased first. No `pull_request_target` job runs PR code,
 and the gate has only `contents: read` permission. Forks do not receive publishing secrets.
 
-The fast `upgrade-impact` job starts independently on GitHub-hosted `ubuntu-latest`, using only
+The fast `upgrade-impact` job starts independently on ephemeral Namespace capacity, using only
 Python and Git. The adoption boundary is **PR #1661**: PR numbers above it require a fresh valid
 upgrade fragment, including documentation changes. PRs #1661 and below without a fragment retain
 their prior merge policy; they still require classification before public release. Supplied
@@ -112,8 +112,20 @@ gate explicitly permits to skip; failure, cancellation or an unexplained skip fa
 the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
 the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
-`genie-freshness`, `typescript-client` and the `linux-gate` aggregate use GitHub-hosted
-`ubuntu-latest`, keeping lightweight checks off reserved build capacity.
+Tiny control jobs (`upgrade-impact`, eight evidence gates, `linux-gate`, web change
+detection and web aggregation) use the existing `ci1-priority` owned role only
+for `merge_group` and protected-main `push` events. Their labels do not depend
+on picker output. Every PR, including same-repository and fork PRs, and every
+manual run retains GitHub-hosted `ubuntu-latest` for these controls.
+Real toolchain work (Genie, CI-script tests, TypeScript, Home Manager evaluation,
+compatibility archives and web execution) retains its existing hosted placement.
+No new Namespace usage or provisioned capacity is introduced. The picker and
+queue watchers remain hosted independently of both workload pools.
+In baseline run `44693797114`, the initial fourteen hosted jobs waited a median
+1,249 seconds (range 798–1,356). Nine of those initial dispatches move to owned
+capacity for merge groups; five remain independently hosted. Across the full
+workflow, twelve control definitions change placement, while all required check
+names, predicates, dependency edges, evidence decisions and work remain unchanged.
 
 By default, required merge-group producers, the first two test shards and supporting
 Rust jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common
@@ -676,8 +688,10 @@ for account permissions, state bootstrap and manual deployment commands.
 
 ### Fractal web
 
-The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
-workflow-level path filters. `linux-gate` does not depend on them.
+Fractal web detection and aggregation use the trusted-event control placement
+above; every PR stays hosted. Real `fractal-web-execution` work retains
+GitHub-hosted `ubuntu-latest` and its existing performance environment. There are
+no workflow-level path filters, and `linux-gate` does not depend on these jobs.
 Only `fractal-web-execution` enables unprivileged user namespaces with
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral
 Ubuntu runner VM before entering the web lanes. The effect-utils Buck TypeScript
@@ -1070,7 +1084,8 @@ image by changing a label. Restore it only through a reviewed dedicated
 persistent-store placement, preserving exact native qualification and cache
 semantics. Cancelled partial proofs remain incomplete rather than passes.
 
-Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
+Genie, CI-script tests, TypeScript and Home Manager evaluation remain hosted.
+Tiny merge/main controls use the owned role; PR controls remain hosted.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
 merge worker, with dynamic label lending.
 Priority PRs share the lane; this sharing is accepted, with release/merge-first ordering owned
