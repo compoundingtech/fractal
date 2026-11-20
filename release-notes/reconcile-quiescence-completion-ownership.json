@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make reconcile quiescence pass counts deterministic by giving the measured broad loop ownership of start-result application. The independent completion consumer remains covered by concurrent adoption tests; the wake test also checks that exactly one additional launch occurred.",
+  "replay": {"status": "none", "detail": "Test-only change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No runtime, wire or CLI change."},
+  "downtime": {"status": "none", "detail": "No deployed behavior changes."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the test change."}
+}

@@ -639,6 +639,7 @@ async fn start_results_are_adopted_while_the_broad_pass_is_held() {
         pass_release.0.send(()).unwrap();
         pass.await.unwrap().unwrap();
         workers_done(&reconciler).await;
+        assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
     }
 }
 

@@ -248,7 +248,12 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             }
         }
     }));
-    let task = tokio::spawn(reconciler.clone().run());
+    // Measure the broad loop's own writes, with completion application owned by that loop.
+    // run() also starts an independent completion consumer, whose writes can land before
+    // or during a pass and legitimately change this count. Its concurrent adoption path
+    // is covered by start_results_are_adopted_while_the_broad_pass_is_held.
+    let starts_before = runtime.starts.lock().unwrap().len();
+    let task = tokio::spawn(reconciler.clone().run_passes());
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
     if traffic == QuiescenceTraffic::StartCompletion {
@@ -287,6 +292,9 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
     }
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    if traffic == QuiescenceTraffic::StartCompletion {
+        assert_eq!(runtime.starts.lock().unwrap().len(), starts_before + 1);
+    }
     eprintln!("traffic={traffic:?}: passes_per_wake={counts:?}");
     counts
 }
