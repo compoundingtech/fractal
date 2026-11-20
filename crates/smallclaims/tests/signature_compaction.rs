@@ -300,3 +300,33 @@ fn a_new_candidate_expands_a_compacted_claim_first() {
     assert_eq!(store.claim_signature(&claim.id).unwrap(), Some(genuine));
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
 }
+
+/// A store the writer fenced at 24, rolled back to this reader release: the fence must not turn
+/// on the version 21 reference writer, whose conversion needs every facade's candidate row.
+#[test]
+fn a_store_fenced_at_24_keeps_the_reference_writer_off() {
+    let (_directory, store, _anchor) = studio();
+    note(&store, None, "a node note");
+    seal(&store);
+    drain(&store);
+    assert!(compact(&store) > 0);
+    store.connection.write().pragma_update(None, "user_version", 24).unwrap();
+    let before = verdicts(&store);
+
+    let later = note(&store, Some("person/ada"), "written after the rollback");
+    seal(&store);
+    drain(&store);
+    for _ in 0..8 {
+        let migration = store.advance_signature_migration().unwrap();
+        assert!(migration.fault.is_none(), "{:?}", migration.fault);
+    }
+    assert!(store.signature_state_faults().unwrap().is_empty());
+    assert_eq!(verdict(&store, &later), Verdict::Verified);
+    let after = verdicts(&store);
+    assert!(before.iter().all(|(claim, verdict)| after.get(claim) == Some(verdict)));
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM claim_signatures WHERE typeof(signature)<>'text'"),
+        0,
+        "no facade became a reference"
+    );
+}
