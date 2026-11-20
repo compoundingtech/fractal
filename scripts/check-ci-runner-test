@@ -190,8 +190,9 @@ for job in ("linux-clippy", "linux-fleet-compat"):
 for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
     assert job not in blocks, (job, 'daily only')
 dispatch_jobs = ('upgrade-impact', 'linux-gate', 'fractal-web-changes', 'fractal-web',
+                 'genie-freshness', 'typescript-client',
                  *(job for job in blocks if job.startswith('evidence-gate-')))
-assert len(dispatch_jobs) == 12, 'twelve tiny control definitions avoid hosted merge dispatch'
+assert len(dispatch_jobs) == 14, 'four required gates and their controls avoid hosted merge dispatch'
 for job in dispatch_jobs:
     labels = blocks[job].split('    runs-on:', 1)[1].split('    timeout-minutes:', 1)[0]
     assert 'needs.' not in labels and 'namespace-' not in labels, (job, 'no picker dependency or new metered capacity')
@@ -209,10 +210,12 @@ for job in dispatch_jobs:
         assert json.loads(eval(evaluated, {'__builtins__': {}})) == expected, (job, event, ref)
 for job in ('pick-runner', 'namespace-capacity'):
     assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'bootstrap and watchdogs stay independent of workload pools')
-for job in ('genie-freshness', 'ci-script-tests', 'typescript-client'):
-    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'real toolchain work retains hosted placement')
+for job in ('ci-script-tests',):
+    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'unchanged real-work placement')
     assert 'cargo-cache' not in blocks[job], job
     assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
+for job in ('genie-freshness', 'typescript-client'):
+    assert 'cargo-cache' not in blocks[job] and 'build-snapshot' not in blocks[job], job
 for job, output in [('linux-tests-shard-2', 'ci1_secondary')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert "github.event_name != 'merge_group' && needs.pick-runner.outputs." + output in blocks[job], (job, 'PR extras must use their own distinct slot')

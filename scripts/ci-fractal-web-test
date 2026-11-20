@@ -472,6 +472,8 @@ for block in (changes, gate_job):
     assert '["ci1-priority"]' in labels and '["ubuntu-latest"]' in labels
     assert "needs." not in labels and "namespace-" not in labels
 assert "runs-on: ubuntu-latest" in execution, "retain the web performance environment"
+assert "uses: actions/setup-node@v4" in gate_job, "owned receipt validators need an explicit Node runtime"
+assert "runner.environment == 'self-hosted'" in gate_job and "node-version: 24.18.0" in gate_job
 assert "timeout-minutes: 3" in changes and "timeout-minutes: 3" in gate_job and "timeout-minutes: 25" in execution
 assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in changes
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes

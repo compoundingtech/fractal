@@ -501,7 +501,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       env: { CI_CACHE_DEV_SHELL: 'genie' },
       ...afterPickRunner,
       needs: [...afterPickRunner.needs, 'evidence-gate-genie-freshness'],
-      'runs-on': 'ubuntu-latest',
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 20,
       ...evidenceStepJob(),
       steps: skipIfCovered('genie-freshness', [
@@ -571,7 +571,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       // Keep generated-file validation ahead of its consumers.
       needs: ['pick-runner', 'genie-freshness', 'evidence-gate-typescript-client'],
       if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 10,
       ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },

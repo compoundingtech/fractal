@@ -2645,7 +2645,7 @@ jobs:
       CI_CACHE_DEV_SHELL: genie
     needs: [main-checks, proof-pick-runner, proof-evidence-gate-genie-freshness]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     steps:
@@ -3077,7 +3077,7 @@ jobs:
     needs:
       [main-checks, proof-pick-runner, proof-genie-freshness, proof-evidence-gate-typescript-client]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.proof-genie-freshness.result == 'success') ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
@@ -6513,6 +6513,10 @@ jobs:
         with:
           pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
           path: "${{ runner.temp }}/kit-play-receipts"
+      - uses: actions/setup-node@v4
+        if: runner.environment == 'self-hosted' && needs.proof-fractal-web-changes.outputs.relevant == 'true' && needs.proof-evidence-gate-fractal-web.outputs.skip != 'true'
+        with:
+          node-version: 24.18.0
       - name: Publish web lane costs as a public check annotation
         continue-on-error: true
         if: "!cancelled() && needs.proof-fractal-web-changes.outputs.relevant == 'true' && needs.proof-evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'"

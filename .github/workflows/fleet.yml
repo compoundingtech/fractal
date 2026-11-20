@@ -1369,7 +1369,7 @@ jobs:
       CI_CACHE_DEV_SHELL: genie
     needs: [pick-runner, evidence-gate-genie-freshness]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     steps:
@@ -1852,7 +1852,7 @@ jobs:
     name: typescript-client
     needs: [pick-runner, genie-freshness, evidence-gate-typescript-client]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
@@ -5320,6 +5320,10 @@ jobs:
         with:
           pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
           path: "${{ runner.temp }}/kit-play-receipts"
+      - uses: actions/setup-node@v4
+        if: runner.environment == 'self-hosted' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+        with:
+          node-version: 24.18.0
       - name: Publish web lane costs as a public check annotation
         continue-on-error: true
         if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'"
