@@ -95,6 +95,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_mailbox_argv_bindings",
         "local_mailbox_leases",
         "local_native_delivery_receipts_v2",
+        // Member-local terminal ladder scheduling; native delivery claims own deduplication.
+        "local_escalation_runs_v1",
+        // Rebuildable indexed escalation clocks and transaction-local change capture.
+        "local_escalation_clocks_v1",
+        "local_escalation_pending_v1",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -195,6 +200,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
+        "local_resource_preparation_stale",
         "local_resource_preparation_rebuild",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
@@ -224,6 +230,10 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        // Host-local deferred publication queue; never part of the shared projection digest.
+        "resource_admission_pending_v1",
+        // Host-local retirement-qualified learner samples and permanent replay dedupe.
+        "resource_profile_samples_v1",
         "shell_resources_v1",
         // Owner-scoped cancellation tombstones govern only this host's runtime requests.
         "shell_resource_request_cancellations_v1",

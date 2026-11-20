@@ -95,9 +95,27 @@ fn default_text_writer_and_reference_reader_preserve_version_and_authority() {
     }
     assert!(!store.signature_migration().unwrap().references_pending);
     drop(store);
-    // A later writer release activates v21. This earlier reader must preserve that
-    // marker, convert the old text losslessly and continue reading/writing authority.
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 21).unwrap();
+    {
+        // A reader fence alone (here 22, as a later format would set) leaves the writer off.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.pragma_update(None, "user_version", 22).unwrap();
+        drop(connection);
+        let fenced = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
+        assert!(!fenced.signature_migration().unwrap().references_pending);
+        fenced.set_node_key(member.clone()).unwrap();
+        let text = note(&fenced, None, "fence without the writer flag");
+        seal(&fenced);
+        let connection = fenced.connection.write();
+        assert_eq!(connection.query_row("SELECT typeof(signature) FROM claim_signatures WHERE claim_id=?1", [&text.id], |row| row.get::<_,String>(0)).unwrap(), "text");
+        assert_eq!(connection.query_row("SELECT count(*) FROM claim_signature_originals", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+    // The writer release activates v21: the fence and its own flag. This earlier reader must
+    // preserve that marker, convert the old text losslessly and continue reading/writing.
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('claim_signature_reference_writer','1')", []).unwrap();
+        connection.pragma_update(None, "user_version", 21).unwrap();
+    }
     let reader = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while reader.signature_migration().unwrap().references_pending {

@@ -44,6 +44,7 @@
     "examples/fractal",
     "fixtures",
     "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/escalation.kdl",
     "packages/fractal/fixtures/pr-landing.kdl",
     "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",

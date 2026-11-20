@@ -65,6 +65,7 @@ pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
+mod escalation;
 pub mod start_spacing;
 pub mod program;
 mod program_faults;
@@ -607,8 +608,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
         anyhow::bail!("runtime does not support generation-fenced payload cancellation")
     }
-    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
-        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
+        anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
@@ -1052,21 +1053,17 @@ impl RuntimeControl for NativeRuntime {
     fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
         self.exec.signal_if(id, Some(generation), libc::SIGTERM)
     }
-    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+    fn resource_exec_cgroup(&self, id: &str, generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         let current = match self.exec.observe(id)? {
             Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
                 if current.generation_id == generation => current,
             _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
         };
-        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let Some(unit) = current.scope_unit else { return Ok(Default::default()); };
         let snapshot = fractal_runtime::systemd::snapshot()?;
-        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(Default::default()); };
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
-        match fs::read_to_string(group.join("memory.peak")) {
-            Ok(value) => Ok(Some(value.trim().parse()?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        crate::store::resource_profile_learner::cgroup::read(group)
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
@@ -1342,6 +1339,7 @@ impl NativeRuntime {
                 let lane = fractal_runtime::FiniteLane {
                     name: request.name.clone(), capacity: aggregate, member_capacity: request.capacity,
                     memory_high_bytes: request.profile_estimate.as_ref().and_then(|estimate| estimate.memory_high_bytes),
+                    class: request.class.clone(),
                     require_enforced: request.coverage == Coverage::Enforced,
                 };
                 lane.coverage()?;
@@ -1638,6 +1636,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
+    resource_admission_maintenance: Mutex<Option<u128>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1872,6 +1871,7 @@ impl Reconciler<NativeRuntime> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -2108,6 +2108,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
             resource_authority: Default::default(),
+            resource_admission_maintenance: Mutex::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -3140,6 +3141,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         };
         [
+            read("deadline/resource-admission-maintenance", &|| {
+                self.resource_admission_maintenance_deadline()
+            }),
             read("deadline/missions", &|| {
                 self.store.next_active_mission_deadline(&self.host)
             }),
@@ -3298,6 +3302,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(deadline)
     }
 
+    fn resource_admission_maintenance_deadline(&self) -> Result<Option<u128>> {
+        let pending = self.resource_authority.get().is_some_and(|authority| authority.is_ok())
+            && self.store.has_pending_resource_admission_observations()?;
+        let mut deadline = self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending {
+            Ok(Some(*deadline.get_or_insert_with(|| now_ms().saturating_add(5_000))))
+        } else {
+            *deadline = None;
+            Ok(None)
+        }
+    }
+
+    fn maintain_resource_admission_observations(&self) -> Result<()> {
+        let now = now_ms();
+        if self.resource_admission_maintenance_deadline()?.is_none_or(|due| due > now) {
+            return Ok(());
+        }
+        let result = self.store.replay_resource_admission_observations();
+        *self.resource_admission_maintenance.lock().unwrap_or_else(PoisonError::into_inner) =
+            if matches!(&result, Ok(false)) { None } else { Some(now.saturating_add(5_000)) };
+        result.map(|_| ())
+    }
+
     pub fn reconcile_once(&self) -> Result<()> {
         self.reconcile_once_with_cause(crate::reconcile_telemetry::WakeCause::Other)
     }
@@ -3379,6 +3406,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             hook();
         }
         self.reconcile_shell_resources()?;
+        if let Err(error) = self.maintain_resource_admission_observations() {
+            tracing::warn!(%error, "resource admission observation replay deferred");
+        }
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -11439,7 +11469,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .flatten()
                 .map(|observation| observation.status)
         });
-        let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        let mut ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        for id in self.store.escalation_run_ids(&self.host)? {
+            if !ids.contains(&id) { ids.push(id); }
+        }
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -11542,8 +11575,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
-    /// the last pass listed the active runs.
+    /// Evaluate one run and remember what it read. `active_only` leaves terminal execution
+    /// alone, but still evaluates escalation deadlines committed with its transition.
     fn evaluate_one_mission_run(
         &self,
         id: &str,
@@ -11560,7 +11593,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
                     smallclaims::touched::note_read(|| subject.clone());
-                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    let (run, mut mission) = self.store.mission_run_for_evaluation(id)?;
                     // Eager cancellation (§6): a program step that left its attempt in this run's
                     // latest transition stops now, with its child runs and asks, before an
                     // inactive run returns below. Then what the run's programs wait on is started
@@ -11570,16 +11603,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                         engine.release_left(&run)?;
                         settled = self.settle_program_waits(engine, &run)?;
                     }
-                    if active_only
-                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
-                    {
-                        return Ok(false);
-                    }
                     active_generations.insert(run.generation.clone());
                     active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
                     // From the view the evaluation started with: a write it makes changes subjects
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
+                    if mission.is_none() && run.steps.is_empty() {
+                        let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
+                        mission = self.store.mission_spec(mission_id, Some(&run.revision))?;
+                    }
+                    if let Some(definition) = mission.as_ref() {
+                        match self.escalate_run(&run, definition, now_ms()) {
+                            Ok(escalation_due) => {
+                                due = [due, escalation_due].into_iter().flatten().min();
+                                self.close_fault(&run.subject, "escalation", "all due stages delivered")?;
+                            }
+                            Err(error) => self.record_fault(&run.subject, "escalation", Err(error))?,
+                        }
+                    }
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
                     // Telling a run's reporter never holds the run back or fails it.
                     match self.report_choice(&run.subject).and_then(|choice| match choice {
                         run_report::ReportChoice::Named(report) => {
@@ -11739,14 +11785,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
         if !unseen.is_empty() {
-            // Another host's run, or one that already ended, is not this host's to evaluate.
-            let active = self
-                .store
-                .active_mission_run_ids_for_origin(&self.host)?
-                .into_iter()
+            // Terminal runs with pending escalation discovery belong to this host too.
+            let mut eligible = self.store.active_mission_run_ids_for_origin(&self.host)?;
+            eligible.extend(self.store.escalation_run_ids(&self.host)?);
+            let eligible = eligible.into_iter()
                 .map(|id| format!("mission-run/{id}"))
                 .collect::<BTreeSet<_>>();
-            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+            changed_runs.extend(unseen.into_iter().filter(|subject| eligible.contains(subject)));
         }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
