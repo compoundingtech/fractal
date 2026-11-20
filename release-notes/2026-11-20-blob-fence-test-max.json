@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test-only: the blob-fence test reads a store at 26 under any build whose ceiling is at least 26, now that #6880 raised it to 27",
+  "replay": {"status": "none", "detail": "No replay."},
+  "schema": {"status": "none", "detail": "No change."},
+  "rules": {"status": "none", "detail": "No change."},
+  "compatibility": {"status": "none", "detail": "No change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No action."},
+  "recovery": {"status": "none", "detail": "No change."}
+}
