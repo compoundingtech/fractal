@@ -152,7 +152,7 @@ UNKNOWN conflict states. Ordinary mission and active fix history retain their ow
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A
 store made with incremental auto-vacuum gives them back: the hourly retention pass releases free
-pages 512 at a time (2 MiB), one short write each, so other writes run between them. A new store
+pages 128 at a time (512 KiB), one short write each, so other writes run between them. A new store
 is made that way.
 
 A store made before then has auto-vacuum off: the file never shrinks, whatever the trims free. One
