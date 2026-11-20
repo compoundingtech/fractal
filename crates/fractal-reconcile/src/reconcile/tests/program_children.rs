@@ -780,6 +780,7 @@ fn native_scope(fixture: &Fixture, parent: &Started) -> crate::store::resource_m
         max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 * 1024 }),
         coverage: Coverage::Logical, admission_timeout_ms: None, class: fractal_runtime::RequestClass::Agent,
         disk: None, io: None,
+        profile: None, profile_estimate: None, disk_path: None,
         owner: Owner { run: parent.run.clone(), step: parent.step.clone(), attempt: 1, invocation: None },
     };
     let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 4, memory: 1024 * 1024 * 1024 }), ..Fit::default() };
