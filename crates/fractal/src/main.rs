@@ -7971,9 +7971,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
+                    "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 2,
@@ -8143,6 +8144,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.clone(),
         config.observations.clone(),
     )));
+    if config.trim.retires_mail() {
+        tokio::spawn(fractal_daemon::task_cpu::account("mail.retire", retire_closed_mail(store.clone())));
+    }
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     // The shipped CI objectives are retired: end any fault one left open, once per start.
@@ -8372,6 +8376,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ));
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
+            ));
+            let admission_notify = notify.clone();
+            let admission_events = event_notify.clone();
+            let admission_state_dir = config.state_dir.clone();
+            tokio::spawn(fractal_daemon::maintenance::run_replication_admission(
+                Arc::downgrade(&store),
+                move || {
+                    admission_notify.notify_one();
+                    admission_events.send_modify(|generation| *generation = generation.saturating_add(1));
+                    let _ = fs::write(
+                        admission_state_dir.join("replication.wake"),
+                        format!("{}\n", uuid::Uuid::now_v7()),
+                    );
+                },
             ));
             stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
             stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
@@ -16826,14 +16844,14 @@ fn shell_word(value: &str) -> String {
     }
 }
 
-/// A send's result. The human form prints the message alone on stdout, as for a new message,
-/// and says on stderr when the message had already been sent.
+/// A send's result. Stdout always names the message; stderr confirms a successful retry without
+/// suggesting that its body was dropped.
 fn print_message_receipt(receipt: &MessageSendReceipt, json_output: bool) -> Result<()> {
     if json_output {
         return print_value(receipt, true);
     }
     if receipt.already_sent {
-        stderr_message("st", format_args!("{} was already sent{} (idempotency key {}); nothing new was sent", receipt.message.subject,
+        stderr_message("st", format_args!("{} was sent{} (confirmed on retry; idempotency key {})", receipt.message.subject,
         receipt
             .sent_at
             .as_deref()
@@ -22870,6 +22888,82 @@ fn first_observation_trim_delay() -> Duration {
     Duration::from_secs(10 * 60) + Duration::from_secs(5 * 60).mul_f64(share)
 }
 
+/// Give every free page back to the filesystem, one short write at a time so other writes run
+/// between them, and return how many went.
+async fn release_free_pages_paced(store: &Arc<Store>) -> u64 {
+    let mut released = 0;
+    loop {
+        let vacuum_store = store.clone();
+        match vacuum_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(pages)) => released += pages,
+            Ok(Err(error)) => {
+                stderr_message("fractal", format_args!("giving free pages back failed: {error:#}"));
+                break;
+            }
+            Err(error) => {
+                stderr_message("fractal", format_args!("giving free pages back stopped: {error}"));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    released
+}
+
+/// Retire closed graph mail on a member that trims locally (`mail_retirement.rs`), hourly. Each
+/// step is one writer hold of at most `HOLD_BUDGET` and is followed by a rest of four times the
+/// hold, at least 100 ms, as the trim rests; what it frees goes back to the filesystem as it goes.
+async fn retire_closed_mail(store: Arc<Store>) {
+    const PASS_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    // Claims deleted between giving free pages back, so a long first pass shrinks the file early.
+    const RELEASE_EVERY_CLAIMS: usize = 2_000;
+    tokio::time::sleep(first_observation_trim_delay()).await;
+    loop {
+        let pass_started = Instant::now();
+        let (mut threads, mut claims, mut unreleased, mut released) = (0, 0, 0, 0);
+        let mut longest = Duration::ZERO;
+        loop {
+            let step_store = store.clone();
+            let step = match store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("mail.retire", || {
+                    step_store.retire_closed_mail_step(u64::try_from(now_ms()).unwrap_or(u64::MAX))
+                })
+            }).await {
+                Ok(Ok(step)) => step,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("closed mail retirement failed: {error:#}"));
+                    break;
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("closed mail retirement stopped: {error}"));
+                    break;
+                }
+            };
+            threads += step.threads;
+            claims += step.claims;
+            unreleased += step.claims;
+            longest = longest.max(step.hold);
+            if unreleased >= RELEASE_EVERY_CLAIMS || (!step.more && unreleased > 0) {
+                released += release_free_pages_paced(&store).await;
+                unreleased = 0;
+            }
+            if !step.more {
+                break;
+            }
+            tokio::time::sleep((step.hold * 4).max(Duration::from_millis(100))).await;
+        }
+        if claims > 0 {
+            stderr_message("fractal", format_args!(
+                "closed mail retired: {threads} threads, {claims} claims, gave {released} free pages back, longest writer hold {} ms, pass {} s",
+                longest.as_millis(),
+                pass_started.elapsed().as_secs(),
+            ));
+        }
+        tokio::time::sleep(PASS_INTERVAL).await;
+    }
+}
+
 async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon::config::ObservationsConfig) {
     const LOCAL_OBSERVATION_TRIM_INTERVAL: Duration = Duration::from_secs(60 * 60);
     // Rows one writer statement deletes: a short hold even with every index and trigger it touches.
@@ -22948,25 +23042,8 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 None
             }
         };
-        // What these trims, checkpoints and response expiry freed goes back to the filesystem,
-        // one short write at a time so other writes run between them.
-        let mut released = 0;
-        loop {
-            let vacuum_store = store.clone();
-            match vacuum_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(pages)) => released += pages,
-                Ok(Err(error)) => {
-                    stderr_message("fractal", format_args!("giving free pages back failed: {error:#}"));
-                    break;
-                }
-                Err(error) => {
-                    stderr_message("fractal", format_args!("giving free pages back stopped: {error}"));
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // What these trims, checkpoints and response expiry freed goes back to the filesystem.
+        let released = release_free_pages_paced(&store).await;
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("fractal", format_args!(

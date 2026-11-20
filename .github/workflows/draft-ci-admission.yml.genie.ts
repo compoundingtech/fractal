@@ -4,6 +4,8 @@ import { auditCaches } from './cache-audit.ts'
 
 // workflow_run uses main's code even for a PR targeting an older stacked branch.
 // Never check out PR code or download its artifacts with this write-scoped token.
+// This main-owned metadata-only job never executes the triggering PR, including forks.
+// Keep admission off the hosted dispatch queue it is meant to drain.
 export default githubWorkflow(auditCaches({
   name: 'Draft CI admission',
   on: {
@@ -14,13 +16,19 @@ export default githubWorkflow(auditCaches({
   },
   permissions: { actions: 'write', 'pull-requests': 'read' },
   concurrency: { group: 'draft-ci-admission-${{ github.event.workflow_run.id }}', 'cancel-in-progress': false },
-  actionlint: defaultActionlintConfig,
+  actionlint: {
+    ...defaultActionlintConfig,
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'ci1-priority'],
+  },
   jobs: {
     admission: {
       if: "github.event.workflow_run.event == 'pull_request'",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': 'ci1-priority',
       'timeout-minutes': 3,
       steps: [{
+        name: 'Qualify the owned control Python runtime',
+        run: 'python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version; print(sys.version)"',
+      }, {
         name: 'Cancel only a currently draft PR run',
         env: { GH_TOKEN: '${{ github.token }}', REPOSITORY: '${{ github.repository }}', RUN_ID: '${{ github.event.workflow_run.id }}' },
         run: `python3 - <<'DRAFT_ADMISSION_PY'\n${readFileSync(new URL('../../scripts/ci-draft-admission', import.meta.url), 'utf8')}\nDRAFT_ADMISSION_PY`,

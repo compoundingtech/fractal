@@ -2077,13 +2077,21 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalE
         observer.set_children(body);
         return parse_structure(&observer, "observer", context);
     }
-    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
+    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty" | "objective" | "github-source" | "github-scope")) {
         return Err(FractalError::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
+            format!("stop requires a full agent, exec, PTY, objective, GitHub source or GitHub scope subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();
+    // These roots retire only their declaration. A run cannot retire fleet measurement/configuration,
+    // and this stop neither deletes historical facts nor changes acquisition-authority receipts.
+    if context.owner_run.is_some() && kind == "objective" {
+        return Err(FractalError::new("objective-inside-mission", "an objective retirement must be at the root"));
+    }
+    if context.owner_run.is_some() && matches!(kind, "github-source" | "github-scope") {
+        return Err(FractalError::new("github-configuration-inside-mission", "GitHub configuration retirement must be at the root"));
+    }
     let local = subject
         .strip_prefix(&format!("{kind}/"))
         .unwrap_or(&subject);
