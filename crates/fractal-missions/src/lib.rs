@@ -15,6 +15,7 @@ pub use fractal_delivery::*;
 pub mod graph;
 pub mod references;
 pub mod store;
+pub mod native_attach;
 
 pub use store::MissionsStoreCore;
 #[cfg(any(test, feature = "test-support"))]
