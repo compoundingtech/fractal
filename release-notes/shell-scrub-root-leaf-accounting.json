@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Consume the whole historical shell-environment free list even when only one page remains after allocating the scrub table. The first zero row can fit its existing root leaf; a nonempty free list now receives at least two rows to force the root split.",
+  "replay": { "status": "none", "detail": "No claim or projection changes." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "Secure deletion, complete free-list consumption and successful checkpoints remain required before marking the scrub complete." },
+  "compatibility": { "status": "none", "detail": "Existing completed scrub markers retain their skip behavior." },
+  "downtime": { "status": "none", "detail": "Work remains bounded by the free list, with at most one additional zero row and no full startup VACUUM." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Previously incomplete scrubs retry on the next open; checkpoint failures still refuse completion." }
+}
