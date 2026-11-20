@@ -127,21 +127,16 @@ fn scrub_historical_environments(connection: &Connection) -> Result<()> {
     let previous: i64 = connection.query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
     connection.pragma_update(None, "secure_delete", 1)?;
     let scrub = scrub_pending_environments(connection);
-    // Restore OFF, ON or FAST before propagating any scrub error.
-    let restored = connection.pragma_update(None, "secure_delete", secure_delete_mode(previous));
+    // FAST reads back as 2, but numeric assignments are boolean: 2 would enable ON.
+    // Restore the keyword before propagating any scrub error.
+    let restored = if previous == 2 {
+        connection.pragma_update(None, "secure_delete", "FAST")
+    } else {
+        connection.pragma_update(None, "secure_delete", previous)
+    };
     scrub?;
     restored?;
     Ok(())
-}
-
-/// The pragma's argument for a mode it reported. SQLite reads a number as a boolean, so 2
-/// would set ON: FAST is only set by name.
-fn secure_delete_mode(mode: i64) -> &'static str {
-    match mode {
-        0 => "OFF",
-        2 => "FAST",
-        _ => "ON",
-    }
 }
 
 fn scrub_pending_environments(connection: &Connection) -> Result<()> {
@@ -705,7 +700,7 @@ mod tests {
 
     #[test]
     fn historical_scrub_restores_all_secure_delete_modes_and_preserves_completed_skip() {
-        for mode in [0, 1, 2] {
+        for (setting, mode) in [("OFF", 0), ("ON", 1), ("FAST", 2)] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("store.db");
             let connection = Connection::open(&path).unwrap();
@@ -714,7 +709,8 @@ mod tests {
             connection.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
             connection.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
                 [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
-            connection.pragma_update(None, "secure_delete", secure_delete_mode(mode)).unwrap();
+            connection.pragma_update(None, "secure_delete", setting).unwrap();
+            assert_eq!(connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), mode);
             scrub_historical_environments(&connection).unwrap();
             assert_eq!(connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), mode);
             assert_no_environment_bytes(&path);
@@ -808,6 +804,7 @@ mod tests {
         writer.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
             [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
         writer.pragma_update(None, "secure_delete", "FAST").unwrap();
+        assert_eq!(writer.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         assert!(scrub_historical_environments(&writer).is_err());
         assert_eq!(writer.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();
