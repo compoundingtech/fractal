@@ -1337,9 +1337,12 @@ impl Store {
         connection.install_runtime_finalizer(move |transaction| {
             finalizing_runtime.before_commit(transaction)
         })?;
-        // Keep memory-store transaction tests deterministic unless they explicitly schedule.
-        // Production stores resume persisted work without replication or a checkpoint.
-        if !shared_memory || !cfg!(any(test, feature = "test-support")) {
+        // Temporary WAL and shared-memory fixtures opt in explicitly for deterministic tests.
+        // Ordinary disk stores resume persisted work without replication or a checkpoint.
+        let auto_schedule = !shared_memory;
+        #[cfg(any(test, feature = "test-support"))]
+        let auto_schedule = auto_schedule && readers.temporary_directory().is_none();
+        if auto_schedule {
             Self::install_deferred_drain(&connection, runtime.clone());
         }
         Ok(Self {
