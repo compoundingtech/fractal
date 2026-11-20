@@ -128,7 +128,7 @@ fn native_attach_defaults_expired_asks_and_assistant_admission_are_refused() {
     let mut defaulted = ask_input();
     defaulted.default_answer = Some("attach".into());
     assert!(store.ask_person(&defaulted).is_err());
-    store.connection.batched(|tx| {
+    store.connection.batched(|tx| -> anyhow::Result<()> {
         let view = step(tx, &ask.subject)?.unwrap();
         assert!(admit(tx, &ask, &view, &input, false, true, Some((&paired.subject, SESSION))).is_err());
         for (field, value) in [("deadline_unix_ms", json!(1)), ("deadline_unix_ms", Value::Null), ("default_answer", json!("attach"))] {

@@ -124,11 +124,11 @@ fn consumed_answer_and_candidate_reservations_are_atomic_under_competing_prepare
         assert_eq!(left.join().unwrap().id,right.join().unwrap().id);
     });
     let barrier = std::sync::Barrier::new(2);
+    let attempt = |prepared: &Preparation, answer: &str| {
+        barrier.wait();
+        store.commit_native_attach(&prepared.id,&prepared.candidate_digest,answer,"commit",&fixture.witness).is_ok()
+    };
     std::thread::scope(|scope| {
-        let attempt = |prepared: &Preparation, answer: &str| {
-            barrier.wait();
-            store.commit_native_attach(&prepared.id,&prepared.candidate_digest,answer,"commit",&fixture.witness).is_ok()
-        };
         let one = scope.spawn(|| attempt(&first,&first_answer));
         let two = scope.spawn(|| attempt(&second,&second_answer));
         assert_ne!(one.join().unwrap(),two.join().unwrap(),"exactly one process/session/agent reservation wins");
@@ -152,7 +152,7 @@ fn expiry_and_generic_claim_forgery_never_authorize_attach() {
     assert!(store.finish_person_step_kind(&input,false,None,false,Some((&expired.subject,SESSION))).is_err());
     for kind in ["custom.native-attach.prepared","custom.native-attach.ask-bound","custom.native-attach.committed"] {
         assert!(store.append_claim(&ClaimInput {subject:prepared.subject(),kind:kind.into(),actor:Some(REQUESTER.into()),
-            fields:serde_json::Map::new(),evidence:vec![],expected_subject:None,idempotency_key:None}).is_err());
+            fields:Default::default(),evidence:vec![],expected_subject:None,idempotency_key:None}).is_err());
     }
     assert!(store.prepare_native_attach(fixture.candidate.clone(),"expired",&fixture.challenge,smallclaims::store::now_ms(),&fixture.witness).is_err());
     let brief = store.prepare_native_attach(fixture.candidate.clone(),"brief",&fixture.challenge,smallclaims::store::now_ms()+10,&fixture.witness).unwrap();
