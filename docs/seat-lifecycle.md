@@ -462,7 +462,11 @@ agent.
 
 For omp, history scans exclude JSONL tool logs within attachment directories. Exact lookup refuses
 multiple transcript copies with the same full native ID, regardless of workspace or modification
-time. Discovery is not native attach: `import run` still stops the selected predecessor.
+time, including when one copy is open in a running process. Symlinks and hardlinks to the same
+physical file are aliases, not copies. Saved OpenCode sessions are revalidated by their complete
+native ID in the SQLite database, not as JSONL transcripts.
+
+Discovery is not native attach: `import run` still stops the selected predecessor.
 
 ```sh
 fractal import run SESSION --as person/ada

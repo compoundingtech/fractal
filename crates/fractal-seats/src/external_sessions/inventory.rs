@@ -78,20 +78,40 @@ pub(super) fn find(home: Option<&Path>, id: &str, fresh: bool) -> Result<Option<
     let Some(home) = home else { return Ok(None); };
     // Live resolution is shared with list, never a synchronous history walk.
     let discovery = discover(Some(home), false, fresh)?;
-    if let Some(conversation) = discovery.into_conversation(id) { return Ok(Some(conversation)); }
+    let live = discovery.into_conversation(id);
+    let strict_live_omp = matches!(live.as_ref(),
+        Some(ExternalConversation::Readable(session)) if session.driver == ExternalDriver::Omp);
+    if live.is_some() && (!fresh || !strict_live_omp) { return Ok(live); }
     start_history_inventory(Some(home));
     let cold = HISTORY.0.lock().expect("history inventory mutex poisoned")
         .get(home).is_none_or(|inventory| inventory.index.is_none());
-    if cold { historical_files(home)?; }
-    let files = {
+    if cold || fresh { historical_files(home)?; }
+    let mut files = {
         let inventories = HISTORY.0.lock().expect("history inventory mutex poisoned");
         let inventory = inventories.get(home).expect("registered history");
+        if fresh && inventory.refreshing { return Err(DiscoveryError::HistoryPending.into()); }
         let Some(index) = &inventory.index else { return Err(DiscoveryError::HistoryPending.into()); };
         index.get(id).cloned().unwrap_or_default()
     };
     // Complete-ID indexed lookup is independent of history size and list pages.
     if fresh {
-        return revalidate(home, id, files, REQUEST_BUDGET.saturating_sub(started.elapsed()));
+        let live_process = if let Some(ExternalConversation::Readable(session)) = live {
+            files.push(SessionMetadata {
+                driver: session.driver, native_id: session.native_id, transcript: session.transcript,
+                codex_home: session.codex_home, cwd: session.cwd, title: session.title,
+                started_at_unix_ms: session.started_at_unix_ms,
+                updated_at_unix_ms: session.updated_at_unix_ms, revision: session.revision,
+            });
+            session.process
+        } else { None };
+        let exact = revalidate(home, id, files, REQUEST_BUDGET.saturating_sub(started.elapsed()))?;
+        return Ok(exact.map(|conversation| match conversation {
+            ExternalConversation::Readable(mut session) => {
+                session.process = live_process;
+                ExternalConversation::Readable(session)
+            }
+            unavailable => unavailable,
+        }));
     }
     Ok(assemble_discovery(files, Vec::new(), Some(id), true)?.into_conversation(id))
 }
@@ -119,9 +139,14 @@ fn revalidate(home: &Path, id: &str, files: Vec<SessionMetadata>, budget: Durati
         let result = (|| {
             let mut current = Vec::new();
             for file in files {
-                if let Some(metadata) = read_metadata(file.driver, &file.transcript)?
-                    && metadata.native_id == file.native_id
-                { current.push(metadata); }
+                let metadata = if file.driver == ExternalDriver::OpenCode {
+                    read_opencode_sessions(&file.transcript, Some(&file.native_id))?.into_iter().next()
+                } else {
+                    read_metadata(file.driver, &file.transcript)?
+                };
+                if let Some(metadata) = metadata && metadata.native_id == file.native_id {
+                    current.push(metadata);
+                }
             }
             assemble_discovery(current, Vec::new(), Some(&worker_id), true)
         })().map_err(|error: anyhow::Error| DiscoveryError::Failed(format!("{error:#}")));
@@ -261,6 +286,8 @@ mod tests {
         let mut second = first.clone();
         second.transcript = home.path().join("copy.jsonl");
         second.updated_at_unix_ms = 100;
+        fs::write(&first.transcript, "{\"type\":\"session\",\"id\":\"same-id\"}\n").unwrap();
+        fs::copy(&first.transcript, &second.transcript).unwrap();
         let id = external_session_id(first.driver, &first.native_id);
         assert!(resolve_duplicate_sessions(vec![first, second], &[], Some(&id))
             .unwrap_err().downcast_ref::<AmbiguousSession>().is_some());
@@ -281,5 +308,73 @@ mod tests {
         fs::write(&transcript, "{\"type\":\"session\",\"id\":\"different-native-id\"}\n").unwrap();
         let error = revalidate(home.path(), &id, files.as_ref().clone(), Duration::from_secs(1));
         assert!(error.unwrap().is_none(), "changed full header ID cannot inherit the indexed identity");
+    }
+
+    #[test]
+    fn saved_opencode_fresh_lookup_revalidates_the_exact_sqlite_session() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join(".local/share/opencode");
+        fs::create_dir_all(&parent).unwrap();
+        let db = Connection::open(parent.join("opencode.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT,
+                 time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_updated INTEGER);
+             INSERT INTO session VALUES ('saved', '/workspace', 'Before', 1, 2);
+             INSERT INTO session VALUES ('saved-prefix', '/other', 'Other session', 1, 100);"
+        ).unwrap();
+        historical_files(home.path()).unwrap();
+        db.execute("UPDATE session SET title = 'After', time_updated = 3 WHERE id = 'saved'", []).unwrap();
+        let id = external_session_id(ExternalDriver::OpenCode, "saved");
+        let found = find_fresh(Some(home.path()), &id).unwrap().unwrap();
+        assert_eq!(found.native_id, "saved");
+        assert_eq!(found.title.as_deref(), Some("After"));
+        assert!(found.process.is_none());
+        db.execute("DELETE FROM session WHERE id = 'saved'", []).unwrap();
+        assert!(find_fresh(Some(home.path()), &id).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_omp_fresh_lookup_rejects_copies_but_accepts_physical_file_aliases() {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Stdio;
+        struct Harness(std::process::Child);
+        impl Drop for Harness {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join(".omp/agent/sessions/project");
+        fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("live.jsonl");
+        fs::write(&transcript, "{\"type\":\"session\",\"id\":\"live-full-id\"}\n").unwrap();
+        let alias = project.join("alias.jsonl");
+        let hardlink = project.join("hardlink.jsonl");
+        std::os::unix::fs::symlink(&transcript, &alias).unwrap();
+        fs::hard_link(&transcript, &hardlink).unwrap();
+        let id = external_session_id(ExternalDriver::Omp, "live-full-id");
+        let aliases = [&transcript, &alias, &hardlink].into_iter()
+            .map(|path| read_metadata(ExternalDriver::Omp, path).unwrap().unwrap()).collect();
+        assert_eq!(resolve_duplicate_sessions(aliases, &[], Some(&id)).unwrap().len(), 1);
+        let mut command = crate::environment::command("bash").unwrap();
+        command.arg0("omp").args(["-c", "exec 3< \"$1\"; printf ready; read -r line", "omp"])
+            .arg(&transcript).stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut harness = Harness(command.spawn().unwrap());
+        let mut ready = [0; 5];
+        harness.0.stdout.as_mut().unwrap().read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+        let found = find_fresh(Some(home.path()), &id).unwrap().unwrap();
+        assert_eq!(found.process.unwrap().pid, harness.0.id());
+        fs::copy(&transcript, project.join("copy.jsonl")).unwrap();
+        {
+            let mut inventories = HISTORY.0.lock().unwrap();
+            inventories.get_mut(home.path()).unwrap().files.as_mut().unwrap().0 =
+                Instant::now().checked_sub(DISCOVERY_CACHE_TTL * 2).unwrap();
+        }
+        let error = find_fresh(Some(home.path()), &id).unwrap_err();
+        assert!(error.to_string().contains("multiple matching transcripts"), "{error}");
     }
 }

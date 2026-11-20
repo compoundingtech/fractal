@@ -340,7 +340,24 @@ fn resolve_duplicate_sessions(
         if driver == ExternalDriver::Omp
             && strict_id == Some(external_session_id(driver, native_id).as_str())
         {
-            return Err(AmbiguousSession(native_id.clone()).into());
+            let mut identities = BTreeSet::new();
+            let mut unique = Vec::with_capacity(group.len());
+            for item in group {
+                #[cfg(unix)]
+                let identity = {
+                    use std::os::unix::fs::MetadataExt as _;
+                    let metadata = fs::metadata(&item.transcript)?;
+                    (metadata.dev(), metadata.ino())
+                };
+                #[cfg(not(unix))]
+                let identity = fs::canonicalize(&item.transcript)?;
+                if identities.insert(identity) { unique.push(item); }
+            }
+            if unique.len() == 1 {
+                selected.push(unique.pop().expect("one physical transcript"));
+                continue;
+            }
+            return Err(AmbiguousSession(unique[0].native_id.clone()).into());
         }
         let process_cwd = candidates
             .iter()
@@ -1576,20 +1593,29 @@ fn open_opencode_database(path: &Path) -> Result<Connection> {
 
 fn discover_opencode_sessions(home: &Path) -> Result<Vec<SessionMetadata>> {
     let database = home.join(".local/share/opencode/opencode.db");
+    read_opencode_sessions(&database, None)
+}
+
+fn read_opencode_sessions(database: &Path, native_id: Option<&str>) -> Result<Vec<SessionMetadata>> {
     if !database.is_file() {
         return Ok(Vec::new());
     }
     let file_metadata = fs::metadata(&database)?;
     let database_updated_at = system_time_ms(file_metadata.modified().unwrap_or(UNIX_EPOCH));
     let connection = open_opencode_database(&database)?;
-    let mut statement = connection.prepare(
+    let sql = if native_id.is_some() {
         "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
                 COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
          FROM session s LEFT JOIN message m ON m.session_id = s.id \
-         GROUP BY s.id \
-         ORDER BY s.time_updated DESC LIMIT ?1",
-    )?;
-    let rows = statement.query_map(params![MAX_EXPOSED_HISTORY as i64], |row| {
+         WHERE s.id = ?1 GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+    } else {
+        "SELECT s.id, s.directory, s.title, s.time_created, s.time_updated, \
+                COALESCE(MAX(m.time_updated), 0), COUNT(m.id) \
+         FROM session s LEFT JOIN message m ON m.session_id = s.id \
+         WHERE ?1 IS NULL GROUP BY s.id ORDER BY s.time_updated DESC LIMIT ?2"
+    };
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map(params![native_id, MAX_EXPOSED_HISTORY as i64], |row| {
         let native_id: String = row.get(0)?;
         let directory: Option<String> = row.get(1)?;
         let title: Option<String> = row.get(2)?;
@@ -1627,7 +1653,7 @@ fn discover_opencode_sessions(home: &Path) -> Result<Vec<SessionMetadata>> {
         found.push(SessionMetadata {
             driver: ExternalDriver::OpenCode,
             native_id,
-            transcript: database.clone(),
+            transcript: database.to_owned(),
             codex_home: None,
             cwd: directory
                 .filter(|value| !value.trim().is_empty())
