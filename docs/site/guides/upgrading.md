@@ -197,9 +197,15 @@ The command does not choose a receipt filename. Re-run dry-run immediately befor
 the real run, even if an earlier preparation dry-run passed. Dry-run checks staging,
 paths, store access, checkpoint and replication quiescence, and legacy effective
 memory protection without stopping services or writing a migration journal. A
-pending checkpoint, pending replication records, an unverified first sync, or a
-peer worker not observed idle/backoff refuses cutover. Resolve the cause and retry;
-do not suppress the check. The real run independently re-checks quiescence.
+pending checkpoint when its worker is enabled, pending replication records, or an
+unverified first sync refuses cutover. Resolve the cause and retry; do not suppress
+the check. The real run independently re-checks local readiness. Peer worker phases
+do not gate migration: the replication auxiliary runs resumable exchanges, and
+each received page is stored transactionally before acknowledgement. Stopping an
+exchange leaves either a durable page (including any unfinished local admission)
+or data still held by its sender; restarted replication resumes from inventory
+and deduplicates retries. The complete store moves only after workers and the
+daemon stop and state/store ownership is fenced.
 
 The staged Home Manager generation is a rollback target **only until migration
 starts**. Once root markers exist, legacy/stage activation is refused by the

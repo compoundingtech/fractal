@@ -49,21 +49,32 @@ fn mission_escalates(mission: &MissionSpec) -> bool {
 // Inspect the persisted JSON as well as typed publications, including nested missions and
 // loop branches. Disabling inheritance is also a declaration older readers must understand.
 fn declares_escalation(value: &Value) -> bool {
-    match value {
-        Value::Object(fields) => fields.iter().any(|(key, value)| {
-            (key == "escalation" && !value.is_null() && value["_tag"] != "inherit")
-                || (key == "declarations_kdl" && value.as_str().is_some_and(|source| {
-                    fn contains(document: &kdl::KdlDocument) -> bool {
-                        document.nodes().iter().any(|node| node.name().value() == "escalation"
-                            || node.children().is_some_and(contains))
-                    }
-                    source.parse::<kdl::KdlDocument>().is_ok_and(|document| contains(&document))
-                }))
-                || declares_escalation(value)
-        }),
-        Value::Array(values) => values.iter().any(declares_escalation),
-        _ => false,
+    fn scope(value: &Value) -> bool {
+        value.get("escalation").is_some_and(|policy| !policy.is_null() && policy["_tag"] != "inherit")
+            || value.get("declarations_kdl").and_then(Value::as_str).is_some_and(|source| {
+                fn contains(document: &kdl::KdlDocument) -> bool {
+                    document.nodes().iter().any(|node| {
+                        let kind = node.name().value();
+                        matches!(kind, "mission" | "step" | "loop" | "round" | "on-keep" | "on-discard" | "finally")
+                            && node.children().is_some_and(|children| {
+                                (matches!(kind, "mission" | "step" | "round" | "on-keep" | "on-discard")
+                                    && children.nodes().iter().any(|child| child.name().value() == "escalation"))
+                                    || contains(children)
+                            })
+                    })
+                }
+                source.parse::<kdl::KdlDocument>().is_ok_and(|document| contains(&document))
+            })
     }
+    scope(value) || value.get("steps").and_then(Value::as_object).is_some_and(|steps| {
+        steps.values().any(|step| {
+            scope(step)
+                || step.get("nested_mission").is_some_and(declares_escalation)
+                || ["round", "on_keep", "on_discard"].iter().any(|branch| {
+                    step.get("loop_spec").and_then(|spec| spec.get(branch)).is_some_and(declares_escalation)
+                })
+        })
+    })
 }
 
 fn declares_fields(value: &Value, attention_only: bool) -> bool {

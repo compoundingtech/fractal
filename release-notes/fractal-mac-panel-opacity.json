@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Soften busy backgrounds behind the native Mac menu-bar panel while preserving its glass surface",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "Native client presentation only; no schema or codegen changes." },
+  "rules": { "status": "none", "detail": "Attention and answer behavior are unchanged." },
+  "compatibility": { "status": "changed", "detail": "One appearance-aware root tint covers both panel columns, reducing backdrop contrast while retaining native glass. Reduce Transparency continues to use the system surface without the extra tint." },
+  "downtime": { "status": "none", "detail": "No daemon downtime is required." },
+  "manual": { "status": "none", "detail": "No user migration is required." },
+  "recovery": { "status": "changed", "detail": "Restore the previous native app package to roll back; daemon state is unchanged." }
+}

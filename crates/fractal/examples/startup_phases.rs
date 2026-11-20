@@ -1,6 +1,6 @@
 //! Time the daemon's startup store phases on a private, previously copied store.
 //! Usage: cargo run --release -p fractal --example startup_phases -- CLONE NODE [FLEET_ID]
-//! Runs what `st up` runs before it binds its sockets, in the same order, then what it starts at
+//! Runs what `fractal up` runs before it binds its sockets, in the same order, then what it starts at
 //! bind, and prints each phase's wall time and the statements that cost the most. It starts no
 //! runtime, seat or listener. Never supply a live store: this opens and writes CLONE.
 

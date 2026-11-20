@@ -47,6 +47,9 @@ final class AttentionControlAdapterTests: XCTestCase {
     XCTAssertEqual(mapped.seenAt, Date(timeIntervalSince1970: 1_792_411_080))
     XCTAssertEqual(mapped.snoozedUntil, Date(timeIntervalSince1970: 1_792_414_800))
     XCTAssertEqual(mapped.update?.speech, "The release landed")
+    XCTAssertEqual(mapped.update?.type, "update")
+    XCTAssertEqual(mapped.requesterID, "agent/builder", "the inbox kind reads the raw requester, not `from`")
+    XCTAssertEqual(InboxKind(mapped), .updates)
 
     let plain = try FractalAttentionAdapter.record(
       try JSONDecoder().decode(AttentionResource.self, from: Data(row().utf8)), fractalURL: base)

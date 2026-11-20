@@ -112,10 +112,14 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter, InboxActivityAdapte
   }
 
   func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
-    try serve(contexts[record.id] ?? AttentionContext(detail: record.detail.isEmpty ? nil : record.detail, request: nil))
+    await waitForRelease("context")
+    return try serve(contexts[record.id] ?? AttentionContext(detail: record.detail.isEmpty ? nil : record.detail, request: nil))
   }
 
-  func readExcerpt(_ record: AttentionRecord) async throws -> ConversationExcerpt? { try serve(excerpts[record.id]) }
+  func readExcerpt(_ record: AttentionRecord) async throws -> ConversationExcerpt? {
+    await waitForRelease("excerpt")
+    return try serve(excerpts[record.id])
+  }
 
   func readAttachment(_ attachment: AttachmentRef) async throws -> Data {
     guard let data = attachments[attachment.sha256] else {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Persist one durable resource execution receipt per terminal charged shell membership",
+  "replay": {"status": "changed", "detail": "Terminal shell state and its resource.exec-receipt claim commit atomically. Nested executions retain one receipt for their charged membership."},
+  "schema": {"status": "changed", "detail": "Adds the durable system-only resource.exec-receipt claim with declared resource profile, execution observations, owner, coverage and head-first query subjects."},
+  "rules": {"status": "none", "detail": "Receipts describe completed execution and do not grant resource capacity or change admission policy."},
+  "compatibility": {"status": "changed", "detail": "Existing shell command rows remain readable. Receipt consumers require upgraded execution hosts; older executions do not gain retrospective claims. Client-v0 contracts are unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment or host restart is required by the schema addition."},
+  "manual": {"status": "changed", "detail": "Query resource.exec-receipt with claims ls by start-head subject prefix and inspect host, class, declared profile, coverage and actual observed outcome; absent measurements are not zero."},
+  "recovery": {"status": "changed", "detail": "Recovery and owner-expiration teardown persist payload observations before retiring native custody. Recovered live helpers receive one bounded notification-driven observation grace; unavailable payload exit evidence remains absent."}
+}

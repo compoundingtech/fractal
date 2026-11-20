@@ -458,3 +458,108 @@ seeded random stream, so an older corpus's exact trim set is not transferable.
 The v34 filename is used in diagnostics as well as the audit summary.
 For a wider characterization, use a fresh `CONVERGENCE_REPORT_DIR` and the existing
 `fixed_sweep` workflow above; retain the source and binary hashes with its outcomes.
+
+`claims-v35.json` adds the durable `resource.exec-receipt` schema. Versions 1 through 34
+remain byte-identical. It is the official `claims_json` generator output produced under
+admitted capacity (receipt `1475150:88192935`), with SHA-256
+`ba9a0a13be02824369b77e5c0f7ff76f0107fe382e3f73de0777d6053221d86a`.
+Regenerate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v35.json`;
+do not hand-edit the snapshot.
+
+In [hosted run 44158892426](https://github.com/compoundingtech/fractal/actions/runs/44158892426),
+seed 2 converged and trimmed an initial checkpoint with this corpus, so v34's non-trimming
+expectation for seed 2 no longer applies. The v35 never-trim set is `[179]`; exact per-seed
+equality, continuation after excusing the old build, and majority trim coverage remain enforced.
+
+`claims-v36.json` adds `github.fact.observed`, `github.capture.committed`,
+`github.capture.authority`, and `github.capture.fenced` from the complete native registry.
+Versions 1 through 35 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v36.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v36.
+Native capture draws encode typed records: public repository observations have content-derived
+subjects, commits reference admitted authority and fact claim IDs and fact digests, and subsequent
+commits link the preceding commit and increment its sequence. Coverage and completed scan
+checkpoints identify the observed repository. A fencing receipt names the stopped writer's grant
+and final commit; that writer generates no further commits. Dependency-free authority and fact
+draws seed these inputs through ordinary schedule writes rather than hidden fixture appends.
+The focused `the_corpus_generates_valid_native_capture_inputs` regression validates and admits
+all four kinds, checks the commit chain and stopped frontier, and replicates them to the oracle.
+The admission check also verifies the stored `/fields/record` envelope. Capture dependency
+lookups use that same path as the production projection, not the flat body of native missions.
+The full registry-kind coverage assertion remains intact.
+
+Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
+not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
+the three-seed cap, and majority trim coverage remain enforced.
+
+`claims-v37.json` adds the eight durable residency evidence kinds from the complete
+reader-first registry. Versions 1 through 36 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v37.json`.
+The simulation and audit reports select v37. Residency inputs bind their host to
+the subject, use integer 0/1 outcome flags and unavailable memory coverage without
+fabricated deltas. The focused residency corpus regression validates every new kind.
+Adding kinds shifts the shared seeded schedule; prior characterization remains
+historical. Exact trim equality, continuation and majority coverage stay enforced.
+
+In [hosted run 44419937655, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44419937655/job/135233311105),
+seed 34 converged without an initial trim, then trimmed on every modern node
+after the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts.
+The shard passed 6,487 tests and failed only the stale seed-34 trim expectation.
+The measured v37 never-trim set is `[34, 179]`; exact per-seed equality,
+old-build-excusal continuation, the three-seed cap and majority coverage remain enforced.
+
+`claims-v38.json` adds the durable native admission evidence kinds
+`resource.admission.observed`, `resource.admission.coverage`, and `gate.admission.observed`
+to the registry that already includes residency. Versions 1 through 37 remain frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v38.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v38.
+Native admission draws use the originating simulation host, a coherent epoch and simulation
+clock, a typed queued owner, and a finite admission request. Gate evidence records a durable
+accepted outcome with the same onset and observation clock; these facts confer no build grant.
+The focused `the_corpus_generates_valid_native_admission_inputs` regression checks all three
+specifications against the live registry, validates and admits their generated inputs, and
+replicates every resulting claim to the oracle. Full registry-kind coverage remains intact.
+New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
+old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
+must come from actual v38 outcomes rather than assuming historical results still apply.
+
+In [hosted run 44486252490, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44486252490/job/135438980421),
+seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
+`after excuse and cut=None`), so its v37 non-trimming expectation no longer applies.
+The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
+The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
+the three-seed cap and majority trim coverage remain enforced.
+
+`claims-v39.json` adds the durable `custom.client.observation-minute` summary kind.
+Versions 1 through 38 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v39.json`.
+The simulation and audit reports select v39. Phone summaries retain source-bound
+minute populations and canonical latency histograms; missing minutes are not
+invented by the native evaluator. Previous seeded trim characterizations remain
+historical; exact per-seed equality, old-build-excusal continuation, the three-seed
+cap and majority trim coverage are unchanged.
+
+In hosted run [44551516592](https://github.com/compoundingtech/fractal/actions/runs/44551516592),
+[seed 2](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697651881)
+and [seed 34](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697652144)
+each converged without an initial checkpoint trim, then trimmed on every modern node after
+the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts. The loader selected
+v39; the failure messages still named the superseded v38 characterization.
+The current v39 never-trim list is `[2, 34, 179]`, retaining the prior seed-179 expectation
+and adding the two measured changes. This run does not establish a full dense-seed
+characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
+cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
+
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
+The simulation and audit reports select v40. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.

@@ -41,6 +41,7 @@ pub struct FractalRuntime {
     pub conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
+    pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
@@ -162,6 +163,8 @@ pub struct AgentResourcesEntry {
     pub index: u64,
     pub local: u64,
     pub history: bool,
+    /// Effective local policy used when folding cards, independent of graph/local claim cuts.
+    pub idle_residency: crate::config::IdleResidencyPolicy,
     /// None certifies the whole roster; Some records the lazily materialized page subjects.
     pub covered: Option<BTreeSet<String>>,
     /// Earliest wall-clock boundary in queue metadata; absent means no expiring work lease.
@@ -198,11 +201,14 @@ impl FractalRuntime {
         migrate_local_usage_seen(connection)?;
         // Before the projection backfills, which fold marks in.
         message_marks::create_table(connection)?;
+        mail_input_acceptance::create_schema(connection)?;
+        mail_delivery_source::create_schema(connection)?;
         message_outbox::create_table(connection)?;
         stream_mirror::create_table(connection)?;
         relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
+        wake_demand::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
         // The remaining initial DDL has no backfill transaction. Keep existing-store
         // upgrade progress unchanged, and commit this chunk only for a fresh store.
@@ -223,6 +229,7 @@ impl FractalRuntime {
         message_marks::create_triggers(connection)?;
         relayed_closes::create_triggers(connection)?;
         stream_mirror::create_triggers(connection)?;
+        mail_delivery_source::install(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
@@ -371,6 +378,10 @@ impl Runtime for FractalRuntime {
     }
 
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()> {
+        // Core source tables (including repaired-claim membership) are installed
+        // after create_schema. This common hook runs after that on fresh opens,
+        // reopens and upgrades, before projections or readers can use reductions.
+        card_actual::install(transaction)?;
         if let Some(views) = &self.ivm_views {
             // An admitted frontier identifies pending work, never successful projection.
             // Existing sources require an explicit installer and dependency certificate.
@@ -428,6 +439,7 @@ impl Runtime for FractalRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
+        migrate_person_cancellation_projections_tx(transaction)?;
         Ok(())
     }
 
@@ -863,6 +875,7 @@ impl FractalRuntime {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
+        self.card_actuals.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
         self.agent_page_refs_cache
             .lock()

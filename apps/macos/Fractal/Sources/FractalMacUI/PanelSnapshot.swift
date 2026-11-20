@@ -76,7 +76,15 @@ import SwiftUI
     window.contentView = host
     host.layoutSubtreeIfNeeded()
     try? await Task.sleep(for: .milliseconds(300))
-    guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+    // Always 2x (the manifest's scale), whatever the backing scale of the host's screen.
+    let scale: CGFloat = 2
+    guard
+      let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: Int(host.bounds.width * scale), pixelsHigh: Int(host.bounds.height * scale),
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: 0, bitsPerPixel: 0)
+    else { return nil }
+    bitmap.size = host.bounds.size
     host.cacheDisplay(in: host.bounds, to: bitmap)
     return bitmap.representation(using: .png, properties: [:])
   }

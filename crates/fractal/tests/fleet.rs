@@ -5887,6 +5887,11 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         amber.st_json(&["agents", "show", seat])["value"]["harness_state"] == "idle"
     })
     .await;
+    let before_mail: Value = amber.client()
+        .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+    let previous_observation = before_mail["claims"].as_array().unwrap().iter()
+        .find(|claim| claim["kind"] == "harness.observed")
+        .expect("the idle source has a native observation")["id"].clone();
     amber.st_ok(&[
         "conversations",
         "send",
@@ -5902,6 +5907,21 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         fs::read_to_string(&receipts)
             .unwrap_or_default()
             .contains("Remember the copper orchard")
+    })
+    .await;
+    // A provider receipt precedes its turn-end observation. Require a new quiet report for
+    // this incarnation, not the pre-message idle report, before attempting a strict suspend.
+    wait_until("source reports quiet after reading the first message", 60, || async {
+        let incarnation = amber.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
+        let page: Value = amber.client()
+            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+        page["claims"].as_array().into_iter().flatten()
+            .find(|claim| claim["kind"] == "harness.observed")
+            .is_some_and(|claim| {
+                let fields = claim["body"].get("fields").unwrap_or(&claim["body"]);
+                claim["id"] != previous_observation && incarnation.is_string()
+                    && fields["incarnation_id"] == incarnation && fields["quiescent"] == true
+            })
     })
     .await;
     let suspended = amber.st_json(&[
@@ -9604,6 +9624,24 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     }).await;
 
     if release_has_plugin {
+        // Replication admits claims before projecting desired state. The plugin reads the
+        // selected observer and its claim's origin, not the latest raw declaration.
+        wait_until("the elder selects the poller's active repository observer", 90, || async {
+            let selected: Value = elder.client().get(
+                "/v1/desired?subject=observer/github/fixture/app",
+            ).await.unwrap();
+            let Some(observer) = selected["items"].as_array().unwrap().first() else {
+                return false;
+            };
+            observer["kind"] == "observer"
+                && fractal_daemon::graph::observer_spec(&observer["desired"]).is_some_and(|spec| {
+                    spec.provider == "github.repository" && !spec.stopped
+                        && spec.locator.eq_ignore_ascii_case("fixture/app")
+                })
+                && elder.claims().await.iter().any(|claim| {
+                    claim["id"] == observer["desired_token"] && claim["origin"] == "fixture-poller"
+                })
+        }).await;
         let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
         assert_eq!(pull["pull"]["facts"]["head_sha"], "c".repeat(40), "{pull}");
     } else {

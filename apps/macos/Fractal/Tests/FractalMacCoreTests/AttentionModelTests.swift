@@ -12,7 +12,8 @@ final class AttentionModelTests: XCTestCase {
 
   func testFreshReadPublishesAsksUpdatesAndObjectives() async {
     let ask = Fixture.record()
-    let update = Fixture.record(id: "attention/update", update: UpdateNote(about: "deploy", summary: "Done"))
+    let update = Fixture.record(
+      id: "attention/update", update: UpdateNote(about: "deploy", summary: "Done"), requesterID: "agent/deployer")
     let gate = Fixture.record(id: "attention/gate", kind: "human-gate", actions: ["review.approve"])
     let ignored = Fixture.record(id: "attention/closed", state: "resolved")
     let adapter = FakeAdapter(attention: [.success(.init(records: [ask, update, gate, ignored], canAnswer: true))], slo: [.success(slo)])
@@ -248,7 +249,8 @@ final class AttentionModelTests: XCTestCase {
     let snoozedAsk = Fixture.record(id: "attention/later", from: "release-captain", urgent: true, snoozedUntil: now + 3600)
     let urgent = Fixture.record(id: "attention/now", from: "observability", urgent: true)
     let update = Fixture.record(
-      id: "attention/update", update: UpdateNote(about: "run/1", summary: nil), snoozedUntil: now + 1800)
+      id: "attention/update", update: UpdateNote(about: "run/1", summary: nil), snoozedUntil: now + 1800,
+      requesterID: "agent/runner")
     let page = AttentionPage(records: [snoozedAsk, urgent, update], canAnswer: true, canControl: true)
     let lines = Lines()
     let speech = SpeechCoordinator(output: ScriptedSpeech(), clock: { [now] in now }, log: { lines.append($0) })
@@ -346,6 +348,190 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertNotEqual(
       AttentionControlSubmission(record: ask, control: .seen).actionID,
       AttentionControlSubmission(record: Fixture.record(revision: "claim/2"), control: .seen).actionID)
+  }
+
+  func testOverlappingOpensCoalesceAndKeepSnapshotAvailableDuringRead() async {
+    let snapshot = AttentionContext(detail: "Ready before the network", request: nil)
+    let ask = Fixture.record(snapshotContext: snapshot)
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [ask], canAnswer: true))], slo: [.success(slo)])
+    await adapter.holdContext()
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(ask.id))
+    let first = Task { await model.readOpenPage(now: now) }
+    await adapter.waitForContext()
+    XCTAssertEqual(model.detail(for: ask), snapshot)
+    let second = Task { await model.readOpenPage(now: now) }
+    await adapter.releaseContext()
+    await first.value
+    await second.value
+    let reads = await adapter.contextReads
+    XCTAssertEqual(reads.count, 1)
+    XCTAssertEqual(model.detail(for: ask).detail, "Goals")
+  }
+
+  func testDetailIsSynchronousAndReopeningUsesFreshEnrichment() async {
+    let snapshot = AttentionContext(detail: "Already here", request: nil)
+    let ask = Fixture.record(snapshotContext: snapshot)
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [ask], canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(ask.id))
+    XCTAssertEqual(model.detail(for: ask), snapshot)
+    let before = await adapter.contextReads
+    XCTAssertTrue(before.isEmpty, "opening paints before any read")
+    await model.readOpenPage(now: now)
+    model.back()
+    model.open(.attention(ask.id))
+    await model.readOpenPage(now: now + 1)
+    let after = await adapter.contextReads
+    XCTAssertEqual(after.count, 1, "fresh detail is not fetched on every visit")
+  }
+
+  func testWarmingIsLimitedAndCacheEvictsOldDetails() async {
+    let records = (0..<20).map { Fixture.record(id: "attention/\($0)") }
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: records, canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.isPanelVisible = true
+    await model.warmDetails(now: now)
+    let warmed = await adapter.contextReads
+    XCTAssertEqual(warmed.count, AttentionModel.detailWarmCount)
+    for record in records {
+      model.open(.attention(record.id))
+      await model.readOpenPage(now: now + 30)
+    }
+    XCTAssertEqual(model.contexts.count, AttentionModel.detailCapacity)
+    XCTAssertEqual(model.excerpts.count, AttentionModel.detailCapacity)
+    XCTAssertNil(model.contexts[records[0].id])
+    XCTAssertNotNil(model.contexts[records.last!.id])
+  }
+
+  func testNewRevisionShowsItsSnapshotInsteadOfPreviousEnrichment() async {
+    let old = Fixture.record()
+    let current = Fixture.record(revision: "claim/2", snapshotContext: .init(detail: "New request", request: nil))
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [old], canAnswer: true)), .success(.init(records: [current], canAnswer: true))],
+      slo: [.success(slo), .success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(old.id))
+    await model.readOpenPage(now: now)
+    await model.refresh(now: now + 1)
+    XCTAssertEqual(model.detail(for: current), current.snapshotContext)
+  }
+
+  func testPrefetchIsSerialCoalescesWithOpeningAndStopsWhenHidden() async {
+    let records = (0..<8).map { Fixture.record(id: "attention/\($0)") }
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: records, canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    await model.warmDetails(now: now)
+    let hiddenReads = await adapter.contextReads
+    XCTAssertTrue(hiddenReads.isEmpty)
+
+    await adapter.holdContext()
+    model.isPanelVisible = true
+    let warming = Task { await model.warmDetails(now: now) }
+    await adapter.waitForContext()
+    let concurrentWarming = Task { await model.warmDetails(now: now) }
+    await concurrentWarming.value
+    let serialReads = await adapter.contextReads
+    XCTAssertEqual(serialReads, [records[0].id], "no second prefetch starts while the first is held")
+    model.open(.attention(records[0].id))
+    let opening = Task { await model.readOpenPage(now: now) }
+    await model.setPanelVisible(false)
+    await adapter.releaseContext()
+    await warming.value
+    await opening.value
+    let reads = await adapter.contextReads
+    XCTAssertEqual(reads, [records[0].id], "open shares prefetch, and hiding stops the queue")
+  }
+
+  func testRevalidationKeepsCachedDetailAndPublishesExcerptBeforeSlowContext() async {
+    let ask = Fixture.record(conversationID: "agent/builder")
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [ask], canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(ask.id))
+    await model.readOpenPage(now: now)
+    let cached = model.detail(for: ask)
+    let excerpt = ConversationExcerpt(
+      conversationID: "agent/builder",
+      turns: [.init(id: "new", speaker: .asker, author: nil, text: "New turn", at: nil)], hasEarlier: false)
+    await adapter.setExcerpt(excerpt)
+    await adapter.setContext(.init(detail: "New enrichment", request: nil))
+    await adapter.holdContext()
+    let revalidating = Task { await model.readOpenPage(now: now + 30) }
+    await adapter.waitForContext()
+    while model.excerpts[ask.id]?.value != .some(excerpt) { await Task.yield() }
+    XCTAssertEqual(model.detail(for: ask), cached, "SWR keeps enrichment visible during a slow read")
+    await adapter.releaseContext()
+    await revalidating.value
+    XCTAssertEqual(model.detail(for: ask).detail, "New enrichment")
+  }
+
+  func testCacheEvictsLeastRecentlyVisitedInsteadOfOldestInserted() async {
+    let records = (0...AttentionModel.detailCapacity).map { Fixture.record(id: "attention/\($0)") }
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: records, canAnswer: true))], slo: [.success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    for record in records.dropLast() {
+      model.open(.attention(record.id))
+      await model.readOpenPage(now: now)
+    }
+    model.open(.attention(records[0].id))
+    await model.readOpenPage(now: now + 1)
+    model.open(.attention(records.last!.id))
+    await model.readOpenPage(now: now + 1)
+    XCTAssertNotNil(model.contexts[records[0].id], "a fresh cache hit updates recency")
+    XCTAssertNil(model.contexts[records[1].id])
+    XCTAssertEqual(model.contexts.count, AttentionModel.detailCapacity)
+  }
+
+  func testLateCompletionCannotRepopulateAnEvictedDetailOutsideTheCapacity() async {
+    let records = (0...AttentionModel.detailCapacity).map { Fixture.record(id: "attention/\($0)") }
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: records, canAnswer: true))], slo: [.success(slo)])
+    await adapter.holdContext(id: records[0].id)
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(records[0].id))
+    let slowFirst = Task { await model.readOpenPage(now: now) }
+    await adapter.waitForContext()
+    for record in records.dropFirst() {
+      model.open(.attention(record.id))
+      await model.readOpenPage(now: now)
+    }
+    XCTAssertNil(model.contexts[records[0].id])
+    await adapter.releaseContext()
+    await slowFirst.value
+    XCTAssertNil(model.contexts[records[0].id], "an evicted in-flight result cannot escape the LRU")
+    XCTAssertNil(model.excerpts[records[0].id])
+    XCTAssertLessThanOrEqual(model.contexts.count, AttentionModel.detailCapacity)
+    XCTAssertLessThanOrEqual(model.excerpts.count, AttentionModel.detailCapacity)
+  }
+
+  func testAttentionSelectionReplacesPreviousSelectionAndOtherPagesCloseIt() {
+    let model = AttentionModel(adapter: nil)
+    model.open(.inbox)
+    let inbox = model.navigationEntries
+    model.open(.attention("attention/1"))
+    model.open(.attention("attention/2"))
+    XCTAssertEqual(model.navigationEntries.map(\.route), [.home, .inbox, .attention("attention/2")])
+    model.back()
+    XCTAssertEqual(model.navigationEntries, inbox)
+    model.open(.attention("attention/1"))
+    model.open(.speech)
+    XCTAssertEqual(model.navigationEntries.map(\.route), [.home, .inbox, .speech])
+    model.back()
+    XCTAssertEqual(model.navigationEntries, inbox, "Back never resurrects a closed selection")
   }
 
   func testAPageReadsItsDetailConversationAndImagesAndKeepsThemWhenARereadFails() async {
@@ -518,6 +704,32 @@ final class AttentionModelTests: XCTestCase {
     model.open(.objectives)
     XCTAssertNil(model.receipt, "moving on clears the receipt")
   }
+
+  func testTheModelListsEachInboxKindAndBothTabsReturnToAsksWhenThePanelCloses() async {
+    let decision = Fixture.record(id: "attention/decision", request: Fixture.decision())
+    let agentUpdate = Fixture.record(
+      id: "attention/landed", update: UpdateNote(about: "message/1", summary: nil), requesterID: "agent/deployer")
+    let ended = Fixture.record(
+      id: "attention/ended", update: UpdateNote(about: "step-run/ask-1", summary: nil), requesterID: "daemon/runtime")
+    let page = AttentionPage(records: [ended, decision, agentUpdate], canAnswer: true)
+    let model = AttentionModel(adapter: FakeAdapter(attention: [.success(page)], slo: [.success(slo)]))
+    await model.refresh(now: now)
+
+    XCTAssertEqual(model.inbox(.asks), [decision])
+    XCTAssertEqual(model.updates, [agentUpdate])
+    XCTAssertEqual(model.notices, [ended])
+    XCTAssertEqual(model.openAskCount, 1, "notices ask nothing")
+    XCTAssertEqual(model.glanceTab, .asks)
+    XCTAssertEqual(model.inboxTab, .asks)
+
+    model.glanceTab = .notices
+    model.inboxTab = .all
+    await model.setPanelVisible(true)
+    XCTAssertEqual(model.glanceTab, .notices, "the tabs hold while the panel is open")
+    await model.setPanelVisible(false)
+    XCTAssertEqual(model.glanceTab, .asks)
+    XCTAssertEqual(model.inboxTab, .asks)
+  }
 }
 
 private struct FakeError: Error, CustomStringConvertible {
@@ -613,6 +825,21 @@ private actor FakeAdapter: AttentionAdapter {
   var excerpt: ConversationExcerpt?
   var attachmentBytes: [String: Data] = [:]
   private(set) var attachmentReads: [String] = []
+  private var contextHeld = false
+  private var heldContextID: String?
+  private var contextPending: CheckedContinuation<Void, Never>?
+  private var contextArrived: CheckedContinuation<Void, Never>?
+
+  func holdContext(id: String? = nil) { contextHeld = true; heldContextID = id }
+  func waitForContext() async {
+    if contextPending != nil { return }
+    await withCheckedContinuation { contextArrived = $0 }
+  }
+  func releaseContext() {
+    contextHeld = false
+    contextPending?.resume()
+    contextPending = nil
+  }
 
   func failContext(_ reason: String?) { contextFailure = reason }
   func setContext(_ context: AttentionContext) { self.context = context }
@@ -621,6 +848,13 @@ private actor FakeAdapter: AttentionAdapter {
 
   func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
     contextReads.append(record.id)
+    if contextHeld && (heldContextID == nil || heldContextID == record.id) {
+      await withCheckedContinuation {
+        contextPending = $0
+        contextArrived?.resume()
+        contextArrived = nil
+      }
+    }
     if let contextFailure { throw FakeError(description: contextFailure) }
     return context
   }

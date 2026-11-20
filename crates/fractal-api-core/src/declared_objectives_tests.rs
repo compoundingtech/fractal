@@ -72,7 +72,7 @@ fn change(store: &Store, name: &str, ago_ms: u64, hosts: &[&str], applied: &[(&s
 }
 
 fn evaluate(store: &Store) -> BTreeMap<String, Value> {
-    rows(store, *NOW).unwrap().into_iter().map(|row| (row["id"].as_str().unwrap().to_owned(), row)).collect()
+    rows(store, *NOW, &[]).unwrap().into_iter().map(|row| (row["id"].as_str().unwrap().to_owned(), row)).collect()
 }
 
 fn s(text: &str) -> String {
@@ -454,7 +454,7 @@ fn a_missed_row_is_a_fault_for_its_owner_on_the_member_the_owner_is_declared_on(
     let store = store_with(&declaration("", "7d", BREACH));
     with_owner(&store, "node");
     change(&store, "a", 30 * MINUTE, &["hosta"], &[("hosta", 600)], "routine");
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     let explain = rows[0]["explain"].as_str().unwrap();
     assert!(explain.contains("addressed to agent/node.ops, delivered by node, the member agent/node.ops is declared on (this member). agent/node.backup is the held backup"), "{explain}");
     let opened = check(&store, &rows).unwrap();
@@ -467,7 +467,7 @@ fn a_missed_row_is_a_fault_for_its_owner_on_the_member_the_owner_is_declared_on(
     for name in ["b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u"] {
         change(&store, name, 10 * MINUTE, &["hosta"], &[("hosta", 10)], "routine");
     }
-    let rows = super::rows(&store, *NOW).unwrap();
+    let rows = super::rows(&store, *NOW, &[]).unwrap();
     assert_eq!(rows.iter().map(|row| row["status"].as_str().unwrap()).collect::<Vec<_>>(), ["met", "met"]);
     assert_eq!(check(&store, &rows).unwrap().recovered, 2);
     assert_eq!(store.operational_failure("slo-objective/node/ops/change-rollout/p95").unwrap().unwrap().status, "resolved");
@@ -478,7 +478,7 @@ fn an_owner_declared_on_another_member_is_delivered_there_not_here() {
     let store = store_with(&declaration("", "7d", &BREACH.replace("node.ops", "other.ops")));
     with_owner(&store, "other");
     change(&store, "a", 30 * MINUTE, &["hosta"], &[("hosta", 600)], "routine");
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(rows[0]["status"], "missed");
     assert!(rows[0]["explain"].as_str().unwrap().contains("delivered by other, the member agent/other.ops is declared on."));
     assert_eq!(check(&store, &rows).unwrap(), ObjectiveFaults::default());
@@ -489,7 +489,7 @@ fn an_owner_declared_on_another_member_is_delivered_there_not_here() {
 fn an_owner_that_is_not_declared_gets_nothing_and_the_explanation_says_so() {
     let store = store_with(&declaration("", "7d", BREACH));
     change(&store, "a", 30 * MINUTE, &["hosta"], &[("hosta", 600)], "routine");
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     assert!(rows[0]["explain"].as_str().unwrap().contains("agent/node.ops is not a live agent declaration, so nothing is delivered"));
     assert_eq!(check(&store, &rows).unwrap(), ObjectiveFaults::default());
 }
@@ -584,12 +584,12 @@ fn an_event_leaves_the_count_and_memory_when_it_leaves_the_window() {
     merged(&store, "a", 50 * MINUTE, json!({}));
     merged(&store, "b", 10 * MINUTE, json!({}));
     assert_eq!(evaluate(&store)[THROUGHPUT]["current"], "2 in the last 1h (2.00 an hour)");
-    let later = rows(&store, *NOW + 20 * MINUTE).unwrap();
+    let later = rows(&store, *NOW + 20 * MINUTE, &[]).unwrap();
     assert_eq!(later[0]["current"], "1 in the last 1h (1.00 an hour)");
     assert_eq!(held(&store), [s("custom/acme/change/b")], "memory holds only the subjects in the window");
     // A retry of the pruned subject carries its time, before the window: ignored.
     merged(&store, "a", 50 * MINUTE, json!({}));
-    assert_eq!(rows(&store, *NOW + 20 * MINUTE).unwrap()[0]["current"], "1 in the last 1h (1.00 an hour)");
+    assert_eq!(rows(&store, *NOW + 20 * MINUTE, &[]).unwrap()[0]["current"], "1 in the last 1h (1.00 an hour)");
     assert_eq!(held(&store), [s("custom/acme/change/b")]);
 }
 
@@ -649,7 +649,7 @@ fn a_missed_count_is_a_fault_for_its_owner() {
     let store = store_with(&count_declaration("", "1h", "min=2", BREACH));
     with_owner(&store, "node");
     merged(&store, "a", 10 * MINUTE, json!({}));
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(rows[0]["status"], "missed");
     assert_eq!(check(&store, &rows).unwrap().opened, 1);
     let failure = store.operational_failure("slo-objective/node/factory/work-throughput").unwrap().unwrap();
@@ -686,7 +686,7 @@ fn a_missed_count_opens_one_fault_for_its_total_and_none_for_its_parts() {
     with_owner(&store, "node");
     merged(&store, "a", 10 * MINUTE, json!({"repository": "fractal"}));
     merged(&store, "c", 10 * MINUTE, json!({"repository": "factory"}));
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(rows.iter().map(|row| row["status"].as_str().unwrap()).collect::<Vec<_>>(), ["missed", "no-data", "no-data"]);
     assert_eq!(check(&store, &rows).unwrap().opened, 1);
     assert!(store.operational_failure("slo-objective/node/factory/work-throughput").unwrap().is_some());
@@ -721,16 +721,16 @@ fn a_count_label_row_reads_zero_once_its_events_leave_the_window() {
         s("factory/work-throughput{repository=fractal}"),
         s("factory/work-throughput{repository=smallclaims}"),
     ];
-    let now = rows(&store, *NOW).unwrap();
+    let now = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(ids(&now[..]), expected);
     assert_eq!(now[3]["current"], "0 in the last 1h (0.00 an hour)");
-    let later = rows(&store, *NOW + 20 * MINUTE).unwrap();
+    let later = rows(&store, *NOW + 20 * MINUTE, &[]).unwrap();
     assert_eq!(ids(&later[..]), expected, "a label value read once keeps its row");
     assert_eq!(later[2]["current"], "0 in the last 1h (0.00 an hour)");
     assert_eq!(held(&store), [s("custom/acme/change/b")], "only the events in the window are held");
     // A new revision reads the claims again, keeping the values its own label reads.
     apply(&store, &count_declaration("    label \"author\"\n", "1h", "min=1", ""));
-    assert_eq!(ids(&rows(&store, *NOW + 20 * MINUTE).unwrap()[..]), [s(THROUGHPUT)]);
+    assert_eq!(ids(&rows(&store, *NOW + 20 * MINUTE, &[]).unwrap()[..]), [s(THROUGHPUT)]);
 }
 
 /// An open fault for objective row `id`, as an earlier evaluation, or build, opened it.
@@ -770,7 +770,7 @@ fn the_open_fault_of_a_count_label_row_ends_and_another_objectives_stays() {
         open_fault(&store, id);
     }
     merged(&store, "a", 10 * MINUTE, json!({"repository": "fractal"}));
-    let rows = rows(&store, *NOW).unwrap();
+    let rows = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(rows[0]["status"], "met");
     assert_eq!(check(&store, &rows).unwrap(), ObjectiveFaults { recovered: 1, ..ObjectiveFaults::default() });
     assert_eq!(fault_status(&store, part), "resolved", "a part is never judged, so its fault ends");
@@ -782,11 +782,11 @@ fn the_fault_of_an_interval_label_row_ends_once_its_samples_leave_the_window() {
     let store = store_with(&declaration("    label \"class\"\n", "7d", BREACH));
     with_owner(&store, "node");
     change(&store, "a", 30 * MINUTE, &["hosta"], &[("hosta", 600)], "routine");
-    let missed = rows(&store, *NOW).unwrap();
+    let missed = rows(&store, *NOW, &[]).unwrap();
     assert_eq!(check(&store, &missed).unwrap().opened, 4, "p50 and p95, in all and for class routine");
     // Eight days on, the sample has left the window: the class rows are gone and the totals are
     // no-data, which neither opens nor ends a fault.
-    let later = rows(&store, *NOW + 8 * 24 * 60 * MINUTE).unwrap();
+    let later = rows(&store, *NOW + 8 * 24 * 60 * MINUTE, &[]).unwrap();
     assert_eq!(later.iter().map(|row| row["status"].as_str().unwrap()).collect::<Vec<_>>(), ["no-data", "no-data"]);
     assert_eq!(check(&store, &later).unwrap(), ObjectiveFaults { recovered: 2, ..ObjectiveFaults::default() });
     assert_eq!(fault_status(&store, "ops/change-rollout/p95{class=routine}"), "resolved");
@@ -929,3 +929,361 @@ fn series(store: &Store, objective: &str, from: u64, to: u64, bucket_seconds: u6
 
 #[path = "claim_series_tests.rs"]
 mod claim_series_tests;
+
+fn numeric_declaration(indicator: &str, extra: &str) -> String {
+    format!(r#"version 2
+objective "example/quality" {{
+  about "Example quality"
+  indicator "{indicator}" {{
+    subject-prefix "custom/acme/change/"
+    event "custom.acme.reading" at="observed_at"
+    value "value" bad-above=10
+    {extra}
+  }}
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {{
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }}
+}}
+"#)
+}
+
+#[test]
+fn numeric_claims_are_deduplicated_and_incrementally_caught_up() {
+    let store = store_with(&numeric_declaration("ratio", ""));
+    let at = *NOW - MINUTE;
+    claim(&store, "one", "custom.acme.reading", json!({"observed_at": at, "value": 20}));
+    claim(&store, "one", "custom.acme.reading", json!({"observed_at": at, "value": 20}));
+    assert_eq!(evaluate(&store)["example/quality"]["current"], "1 bad / 1 qualifying events");
+    assert_eq!(evaluate(&store)["example/quality"]["current"], "1 bad / 1 qualifying events");
+    // A new timestamp is a new observation even when the source subject is unchanged.
+    claim(&store, "one", "custom.acme.reading", json!({"observed_at": at + 1, "value": 1}));
+    assert_eq!(evaluate(&store)["example/quality"]["current"], "1 bad / 2 qualifying events");
+}
+
+#[test]
+fn durable_hourly_readings_burn_with_partial_horizon_then_turn_unknown_when_stale() {
+    let store = store_with(&numeric_declaration("gauge", "max-age \"1h\"\n    cadence \"1h\""));
+    for hour in 1..=6 {
+        claim(&store, "source", "custom.acme.reading", json!({"observed_at": *NOW - hour * 60 * MINUTE, "value": 20}));
+    }
+    let evaluated = evaluate(&store);
+    assert_eq!(evaluated["example/quality"]["status"], "burning");
+    assert!(evaluated["example/quality"]["remaining_percent"].is_null());
+    let later = rows(&store, *NOW + 7 * 60 * MINUTE, &[]).unwrap();
+    assert_eq!(later[0]["status"], "no-data");
+}
+
+#[test]
+fn gauge_filters_do_not_turn_a_covered_burn_into_missing_data() {
+    for filter in ["only \"workflow\" \"production\"", "exclude \"workflow\" \"ignored\""] {
+        let store = store_with(&numeric_declaration("gauge", &format!("max-age \"1h\"\n    cadence \"1h\"\n    {filter}")));
+        for hour in 1..=6 {
+            let at = *NOW - hour * 60 * MINUTE;
+            claim(&store, "live", "custom.acme.reading", json!({"observed_at": at, "value": 20, "workflow": "production"}));
+            claim(&store, "filtered", "custom.acme.reading", json!({"observed_at": at, "value": 20, "workflow": "ignored"}));
+        }
+        let evaluated = evaluate(&store);
+        assert_eq!(evaluated["example/quality"]["status"], "burning", "{filter}");
+        assert!(evaluated["example/quality"]["remaining_percent"].is_null());
+    }
+}
+
+#[test]
+fn native_owner_binding_inherits_source_and_missing_source_is_unknown() {
+    let store = store_with(r#"version 2
+objective "example/latency" {
+  about "Example native owner binding"
+  indicator "native" { objective "person-read"; }
+}
+"#);
+    let source = json!({
+        "id": "person-read", "kind": "objective", "about": "Native source",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let evaluated = rows(&store, *NOW, &[source]).unwrap();
+    assert_eq!(evaluated[0]["id"], "example/latency");
+    assert_eq!(evaluated[0]["status"], "burning");
+    assert_eq!(evaluated[0]["remaining_percent"], 75.0);
+    assert!(evaluated[0]["explain"].as_str().unwrap().contains("Native evidence"));
+    assert_eq!(rows(&store, *NOW, &[]).unwrap()[0]["status"], "no-data");
+}
+
+#[test]
+fn native_burn_opens_member_local_episode_for_an_owner_on_another_host() {
+    let store = store_with(r#"version 2
+objective "example/latency" {
+  about "Example native owner binding"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/other.ops" condition="native-latency-burn"
+}
+"#);
+    with_owner(&store, "other");
+    let source = json!({
+        "id": "person-read", "kind": "objective", "about": "Native source",
+        "target": "5% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let evaluated = rows(&store, *NOW, &[source]).unwrap();
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 1);
+    assert!(store.operational_failure("slo-objective/node/example/latency").unwrap().is_some());
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 0);
+}
+
+#[test]
+fn domain_rows_compose_with_native_ownership_and_preserve_unknown_episodes() {
+    for status in ["burning", "exhausted", "missed"] {
+        let store = store_with(r#"version 2
+objective "example/delivery" {
+  about "Delivery measurement owner"
+  indicator "native" { objective "delivery/merged"; }
+  on-breach "fault" owner="agent/other.ops" condition="delivery-throughput"
+}
+"#);
+        with_owner(&store, "other");
+        let source = json!({
+            "id": "delivery/merged", "kind": "objective", "about": "Committed GitHub merges",
+            "target": "7 merges per hour", "current": "3 merges", "window": "rolling 1h",
+            "remaining_percent": 0.0, "status": status, "explain": "Complete effective-roster coverage",
+            "measurement": {"rolling_hour": {"complete": true, "merged_count": 3}},
+        });
+        let evaluated = crate::api::slo_rows(&store, vec![source.clone()]).unwrap();
+        let owned = evaluated.iter().find(|row| row["id"] == "example/delivery").unwrap();
+        assert_eq!(owned["status"], status);
+        assert_eq!(owned["measurement"], source["measurement"]);
+        assert_eq!(check(&store, &evaluated).unwrap().opened, 1);
+        let unknown = crate::api::slo_rows(&store, Vec::new()).unwrap();
+        assert_eq!(unknown.iter().find(|row| row["id"] == "example/delivery").unwrap()["status"], "no-data");
+        assert_eq!(check(&store, &unknown).unwrap().recovered, 0);
+        assert!(store.operational_failure("slo-objective/node/example/delivery").unwrap().is_some());
+        let mut recovered = source;
+        recovered["status"] = json!("met");
+        let evaluated = crate::api::slo_rows(&store, vec![recovered]).unwrap();
+        assert_eq!(check(&store, &evaluated).unwrap().recovered, 1);
+    }
+}
+
+#[test]
+fn known_ratio_source_without_recent_events_is_not_missing_source_data() {
+    let store = store_with(&numeric_declaration("ratio", ""));
+    assert_eq!(evaluate(&store)["example/quality"]["status"], "no-data");
+    claim(&store, "good", "custom.acme.reading", json!({"observed_at": *NOW - MINUTE, "value": 1}));
+    claim(&store, "invalid", "custom.acme.reading", json!({"observed_at": *NOW - MINUTE, "value": "invalid"}));
+    assert_eq!(evaluate(&store)["example/quality"]["status"], "no-data");
+    let later = rows(&store, *NOW + 31 * 24 * 60 * MINUTE, &[]).unwrap();
+    assert_eq!(later[0]["status"], "no-qualifying-events");
+}
+
+#[test]
+fn native_root_binding_keeps_independent_child_identities_and_prefix_boundaries() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/other.ops" condition="transaction-burn"
+}
+"#);
+    with_owner(&store, "other");
+    let native: Vec<Value> = ["transaction/read", "transaction/write", "transaction/writer-hold", "transactions/unrelated"]
+        .into_iter().map(|id| json!({
+            "id": id, "kind": "objective", "about": "Native source",
+            "target": "1% bad events", "current": "paired burn", "window": "30d",
+            "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+        })).collect();
+    let evaluated = rows(&store, *NOW, &native).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(), [
+        "example/transactions/read", "example/transactions/write", "example/transactions/writer-hold",
+    ]);
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 3);
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 0);
+    // A child that disappears from the source ends only its own member-local episode.
+    let remaining = rows(&store, *NOW, &native[..2]).unwrap();
+    assert_eq!(check(&store, &remaining).unwrap().recovered, 1);
+}
+
+#[test]
+fn native_source_outage_preserves_all_child_episode_identities() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/other.ops" condition="transaction-burn"
+}
+"#);
+    with_owner(&store, "other");
+    let native: Vec<Value> = ["transaction/read", "transaction/write"].into_iter().map(|id| json!({
+        "id": id, "kind": "objective", "about": "Native source",
+        "target": "1% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    })).collect();
+    let burning = rows(&store, *NOW, &native).unwrap();
+    assert_eq!(check(&store, &burning).unwrap().opened, 2);
+    let unavailable = rows(&store, *NOW, &[]).unwrap();
+    assert_eq!(unavailable.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/transactions/read", "example/transactions/write"]));
+    assert!(unavailable.iter().all(|row| row["status"] == "no-data"));
+    assert_eq!(check(&store, &unavailable).unwrap().recovered, 0);
+    assert_eq!(check(&store, &unavailable).unwrap().opened, 0);
+}
+
+#[test]
+fn native_binding_does_not_recover_a_nested_declarations_unknown_episode() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/node.ops" condition="transaction-burn"
+}
+objective "example/transactions/latency" {
+  about "Independent latency owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="latency-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let nested = "example/transactions/latency";
+    open_fault(&store, nested);
+    let source = json!({
+        "id": "transaction/read", "kind": "objective", "about": "Native source",
+        "target": "1% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let evaluated = rows(&store, *NOW, &[source]).unwrap();
+    assert_eq!(evaluated.iter().find(|row| row["id"] == nested).unwrap()["status"], "no-data");
+    let faults = check(&store, &evaluated).unwrap();
+    assert_eq!(faults.opened, 1);
+    assert_eq!(faults.recovered, 0);
+    assert_eq!(fault_status(&store, nested), "pending");
+    assert_eq!(check(&store, &evaluated).unwrap(), ObjectiveFaults::default());
+}
+
+fn native_revision_declaration(source: &str) -> String {
+    format!(r#"version 2
+objective "example/service" {{
+  about "Service owner"
+  indicator "native" {{ objective "{source}"; }}
+  on-breach "fault" owner="agent/node.ops" condition="service-burn"
+}}
+objective "example/service/read/latency" {{
+  about "Independent nested latency owner"
+  indicator "native" {{ objective "remote-path"; }}
+  on-breach "fault" owner="agent/node.ops" condition="latency-burn"
+}}
+"#)
+}
+
+fn open_native_revision_episodes(store: &Store) {
+    apply(store, &native_revision_declaration("transaction"));
+    with_owner(store, "node");
+    let native: Vec<Value> = ["transaction/read", "transaction/write", "remote-path"]
+        .into_iter().map(|id| json!({
+            "id": id, "kind": "objective", "about": "Native source",
+            "target": "1% bad events", "current": "paired burn", "window": "30d",
+            "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+        })).collect();
+    let evaluated = rows(store, *NOW, &native).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/service/read", "example/service/write", "example/service/read/latency"]));
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults { opened: 3, ..ObjectiveFaults::default() });
+    for id in ["example/service/read", "example/service/write", "example/service/read/latency"] {
+        assert_eq!(fault_status(store, id), "pending", "{id}");
+    }
+}
+
+fn assert_native_revision_recovers_only_owned_children(store: &Store) {
+    let source = json!({
+        "id": "person-read", "kind": "objective", "about": "Replacement native source",
+        "target": "1% bad events", "current": "within budget", "window": "30d",
+        "remaining_percent": 100.0, "status": "met", "explain": "Replacement native evidence",
+    });
+    let evaluated = rows(store, *NOW, &[source]).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/service", "example/service/read/latency"]));
+    assert_eq!(evaluated.iter().find(|row| row["id"] == "example/service").unwrap()["status"], "met");
+    assert_eq!(evaluated.iter().find(|row| row["id"] == "example/service/read/latency").unwrap()["status"], "no-data");
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults { recovered: 2, ..ObjectiveFaults::default() });
+    for id in ["example/service/read", "example/service/write"] {
+        assert_eq!(fault_status(store, id), "resolved", "{id} belongs to the obsolete binding");
+    }
+    assert_eq!(fault_status(store, "example/service/read/latency"), "pending",
+        "the independent declaration shares a child prefix, not episode ownership");
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults::default());
+}
+
+#[test]
+fn native_binding_revision_recovers_obsolete_children_without_prefix_cleaning() {
+    let store = Store::open_memory("node").unwrap();
+    open_native_revision_episodes(&store);
+    apply(&store, &native_revision_declaration("person-read"));
+    assert_native_revision_recovers_only_owned_children(&store);
+}
+
+#[test]
+fn native_binding_episode_ownership_survives_disk_reopen_and_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "node").unwrap();
+    open_native_revision_episodes(&store);
+    drop(store);
+
+    // Publish after reopening, so no in-memory binding state can supply old ownership.
+    let store = Store::open(&path, "node").unwrap();
+    apply(&store, &native_revision_declaration("person-read"));
+    drop(store);
+
+    // Reopen the revised declaration before evaluating its replacement source as well.
+    let store = Store::open(&path, "node").unwrap();
+    for id in ["example/service/read", "example/service/write", "example/service/read/latency"] {
+        assert_eq!(fault_status(&store, id), "pending", "{id} must survive reopening");
+    }
+    assert_native_revision_recovers_only_owned_children(&store);
+    drop(store);
+
+    let store = Store::open(&path, "node").unwrap();
+    assert_eq!(fault_status(&store, "example/service/read"), "resolved");
+    assert_eq!(fault_status(&store, "example/service/write"), "resolved");
+    assert_eq!(fault_status(&store, "example/service/read/latency"), "pending");
+}
+
+#[test]
+fn roll_native_binding_preserves_known_evidence_without_manufacturing_population_coverage() {
+    let store = store_with(r#"version 2
+objective "example/rolls" {
+  about "Every rollout host"
+  indicator "native" { objective "fleet/roll-completion"; }
+  on-breach "fault" owner="agent/other.ops" condition="roll-completion"
+}
+"#);
+    with_owner(&store, "other");
+    let root = tempfile::tempdir().unwrap();
+    crate::roll_completion::install(&store, root.path()).unwrap();
+    let declared = *NOW - 86_400_001;
+    let target = json!({"dotfiles_revision": "dotfiles-exact", "daemon_revision": "daemon-exact"});
+    crate::roll_completion::tests::ingest_fixture(&store, serde_json::from_value(json!({
+        "version": 1, "kind": "roll-declared", "roll_id": "example-roll",
+        "declared_at_ms": declared, "targets": {"node": target},
+    })).unwrap(), *NOW).unwrap();
+    crate::roll_completion::tests::ingest_fixture(&store, serde_json::from_value(json!({
+        "version": 1, "kind": "host-observed", "roll_id": "example-roll",
+        "declared_at_ms": declared, "host": "node", "observed_at_ms": *NOW,
+        "target": target, "adoption": "not-adopted",
+        "evidence": {"system_path": "system", "home_path": "home", "expected_system_path": "system",
+            "expected_home_path": "home", "daemon_ready": false, "daemon_revision": "daemon-exact"},
+    })).unwrap(), *NOW).unwrap();
+    let evaluated = crate::api::slo_rows(&store, Vec::new()).unwrap();
+    let owned = evaluated.iter().find(|row| row["id"] == "example/rolls").unwrap();
+    assert_eq!(owned["status"], "no-data");
+    assert_eq!(owned["measurement"]["windows"][0]["bad"], 1.0);
+    assert!(owned["measurement"]["population_frontier_ms"].is_null());
+    assert_eq!(owned["measurement"], evaluated.iter().find(|row| row["id"] == "fleet/roll-completion").unwrap()["measurement"]);
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 0);
+    crate::roll_completion::tests::ingest_fixture(&store, serde_json::from_value(json!({
+        "version": 1, "kind": "roll-declared", "roll_id": "unknown-roll",
+        "declared_at_ms": declared, "targets": {"host-b": target},
+    })).unwrap(), *NOW).unwrap();
+    let unknown = crate::api::slo_rows(&store, Vec::new()).unwrap();
+    assert_eq!(unknown.iter().find(|row| row["id"] == "example/rolls").unwrap()["status"], "no-data");
+    assert_eq!(check(&store, &unknown).unwrap().recovered, 0);
+    assert!(store.operational_failure("slo-objective/node/example/rolls").unwrap().is_none());
+}

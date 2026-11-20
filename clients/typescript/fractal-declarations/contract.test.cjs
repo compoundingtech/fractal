@@ -49,6 +49,16 @@ test('principal and lane capacities match the parser-backed golden', () => {
     assert.equal(encodeKdl(declarations), fs.readFileSync(path.join(__dirname, 'fixtures/capacity-principal.kdl'), 'utf8'));
 });
 
+test('idle-suspend encodes each explicit policy and preserves omission', () => {
+    assert.doesNotMatch(encodeKdl({ agents: [editor] }), /idle-suspend/);
+    for (const idleSuspend of ['never', 'member']) {
+        assert.equal(
+            encodeKdl({ agents: [{ ...editor, idleSuspend }] }),
+            `version 2\n\nagent "docs/editor" {\n  workspace "."\n  idle-suspend "${idleSuspend}"\n  command "true"\n}\n`,
+        );
+    }
+});
+
 test('the runnable TypeScript example matches the Rust-validated golden fixture', () => {
     const { execFileSync } = require('node:child_process');
     const rendered = execFileSync(process.execPath, [path.join(__dirname, 'examples/render.cjs')], { encoding: 'utf8' });

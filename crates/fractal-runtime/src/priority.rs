@@ -187,6 +187,9 @@ pub fn protect_server(runtime_id: &str, pid: u32, work_unit: &str) -> Result<Ser
     if leaf != work_unit {
         return Ok(ServerPlacement::Foreign);
     }
+    // Physical membership proves the original scope joined, even for an older
+    // launcher without the normal PTY completion acknowledgement.
+    crate::isolate::finish_scope_join(work_unit);
     let output =
         crate::pty::output_within(move_command(&unit, pid, slice, runtime_id), MOVE_TIMEOUT)
             .context("ask the systemd user manager for a PTY server scope")?;
@@ -199,6 +202,7 @@ pub fn protect_server(runtime_id: &str, pid: u32, work_unit: &str) -> Result<Ser
     let deadline = Instant::now() + MOVE_TIMEOUT;
     loop {
         if slice_and_leaf(&process_cgroup(pid)?).1 == unit {
+            crate::systemd::invalidate();
             return Ok(ServerPlacement::Moved(unit));
         }
         anyhow::ensure!(
@@ -324,11 +328,11 @@ pub fn protect_servers(observations: &[PtyObservation]) {
         for (key, runtime_id, pid, work_unit) in pending {
             match protect_server(&runtime_id, pid, &work_unit) {
                 Ok(ServerPlacement::Moved(unit)) => {
-                    eprintln!("st3: PTY server {pid} of {runtime_id} runs in {unit}");
+                    eprintln!("fractal: PTY server {pid} of {runtime_id} runs in {unit}");
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!(
-                    "st3: WARN PTY server {pid} of {runtime_id} still shares its harness's scope: {error:#}"
+                    "fractal: WARN PTY server {pid} of {runtime_id} still shares its harness's scope: {error:#}"
                 ),
             }
             SETTLED

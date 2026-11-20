@@ -3,6 +3,20 @@ use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
 
+pub(super) fn is_message_path(path: &str) -> bool {
+    path.strip_prefix("/v1/messages")
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
+pub(super) fn attribution_error() -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "foreign-agent-actor".into(),
+        message: "message attribution must match the authenticated caller".into(),
+        details: Box::default(),
+    }
+}
+
 fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError> {
     crate::store::identities::resolve_reference_conn(
         &store.readers.get(), &normalize_message_party(party),
@@ -199,8 +213,27 @@ pub async fn send_message(
     peer: Option<Extension<NativeDeliveryPeer>>,
     session: Option<Extension<client_v0::ClientSession>>,
     local_peer: Option<Extension<LocalPeer>>,
-    Json(request): Json<MessageSendRequest>,
+    run: Option<Extension<BoundRun>>,
+    Json(mut request): Json<MessageSendRequest>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
+    // The credential, not a caller-supplied owner or sender, binds program effects.
+    if let Some(Extension(BoundRun(binding))) = run {
+        if request.owner.is_some() || request.from != binding.run || request.idempotency_key.trim().is_empty() {
+            return Err(ApiError::bad(FractalError::new("effect-caller-refused",
+                "a program message requires its own run sender, a nonempty key and no supplied owner")));
+        }
+        let step = state.store.step_run(&binding.step_run).map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::bad(FractalError::new("run-credential-ended", "the program step disappeared")))?;
+        let mission = state.store.mission_run(&binding.run).map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::bad(FractalError::new("run-credential-ended", "the program run disappeared")))?;
+        request.owner = Some(crate::model::EffectOwner {
+            mission: mission.mission, key: request.idempotency_key.clone(),
+            step: binding.step_run, attempt: binding.attempt,
+            incarnation: format!("program:{}", step.attempt),
+        });
+        return blocking_api(move || accept_message_receipt_authorized(
+            &state, request, None, None, None, None, Some(&binding.run)).map(Json)).await;
+    }
     let effect_caller = if let Some(owner) = request.owner.as_ref() {
         let actor = bound.as_ref().map(BoundActor::actor)
             .or_else(|| peer.as_ref().map(|Extension(peer)| peer.agent.as_str()))

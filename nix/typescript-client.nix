@@ -6,22 +6,17 @@
 # uses the hoisted linker, so they are plain directories with relative links). The check restores them
 # over the source and runs the same script, unchanged.
 #
-# Refreshing the hash: the installation name carries the lockfile hash and effect-utils source identity.
-# `nix/typescript-client-deps.hash` records both the output hash and the effect-utils narHash it was measured
-# with, so consumers overriding that input fail before building. `scripts/nix-typescript-client-deps-hash`
-# refreshes both values. pnpm-workspace.yaml installs the same supported architectures on every host.
+# The installation name and recorded guard use semantic installation inputs, not the
+# entire effect-utils revision. The filtered upstream tree is also the only tree
+# available to staging. Refresh the real output hash and input fingerprint together
+# with scripts/nix-typescript-client-deps-hash after installation inputs change.
 { effect-utils, system, self, version }:
 let
   pkgs = import effect-utils.inputs.nixpkgs { inherit system; };
   lib = pkgs.lib;
   # pnpm and Node 24 from effect-utils' own nixpkgs, as the web shell (`nix/web-shell.nix`) has them.
-  pnpm = effect-utils.lib.mkPnpm { inherit pkgs; };
+  pnpm = import "${inputs.sources}/nix/pnpm.nix" { inherit pkgs; };
   node = pkgs.nodejs_24;
-  # A fixed-output path is named by its name and hash, not by its builder inputs. The lockfile records the staged
-  # `@overeng/*` sources by path only, so both the lockfile and the effect-utils revision go into the name: a bump of
-  # either builds a new installation instead of reusing a stale one from a store or cache.
-  lockHash = builtins.substring 0 12 (builtins.hashFile "sha256" ../pnpm-lock.yaml);
-  sourcesHash = builtins.substring 0 12 (builtins.hashString "sha256" effect-utils.narHash);
   dependencyPin = builtins.fromJSON (builtins.readFile ./typescript-client-deps.hash);
   manifests = lib.fileset.toSource {
     root = ../.;
@@ -42,13 +37,17 @@ let
       ../packages/fractal-ui/package.json
     ];
   };
-  installation = pkgs.runCommand "typescript-client-installation-${lockHash}-${sourcesHash}" {
+  inputs = import ./typescript-client-inputs.nix {
+    inherit manifests;
+    effectUtils = effect-utils.outPath;
+    nixpkgsNarHash = effect-utils.inputs.nixpkgs.narHash;
+    recipe = ./typescript-client.nix;
+  };
+  installation = pkgs.runCommand "typescript-client-installation-${builtins.substring 0 24 inputs.fingerprint}" {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash =
-      if effect-utils.narHash == dependencyPin.effectUtilsNarHash then dependencyPin.hash
-      else throw "fractal's effect-utils input is overridden or changed (got ${effect-utils.narHash}, hash measured with ${dependencyPin.effectUtilsNarHash}); consumers must resolve effect-utils to fractal's pin, or run scripts/nix-typescript-client-deps-hash";
-    passthru.effectUtilsNarHash = effect-utils.narHash;
+    outputHash = inputs.outputHash dependencyPin;
+    passthru.installationInputHash = inputs.fingerprint;
     nativeBuildInputs = [ pnpm node pkgs.cacert ];
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   } ''
@@ -59,7 +58,7 @@ let
     cd source
     # The workspace's `@overeng/*` packages are `file:` sources staged from effect-utils, as the web shell does.
     mkdir repos
-    ln -s ${effect-utils} repos/effect-utils
+    ln -s ${inputs.sources} repos/effect-utils
     node -e '
       const { readFileSync } = require("node:fs");
       const { spawnSync } = require("node:child_process");
@@ -68,7 +67,7 @@ let
         process.argv[1], "publish", process.cwd(), ".devenv/pnpm-source-inputs", ...paths,
       ], { stdio: "inherit" });
       process.exit(result.status ?? 1);
-    ' ${effect-utils}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
+    ' ${inputs.sources}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
     pnpm install --frozen-lockfile --store-dir "$TMPDIR/store"
     # Both name the install directory and the time; neither is needed to run the workspace.
     find . -name node_modules -prune -exec rm -f '{}/.modules.yaml' '{}/.pnpm-workspace-state-v1.json' ';'

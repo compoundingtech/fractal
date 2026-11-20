@@ -1,5 +1,8 @@
 //! Candidate pages and their dependency accumulator commit together. A page never authorizes
 //! a partial result. Relevant authority changes dirty the cursor in queue_linked_tx.
+//! Completed, unblocked folds retain their result witness but discard their resume-only
+//! cursor and roots digest. Invalidation always restarts them from retained candidates;
+//! their global dependency links remain live regardless of when judgment completed.
 use super::*;
 
 pub(super) fn rank(verdict: &Verdict) -> u8 {
@@ -22,7 +25,10 @@ pub(super) fn complete(connection: &Connection, claim_id: &str) -> Result<bool> 
         .query_row(/* sqlite-large-value: allow-for-now lv-h4cf561874b59 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|row.get(0))?)
 }
 pub(super) fn validate_cached(connection: &Connection, row: &ClaimRow) -> Result<()> {
-    let (content,signature,verdict,reason)=connection.prepare_cached("SELECT content_digest,best_signature,best_verdict,best_reason FROM claim_signature_judging WHERE claim_id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h11b4260d91f2 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [&row.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?)))?;
+    let (content,signature,verdict,reason)=connection.prepare_cached("SELECT content_digest,best_signature,best_verdict,best_reason FROM claim_signature_judging WHERE claim_id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h772f8904542f owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [&row.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<SqlValue>>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?)))?;
+    let signature = signature
+        .map(|value| references::resolve(connection, &row.id, value))
+        .transpose()?;
     anyhow::ensure!(
         content == content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
         "signature-state-corrupt: claim content differs from completed judgment"
@@ -74,11 +80,15 @@ pub(super) fn advance(
     let count = candidate_count(connection, claim_id)?;
     let roots_digest = crate::hash::canonical_hash(roots)?;
     let previous=connection.prepare_cached("SELECT candidate_count,roots_digest,last_signature,best_signature,best_verdict,best_reason,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h5c7fa1bc38b3 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?))).optional()?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-he591a2246f4a owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,SqlValue>(2)?,row.get::<_,Option<SqlValue>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?))).optional()?;
     let (last, mut best, mut blocked) = match previous {
         Some((n, root, last, signature, verdict, reason, false, false, blocked))
             if n == count && root == roots_digest =>
         {
+            let last = references::resolve(connection, claim_id, last)?;
+            let signature = signature
+                .map(|value| references::resolve(connection, claim_id, value))
+                .transpose()?;
             if let Some(name) = &verdict
                 && !matches!(name.as_str(), "verified" | "held" | "invalid" | "unsigned")
             {
@@ -127,7 +137,6 @@ pub(super) fn advance(
             best = Some((verdict, text));
         }
     }
-    let through = texts.last().cloned().unwrap_or(last);
     let finished = texts.len() < budget;
     let (best_name, best_reason, best_signature) =
         best.as_ref()
@@ -138,7 +147,24 @@ pub(super) fn advance(
                     Some(signature.as_str()),
                 )
             });
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec805028307d owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h070bbbc92435 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
+    // Only unfinished or blocked folds can resume from this cursor. Completed
+    // judgments restart from canonical candidates when dirtied; retaining their
+    // final full signature and roots digest duplicates evidence indefinitely.
+    let cold = finished && !blocked;
+    let through = if cold {
+        ""
+    } else {
+        texts.last().map_or(last.as_str(), String::as_str)
+    };
+    let through = if through.is_empty() {
+        references::SignatureValue::Text(through)
+    } else {
+        references::write_value(connection, claim_id, through, true)?
+    };
+    let best_signature = best_signature
+        .map(|text| references::write_value(connection, claim_id, text, true))
+        .transpose()?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc47520fe1f56 owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6,roots_digest=CASE WHEN ?8 THEN '' ELSE roots_digest END WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h2a77ab38ae8d owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id,cold])?;
     if !finished {
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?

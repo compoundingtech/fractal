@@ -68,8 +68,11 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "apps/ios/fixtures/observation-minute.json",
     "claude-channel",
-    "scripts/ci-test-paths.rs"
+    "fixtures/objective-native-rows.json",
+    "scripts/ci-test-paths.rs",
+    "slo/dotfiles-merge-latency.kdl"
    ]
   },
   "fractal-api-mailbox": {
@@ -131,6 +134,7 @@
   },
   "fractal-conversation-ui": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "fixtures/clients/conversation-style.json",
     "fixtures/clients/transcripts/claude-skill.json",
     "fixtures/clients/transcripts/claude.expected.json",
@@ -164,6 +168,7 @@
   },
   "fractal-delivery-base": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -241,6 +246,7 @@
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
     "crates/fractal-daemon/hooks/pi-channel.ts",
+    "fixtures/objective-native-rows.json",
     "slo/fractal-ci.kdl",
     "slo/objectives.kdl"
    ]

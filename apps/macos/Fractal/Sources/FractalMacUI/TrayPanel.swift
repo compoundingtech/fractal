@@ -5,8 +5,14 @@ import SwiftUI
 
 /// The menu-bar panel as a Control Center module: the top level (tiles, the inbox as one-line
 /// rows, the footer), and the pages drilled into from it, pushed within the same panel with a
-/// back chevron. It draws no background of its own: the menu-bar window's glass is the surface,
-/// and content sits on it in the content layer.
+/// back chevron. The menu-bar window supplies the glass; one light, appearance-aware tint
+/// beneath both columns softens busy backgrounds without adding another glass layer.
+///
+/// A card is not pushed: it opens beside the page its row is on, and the panel widens into a
+/// list | detail split (`PanelMetrics.detailWidth` more), as Mail and Messages show a message
+/// beside its list. The list stays exactly where it was, its row selected; picking another row
+/// swaps the card, Esc or Close collapses the panel back. The live window's `PanelWindowFrame`
+/// grows the panel from its leading edge, so nothing the pointer is on moves.
 ///
 /// Every page on the model's navigation stack stays mounted under its entry's identity, so a
 /// page the person goes back to keeps its native view state (its scroll position above all);
@@ -19,6 +25,8 @@ public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
   @Environment(\.panelWidth) private var width
+  @Environment(\.panelAvailableHeight) private var availableHeight
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   /// The panel has appeared: pages it shows from now on arrive with motion. The pages it
   /// opens with (and a single-frame render) stand still.
   @State private var isShown = false
@@ -30,27 +38,50 @@ public struct TrayPanel: View {
 
   public var body: some View {
     let entries = model.navigationEntries
-    let active = entries[entries.count - 1].id
-    PanelStackLayout(active: active) {
-      ForEach(entries) { entry in
-        let isActive = entry.id == active
-        page(entry.route)
-          .environment(\.panelPageIsActive, isActive)
-          .modifier(PageArrival(isActive: isActive, moves: isShown, width: width))
-          // A covered page is out of sight and out of reach: no clicks, keyboard focus,
-          // shortcuts or VoiceOver, until Back shows it again.
-          .disabled(!isActive)
-          .opacity(isActive ? 1 : 0)
+    // The card on top is the detail column; the pages below it are the list column's stack.
+    let card = entries.last.flatMap { entry -> (entry: PanelNavigationEntry, record: AttentionRecord)? in
+      guard case .attention(let id) = entry.route, let record = model.record(id: id) else { return nil }
+      return (entry, record)
+    }
+    let pages = entries.filter { if case .attention = $0.route { false } else { true } }
+    let active = pages[pages.count - 1].id
+    SplitLayout(minHeight: min(PanelMetrics.splitMinHeight, availableHeight)) {
+      PanelStackLayout(active: active) {
+        ForEach(pages) { entry in
+          let isActive = entry.id == active
+          page(entry.route)
+            .environment(\.panelPageIsActive, isActive)
+            .modifier(PageArrival(isActive: isActive, moves: isShown, width: width))
+            // A covered page is out of sight and out of reach: no clicks, keyboard focus,
+            // shortcuts or VoiceOver, until Back shows it again.
+            .disabled(!isActive)
+            .opacity(isActive ? 1 : 0)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(isActive ? "panel-active-page" : "panel-retained-page")
+            .accessibilityHidden(!isActive)
+            .layoutValue(key: PanelStackEntry.self, value: entry.id)
+        }
+      }
+      // A push or Back animates only the arriving page, whatever animation the change came with.
+      .transaction(value: active) { $0.animation = nil }
+      .frame(width: width, alignment: .top)
+      .clipped()
+      .environment(\.panelDetailOpen, card != nil)
+      if let card {
+        AttentionPage(record: card.record, model: model)
+          // Another row's card starts at its top; the window's edge is the only motion.
+          .id(card.entry.id)
+          .frame(width: PanelMetrics.detailWidth)
+          .overlay(alignment: .leading) {
+            Rectangle().fill(.separator).frame(width: 1).accessibilityHidden(true)
+          }
           .accessibilityElement(children: .contain)
-          .accessibilityIdentifier(isActive ? "panel-active-page" : "panel-retained-page")
-          .accessibilityHidden(!isActive)
-          .layoutValue(key: PanelStackEntry.self, value: entry.id)
+          .accessibilityIdentifier("panel-detail")
+          .transaction { $0.animation = nil }
       }
     }
-    // A push or Back animates only the arriving page, whatever animation the change came with.
-    .transaction(value: active) { $0.animation = nil }
-    .frame(width: width, alignment: .top)
-    .clipped()
+    // The system supplies an opaque surface for Reduce Transparency; do not tint it again.
+    .background(Color(nsColor: .windowBackgroundColor).opacity(reduceTransparency ? 0 : PanelMetrics.surfaceTintOpacity))
     .background(PanelFrameMarker(route: model.route))
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)
@@ -59,14 +90,9 @@ public struct TrayPanel: View {
 
   @ViewBuilder private func page(_ route: PanelRoute) -> some View {
     switch route {
-    case .home:
+    // A card opens in the detail column, never on the list's stack (filtered out above).
+    case .home, .attention:
       HomePage(model: model, build: build)
-    case .attention(let id):
-      if let record = model.record(id: id) {
-        AttentionPage(record: record, model: model)
-      } else {
-        HomePage(model: model, build: build)
-      }
     case .availability:
       ModulePage(title: "Availability", model: model) {
         AvailabilitySwitch(model: model)
@@ -112,6 +138,28 @@ public struct TrayPanel: View {
     case .inbox:
       InboxPage(model: model)
     }
+  }
+}
+
+/// The list column at its own height, and when a card is open its column beside it, as tall as
+/// the list (at least `minHeight`): opening a card widens the panel and leaves its height alone
+/// wherever the list is tall enough, so the only change is the trailing edge moving out.
+private struct SplitLayout: Layout {
+  let minHeight: CGFloat
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let list = subviews[0].sizeThatFits(ProposedViewSize(width: nil, height: proposal.height))
+    guard subviews.count > 1 else { return list }
+    return CGSize(width: list.width + PanelMetrics.detailWidth, height: max(list.height, minHeight))
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    let list = subviews[0].sizeThatFits(ProposedViewSize(width: nil, height: proposal.height))
+    subviews[0].place(at: bounds.origin, proposal: ProposedViewSize(list))
+    guard subviews.count > 1 else { return }
+    subviews[1].place(
+      at: CGPoint(x: bounds.minX + list.width, y: bounds.minY),
+      proposal: ProposedViewSize(width: PanelMetrics.detailWidth, height: bounds.height))
   }
 }
 

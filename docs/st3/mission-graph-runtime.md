@@ -18,6 +18,14 @@ ordered, absolute-delay stages. Each policy matches a runtime state and uses
 repeated observations or lease renewals do not restart the state-entry clock.
 Step declarations inherit, replace, or disable the mission's policies.
 
+Canonical episode metadata is projected incrementally on receipt admission,
+replication and replay. Evaluation uses indexed, single-row seeks rather than
+replaying subject history. Out-of-order status receipts update only adjacent
+transition boundaries; same-state renewals never create a new entry episode.
+An explicit `work wait` pauses step silence until its declared deadline, including
+ordinary progress during the wait. Automatic expiry keeps that deadline as the
+stable silence anchor; `work resume` starts a fresh progress episode.
+
 Reconciliation delivers every overdue stage in order, not just the latest one,
 and registers the next stage as a deadline on the run's existing incremental
 evaluation. `notify` uses native message routing; `ask` creates an independent
@@ -31,6 +39,8 @@ Publication, including direct `mission.published` claims, requires signed
 `features.mission-escalation-v1=1` advertisements from every active anchored
 member. Missing, unsigned, or older reader advertisements refuse publication;
 upgrade or fence those readers rather than silently dropping policy fields.
+Only mission/step declaration fields (including nested and loop missions) require
+the capability; ordinary step or input names such as `escalation` do not.
 
 ## Retrying a failed run
 
@@ -45,6 +55,21 @@ The source's status, generation, and execution history are immutable. Append-onl
 ## Automatic publication supersession
 
 For a mission without a revision policy, publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
+
+An explicit CLI `missions start --revision REVISION`, API request `revision`, or declarative
+`mission "mission/ID@REVISION"` pins the run against automatic supersession. A CLI start
+without `--revision` still resolves an exact revision for admission, but emits
+`follow-head "true"` in its mission-run declaration so that this internal resolution does
+not become a user pin. Declarative callers can use the same flag when their selected
+revision is intended to follow later publications. Same-revision retries preserve the pin.
+
+The daemon advertises `capabilities.mission_run_follow_head = 1` in `/v1/health`.
+The CLI emits `follow-head` only when that capability is at least 1. Against an older
+daemon (capability absent or 0), it sends the legacy exact-revision declaration so starts
+continue to work during rolling upgrades; those admissions may be recorded as pinned.
+Authored declarations using `follow-head` require an upgraded publishing daemon. This
+authored flag keeps the exact admission binding (including validated readiness and
+workspace) while explicitly opting into later automatic head supersession.
 
 Native `work revise` and targeted launch revision proposals publish their candidate with the explicit run-revision operation atomically. Automatic publication supersession therefore cannot cancel the source between publication and its authorized explicit revision or proposal. Direct and proposal responses retain their durable idempotency correlation.
 
@@ -1762,6 +1787,25 @@ fractal work publish-mission step-run/GENERATION/compile-mission generated.kdl -
 ```
 
 The published document must contain exactly one ready mission with the declared ID. Fractal publishes the immutable revision and binds it to the producing definition and attempt.
+
+For an isolated output per producer run, declare
+`produces-mission "consent/${ST_MISSION_RUN}"`. Only this output-ID field expands the
+`${ST_MISSION_RUN}` placeholder; the worker publishes the concrete ID using the same
+`ST_MISSION_RUN` environment value (the durable run ID, without `mission-run/`).
+Retries, replays and daemon restarts within that run resolve the same ID. A new run,
+including an explicit successor, resolves a different ID. Resolution uses the producer's
+pinned revision, and `uses-mission output-of` still binds the exact produced revision.
+Other template variables are refused. Run-scoped IDs must resolve to 1–160 bytes of
+ASCII letters, digits, `/`, `-`, `.`, or `_`, without leading/trailing or doubled slashes.
+Literal output IDs retain their existing validation.
+
+Publication requires every active fleet member to advertise
+`daemon.started.features.per_run_missions=1`; unfenced legacy writers also block it.
+Run-scoped revisions carry the closed-schema `mission.published.per_run_missions=1`
+marker, so downgraded replicas quarantine them as unknown fields instead of selecting
+a literal shared ID. Upgrade or fence every peer before publication. This does not
+automatically retire the produced mission when its runs finish; explicit retirement
+continues to use the normal ownership and active-run fences.
 
 A later step can start that exact output:
 

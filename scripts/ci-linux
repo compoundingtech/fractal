@@ -128,6 +128,21 @@ clippy_and_codegen() {
   python3 scripts/build-stamp-watch-test || return
   python3 scripts/clippy-ratchet-test || return
   python3 scripts/crate-cut-test || return
+  # Verify Cargo's resolved graph, not just the target-conditioned manifest declaration.
+  local sha_features target
+  for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+    sha_features=$(cargo tree -p smallclaims --locked --target "$target" -e features \
+      --invert sha2@0.10.9 --prefix none) || return
+    if [[ "$target" == aarch64-* ]]; then
+      if [[ "$sha_features" != *'sha2 feature "asm"'* ]]; then
+        echo "smallclaims must enable sha2 asm on $target" >&2
+        return 1
+      fi
+    elif [[ "$sha_features" == *'sha2 feature "asm"'* ]]; then
+      echo "smallclaims must not enable sha2 asm on $target" >&2
+      return 1
+    fi
+  done
   cargo metadata --no-deps --format-version 1 --locked > "$logs/clippy-metadata.json" || return
   rustc --version > "$logs/clippy-rustc.txt" || return
   cargo clippy --version > "$logs/clippy-version.txt" || return

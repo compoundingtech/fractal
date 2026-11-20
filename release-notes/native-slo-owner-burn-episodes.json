@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Objective budget burns and exhausted budgets open one native episode for the declared owning agent; unknown evidence cannot manufacture recovery",
+  "replay": {"status": "none", "detail": "Existing objective failure and recovery claims remain authoritative."},
+  "schema": {"status": "changed", "detail": "New objective failures include an objective field identifying their exact declaring objective. Existing failure and recovery claims remain valid; no client wire types change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The existing objective response path accepts burning and exhausted alongside legacy missed. A transition between burn and exhaustion keeps the same episode; only measured met evidence or removal of an exactly owned child recovers it. No-data, not-eligible and no-qualifying-events preserve an open episode. Native binding ownership survives source revisions and member restart without prefix-cleaning independent declarations. Faults remain agent-addressed, not person notifications."},
+  "downtime": {"status": "none", "detail": "Standard daemon restart only."},
+  "manual": {"status": "none", "detail": "Declare an on-breach owner to receive objective episodes."},
+  "recovery": {"status": "none", "detail": "Rollback stops opening episodes for the new budget statuses without discarding existing claims."}
+}

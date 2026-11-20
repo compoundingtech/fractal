@@ -11,15 +11,32 @@ pub const MAX_START_JOBS: usize = 2;
 pub const OPERATION_TAG: &str = "st3.start-operation";
 pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 
+struct StartResult {
+    id: String,
+    subject: String,
+    finished_at: std::time::Instant,
+}
+
 pub struct StartJobs {
     owner: String,
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
+    application: Mutex<()>,
+    results: tokio::sync::mpsc::UnboundedSender<StartResult>,
+    completions: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<StartResult>>,
+    #[cfg(test)]
+    pub(super) completion_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl Default for StartJobs {
     fn default() -> Self {
+        let (results, completions) = tokio::sync::mpsc::unbounded_channel();
         Self {
             owner: uuid::Uuid::now_v7().to_string(),
             live: Arc::default(),
+            application: Mutex::new(()),
+            results,
+            completions: tokio::sync::Mutex::new(completions),
+            #[cfg(test)]
+            completion_hook: Mutex::default(),
         }
     }
 }
@@ -188,13 +205,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.signal_changed();
     }
 
+    pub(super) fn admit_incarnation_launch(&self) -> Result<Option<crate::store::launch_freeze::LaunchPermit>> {
+        let permit = self.store.admit_launch()?;
+        if permit.is_none() && let Some(freeze) = self.store.launch_freeze()? {
+            self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
+                crate::reconcile_telemetry::WakeCause::Deadline);
+        }
+        Ok(permit)
+    }
+
     pub fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
+        let Some(launch_permit) = self.admit_incarnation_launch()? else {
+            return Ok(());
+        };
         let Some(lock) = self.store.try_runtime_start_lock(&operation.subject)? else {
             return Ok(());
         };
+        if operation.owner != self.start_jobs.owner
+            && !self.store.adopt_queued_runtime_start(&operation.id, &self.start_jobs.owner)?
+        {
+            return Ok(());
+        }
         if !self
             .store
             .dispatch_runtime_start(&operation.id, MAX_START_JOBS)?
@@ -206,17 +240,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         let runtime = self.runtime.clone();
         let notify = self.notify.clone();
         let events = self.event_notify.clone();
+        let results = self.start_jobs.results.clone();
         let incremental = self.incremental.clone();
         let live = self.start_jobs.live.clone();
         let id = operation.id.clone();
         let subject = operation.subject.clone();
-        let owner = operation.owner.clone();
+        let owner = self.start_jobs.owner.clone();
         live.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id.clone());
         let spawned = std::thread::Builder::new().name("st3-runtime-start".into()).spawn(move || crate::task_cpu::blocking("runtime.start", || {
             let _lock = lock;
+            let _launch_permit = launch_permit;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 anyhow::ensure!(store.runtime_start_intent_current(&id)?,
@@ -236,6 +272,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut backend_entered = false;
             let mut contract = None;
+            let mut runtime_before_start = None;
             let result = caught(|| {
                 guard()?;
                 if prepared.subject.kind == "agent" {
@@ -243,11 +280,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                     store.record_invocation_launch_inputs(&id, &measured)?;
                     contract = Some(measured);
                 }
+                if prepared.subject.kind == "agent" && prepared.member.driver.is_none() {
+                    runtime_before_start = store.latest_claim(&subject, Some("runtime.observed"))?
+                        .map(|claim| claim.id);
+                }
                 backend_entered = true;
+                let operation = fractal_runtime::LaunchOperation(id.clone());
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
-                    runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
+                    runtime.start_resource_guarded(&store, &prepared.launch_member, Some(&operation), &guard)?;
                 } else {
-                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                    runtime.start_guarded(&prepared.launch_member, Some(&operation), &guard)?;
                 }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),
@@ -279,6 +321,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "verification_error": verification_error})
                 },
             };
+            if result["verification"] == "operation-incarnation"
+                && prepared.subject.kind == "agent" && prepared.member.driver.is_none()
+                && let Some(incarnation) = result["incarnation"].as_str()
+                && let Ok(Some((pid, token))) =
+                    runtime.start_process_identity(&prepared.launch_member, incarnation)
+            {
+                let fields = member_fields(&prepared.member, "starting", Some(incarnation), false);
+                result["runtime_pid"] = Value::from(pid);
+                result["runtime_pid_start_token"] = Value::from(token.to_string());
+                result["runtime_start_fields"] = serde_json::json!(fields);
+                result["runtime_before_start"] = serde_json::json!(runtime_before_start);
+            }
             result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());
             result["subject"] = Value::from(subject.clone());
@@ -292,12 +346,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["terminal"] = Value::from(prepared.member.terminal);
             result["start_request"] = Value::from(prepared.start_request);
             result["control_request"] = serde_json::json!(prepared.control_request);
-            if let Err(error) = store.finish_runtime_start(&id, &result) {
-                eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
-            }
+            let persisted = match store.finish_runtime_start(&id, &result) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("fractal: failed to persist runtime start completion {id}: {error:#}");
+                    false
+                }
+            };
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
             incremental.touch(&format!("local-runtime-start:{subject}"));
+            if persisted {
+                let _ = results.send(StartResult {
+                    id: id.clone(),
+                    subject: subject.clone(),
+                    finished_at: std::time::Instant::now(),
+                });
+            }
             incremental.touch(&subject);
             signal_changed(&notify, &events);
             // Leave `live` only once the completion is marked and its wake sent, so whoever waits
@@ -357,6 +422,59 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// This lane only consumes durable results for the exact signalled operation.
+    /// It runs alongside the broad pass, never launches a second broad reconciler.
+    pub(super) async fn consume_start_results(self: Arc<Self>) {
+        let mut completions = self.start_jobs.completions.lock().await;
+        while let Some(result) = completions.recv().await {
+            self.blocking(move |this| {
+                match this.isolate_start_completion(&result.subject, || {
+                    this.apply_start_result(&result.id, &result.subject)
+                }) {
+                    None => eprintln!(
+                        "fractal: failed to apply runtime start completion {}; see start-completion fault", result.id
+                    ),
+                    Some(true) => tracing::info!(
+                        operation = %result.id,
+                        subject = %result.subject,
+                        result_to_adoption_ms = result.finished_at.elapsed().as_secs_f64() * 1_000.0,
+                        "runtime start result adopted"
+                    ),
+                    Some(false) => {}
+                }
+            }).await;
+        }
+    }
+
+    pub(super) fn apply_start_result(&self, id: &str, subject: &str) -> Result<bool> {
+        let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(operation) = self.store.runtime_start_for(subject)? else {
+            return Ok(false);
+        };
+        if operation.id != id || !operation.finished || operation.applied {
+            return Ok(false);
+        }
+        #[cfg(test)]
+        {
+            let hook = self.start_jobs.completion_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let _capture = self.store.capture_runtime_observations()?;
+        self.reconcile_start_operation(operation, &PassPtySnapshot::new())?;
+        let Some(succeeded) = self.store.latest_observation(subject, "runtime.action.succeeded")?
+            .filter(|claim| claim.body["fields"]["operation"] == id)
+        else {
+            return Ok(false);
+        };
+        Ok(self.store.latest_observation(subject, "runtime.observed")?
+            .is_some_and(|claim| {
+                claim.body["fields"]["adopted"] == true
+                    && claim.body["fields"]["incarnation_id"] == succeeded.body["fields"]["incarnation_id"]
+            }))
+    }
+
     pub fn reconcile_start_jobs(&self) -> Result<()> {
         self.reconcile_start_jobs_with_snapshot(&PassPtySnapshot::new())
     }
@@ -372,23 +490,31 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn reconcile_start_jobs_with_snapshot(&self, snapshot: &PassPtySnapshot) -> Result<()> {
+        // Read operations only after serialization: a snapshot from before a
+        // completion consumer ran must never be applied a second time.
+        let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
-            if reconcile_decision_admitted(&subject) {
-                self.isolate("start-completion", &subject, || {
-                    self.reconcile_start_operation(operation, snapshot)
-                });
-            } else {
-                // Gate operations are not admitted reconciliation-fault subjects.
-                // Keep a distinct daemon fault scope for each exact operation.
-                self.isolate(
-                    &format!("start-completion:{subject}"),
-                    &format!("daemon/{}", self.host),
-                    || self.reconcile_start_operation(operation, snapshot),
-                );
-            }
+            self.isolate_start_completion(&subject, || {
+                self.reconcile_start_operation(operation, snapshot)
+            });
         }
         Ok(())
+    }
+
+    fn isolate_start_completion<T>(
+        &self,
+        subject: &str,
+        apply: impl FnOnce() -> Result<T>,
+    ) -> Option<T> {
+        // Completion subjects include agents, execs and gates, which are not
+        // admitted reconciliation-fault subjects. Keep each item's fault
+        // independent under the daemon's valid recorder.
+        self.isolate(
+            &format!("start-completion:{subject}"),
+            &format!("daemon/{}", self.host),
+            apply,
+        )
     }
 
     pub(super) fn reconcile_start_operation(
@@ -416,7 +542,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&operation.id);
         if !operation.finished
-            && (operation.owner != self.start_jobs.owner || (operation.dispatched && !live))
+            && operation.dispatched && (operation.owner != self.start_jobs.owner || !live)
         {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.

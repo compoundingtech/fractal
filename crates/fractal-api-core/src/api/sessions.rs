@@ -272,6 +272,9 @@ pub async fn attach_session(
     Json(_request): Json<AttachRequest>,
 ) -> Result<Json<Attachment>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
+    let (store, seat) = (state.store.clone(), subject.clone());
+    blocking_store(move || store.record_idle_unrouted(&seat,
+        crate::store::idle_residency::UnroutedKind::Attach)).await?;
     let session = live_session(&state, &subject, None)?;
     if !session.terminal {
         return Err(ApiError::bad(FractalError::new(
@@ -315,6 +318,9 @@ pub async fn local_terminal(
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<LocalTerminal>, ApiError> {
     let subject = session_storage_subject(&state, &subject)?;
+    let (store, seat) = (state.store.clone(), subject.clone());
+    blocking_store(move || store.record_idle_unrouted(&seat,
+        crate::store::idle_residency::UnroutedKind::Attach)).await?;
     // A read can still wait on a saturated disk; it must not hold a runtime worker meanwhile.
     let (lookup, lookup_subject) = (state.clone(), subject.clone());
     let session = crate::api::read_deadline::spawn_blocking(move || live_session(&lookup, &lookup_subject, None))

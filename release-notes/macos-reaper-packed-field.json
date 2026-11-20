@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restore macOS compilation of the owned-child reaper by formatting an aligned copy of packed kevent data",
+  "replay": { "status": "none", "detail": "No claim replay changes." },
+  "schema": { "status": "none", "detail": "No schema or persisted state changes." },
+  "rules": { "status": "none", "detail": "Child completion and kqueue error conditions are unchanged." },
+  "compatibility": { "status": "none", "detail": "The same kqueue error value is formatted without borrowing an unaligned packed field." },
+  "downtime": { "status": "none", "detail": "Build-only correction; normal binary rollout." },
+  "manual": { "status": "none", "detail": "No manual migration or configuration changes." },
+  "recovery": { "status": "none", "detail": "No durable state changes to recover." }
+}

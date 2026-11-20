@@ -13,20 +13,31 @@ collection, but `FractalClient` has no typed attention or availability stream.
   “N more”; the home cap uses the screen's visible height minus a 12 pt margin
   and measured tile/footer chrome. At least three inbox rows stay on short screens,
   which then scroll; tall screens show more rows while keeping all signals in view.
-  A row or tile pushes its page within the panel, with a back chevron and Esc.
-  Pages form a stack (the top level, the full inbox, a card opened from it): each
-  page still on the stack stays mounted, hidden off to the leading side, so Back
-  (or opening it again) returns to it at its exact scroll position, while a page
-  opened after it was popped starts at the top. The live panel hugs its content up to the
-  screen budget. One native frame policy keeps the menu-bar top edge pinned while arriving
-  data and navigation resize downward. The swap is instant, and only the arriving
-  page slides in sideways, from the trailing side on a push and the leading side
-  on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
-  and back to the row or tile that opened it. Closing the panel returns it to the
-  top level.
+  Selecting a card widens the panel to a 760 pt list | detail split: the 360 pt
+  list remains mounted at its scroll position and the 400 pt detail column has
+  a scrolling body and a sticky decision footer. Selecting another card replaces
+  the detail; Close or Esc returns to the list. Other tiles still push pages
+  with Back navigation. One native frame policy pins the top edge and, when
+  widening, the leading edge, clamping to the visible screen; Reduce Motion
+  makes the resize instant. Closing the panel returns it to the top level.
+- **Inbox tabs** split the inbox into Asks, Updates and Notices, each with its
+  count; `InboxKind` classifies on wire fields only, never titles. Asks are every
+  open request (`Role.ask`); updates are `update.type` `update` sent by an agent
+  (`requester_id` `agent/…`); every other update is a notice, such as the runtime's
+  `daemon/runtime` word that an ask ended (`update.about` `step-run/…`). The home
+  label's line carries the three as plain text tabs (no added height) and the capped
+  rows follow the selected one; More opens the full inbox on that tab. The full
+  inbox puts its Activity overview above a segmented All · Asks · Updates · Notices
+  control; Asks group under `AskGroup` sub-headers (decisions, choices, feedback,
+  questions, then reviews, prompts and forms answered in Fractal), and All lists
+  each kind under its own label. Both surfaces open on Asks and return to it when
+  the panel closes. Gallery scenarios `inbox-tabs-*` cover home, each page tab, an
+  empty tab, and both with and without activity.
 - **Inbox activity** counts arrival and resolution claims in the generic Fractal
   series response, grouped by ask/update type. Arrivals stack above the axis and
-  resolutions below, with asks in the stronger tone. The home label carries a
+  resolutions below, with asks in the stronger tone, on one scale for every tab:
+  the selected tab's series stays full and the other fades (notices count as
+  updates; All keeps both full). The home label carries a
   fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
   picker and per-bucket hover values. Missing activity data keeps the home label
   and full inbox Activity section visible with an explicit unavailable notice,
@@ -37,33 +48,32 @@ collection, but `FractalClient` has no typed attention or availability stream.
   substituting fleet-wide person-work counts. Gallery scenarios
   `inbox-activity-{busy,quiet,unavailable}-{home,page}` exercise both appearances at 360 pt.
 - **Asks** are classified by the wire kind and offered actions. Person steps
-  are answered on their page: a decision's or
-  choice's named answers (recommended first; request-changes takes words), a
-  choice's custom words or feedback text, Yes/No for an untyped question, or
-  Nothing to Do when there are no named answers. Custom forms, human reviews
-  offering approval, rejection or request changes, and harness prompts link to Fractal.
-  Every control is always in place, for the keyboard
-  and VoiceOver as much as the pointer. Each page has at most one prominent
-  button: an ask's recommended answer (never a decline, never one that needs
-  words) while nothing is being typed, or an update's Mark Read; no answer
-  takes Return, since answers are irreversible. A committed answer or control
-  returns the panel to the top level with a receipt row. Typed answers and the
-  note draft live on the model, so closing the panel keeps them.
-- **Pages** show what the row cannot: the card read again with its whole
-  request (`attentionGet`: question, why the person, summary, reasons,
-  recommendation, subjects, attachments), its work step (`workGet` of the
-  step run: title, state, last progress), each GitHub pull request's and
-  issue's state through Fractal's GitHub plugin (with "New commits" when a
-  pull request's head moved since the ask), image attachments as blobs read by
-  the step run that carries them, and the asker's newest timeline page reduced
-  to its last 10 prose turns, each capped at six lines. These are projection
-  reads under the session's `read.projections` scope, like the inbox itself. A
-  page is read when it opens, again on every refresh while the panel is on
-  screen, and when the panel comes back on screen; a closed panel polls no
-  page. Each part keeps its last value when a read fails and says why; a
-  member that does not grant a read, or predates its route (404), leaves only
-  that part unread. Raw image data leaves the model with its card; decoded images
-  use a shared, evictable 32 MiB cache (charged by decoded pixels).
+  are answered in the detail footer: pick a named answer, then Send or ⌘Return.
+  The recommendation is preselected; 1/2/3 pick while the detail has keyboard
+  focus, not while typing. Picking never sends, and bare Return never sends.
+  Declines retain their destructive tint; choices requiring words cannot send
+  without them. Custom words and feedback use the same fenced send path.
+  Untyped questions offer Yes/No; asks without named answers offer Nothing to Do.
+  Custom forms, human reviews and harness prompts link to Fractal.
+  A committed answer or control returns to the top level with a receipt row.
+  Typed answers and the note draft live on the model across panel closure.
+- **Details open synchronously** from the complete request snapshot already
+  returned by `attention.list`: question, why you, summary, reasons,
+  recommendation, subjects and attachments. Background reads enrich the work
+  step, GitHub subject status and conversation independently; they never gate
+  the first frame or show an initial loading state. One coalesced per-revision
+  stale-while-revalidate cache retains up to 12 entries with 15-second freshness.
+  While the panel is visible, serial prefetch warms the top five asks/updates.
+  Enrichment does not reread `attentionGet`; the authoritative submission fence
+  still does. Failed reads retain their last value and expose their refusal.
+  These remain existing projection reads, with no schema or composer changes.
+  The readable thread attributes each turn, collapses delivery envelopes into
+  “Prompt from X” chips, hides reasoning behind a toggle, and shortens GitHub
+  links to `repo#N`. Adjacent delivery copies are deduplicated; each prose turn
+  has a four-line cap with Show More, and Earlier turns in Fractal opens the
+  full conversation. The question and work-step title are not repeated.
+  Image bytes remain lazy; raw image data leaves the model with its card and
+  decoded images share an evictable 32 MiB cache charged by decoded pixels.
 - **Snooze and Dismiss** are the person's own attention controls
   (`attention.snooze`, `attention.dismiss`), offered when the session is
   granted them, on every ask's page (and Snooze on an update's), never as an
@@ -344,6 +354,16 @@ weekly budget. Render just these on a Mac with:
   programmatically. The guest's macOS is the captures' macOS: `capture.json`
   records it.
 
+
+## Panel surface
+
+The window-style `MenuBarExtra` supplies the native glass. One
+`windowBackgroundColor` underlay at the `TrayPanel` root covers both columns,
+adapts to light and dark appearance, and leaves the system glass edge intact.
+`PanelMetrics.surfaceTintOpacity` controls its weight (0.45 retains 55% of
+the backdrop contrast). Reduce Transparency omits this tint and leaves the
+system's opaque accessibility surface alone. Groups and tiles do not add
+another glass layer.
 
 ## Scroll and refresh performance Mac gate
 

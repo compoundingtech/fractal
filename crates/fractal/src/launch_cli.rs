@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 /// Resolve against the approved revision, or the exact candidate being approved, not the
@@ -541,6 +541,9 @@ pub(super) async fn run_mission_view(
         MissionViewCommand::RenameId(args) => {
             run_identity_rename(endpoint, args, false, json_output).await
         }
+        MissionViewCommand::RenameProof(args) => {
+            run_identity_rename_proof(endpoint, args, false, json_output).await
+        }
         MissionViewCommand::Tree => {
             let view: Value = client.get("/v1/client/missions-tree").await?;
             if json_output {
@@ -652,6 +655,16 @@ pub(super) async fn run_mission_view(
                 client.clone()
             };
             let client = &client;
+            // Capture the cursor before reading the selected run, so a transition
+            // during that read remains visible to the event wait.
+            let cursor = if args.follow {
+                let health: Value = client.get("/v1/health").await?;
+                health["store_index"]
+                    .as_u64()
+                    .context("the daemon health response has no store index")?
+            } else {
+                0
+            };
             let mut selected = args.mission_or_run;
             if !selected.starts_with("mission-run/") {
                 let overview: Value = client
@@ -683,7 +696,7 @@ pub(super) async fn run_mission_view(
                 ))
                 .await?;
             if args.follow {
-                return follow_mission_run(client, run, 0, json_output, args.limit).await;
+                return follow_mission_run(client, run, cursor, json_output, args.limit).await;
             }
             if json_output {
                 return print_value(&run, true);
@@ -748,7 +761,7 @@ pub(super) async fn run_mission_view(
     }
 }
 
-/// `st missions check FILE`: exit status 1 when a gate is broken.
+/// `fractal missions check FILE`: exit status 1 when a gate is broken.
 async fn check_mission_file(
     client: &Client,
     args: MissionCheckArgs,
@@ -775,7 +788,7 @@ async fn check_mission_file(
         },
     )
     .await?;
-    let view = checked.context("this st daemon cannot check exec gates; update it")?;
+    let view = checked.context("this fractal daemon cannot check exec gates; update it")?;
     if json_output {
         print_value(&view, true)?;
     } else if view.gates.is_empty() {
@@ -1058,7 +1071,7 @@ fn render_mission_overview(view: &Value) -> String {
     out
 }
 
-/// The lanes a mission run owns, for `st missions show`.
+/// The lanes a mission run owns, for `fractal missions show`.
 fn render_run_lanes(lanes: &[fractal_daemon::model::LaneView], now: u128) -> String {
     use std::fmt::Write as _;
 

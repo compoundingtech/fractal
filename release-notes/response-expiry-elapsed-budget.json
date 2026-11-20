@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Yield response-expiry maintenance after 20ms of cooperative work as well as 64 receipts",
+  "replay": {"status": "none", "detail": "No replay; unexamined receipts remain queued for the next maintenance transaction."},
+  "schema": {"status": "none", "detail": "No schema or index changes."},
+  "rules": {"status": "none", "detail": "Durable clock validation, live response pinning and operation identity protection are unchanged."},
+  "compatibility": {"status": "none", "detail": "Receipt cleanup may commit fewer than 64 candidates; cleanup counts describe only the committed prefix."},
+  "downtime": {"status": "none", "detail": "Normal daemon restart deploys the cooperative maintenance limit."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Failed transactions roll back their prefix; later maintenance resumes from durable receipt order. One response check, mutation or COMMIT can exceed the cooperative budget."}
+}

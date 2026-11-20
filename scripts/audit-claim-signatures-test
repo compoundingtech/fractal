@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 audit = runpy.run_path(str(Path(__file__).with_name("audit-claim-signatures")))["audit"]
+stored_signature_text = audit.__globals__["stored_signature_text"]
 
 
 class AuditTest(unittest.TestCase):
@@ -20,6 +21,7 @@ class AuditTest(unittest.TestCase):
         self.path = Path(self.temp.name) / "claims.sqlite3"
         self.db = sqlite3.connect(self.path)
         self.addCleanup(self.db.close)
+        self.db.row_factory = sqlite3.Row
         self.db.executescript("""
             CREATE TABLE claims(id TEXT PRIMARY KEY, batch_id TEXT, kind TEXT, store_index INTEGER);
             CREATE INDEX claims_kind ON claims(kind, store_index);
@@ -42,6 +44,75 @@ class AuditTest(unittest.TestCase):
             encoded = base64.b64encode(cbor2.dumps(payload)).decode()
             self.db.execute("INSERT INTO replica_envelopes VALUES(?,?)", (claim, encoded))
         self.db.commit()
+
+    def reference(self, index, text, candidate=True):
+        claim = str(index)
+        reference = hashlib.sha256(text.encode("utf-8")).digest()
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS claim_signature_originals(
+                claim_id TEXT, reference BLOB, signature TEXT, candidate INTEGER,
+                PRIMARY KEY(claim_id, reference));
+            CREATE TABLE IF NOT EXISTS claim_signature_candidates(
+                claim_id TEXT, signature TEXT, PRIMARY KEY(claim_id, signature));
+        """)
+        self.db.execute("INSERT INTO claim_signature_originals VALUES(?,?,?,?)",
+                        (claim, reference, text, int(candidate)))
+        if candidate:
+            self.db.execute("INSERT INTO claim_signature_candidates VALUES(?,?)", (claim, text))
+        self.db.execute("INSERT OR REPLACE INTO claim_signatures VALUES(?,?)", (claim, reference))
+        self.db.commit()
+        return reference
+
+    def test_reference_resolution_preserves_original_utf8_bytes(self):
+        text = ' { "signature": "fixture", "signer": "person/é" }\n'
+        self.grant(1)
+        reference = self.reference(1, text)
+        query = lambda sql, args: [dict(row) for row in self.db.execute(sql, args)]
+        self.assertEqual(stored_signature_text(query, "1", reference).encode("utf-8"),
+                         text.encode("utf-8"))
+        self.assertEqual(stored_signature_text(query, "1", text), text)
+        self.assertIsNone(stored_signature_text(query, "1", None))
+        self.grant(2)
+        legacy_reference = self.reference(2, text, candidate=False)
+        self.assertEqual(stored_signature_text(query, "2", legacy_reference), text)
+
+    def test_corrupt_references_fail_closed_without_leaking_evidence(self):
+        for index, corruption in enumerate(("missing", "digest", "candidate", "length"), 1):
+            with self.subTest(corruption=corruption):
+                self.grant(index)
+                self.reference(index, '{"signature":"PRIVATE"}')
+                if corruption == "missing":
+                    self.db.execute("DELETE FROM claim_signature_originals WHERE claim_id=?", (str(index),))
+                elif corruption == "digest":
+                    self.db.execute("UPDATE claim_signature_originals SET signature='PRIVATE corrupt' WHERE claim_id=?", (str(index),))
+                elif corruption == "candidate":
+                    self.db.execute("DELETE FROM claim_signature_candidates WHERE claim_id=?", (str(index),))
+                else:
+                    self.db.execute("UPDATE claim_signatures SET signature=? WHERE claim_id=?", (b"x" * 31, str(index)))
+                self.db.commit()
+                result = audit(self.path)
+                self.assertFalse(result["complete"], result)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                self.assertTrue(any("signature" in reason for reason in result["limitations"]), result)
+                # Isolate each corrupt row so every failure path is exercised.
+                self.db.execute("DELETE FROM claims WHERE id=?", (str(index),))
+                self.db.commit()
+
+    @unittest.skipUnless(audit.__globals__["cbor2"], "requires optional cbor2 payload decoder")
+    def test_mixed_references_compare_original_sealed_payloads_read_only(self):
+        text = ' { "signature": "fixture", "signer": "person/é" }\n'
+        signature = json.loads(text)
+        for index in (1, 2, 3):
+            self.grant(index, sealed=True, stored=signature, payload_signature=signature)
+        self.reference(2, text)
+        self.reference(3, text, candidate=False)
+        before = hashlib.sha256(self.path.read_bytes()).digest()
+        result = audit(self.path)
+        self.assertTrue(result["complete"], result)
+        self.assertEqual(result["sealed_payloads"]["envelopes_checked"], 3)
+        self.assertEqual(result["sealed_payloads"]["payload_signature_differs_from_stored"], 0)
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).digest(), before)
+
 
     @unittest.skipUnless(audit.__globals__["cbor2"], "requires optional cbor2 payload decoder")
     def test_classifies_original_payloads_without_mutating_evidence(self):

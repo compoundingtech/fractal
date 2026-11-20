@@ -300,3 +300,16 @@ success-output = "immediate"
 filter = 'package(=fractal-runtime) and test(=pty::tests::process_identity_captures_the_harness_not_the_pty_server_and_fences_incarnation)'
 retries = 0
 success-output = "immediate"
+
+# Keep the bounded signature migration's measured byte/time receipt in hosted logs.
+[[profile.ci.overrides]]
+filter = 'package(=smallclaims) and test(=store::principals::references::tests::measured_twenty_thousand_claim_reference_migration)'
+retries = 0
+success-output = "immediate"
+junit.store-success-output = true
+
+# Retain completed-judging/dependency byte and VM tuples without changing selection or retries.
+[[profile.ci.overrides]]
+filter = '(package(=smallclaims) and binary(=principals) and (test(=a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page) or test(=compact_dependencies_reopen_cold_results_and_hold_revoked_dependents_past_one_page) or test(=mixed_duplicate_dependencies_preserve_canonical_invalidation_pages))) or (package(=fractal) and test(=daemon_cost::cold_dependency_reads_and_invalidation_pages_are_history_bounded))'
+success-output = "immediate"
+junit.store-success-output = true

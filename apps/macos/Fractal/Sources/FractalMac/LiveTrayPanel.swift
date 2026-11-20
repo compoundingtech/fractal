@@ -27,6 +27,9 @@ struct LiveTrayPanel: View {
         Color.clear.frame(width: lastSize.width, height: lastSize.height)
       }
     }
+    // Pinned top-leading: while the window's trailing edge animates out or in for the card's
+    // column, the content stays in its final place and the edge uncovers or covers it.
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .background(PanelVisibility(model: model, availableHeight: $availableHeight))
     .background(PanelWindowFrame(contentSize: lastSize))
   }
