@@ -248,7 +248,7 @@ fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
         "claim_signature_originals",
     ];
     let read = |sql: &str, id: &str| -> rusqlite::Result<()> {
-        let mut statement = connection.prepare_cached(sql)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9fa486291dca owner=fractal_store::store::mail_retirement TODO=trace-statement-and-value-representation */ sql)?;
         let mut rows = statement.query([id])?;
         while rows.next()?.is_some() {}
         Ok(())

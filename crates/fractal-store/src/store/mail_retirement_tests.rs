@@ -240,7 +240,7 @@ fn a_spent_budget_stops_before_the_next_sent_claim() {
     let short = |subject: &str| {
         let ids = thread(&store, subject, SENDER, RECIPIENT, true);
         for id in &ids[1..3] {
-            store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd1bf57d459d7 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id]).unwrap();
+            store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-had322b3de5b9 owner=fractal_store::store::mail_retirement_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id]).unwrap();
         }
         vec![ids[0].clone(), ids[3].clone()]
     };
