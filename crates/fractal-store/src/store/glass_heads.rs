@@ -4,7 +4,7 @@ use smallclaims::store::canonical;
 use fractal_schema::glasses::MAX_GLASSES;
 
 const VERSION: &str = "1";
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8dab9a88d980 owner=fractal_store::store::glass_heads TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2dd7589af403 owner=fractal_store::store::glass_heads TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS glass_heads (
     subject TEXT PRIMARY KEY,
     person TEXT NOT NULL,

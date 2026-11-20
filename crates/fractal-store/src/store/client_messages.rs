@@ -1137,7 +1137,7 @@ fn malformed_count(connection: &Connection) -> Result<u64> {
 /// otherwise projection can replace a header at an already issued store-index cut.
 fn projection_blocks_selectors(connection: &Connection, subject: Option<&str>) -> Result<bool> {
     Ok(connection.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+        /* sqlite-large-value: allow-for-now lv-h2b154489f9c3 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
          WHERE subject=COALESCE(?1,(SELECT subject FROM local_client_message_selectors_v1
            INDEXED BY client_selector_pending WHERE born_index=-1 ORDER BY subject LIMIT 1))
            AND kind='intent.desired'

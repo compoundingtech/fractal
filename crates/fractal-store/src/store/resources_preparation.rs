@@ -213,14 +213,14 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
                 String::new()
             };
             let sql = format!(
-                /* sqlite-large-value: allow-for-now lv-h644b8879386d owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event}{suffix} AFTER {clause} ON {table}{when} BEGIN
+                /* sqlite-large-value: allow-for-now lv-hf0878f8059c5 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event}{suffix} AFTER {clause} ON {table}{when} BEGIN
                  INSERT INTO local_resource_preparation_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL
                  AND EXISTS (SELECT 1 FROM claims WHERE id={row}.{identity} AND {relevant})
                  AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_pending WHERE claim_id={row}.{identity}); END;"
             );
             replace_if_changed(connection, "TRIGGER", &format!("preparation_{table}_{event}{suffix}"), &sql)?;
-            connection.execute_batch(&sql)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc48b9de3a658 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &sql)?;
         }
     }
     // UPDATE can move an identity as well as changing its canonical inputs.

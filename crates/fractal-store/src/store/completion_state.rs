@@ -174,7 +174,7 @@ fn tracking(connection: &Connection) -> Result<()> {
                 String::new()
             };
             let sql = format!(
-                /* sqlite-large-value: allow-for-now lv-hb41247584095 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}{suffix}
+                /* sqlite-large-value: allow-for-now lv-h4e91fa11194d owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}{suffix}
                  AFTER {clause} ON {table}{when} BEGIN
                  INSERT INTO local_completion_health_v1_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL AND (
@@ -183,7 +183,7 @@ fn tracking(connection: &Connection) -> Result<()> {
                  AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id={row}.{identity});
                  END;");
             replace_if_changed(connection, "TRIGGER", &format!("completion_health_v1_{table}_{event}_{row}{suffix}"), &sql)?;
-            connection.execute_batch(&sql)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7c0d7a38f43c owner=fractal_store::store::completion_state TODO=trace-statement-and-value-representation */ &sql)?;
         }
     }
     for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"), ("UPDATE", "OLD")] {

@@ -9316,7 +9316,7 @@ pub fn desired_row_at(
     if subject.starts_with("message/") {
         if let Some(row) = current_desired_row(connection, subject)? {
             let unchanged: bool = connection.query_row(
-                &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                /* sqlite-large-value: allow-for-now lv-hb1f5eb722a0b owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE subject=?1 AND kind='intent.desired' AND store_index>?2)
                  AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                    WHERE subject=?1 AND kind='intent.desired'
