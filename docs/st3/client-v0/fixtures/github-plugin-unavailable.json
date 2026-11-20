@@ -1,5 +1,0 @@
-{
-  "status": "unavailable",
-  "reason": "GitHub API rate limit exceeded for this installation",
-  "retry_after_s": 120
-}
