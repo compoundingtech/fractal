@@ -11,7 +11,8 @@ priority = 100
 [[profile.default.overrides]]
 filter = '''
 ((package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and (
-    test(/^delivery_probe::native_delivery_probe_alerts_and_recovers_without_model_turns$/)
+    test(/^convergence::(seed_1_converges_on_a_real_disk|the_checks_catch_a_partial_adoption)$/)
+    or test(/^delivery_probe::native_delivery_probe_alerts_and_recovers_without_model_turns$/)
     or test(/^client_only::the_(fleet|usage)_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute$/)
     or test(/^daemon_restart::a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_restart$/)
     or test(/^subagents_seat::a_seats_subagents_appear_renew_and_end$/)
@@ -100,6 +101,11 @@ filter = '''
   or
   (binary_id(=fractal::integration) and (
     test(=client_only::daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member)
+    or test(=convergence::a_seed_runs_the_same_every_time)
+    or test(=convergence::seed_1_converges)
+    or test(=convergence::seed_2_converges)
+    or test(=convergence::seed_34_converges)
+    or test(=convergence::the_checks_catch_a_trim_that_forgets_its_tombstones)
     or test(=daemon_restart::native_read_mail_is_settled_before_and_after_reopening_the_daemon)
     or test(=daemon_restart::todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_after_catchup)
     or test(=delivery_probe::native_delivery_probe_alerts_attention_and_recovers_without_model_turns)
