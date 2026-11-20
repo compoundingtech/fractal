@@ -640,6 +640,40 @@ impl Store {
     }
 }
 
+/// The judged claim's batch time, and for a batch this side of the freshness cutover whether it
+/// keeps the writer's order: no claim in it timed before it, and it timed no earlier than the
+/// writer's previous batch or any batch its claims name as predecessors. Every read is an index
+/// seek; batches before the cutover are not checked.
+fn batch_time(connection: &Connection, claim_id: &str) -> Result<Option<crate::principal::BatchTime>> {
+    let Some((time, origin, sequence, batch)) = connection
+        .prepare_cached(
+            "SELECT CAST(b.accepted_at_unix_ms AS INTEGER), b.origin, b.replica_sequence, b.id
+             FROM claims c JOIN batches b ON b.id=c.batch_id WHERE c.id=?1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hccc03f5454c6 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)))
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let time_unix_ms = u64::try_from(time).unwrap_or(0);
+    if time_unix_ms < crate::principal::FRESHNESS_FROM_UNIX_MS {
+        return Ok(Some(crate::principal::BatchTime { time_unix_ms, ordered: true }));
+    }
+    let disordered: bool = connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
+                           WHERE batch_id=?1 AND CAST(accepted_at_unix_ms AS INTEGER)<?2)
+                 OR EXISTS(SELECT 1 FROM batches INDEXED BY batches_writer_sequence
+                           WHERE origin=?3 AND replica_sequence=?4-1
+                             AND CAST(accepted_at_unix_ms AS INTEGER)>?2)
+                 OR EXISTS(SELECT 1 FROM claims c INDEXED BY claims_batch_index, json_each(c.predecessors) j
+                           JOIN claims p ON p.id=j.value JOIN batches pb ON pb.id=p.batch_id
+                           WHERE c.batch_id=?1 AND CAST(pb.accepted_at_unix_ms AS INTEGER)>?2)",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h01b6552da688 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![batch, time, origin, sequence], |row| row.get(0))?;
+    Ok(Some(crate::principal::BatchTime { time_unix_ms, ordered: !disordered }))
+}
+
 /// Answers for one claim being judged: every question about order is about claims before it.
 struct StoreFacts<'a> {
     connection: &'a Connection,
@@ -699,6 +733,10 @@ impl StoreFacts<'_> {
 }
 
 impl Facts for StoreFacts<'_> {
+    fn batch(&self) -> Option<crate::principal::BatchTime> {
+        self.read(batch_time(self.connection, &self.claim_id), None)
+    }
+
     fn delegation(&self, claim_id: &str) -> Option<Delegation> {
         self.links
             .borrow_mut()
@@ -2884,5 +2922,85 @@ mod paced_verdict_tests {
                 .unwrap(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use crate::claim::ClaimInput;
+    use crate::fleet::MemberKey;
+    use crate::principal::{BatchTime, FRESHNESS_FROM_UNIX_MS};
+
+    fn note(store: &Store, text: &str, at: u64) -> String {
+        store.set_write_clock_at(u128::from(at)).unwrap();
+        let id = store
+            .append_claim(&ClaimInput {
+                subject: format!("note/{text}"),
+                kind: "example.note".into(),
+                actor: None,
+                fields: serde_json::from_value(serde_json::json!({"text": text})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+            .id;
+        store.replication_snapshot().unwrap();
+        id
+    }
+
+    fn batch_of(store: &Store, claim: &str) -> BatchTime {
+        batch_time(&store.readers.get(), claim).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_batch_past_the_cutover_keeps_the_writers_order_or_its_claims_are_invalid() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let start = FRESHNESS_FROM_UNIX_MS + 60_000;
+        let first = note(&store, "first", start);
+        let second = note(&store, "second", start + 60_000);
+        while store.verdicts_pending().unwrap() {
+            store.advance_signature_judgment().unwrap();
+        }
+        for claim in [&first, &second] {
+            assert!(batch_of(&store, claim).ordered);
+            assert_eq!(store.claim_verdict(claim).unwrap(), Verdict::Verified);
+        }
+        assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+        let batch: String = store.readers.get()
+            .query_row("SELECT batch_id FROM claims WHERE id=?1", [&second], |row| row.get(0)).unwrap();
+        let write = |sql: &str| { store.connection.write().execute(sql, [&batch]).unwrap(); };
+
+        // Timed before the writer's previous batch.
+        write(&format!("UPDATE batches SET accepted_at_unix_ms='{}' WHERE id=?1", start - 1));
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start - 1));
+        assert!(!batch_of(&store, &second).ordered);
+        let mismatches = store.recheck_claim_verdicts().unwrap();
+        assert!(mismatches.iter().any(|m| m.claim_id == second), "{mismatches:?}");
+        write(&format!("UPDATE batches SET accepted_at_unix_ms='{}' WHERE id=?1", start + 60_000));
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 60_000));
+        assert!(batch_of(&store, &second).ordered);
+
+        // A claim timed before its own batch.
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 59_999));
+        assert!(!batch_of(&store, &second).ordered);
+        write(&format!("UPDATE claims SET accepted_at_unix_ms='{}' WHERE batch_id=?1", start + 60_000));
+
+        // Timed before a batch one of its claims names as a predecessor.
+        store.connection.write().execute(
+            "UPDATE claims SET predecessors=json_array(?2) WHERE id=?1", params![&first, &second]).unwrap();
+        assert!(!batch_of(&store, &first).ordered, "the first batch now follows a later one");
+        assert!(batch_of(&store, &second).ordered);
+    }
+
+    #[test]
+    fn a_batch_before_the_cutover_is_not_checked() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
+        let claim = note(&store, "early", FRESHNESS_FROM_UNIX_MS - 60_000);
+        let batch = batch_of(&store, &claim);
+        assert!(batch.time_unix_ms < FRESHNESS_FROM_UNIX_MS && batch.ordered);
     }
 }

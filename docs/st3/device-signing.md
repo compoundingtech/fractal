@@ -299,10 +299,22 @@ interrupted: the paced signature job, which has no request deadline, does that w
 named defect is repaired, a person or the fleet's fault agent runs
 `fractal replication signatures resume --reason TEXT` on that member.
 
-Only the daemon that first accepts the send checks the time. Every member checks the signature
-and its chain when the claim arrives, and records the verdict (`fractal doctor`, claim-signatures).
-It never checks the time, so the verdict is the same everywhere, whatever order claims arrive
-in.
+Only the daemon that first accepts the send checks the time against its own clock. Every member
+checks the signature and its chain when the claim arrives, and records the verdict (`fractal
+doctor`, claim-signatures). The verdict never reads a member's clock, so it is the same
+everywhere, whatever order claims arrive in.
+
+From batches timed 2026-12-01T00:00Z on, the verdict also reads the times the writer put in the
+claims (`principal::FRESHNESS_FROM_UNIX_MS`). Those are the same on every member. A signature
+counts only within 7 days after it was made, by its batch's time, and may be dated at most an hour
+after that batch. The batch must keep its writer's order: no claim timed before it, and not timed
+before the writer's previous batch or a batch its claims name as predecessors. A claim's ID covers
+its batch, but its signature covers only subject, kind, actor and body. So a writer can carry a
+signed claim's content again in a later batch, and members keep that original only while they
+have not trimmed it. The window makes such a copy of a claim old enough to be forgotten invalid
+from its own fields, so members agree without holding the original. Forgets keep signed claims at
+least 8 days. A writer with no earlier batch and no predecessors can still time a copy within the
+window; that remaining gap is accepted, since it needs a member with a writer key.
 
 ## Scope of version 1
 

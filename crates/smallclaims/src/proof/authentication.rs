@@ -77,6 +77,26 @@ fn before(left: &Record, right: &Record) -> bool {
 }
 
 impl Facts for ProofFacts<'_, '_> {
+    /// As the store answers it, from the verified records: a proof's claims carry their batch's
+    /// time, which its header hash binds.
+    fn batch(&self) -> Option<principal::BatchTime> {
+        let claim = &self.record.claim;
+        let time = u64::try_from(claim.accepted_at_unix_ms).ok()?;
+        if time < principal::FRESHNESS_FROM_UNIX_MS {
+            return Some(principal::BatchTime { time_unix_ms: time, ordered: true });
+        }
+        let later = |record: &Record| u64::try_from(record.claim.accepted_at_unix_ms).is_ok_and(|other| other > time);
+        let records = self.authentication.records;
+        let disordered = records.values().any(|record| {
+            // The writer's previous batch.
+            (record.claim.origin == claim.origin && record.sequence + 1 == self.record.sequence && later(record))
+                // Any batch a claim of this batch names as a predecessor.
+                || (record.claim.batch_id == claim.batch_id
+                    && record.claim.predecessors.iter().any(|predecessor| records.get(predecessor).is_some_and(|p| later(p))))
+        });
+        Some(principal::BatchTime { time_unix_ms: time, ordered: !disordered })
+    }
+
     fn delegation(&self, claim_id: &str) -> Option<Delegation> {
         let record = self.authentication.records.get(claim_id)?;
         if record.claim.kind != principal::KEY_GRANTED { return None; }
