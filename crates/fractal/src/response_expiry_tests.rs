@@ -273,3 +273,26 @@ async fn response_expiry_schema_read_failure_stops_visibly() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn replay_safe_receipts_older_than_the_window_go_and_zero_keeps_them() {
+    let retention = smallclaims::store::idempotency::RETENTION_MS;
+    let hour = smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS;
+    for (window, kept) in [(hour, 1), (0, 2)] {
+        let (_directory, store) = fixture();
+        let now = now_ms() as i64;
+        // Completed two hours ago, and just now: only the first is past an hour.
+        insert(&store, "renewal-old", now - 2 * hour + retention);
+        insert(&store, "renewal-new", now + retention);
+        let (_observer, changes) = notices(&store);
+        let task = spawn_response_expiry_with(store.clone(), window);
+        if window == 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        count_becomes(&store, changes, kept).await;
+        task.abort();
+        let left: String = store.readers.get()
+            .query_row("SELECT group_concat(operation_id) FROM (SELECT operation_id FROM idempotency ORDER BY operation_id)", [], |row| row.get(0)).unwrap();
+        assert_eq!(left, if window == 0 { "renewal-new,renewal-old" } else { "renewal-new" });
+    }
+}

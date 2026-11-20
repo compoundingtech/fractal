@@ -288,6 +288,20 @@ impl Runtime for FractalRuntime {
         // A document a run binds is decided by its run authority, as its claims are.
         super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
+    fn replay_safe_response_pinned(&self, connection: &Connection, response: &str) -> Result<bool> {
+        // A replay-safe step view is a lease renewal's: a retry after it is gone renews again,
+        // so the renewal's live work does not keep it. Other replay-safe receipts (a run or
+        // revision apply) keep the in-use rule.
+        let renewal = serde_json::from_str::<Value>(response).is_ok_and(|view| {
+            view.get("mission_run").is_none()
+                && view.get("subject").and_then(Value::as_str).is_some_and(|subject| subject.starts_with("step-run/"))
+        });
+        if renewal {
+            return Ok(false);
+        }
+        self.idempotency_response_in_use(connection, response)
+    }
+
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
         let Ok(value) = serde_json::from_str::<Value>(response) else {
