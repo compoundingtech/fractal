@@ -69,30 +69,46 @@ const PAGE_SQL: &str = "SELECT rowid, writer, sequence, envelope_hash, accepted_
      FROM replica_envelopes WHERE rowid>?1 ORDER BY rowid LIMIT ?2";
 
 /// Whether the envelope `?1`, `?2`, `?3` (batch `?4`) can lose its payload, as far as the store's
-/// rows tell: its batch has no other envelope, every record it has is valid and no repair names
-/// one, it is not its writer's newest envelope here, no checkpoint lists it, no restore holds it
-/// in quarantine, and every claim of its batch has its position stored.
+/// rows tell, one column for each of [`ELIGIBLE_REASONS`]: its batch has no other envelope, every
+/// record it has is valid and no repair names one, it is not its writer's newest envelope here,
+/// no checkpoint lists it, no restore holds it in quarantine, and every claim of its batch has its
+/// position stored.
 const ELIGIBLE_SQL: &str = "SELECT
-        (SELECT COUNT(*) FROM envelope_rows WHERE batch_id=?4)=1
-    AND NOT EXISTS(SELECT 1 FROM replica_records
+        (SELECT COUNT(*) FROM envelope_rows WHERE batch_id=?4)=1,
+        NOT EXISTS(SELECT 1 FROM replica_records
                    WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND state<>'valid')
-    AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
+        AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
                    WHERE claims.batch_id=?4 AND EXISTS(SELECT 1 FROM replica_records
-                       WHERE replica_records.claim_id=claims.id AND state<>'valid'))
-    AND NOT EXISTS(SELECT 1 FROM claims AS repairs INDEXED BY claims_kind_index
+                       WHERE replica_records.claim_id=claims.id AND state<>'valid')),
+        NOT EXISTS(SELECT 1 FROM claims AS repairs INDEXED BY claims_kind_index
                    WHERE repairs.kind='record.repaired'
                      AND json_extract(repairs.body,'$.fields.record') IN (
                          SELECT record_ref FROM replica_records
-                         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3))
-    AND ?2<(SELECT MAX(sequence) FROM replica_envelopes WHERE writer=?1)
-    AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
-                   WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)
-    AND NOT EXISTS(SELECT 1 FROM replica_restore_quarantine
-                   WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)
-    AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
+                         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)),
+        ?2<(SELECT MAX(sequence) FROM replica_envelopes WHERE writer=?1),
+        NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
+                   WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3),
+        NOT EXISTS(SELECT 1 FROM replica_restore_quarantine
+                   WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3),
+        NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index
                    WHERE claims.batch_id=?4
-                     AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=claims.id))
-    AND EXISTS(SELECT 1 FROM batches WHERE id=?4 AND origin=?1 AND replica_sequence=?2)";
+                     AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=claims.id)),
+        EXISTS(SELECT 1 FROM batches WHERE id=?4 AND origin=?1 AND replica_sequence=?2)";
+
+/// Why an envelope stays, for each column of [`ELIGIBLE_SQL`] in order.
+const ELIGIBLE_REASONS: [&str; 8] = [
+    "batch-has-another-envelope",
+    "record-not-valid",
+    "repair-names-a-record",
+    "writers-newest",
+    "checkpoint-lists-it",
+    "quarantined",
+    "claim-without-position",
+    "batch-names-another-write",
+];
+
+/// Why an envelope stays when a claim of it lacks its writer's signature.
+pub const UNSIGNED_CLAIM: &str = "claim-unsigned";
 
 /// What one page of [`Store::release_envelopes`] did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -105,6 +121,11 @@ pub struct EnvelopeRelease {
     pub waiting: Option<&'static str>,
     /// The page's work inside its transaction, before the commit.
     pub work: Duration,
+    /// How many envelopes the page read and kept, by why.
+    pub kept: BTreeMap<&'static str, usize>,
+    /// The payload bytes of the envelopes kept only because a claim lacks its writer's signature:
+    /// what the pass releases once their writers have signed them.
+    pub unsigned_payload_bytes: u64,
 }
 
 /// What judging a claim's writer signature needs, read before the page takes the writer.
@@ -211,12 +232,27 @@ fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) ->
         }
         report.scanned += 1;
         after = rowid;
-        if let (true, Some(batch)) = (admitted, batch)
-            && let Some(signature) = releasable(tx, authority, &envelope, &batch)?
-            && release_tx(tx, rowid, &envelope, &signature)?
-        {
-            released.push(envelope);
-            report.released += 1;
+        let kept = match (admitted, batch) {
+            (true, Some(batch)) => match releasable(tx, authority, &envelope, &batch)? {
+                Ok(signature) if release_tx(tx, rowid, &envelope, &signature)? => None,
+                Ok(_) => Some("rowid-taken"),
+                Err(reason) => Some(reason),
+            },
+            _ => Some("not-admitted"),
+        };
+        match kept {
+            None => {
+                released.push(envelope);
+                report.released += 1;
+            }
+            Some(reason) => {
+                if reason == UNSIGNED_CLAIM {
+                    report.unsigned_payload_bytes += tx
+                        .prepare_cached("SELECT length(payload) FROM replica_envelopes WHERE rowid=?1")?
+                        .query_row(/* sqlite-large-value: allow-for-now lv-h1cad97b84e06 owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, u64>(0))?;
+                }
+                *report.kept.entry(reason).or_default() += 1;
+            }
         }
         if started.elapsed() >= BUDGET {
             report.done = false;
@@ -239,19 +275,30 @@ fn release_page(tx: &Transaction<'_>, authority: &Authority, min_age_ms: u64) ->
 /// carries, `signed_claims`), no claim of its batch is of a kind whose readers need the envelope
 /// ([`kept_kind`]), and every claim carries its writer's signature by such a key and has the id
 /// its stored row hashes to. `None` when it stays.
-fn releasable(tx: &Connection, authority: &Authority, envelope: &ReplicaEnvelopeId, batch: &str) -> Result<Option<(String, String)>> {
+fn releasable(
+    tx: &Connection,
+    authority: &Authority,
+    envelope: &ReplicaEnvelopeId,
+    batch: &str,
+) -> Result<std::result::Result<(String, String), &'static str>> {
     if retired::envelope_refused(tx, &envelope.writer, envelope.sequence, &envelope.hash)? {
-        return Ok(None);
+        return Ok(Err("retired"));
     }
-    let eligible: bool = tx
+    let eligible: [bool; 8] = tx
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c3e7cfc9c6d owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ ELIGIBLE_SQL)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-haf548599f1ef owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| row.get(0))?;
-    if !eligible {
-        return Ok(None);
+        .query_row(/* sqlite-large-value: allow-for-now lv-h37e3173cc3fd owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash, batch], |row| {
+            let mut columns = [false; 8];
+            for (index, column) in columns.iter_mut().enumerate() {
+                *column = row.get(index)?;
+            }
+            Ok(columns)
+        })?;
+    if let Some(column) = eligible.iter().position(|holds| !holds) {
+        return Ok(Err(ELIGIBLE_REASONS[column]));
     }
     let keys = match authority.membership.window(&envelope.writer, envelope.sequence) {
         crate::fleet::Window::Keyed(keys) => keys,
-        crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(None),
+        crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(Err("writer-not-keyed")),
     };
     let message = crate::fleet::envelope_signature_message_in(
         authority.shard.as_deref(), &authority.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
@@ -268,7 +315,7 @@ fn releasable(tx: &Connection, authority: &Authority, envelope: &ReplicaEnvelope
         .into_iter()
         .find(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature))
     else {
-        return Ok(None);
+        return Ok(Err("no-envelope-signature"));
     };
     let claims = tx
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6d430f1b6cf owner=smallclaims::store::envelope_release TODO=trace-statement-and-value-representation */ &format!(
@@ -281,8 +328,11 @@ fn releasable(tx: &Connection, authority: &Authority, envelope: &ReplicaEnvelope
         "SELECT member_key, signature FROM claim_member_signatures WHERE claim_id=?1",
     )?;
     for claim in &claims {
-        if kept_kind(claim) || claim.origin != envelope.writer || !crate::hash::claim_id_is_content_hash(claim)? {
-            return Ok(None);
+        if kept_kind(claim) {
+            return Ok(Err("kept-kind"));
+        }
+        if claim.origin != envelope.writer || !crate::hash::claim_id_is_content_hash(claim)? {
+            return Ok(Err("claim-not-its-hash"));
         }
         let message = crate::fleet::keys::claim_signature_message(
             &authority.fleet_id, &envelope.writer, envelope.sequence, &claim.id,
@@ -293,10 +343,10 @@ fn releasable(tx: &Connection, authority: &Authority, envelope: &ReplicaEnvelope
             .iter()
             .any(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature));
         if !signed {
-            return Ok(None);
+            return Ok(Err(UNSIGNED_CLAIM));
         }
     }
-    Ok(Some(envelope_signature))
+    Ok(Ok(envelope_signature))
 }
 
 /// A claim whose envelope this member keeps whatever its age, because a reader of it reads the
