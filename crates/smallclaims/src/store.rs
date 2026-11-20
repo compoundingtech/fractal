@@ -86,6 +86,7 @@ mod prepared_seal_tests;
 mod binary_payloads;
 pub mod record_bytes;
 pub mod member_signatures;
+pub mod envelope_release;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -1205,7 +1206,12 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA).map_err(Into::into)
+            connection.execute_batch(envelope_release::SCHEMA)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h61123e79de50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ record_bytes::VIEW_SCHEMA)?;
+            // The view reads `envelope_rows` from this build on, so a released claim keeps its
+            // record. An older build keeps this definition: it creates the view only if missing.
+            record_bytes::replace_if_changed(connection, "VIEW", "replica_record_rows", record_bytes::RECORD_ROWS_VIEW)?;
+            connection.execute_batch(record_bytes::RECORD_ROWS_VIEW).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
@@ -3097,7 +3103,10 @@ impl Store {
                 return Ok(true);
             }
         }
-        Ok(false)
+        // A released envelope has no signature left; its claim carries this node's own, by the
+        // same key.
+        envelope_release::released_claim_signed(&connection, &fleet_id, claim_id, Some(&self.origin),
+            |_, _, signer| Ok(signer == key))
     }
 
     /// Authenticate a claim's original writer using an admitted signed envelope and its
@@ -3110,7 +3119,7 @@ impl Store {
         let membership = self.fleet_membership_sealed()?;
         let mut statement = connection.prepare_cached(
             "SELECT signatures.sequence,signatures.envelope_hash,signatures.member_key,signatures.signature
-             FROM replica_records records JOIN replica_envelopes envelopes USING(writer,sequence,envelope_hash)
+             FROM replica_record_rows records JOIN replica_envelopes envelopes USING(writer,sequence,envelope_hash)
              JOIN replica_envelope_signatures signatures USING(writer,sequence,envelope_hash)
              WHERE records.claim_id=?1 AND records.writer=?2 AND records.state='valid'
                AND envelopes.receipt_state='validated'")?;
@@ -3127,7 +3136,14 @@ impl Store {
                 return Ok(true);
             }
         }
-        Ok(false)
+        // A released envelope has no signature left; its claim carries the writer's own, which
+        // counts by the same key membership admits for that writer and sequence.
+        envelope_release::released_claim_signed(&connection, &fleet_id, claim_id, Some(writer), |writer, sequence, key| {
+            let window = shard.as_deref().map_or_else(
+                || membership.window(writer, sequence),
+                |shard| membership.shard_window(shard, writer, sequence));
+            Ok(matches!(window, crate::fleet::Window::Keyed(keys) if keys.contains(key)))
+        })
     }
 
 
@@ -3296,8 +3312,9 @@ pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> 
         .optional()?)
 }
 
-/// The highest sequence this node has held of a writer, counting envelopes a trim dropped: the
-/// writer's batch head (`writer_heads`) and retired envelopes as well as tombstones, the same
+/// The highest sequence this node has held of a writer, counting envelopes a trim dropped or this
+/// member released: the writer's batch head (`writer_heads`) and retired envelopes as well as
+/// tombstones, the same
 /// floor as `next_replica_sequence`. Adoption can withdraw a trimmed envelope's tombstone, and a
 /// removal's high water or a rejoin floor read only from the tombstones would then fall below a
 /// sequence peers already hold.
@@ -3305,6 +3322,8 @@ pub fn writer_high_water(connection: &Connection, writer: &str) -> Result<Option
     Ok(connection.query_row(
         "SELECT MAX(sequence) FROM (
              SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT MAX(sequence) FROM released_envelopes WHERE writer=?1
              UNION ALL
              SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1
              UNION ALL
@@ -4790,7 +4809,8 @@ pub fn full_replication_inventory_rows(
 ) -> Result<(Vec<ReplicaEnvelopeId>, i64)> {
     let mut statement = connection.prepare(
         "SELECT rowid, writer, sequence, envelope_hash FROM replica_envelopes
-         ORDER BY writer, sequence, envelope_hash",
+         UNION ALL SELECT 0, writer, sequence, envelope_hash FROM released_envelopes
+         ORDER BY 2, 3, 4",
     )?;
     let mut max_rowid = 0;
     let envelopes = statement
@@ -4814,7 +4834,8 @@ pub fn full_replication_inventory_rows(
 }
 
 /// Read every envelope identity this node holds straight into compact form, without a public
-/// copy: the envelopes it stores and those a checkpoint dropped, which it keeps as tombstones.
+/// copy: the envelopes it stores, those it released and those a checkpoint dropped, which it
+/// keeps as tombstones.
 pub fn full_compact_replication_inventory(
     connection: &Connection,
 ) -> Result<(CompactReplicationInventory, i64)> {
@@ -4828,7 +4849,17 @@ pub fn full_compact_replication_inventory(
 fn load_compact_replication_inventory(
     connection: &Connection,
 ) -> Result<(CompactReplicationInventory, i64, usize)> {
+    // A released envelope is listed without its payload, as a tombstone is, until a trim that
+    // drops it lists its tombstone instead. Its rowid is below the newest envelope row's
+    // (`envelope_release`), so it never raises the snapshot's envelope frontier.
     static CHECKPOINTED: &str = "SELECT rowid, writer, sequence, envelope_hash, 1 FROM replica_envelopes
+         UNION ALL
+         SELECT 0, writer, sequence, envelope_hash, 0 FROM released_envelopes AS released
+         WHERE NOT EXISTS (
+             SELECT 1 FROM checkpoint_envelopes AS listed
+             WHERE listed.writer=released.writer AND listed.sequence=released.sequence
+               AND listed.envelope_hash=released.envelope_hash
+         )
          UNION ALL
          SELECT 0, writer, sequence, envelope_hash, 0 FROM checkpoint_envelopes AS dropped
          WHERE NOT EXISTS (
@@ -4849,6 +4880,13 @@ fn load_compact_replication_inventory(
                                  AND dropped.envelope_hash={held_hash})
              FROM replica_envelopes AS held
              UNION ALL
+             SELECT 0, writer, sequence, envelope_hash, 0 FROM released_envelopes AS released
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM checkpoint_envelopes AS listed
+                 WHERE listed.writer=released.writer AND listed.sequence=released.sequence
+                   AND listed.envelope_hash=released.envelope_hash
+             )
+             UNION ALL
              SELECT 0, writer, sequence, envelope_hash, 0 FROM checkpoint_envelopes AS dropped
              WHERE NOT EXISTS (
                  SELECT 1 FROM replica_envelopes AS held
@@ -4861,6 +4899,10 @@ fn load_compact_replication_inventory(
                  SELECT 1 FROM replica_envelopes AS held
                  WHERE held.writer=dropped.writer AND held.sequence=dropped.sequence
                    AND held.envelope_hash={retired_hash}
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM released_envelopes AS released
+                 WHERE released.writer=dropped.writer AND released.sequence=dropped.sequence
+                   AND released.envelope_hash={retired_hash}
              ) AND NOT EXISTS (
                  SELECT 1 FROM checkpoint_envelopes AS recorded
                  WHERE recorded.writer=dropped.writer AND recorded.sequence=dropped.sequence
@@ -7363,7 +7405,7 @@ impl Store {
             self.readers.get().query_row(
                 "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
                  WHERE batches.rowid<=?1 AND NOT EXISTS (
-                     SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+                     SELECT 1 FROM envelope_rows WHERE envelope_rows.batch_id=batches.id)
                    AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
                      AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
                 [cursor], |row| row.get(0),
@@ -7668,7 +7710,7 @@ impl Store {
             unsealed: connection
                 .prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND NOT EXISTS(
-                         SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id))",
+                         SELECT 1 FROM envelope_rows WHERE envelope_rows.batch_id=batches.id))",
                 )?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h3192b5133fb0 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [self.seeded_batch_rowid.load(Ordering::Acquire)], |row| {
                     row.get(0)

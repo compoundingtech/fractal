@@ -8080,6 +8080,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone(), config.store.valid_record_delete_after_ms()?)));
+    if smallclaims::store::envelope_release::ENVELOPE_RELEASE {
+        tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_release", release_old_envelopes(store.clone())));
+    }
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.record_repairs", resolve_record_repairs(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_signatures", sign_own_claims(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
@@ -22295,6 +22298,52 @@ async fn release_valid_record_bytes(store: Arc<Store>, delete_after_ms: u64) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes), deleted {deleted}, and gave {released} free pages back"));
+}
+
+/// Old envelopes lose their payloads once every claim they carry has its writer's signature
+/// (`envelope_release`), a page per writer batch, each committing its cursor; the pages they held
+/// then go back to the filesystem, one short write at a time. A walk that reaches envelopes too
+/// young to release, or that waits for the signature migration, goes on within the hour. A failed
+/// page retries, including after a daemon restart.
+async fn release_old_envelopes(store: Arc<Store>) {
+    use smallclaims::store::{envelope_release::ENVELOPE_RELEASE_AGE_MS, record_bytes::FREE_PAGES_PER_WRITE};
+    loop {
+        let mut released = 0;
+        loop {
+            let page_store = store.clone();
+            let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || page_store.release_envelopes(ENVELOPE_RELEASE_AGE_MS))).await;
+            match result {
+                Ok(Ok(report)) => {
+                    released += report.released;
+                    if report.done {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                error => {
+                    stderr_message("fractal", format_args!("releasing envelopes failed: {error:?}"));
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        }
+        if released > 0 {
+            let mut pages = 0;
+            loop {
+                let vacuum_store = store.clone();
+                match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_release", || vacuum_store.release_free_pages_in(FREE_PAGES_PER_WRITE))).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(freed)) => pages += freed,
+                    error => {
+                        stderr_message("fractal", format_args!("giving released envelope pages back stopped: {error:?}"));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stderr_message("fractal", format_args!("released {released} envelopes and gave {pages} free pages back"));
+        }
+        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+    }
 }
 
 /// Sign this member's own claims with its member key (`member_signatures`): the claims it held

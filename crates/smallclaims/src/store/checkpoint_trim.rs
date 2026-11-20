@@ -1307,8 +1307,9 @@ fn next_trim_rows(
     if !cursor.envelopes_done {
         let envelope = next_local_envelope(transaction, &mut cursor.walk)?;
         if let Some(envelope) = envelope {
+            // A released envelope is still held: its identity and claims go as a stored one's.
             let held: bool = transaction.prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+                "SELECT EXISTS(SELECT 1 FROM envelope_rows
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
             )?.query_row(/* sqlite-large-value: allow-for-now lv-h3f0f377d0d3b owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash], |row| row.get(0))?;
             if !held {

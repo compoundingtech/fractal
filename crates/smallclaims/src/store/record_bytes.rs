@@ -168,33 +168,38 @@ pub fn claim_record_not_valid_sql(alias: &str) -> String {
     format!("EXISTS(SELECT 1 FROM replica_records WHERE claim_id={alias}.id AND state<>'valid')")
 }
 
-/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names its
-/// envelope, and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
+/// Whether the claim `alias` was sealed or admitted and is an accepted copy: its batch names an
+/// envelope this member holds or released (`envelope_rows`), and it has no record in another state ([`claim_record_not_valid_sql`]). It asks
 /// what `EXISTS(... replica_records WHERE claim_id=... AND state='valid')` asked, whether or not
 /// the claim's valid record is stored.
 pub fn admitted_claim_sql(alias: &str) -> String {
     format!(
-        "(EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id={alias}.batch_id)
+        "(EXISTS(SELECT 1 FROM envelope_rows WHERE batch_id={alias}.batch_id)
           AND NOT {})",
         claim_record_not_valid_sql(alias)
     )
 }
 
-/// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
-/// valid, a repaired one, or a valid one a store has not yet deleted), and for each valid claim
-/// whose record is gone the row it had: its envelope, found by the claim's batch, its position
-/// and its claim. A valid claim needs no stored record (`record_bytes`), so a reader that asks
-/// which envelope holds a claim, or how many records an envelope holds, reads this view instead.
-/// It holds no data of its own.
+/// The table repairs wait in for a record that is gone (`await_repaired_record_tx`).
 pub const VIEW_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8195fc71bd92 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS record_repair_lookups (record_ref TEXT PRIMARY KEY) WITHOUT ROWID;
+";
+
+/// Every record a reader of `replica_records` used to see: the stored rows (a record that is not
+/// valid, a repaired one, or a valid one a store has not yet deleted), and for each valid claim
+/// whose record is gone the row it had: its envelope, found by the claim's batch among the
+/// envelopes this member holds or released (`envelope_rows`), its position and its claim. A valid
+/// claim needs no stored record (`record_bytes`), so a reader that asks which envelope holds a
+/// claim, or how many records an envelope holds, reads this view instead. It holds no data of its
+/// own.
+pub const RECORD_ROWS_VIEW: &str = "
 CREATE VIEW IF NOT EXISTS replica_record_rows(writer, sequence, envelope_hash, position, state, claim_id) AS
     SELECT writer, sequence, envelope_hash, position, state, claim_id FROM replica_records
     UNION ALL
     SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash, positions.position,
            'valid', claims.id
     FROM claims
-    JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+    JOIN envelope_rows AS envelopes ON envelopes.batch_id=claims.batch_id
     JOIN claim_positions AS positions ON positions.claim_id=claims.id
     WHERE NOT EXISTS (
         SELECT 1 FROM replica_records AS stored
@@ -276,7 +281,7 @@ const DELETE_PAGE_SQL: &str = "SELECT rowid,
         state='valid' AND claim_id IS NOT NULL
         -- A forked writer sequence (two envelopes of one batch) keeps its records, so the
         -- view never shows one envelope's claims under the other.
-        AND (SELECT COUNT(*) FROM replica_envelopes WHERE batch_id=
+        AND (SELECT COUNT(*) FROM envelope_rows WHERE batch_id=
               (SELECT batch_id FROM claims WHERE id=replica_records.claim_id))=1
         -- A repair names its record; keep any record a repair claim names.
         AND NOT EXISTS (SELECT 1 FROM claims repairs INDEXED BY claims_kind_index
@@ -450,7 +455,7 @@ fn resolve_page(tx: &Transaction<'_>) -> Result<RecordRepairResolution> {
             "SELECT claims.store_index, claims.id, envelopes.writer, envelopes.sequence,
                     envelopes.envelope_hash, positions.position
              FROM claims
-             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+             JOIN envelope_rows AS envelopes ON envelopes.batch_id=claims.batch_id
              JOIN claim_positions AS positions ON positions.claim_id=claims.id
              WHERE claims.store_index>?1 ORDER BY claims.store_index LIMIT ?2",
         )?

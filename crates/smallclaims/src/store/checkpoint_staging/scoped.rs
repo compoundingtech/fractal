@@ -16,6 +16,9 @@
 //! - the citations of the claims the cut could drop, from the store's citation cache
 //!   (`local_trim_citations`), caught up first, counting a citer only if it is present and
 //!   sealed at the cut, as a full capture would stage it.
+//!
+//! Every envelope here is read from `envelope_rows`, by the rowid it had: one this member
+//! released (`envelope_release`) is staged as the stored one was, so its claims are still cut.
 use super::*;
 use crate::store::checkpoint::sealed_envelope_records_sql;
 
@@ -54,10 +57,10 @@ impl StagedSet {
                         (SELECT COUNT(*) FROM replica_record_rows counted
                          WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
                            AND counted.envelope_hash=envelopes.envelope_hash)
-                 FROM replica_record_rows records JOIN replica_envelopes envelopes
+                 FROM replica_record_rows records JOIN envelope_rows envelopes
                    ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                      AND envelopes.envelope_hash=records.envelope_hash
-                 WHERE records.claim_id=?1 AND envelopes.rowid <= ?2",
+                 WHERE records.claim_id=?1 AND envelopes.row_id <= ?2",
             )?;
             let mut partners = connection.prepare_cached(
                 "SELECT partner.id FROM claims AS claim JOIN claims AS partner
@@ -226,8 +229,8 @@ impl StagedSet {
                         (SELECT COUNT(*) FROM replica_record_rows counted
                          WHERE counted.writer=envelopes.writer AND counted.sequence=envelopes.sequence
                            AND counted.envelope_hash=envelopes.envelope_hash)
-                 FROM replica_envelopes envelopes
-                 WHERE writer=?1 AND rowid <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3
+                 FROM envelope_rows envelopes
+                 WHERE writer=?1 AND row_id <= ?2 AND CAST(accepted_at_unix_ms AS INTEGER) < ?3
                    AND NOT EXISTS(
                      SELECT 1 FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
                      JOIN batches ON batches.id=claims.batch_id
@@ -296,11 +299,11 @@ impl StagedSet {
                 "SELECT EXISTS(
                    SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id
                    JOIN replica_record_rows records ON records.claim_id=citer.id
-                   JOIN replica_envelopes envelopes
+                   JOIN envelope_rows envelopes
                      ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                        AND envelopes.envelope_hash=records.envelope_hash
                    WHERE citer.id=?1 AND records.state<>'repaired'
-                     AND envelopes.rowid <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
+                     AND envelopes.row_id <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
                      AND NOT EXISTS(
                        SELECT 1 FROM replica_record_rows other CROSS JOIN claims late ON late.id=other.claim_id
                        JOIN batches ON batches.id=late.batch_id

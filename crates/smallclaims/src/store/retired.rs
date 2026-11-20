@@ -155,7 +155,8 @@ pub fn claim_refused(connection: &Connection, id: &str) -> Result<bool> {
         || (authoritative(connection)? && claim_retired(connection, id)?))
 }
 
-/// Whether admission refuses this envelope here, by the same rule as `claim_refused`.
+/// Whether admission refuses this envelope here, by the same rule as `claim_refused`, or because
+/// this member released it (`envelope_release`): its identity already stands for it.
 pub fn envelope_refused(
     connection: &Connection,
     writer: &str,
@@ -163,6 +164,7 @@ pub fn envelope_refused(
     envelope_hash: &str,
 ) -> Result<bool> {
     Ok(checkpoint::envelope_tombstoned(connection, writer, sequence, envelope_hash)?
+        || super::envelope_release::envelope_released(connection, writer, sequence, envelope_hash)?
         || (authoritative(connection)?
             && envelope_retired(connection, writer, sequence, envelope_hash)?))
 }

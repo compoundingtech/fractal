@@ -35,8 +35,13 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
     // a peer could be sent, which export already skips once it is gone. The first versions
     // counted every such row, so every chunk of a trim rebuilt the replication snapshot from
     // nothing. An older build recreates them beside these: it counts every row again, as it did.
+    //
+    // A release (`envelope_release`) keeps the identity it deletes in `released_envelopes` first,
+    // and the inventory lists it from there, so it does not count either; its second version
+    // counted it. An older build recreates that one beside this; it releases nothing.
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-hd0fb382d248c owner=smallclaims::store::inventory_generation TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS replica_envelopes_inventory_DELETE;
+         DROP TRIGGER IF EXISTS replica_envelopes_inventory_DELETE_v2;
          DROP TRIGGER IF EXISTS retired_envelopes_inventory_INSERT;",
     )?;
     let authoritative = format!("EXISTS(SELECT 1 FROM meta WHERE key='{}' AND value='1')", super::retired::AUTHORITY);
@@ -44,12 +49,14 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
     let new_text = super::retired_facts::identity_text_sql("NEW.envelope_hash");
     create(
         connection,
-        "replica_envelopes_inventory_DELETE_v2",
+        "replica_envelopes_inventory_DELETE_v3",
         "replica_envelopes",
         "DELETE",
         &format!(
             "WHEN NOT EXISTS(SELECT 1 FROM checkpoint_envelopes AS listed
                  WHERE listed.writer=OLD.writer AND listed.sequence=OLD.sequence AND listed.envelope_hash=OLD.envelope_hash)
+             AND NOT EXISTS(SELECT 1 FROM released_envelopes AS released
+                 WHERE released.writer=OLD.writer AND released.sequence=OLD.sequence AND released.envelope_hash=OLD.envelope_hash)
              AND NOT ({authoritative} AND EXISTS(SELECT 1 FROM retired_envelopes AS retired
                  WHERE retired.writer=OLD.writer AND retired.sequence=OLD.sequence AND retired.envelope_hash={old_retired}))"
         ),

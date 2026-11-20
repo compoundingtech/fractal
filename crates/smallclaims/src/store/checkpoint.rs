@@ -366,7 +366,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         let batch: Option<String> = delete_statement("envelope_batch", || -> Result<Option<String>> {
             Ok(transaction
                 .prepare_cached(
-                    "SELECT batch_id FROM replica_envelopes
+                    "SELECT batch_id FROM envelope_rows
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 )?
                 .query_row(
@@ -376,11 +376,13 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 .optional()?
                 .flatten())
         })?;
+        // A released envelope's identity goes with it; its tombstone lists it from now on.
         for table in [
             "replica_records",
             "replica_envelope_signatures",
             "replica_envelope_holds",
             "replica_envelopes",
+            "released_envelopes",
         ] {
             delete_statement(table, || -> Result<()> {
                 transaction
@@ -396,7 +398,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 transaction
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                 AND NOT EXISTS (SELECT 1 FROM envelope_rows WHERE batch_id=?1)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
                 Ok(())
             })?;
@@ -458,7 +460,8 @@ pub fn sealed_records_page_sql() -> String {
 }
 
 /// `sealed_records_page_sql` for the records of one envelope (?1, ?2, ?5), with the cut ?3 and
-/// the seal row ?4.
+/// the seal row ?4. The envelope may be one this member released (`envelope_rows`); its row id is
+/// the rowid it had.
 pub fn sealed_envelope_records_sql() -> String {
     let order = super::canonical::components("claims").join(", ");
     format!(
@@ -466,12 +469,12 @@ pub fn sealed_envelope_records_sql() -> String {
                 records.state, records.position
          FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
          JOIN batches ON batches.id=claims.batch_id
-         JOIN replica_envelopes envelopes
+         JOIN envelope_rows envelopes
            ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
              AND envelopes.envelope_hash=records.envelope_hash
          WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
            AND records.state<>'repaired'
-           AND envelopes.rowid <= ?4
+           AND envelopes.row_id <= ?4
            AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
     )
 }

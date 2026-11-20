@@ -881,8 +881,9 @@ fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_bac
     let path = scratch.path().join("claims.sqlite3");
     let store = Store::open(&path, "node").unwrap();
     let names = triggers(&store);
-    assert!(names.contains("replica_envelopes_inventory_DELETE_v2") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v3") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
     assert!(!names.contains("replica_envelopes_inventory_DELETE") && !names.contains("retired_envelopes_inventory_INSERT"), "{names:?}");
+    assert!(!names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
     // As an older build's open creates it.
     store
         .connection
@@ -900,7 +901,7 @@ fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_bac
     let store = Store::open(&path, "node").unwrap();
     let names = triggers(&store);
     assert!(!names.contains("replica_envelopes_inventory_DELETE"), "this build's open drops it again: {names:?}");
-    assert!(names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v3"), "{names:?}");
     // The trigger that counts deleting the newest envelope row is created once, whatever opens
     // the store: an older build's open drops only the two triggers named above, and it already
     // compares the inventory generation this one moves, so it builds its next snapshot from

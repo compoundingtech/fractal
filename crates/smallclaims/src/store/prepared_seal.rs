@@ -77,7 +77,7 @@ pub(crate) fn unsealed_batches(
          FROM batches
          WHERE batches.rowid>=?1 AND batches.rowid<=?2
            AND NOT EXISTS (
-             SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id
+             SELECT 1 FROM envelope_rows WHERE envelope_rows.batch_id=batches.id
          )
          ORDER BY {order}"
     ))?;

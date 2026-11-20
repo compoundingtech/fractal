@@ -72,8 +72,8 @@ pub fn operation_is_trusted(
         if row.get::<_, String>(1)? != expected { continue; }
         let quarantined: bool = connection.query_row(
             // The claim's batch names its envelopes, whether or not its valid record is stored
-            // (`record_bytes`).
-            "SELECT EXISTS(SELECT 1 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+            // (`record_bytes`) or its envelope was released (`envelope_release`).
+            "SELECT EXISTS(SELECT 1 FROM claims JOIN envelope_rows AS envelopes ON envelopes.batch_id=claims.batch_id
                  JOIN replica_restore_quarantine AS quarantine ON quarantine.writer=envelopes.writer
                      AND quarantine.sequence=envelopes.sequence AND quarantine.envelope_hash=envelopes.envelope_hash
                  WHERE claims.id=?1)",
@@ -105,6 +105,21 @@ pub fn operation_is_trusted(
                 smallclaims::fleet::Window::Keyed(keys) if keys.contains(&key)) {
                 return Ok(true);
             }
+        }
+        drop(signers);
+        // A released envelope has no signature left; the receipt carries its writer's own, which
+        // counts by the same key membership admits for that writer and sequence.
+        if let Some(fleet_id) = smallclaims::store::fleet_meta(connection, "fleet_id")?
+            && smallclaims::store::envelope_release::released_claim_signed(connection, &fleet_id, &receipt, Some(origin),
+                |writer, sequence, key| {
+                    if membership.is_none() {
+                        membership = Some(smallclaims::store::fleet_membership_tx(connection)?);
+                    }
+                    Ok(matches!(membership.as_ref().unwrap().window(writer, sequence),
+                        smallclaims::fleet::Window::Keyed(keys) if keys.contains(key)))
+                })?
+        {
+            return Ok(true);
         }
     }
     Ok(false)
