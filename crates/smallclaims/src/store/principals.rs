@@ -372,7 +372,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
     )
 }
 
-mod compaction;
+pub mod compaction;
 mod dependencies;
 mod judging;
 mod legacy;
@@ -1253,6 +1253,15 @@ pub struct JudgingPrune {
     pub finished: bool,
 }
 
+/// One page of [`Store::compact_settled_signatures`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SignatureCompaction {
+    pub examined: usize,
+    pub compacted: usize,
+    /// Every claim an earlier release kept whole has been looked at; later pages do nothing.
+    pub finished: bool,
+}
+
 /// What a verdict recheck found.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerdictMismatch {
@@ -1678,6 +1687,21 @@ impl Store {
         Ok(JudgingPrune { examined, deleted, finished })
     }
 
+    /// Compact one page of the settled claims that earlier releases kept with their candidate
+    /// and source rows (see `compaction`), in one short background writer loan. Waits until the
+    /// candidate model serves, as the judging prune does.
+    pub fn compact_settled_signatures(&self) -> Result<SignatureCompaction> {
+        if !self.signature_migration()?.done() {
+            return Ok(SignatureCompaction::default());
+        }
+        let mut connection = self.connection.write_background();
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (examined, compacted, finished) = compaction::compact_page_tx(&transaction)?;
+        transaction.commit()?;
+        Ok(SignatureCompaction { examined, compacted, finished })
+    }
+
     /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
     /// verdicts are still being queued. Three probes of small tables on a reader.
     pub fn verdicts_pending(&self) -> Result<bool> {
@@ -1906,8 +1930,12 @@ impl Store {
                     // A changed delegation or revocation changes what relied on it.
                     queue_affected_by_row_tx(&transaction, &row)?;
                 }
-                // Its verdict is published: a settled small fold keeps no resume state.
+                // Its verdict is published: a settled small fold keeps no resume state, and
+                // a settled claim keeps only its facade (version 24).
                 judging::discard_settled_tx(&transaction, claim_id)?;
+                if !track_bootstrap {
+                    compaction::compact_settled_tx(&transaction, claim_id)?;
+                }
                 judged += 1;
             }
             if track_bootstrap && candidates_judged != 0 {

@@ -1,7 +1,8 @@
 //! Storage version 24 readers: a compacted claim keeps its facade, count, verdict, nonce use and
 //! dependency links, without candidate or source rows. Readers take the facade as its single
 //! candidate, so verdicts, serving, revocation, delegation and requeue read as before, and a new
-//! candidate expands it first. The writer ships later; these tests compact as it will.
+//! candidate expands it first. The writer compacts a claim as it settles and pages through the
+//! claims earlier releases kept whole.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -82,32 +83,16 @@ fn attach(store: &Store, claim: &ClaimRecord, signature: &ClaimSignature) {
     store_claim_signature_tx(&connection, &claim.id, signature).unwrap();
 }
 
-/// Compact as the version 24 writer will: a settled claim with one candidate whose signature
-/// verified on it (it holds a nonce use), not held, queued, fresh or pending, keeps its count
-/// and loses its candidate and source rows.
+/// Run the version 24 writer to its end: judging compacts each claim as it settles, and the
+/// paced pass the rest. Returns how many claims are compacted.
 fn compact(store: &Store) -> i64 {
-    let connection = store.connection.write();
-    connection
-        .execute_batch(
-            "CREATE TEMP TABLE compacting AS
-               SELECT d.claim_id FROM claim_signature_candidates d
-                 JOIN claim_signature_counts n USING(claim_id)
-                 JOIN claim_verdicts v USING(claim_id)
-                 JOIN claim_signatures s USING(claim_id)
-                WHERE n.candidates=1 AND v.verdict<>'held' AND typeof(s.signature)='text'
-                  AND EXISTS(SELECT 1 FROM claim_signature_nonce_uses u WHERE u.claim_id=d.claim_id)
-                  AND NOT EXISTS(SELECT 1 FROM claim_verdict_queue q WHERE q.claim_id=d.claim_id)
-                  AND NOT EXISTS(SELECT 1 FROM claim_verdict_fresh f WHERE f.claim_id=d.claim_id)
-                  AND NOT EXISTS(SELECT 1 FROM claim_signature_judging j WHERE j.claim_id=d.claim_id);
-             DELETE FROM claim_signature_candidates WHERE claim_id IN (SELECT claim_id FROM compacting);
-             INSERT INTO claim_signature_counts(claim_id,candidates) SELECT claim_id,1 FROM compacting;",
-        )
-        .unwrap();
-    let compacted = connection
-        .query_row("SELECT COUNT(*) FROM compacting", [], |row| row.get(0))
-        .unwrap();
-    connection.execute_batch("DROP TABLE compacting;").unwrap();
-    compacted
+    drain(store);
+    for _ in 0..10_000 {
+        if store.compact_settled_signatures().unwrap().finished {
+            return compacted(store);
+        }
+    }
+    panic!("the paced compaction must finish");
 }
 
 fn compacted(store: &Store) -> i64 {

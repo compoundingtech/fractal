@@ -22257,6 +22257,22 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                     if pruned != 0 {
                         stderr_message("fractal", format_args!("settled signature judgments pruned: {pruned} rows in {:.0}s, longest page {} ms", prune_started.elapsed().as_secs_f64(), longest.as_millis()));
                     }
+                    // Earlier releases kept every settled claim's candidate and source rows.
+                    // Keep only the facade, a short page at a time (storage version 24).
+                    let compact_started = std::time::Instant::now();
+                    let (mut compacted, mut longest) = (0, Duration::ZERO);
+                    loop {
+                        let page_started = std::time::Instant::now();
+                        let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_compaction", || worker.compact_settled_signatures())?;
+                        let page_elapsed = page_started.elapsed();
+                        longest = longest.max(page_elapsed);
+                        compacted += page.compacted;
+                        if page.finished || page.examined == 0 { break; }
+                        std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    if compacted != 0 {
+                        stderr_message("fractal", format_args!("settled signatures compacted: {compacted} claims in {:.0}s, longest page {} ms", compact_started.elapsed().as_secs_f64(), longest.as_millis()));
+                    }
                     return Ok(None);
                 }
             }
