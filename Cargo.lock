@@ -2214,6 +2214,7 @@ dependencies = [
  "fractal-delivery",
  "fractal-kernel",
  "fractal-missions",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-secrets",
  "fractal-store",
