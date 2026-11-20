@@ -1,5 +1,13 @@
 use super::*;
 
+fn advertise_native_roots(store: &Store, supported: bool) {
+    store.append_claim(&ClaimInput {
+        subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(), actor: None,
+        fields: serde_json::from_value(json!({"status":"running","features":{"owned_sets":1,"owned_set_native_roots":u8::from(supported)}})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
 fn roots(revision: u64) -> NormalizedIntent {
     parse_intent(&format!(r#"version 2
 objective "garden/throughput" {{
@@ -87,11 +95,7 @@ fn native_root_membership_requires_every_members_capability() {
         assert!(preview.blockers.iter().any(|b| b.contains(&format!("host/{host}")) && b.contains("native root support")));
     }
     for store in &stores {
-        store.append_claim(&ClaimInput {
-            subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(), actor: None,
-            fields: serde_json::from_value(json!({"status":"running","features":{"owned_sets":1,"owned_set_native_roots":1}})).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
+        advertise_native_roots(store, true);
     }
     for from in &stores {
         for to in &stores {
@@ -102,6 +106,42 @@ fn native_root_membership_requires_every_members_capability() {
     apply(amber, &roots(1), 10);
     signed_share(amber, &stores[1]);
     assert_eq!(stores[1].owned_sets().unwrap().remove(0).receipt.members.len(), 3);
+}
+
+#[test]
+fn losing_branch_native_roots_still_require_capability_before_pruning() {
+    let stores = signed_fleet();
+    for store in &stores { advertise_native_roots(store, true); }
+    for from in &stores {
+        for to in &stores {
+            if from.origin != to.origin { signed_share(from, to); }
+        }
+    }
+    let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
+    // These disconnected publishers create different complete memberships.
+    apply(amber, &roots(1), 10);
+    let agents = bundle("true", true);
+    apply(cobalt, &agents, 30);
+    signed_share(amber, cobalt);
+    let selected = cobalt.owned_sets().unwrap().remove(0);
+    assert!(selected.receipt.members.keys().all(|subject| subject.starts_with("agent/")));
+    assert!(selected.receipt.retired.is_empty());
+    // Model a member that no longer advertises the capability after the branch was accepted.
+    advertise_native_roots(ivory, false);
+    signed_share(ivory, cobalt);
+    let mut opts = options(cobalt, 40);
+    let preview = cobalt.owned_set_preview(&agents, &opts).unwrap();
+    assert!(preview.blockers.iter().any(|b| b.contains("host/ivory") && b.contains("native root support")));
+    for subject in SUBJECTS { assert_eq!(preview.changes[subject], "retiring"); }
+    advertise_native_roots(ivory, true);
+    signed_share(ivory, cobalt);
+    let preview = cobalt.owned_set_preview(&agents, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    opts.expected_subjects = preview.expected_subjects;
+    opts.confirm_retire = Some(preview.digest);
+    cobalt.apply_owned_set(&agents, &opts, "prune-losing-native-roots", "person/operator").unwrap();
+    let selected = cobalt.owned_sets().unwrap().remove(0);
+    for subject in SUBJECTS { assert!(selected.receipt.retired.contains_key(subject)); }
 }
 
 #[test]

@@ -1551,13 +1551,16 @@ pub fn plan_tx(
                 .chain(view.receipt.retired.values())
                 .any(|m| matches!(m.kind.as_str(), "exec" | "pty"))
         });
+    let known = if old.is_some() {
+        known_members(transaction, &set, None)?
+    } else {
+        BTreeMap::new()
+    };
     // Older daemons reject receipts carrying these declaration-only roots, including retirement.
     let native_roots = input.subjects.values().any(|s| {
         matches!(s.kind.as_str(), "objective" | "github-source" | "github-scope")
-    }) || old.as_ref().is_some_and(|view| {
-        view.receipt.members.values().chain(view.receipt.retired.values())
-            .any(|m| matches!(m.kind.as_str(), "objective" | "github-source" | "github-scope"))
-    });
+    }) || known.values()
+        .any(|m| matches!(m.kind.as_str(), "objective" | "github-source" | "github-scope"));
     // Older daemons drop revisions carrying a policy (the receipt hash covers it) or
     // subscription members, and ignore debt.
     let source_enforcement = policy.is_some()
@@ -1816,7 +1819,6 @@ pub fn plan_tx(
     }
     let mut materialize = BTreeSet::new();
     if let Some(old) = &old {
-        let known = known_members(transaction, &set, None)?;
         for (s, m) in &known {
             if old.receipt.retired.contains_key(s) {
                 continue;
