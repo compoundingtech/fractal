@@ -8136,6 +8136,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -22555,6 +22556,48 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Valid records' bytes empty after startup, a page per writer batch, each committing its
+/// cursor; then the pages they held go back to the filesystem, one short write at a time
+/// (`record_bytes`). A failed page retries, including after a daemon restart.
+async fn release_valid_record_bytes(store: Arc<Store>) {
+    let (mut emptied, mut bytes) = (0, 0);
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || page_store.release_valid_record_bytes())).await;
+        match result {
+            Ok(Ok(report)) if report.done => break,
+            Ok(Ok(report)) => {
+                emptied += report.emptied;
+                bytes += report.bytes;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            error => {
+                stderr_message("fractal", format_args!("emptying valid record bytes failed: {error:?}"));
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+    // Every start gives free pages back, whether or not this start emptied anything: a start
+    // after the last page of bytes was emptied, but before its pages went back, finishes that.
+    // A store with no free page answers at once.
+    let mut released = 0;
+    loop {
+        let vacuum_store = store.clone();
+        match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.valid_record_bytes", || vacuum_store.release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE))).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(pages)) => released += pages,
+            error => {
+                stderr_message("fractal", format_args!("giving valid record pages back stopped: {error:?}"));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if emptied > 0 || released > 0 {
+        stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
     }
 }
 

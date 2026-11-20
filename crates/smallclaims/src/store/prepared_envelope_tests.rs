@@ -83,7 +83,9 @@ fn forged(
     forged
 }
 
-/// Every row admission stored from birch, without times. Each node's own rows differ.
+/// Every row admission stored from birch, without times. Each node's own rows differ. A valid
+/// record's bytes are not compared: the old function stored them, and admission now keeps none
+/// (`record_bytes`).
 fn admitted_rows(store: &Store) -> Vec<String> {
     let connection = store.readers.get();
     let mut rows = Vec::new();
@@ -91,7 +93,8 @@ fn admitted_rows(store: &Store) -> Vec<String> {
         "SELECT 'claim', id, batch_id, subject, kind, body, predecessors, accepted_at_unix_ms
          FROM claims WHERE origin='birch' ORDER BY id",
         "SELECT 'record', record_ref, state, COALESCE(claim_id,''), COALESCE(subject_hint,''),
-                COALESCE(kind_hint,''), COALESCE(error_code,''), COALESCE(error_message,''), hex(raw)
+                COALESCE(kind_hint,''), COALESCE(error_code,''), COALESCE(error_message,''),
+                CASE WHEN state='valid' THEN '' ELSE hex(raw) END
          FROM replica_records WHERE writer='birch' ORDER BY record_ref",
         "SELECT 'blob', hash, size, hex(bytes), '', '', '', '' FROM blobs ORDER BY hash",
         "SELECT 'batch', id, origin, replica_sequence, COALESCE(previous_hash,''), hash,

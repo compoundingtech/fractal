@@ -215,6 +215,7 @@ fn capture_work(connection: &Connection) -> Result<()> {
 // Canonical position and repair-membership tables are installed after runtime DDL.
 // Install their dependent triggers in the open transaction, before replay or writes.
 fn create_tracking_triggers(connection: &Connection) -> Result<()> {
+    use smallclaims::store::record_bytes::{replaced_update_trigger, update_event};
     let relevant = RELEVANT;
     // Keep notifications body-free. An unchanged canonical key (for example sealing a local
     // batch) is discarded at flush rather than needlessly refolding that subject's history.
@@ -224,8 +225,14 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
         ("claim_positions", "claim_id"),
     ] {
         for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")] {
+            let (clause, suffix) = if event == "UPDATE" {
+                replaced_update_trigger(connection, table, &format!("preparation_{table}_{event}"))?;
+                update_event(table)
+            } else {
+                (event.to_owned(), "")
+            };
             connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-he182e1d1c072 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event} AFTER {event} ON {table} BEGIN
+                /* sqlite-large-value: allow-for-now lv-h644b8879386d owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event}{suffix} AFTER {clause} ON {table} BEGIN
                  INSERT INTO local_resource_preparation_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL
                  AND EXISTS (SELECT 1 FROM claims WHERE id={row}.{identity} AND {relevant})
@@ -238,8 +245,10 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
         ("replica_records", "claim_id"),
         ("claim_positions", "claim_id"),
     ] {
+        replaced_update_trigger(connection, table, &format!("preparation_{table}_old_update"))?;
+        let (clause, suffix) = update_event(table);
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h47aaff9ea590 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_old_update AFTER UPDATE ON {table} BEGIN
+            /* sqlite-large-value: allow-for-now lv-hf09b6af70b8a owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_old_update{suffix} AFTER {clause} ON {table} BEGIN
              INSERT INTO local_resource_preparation_pending(claim_id)
              SELECT OLD.{identity} WHERE OLD.{identity} IS NOT NULL
              AND EXISTS (SELECT 1 FROM claims WHERE id=OLD.{identity} AND {relevant})

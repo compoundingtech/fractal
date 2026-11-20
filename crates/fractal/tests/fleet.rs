@@ -3691,6 +3691,137 @@ async fn previous_release_replicates_with_new_members_and_preserves_history_on_u
     }
 }
 
+/// What `node`'s store holds in valid records' bytes: their count and total length. The
+/// daemon empties them after an upgrade (`record_bytes`).
+fn valid_record_bytes(node: &Node) -> (u64, u64) {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(raw)), 0) FROM replica_records WHERE state='valid'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// Post a note under an idempotency key and return its claim id.
+async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
+    let claim: Value = node
+        .client()
+        .post(
+            "/v1/claims",
+            &ClaimInput {
+                subject: format!("custom/fleet-test/{text}"),
+                kind: NOTE.into(),
+                actor: Some(PERSON.into()),
+                fields: [("text".to_owned(), Value::String(text.into()))].into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+    claim["id"].as_str().unwrap().to_owned()
+}
+
+/// A release member upgrades in place, and this build empties its valid records' bytes while it
+/// keeps replicating with a release peer in both directions. Rolled back over those emptied
+/// records, the release still reads every note, answers a retried request with the same claim,
+/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
+/// again, this build empties the bytes the release wrote meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "5c3e1a7b-9d2f-4b8e-a6c4-1f0e9d8c7b6a";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([9_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    let mut r = Node::new(root.path(), "r");
+    let mut n = Node::new(root.path(), "n");
+    o.binary = old.clone();
+    r.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("r", r.port), ("n", n.port)]);
+    r.legacy_config(fleet_id, &secret, &[("o", o.port), ("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port), ("r", r.port)]);
+    for node in [&mut o, &mut r, &mut n] {
+        node.start().await;
+    }
+    let retried = keyed_note(&o, "o-keyed", "o-keyed-note").await;
+    let mut expected = BTreeSet::from(["custom/fleet-test/o-keyed".to_owned()]);
+    for (node, text) in [(&o, "o-0"), (&r, "r-0"), (&n, "n-0")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let (valid, bytes) = valid_record_bytes(&o);
+    assert!(valid > 0 && bytes > 0, "the release keeps each valid record's bytes");
+    assert_eq!(valid_record_bytes(&n).1, 0, "this build keeps none");
+
+    // Upgrade in place: the daemon empties the bytes and keeps every record.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member empties its valid records' bytes", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    assert!(valid_record_bytes(&o).0 >= valid, "no valid record went away");
+    for (node, text) in [(&o, "o-upgraded"), (&r, "r-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+
+    // Roll back over the emptied records.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+    assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let digests = || [&o, &r, &n].map(|node| node.st_json(&["replication", "status"]));
+    wait_until("every member holds the same envelopes", 90, || async {
+        let statuses = digests();
+        statuses.iter().all(|status| status["authority_digest"] == statuses[0]["authority_digest"])
+    })
+    .await;
+    for status in digests() {
+        assert_eq!(status["invalid_records"], 0, "{status}");
+        assert_eq!(status["unsigned_envelopes"], 0, "{status}");
+    }
+    // The release stored bytes for what it admitted and wrote; upgraded again, this build
+    // empties those too.
+    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+}
+
 fn backup_baseline_graph(old: &Node, directory: &Path) {
     let original = old.state_dir().join("claims.sqlite3");
     let copy = directory.join("baseline-copy.db");

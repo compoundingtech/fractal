@@ -1098,6 +1098,20 @@ Each receiver derives projections locally from the admitted claims.
 
 An unknown or invalid record stays in `replica_records`. It does not block a valid sibling or a later envelope.
 
+A valid record keeps its row (state, claim, position and repair link) but no bytes: its claim is
+in `claims`, its position in `claim_positions` and its signed encoding in the envelope's payload,
+and nothing reads a valid record's `raw` again. Admission and sealing store an empty `raw` for a
+valid record. After an upgrade the daemon empties the bytes older builds kept, a page per writer
+batch (at most 512 records read and 10 ms of updates before the commit, which can take longer
+while a WAL checkpoint runs), committing a cursor so a restart resumes, and then gives the freed
+pages back to the filesystem 128 at a time (`record_bytes.rs`). The cursor stays after the pass
+finishes, so each start reads only the records added since, and empties those an older build
+wrote with bytes after a rollback. Triggers on `replica_records` that fire on an update list every
+column but `raw`, so emptying the bytes queues no projection work. Only a record that was never
+admitted as valid keeps its bytes; a valid record a repair replaces, or one marked invalid with its
+envelope, keeps the empty `raw`. An older build runs the store unchanged: it finds every row it
+reads, and it writes the bytes of the records it admits itself.
+
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
 A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `fractal now`, `fractal missions ls` and the terminal UI say the node is syncing.
