@@ -290,6 +290,49 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
+/// A cut still trims the claims of envelopes this member released (`envelope_release`): its
+/// capture reads them by the rowids they had. Each dropped one leaves its released identity for
+/// a tombstone, the readers answer as before, and the inventory still lists every identity once.
+#[test]
+fn a_local_cut_trims_the_claims_of_released_envelopes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key.clone())).unwrap();
+    store.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
+    for n in 0..40 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    store.replication_snapshot().unwrap();
+    while !store.sign_own_claims().unwrap().done {}
+    let before = answers(&store, context.now_unix_ms);
+    let digest = store.replication_snapshot().unwrap().authority_digest.clone();
+    while !store.release_envelopes(0).unwrap().done {}
+    let count = |sql: &str| -> i64 { store.readers.get().query_row(sql, [], |row| row.get(0)).unwrap() };
+    let released_observations = count(
+        "SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'",
+    );
+    assert!(released_observations > 30, "{released_observations}");
+    assert_eq!(answers(&store, context.now_unix_ms), before);
+
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+    assert!(
+        count("SELECT COUNT(*) FROM checkpoint_envelopes JOIN released_envelopes USING(writer, sequence, envelope_hash)") == 0
+            && count("SELECT COUNT(*) FROM released_envelopes JOIN claims USING(batch_id) WHERE claims.kind='observer.observed'") <= 2,
+        "a dropped released envelope's identity is its tombstone now"
+    );
+    assert!(count("SELECT COUNT(*) FROM checkpoint_envelopes") >= released_observations - 2);
+    let snapshot = store.replication_snapshot().unwrap();
+    assert_eq!(snapshot.authority_digest, digest, "every identity is still listed");
+    let (full, _) = smallclaims::store::full_compact_replication_inventory(&store.readers.get()).unwrap();
+    assert_eq!((&snapshot.inventory.digest, &snapshot.inventory.payloadless), (&full.digest, &full.payloadless));
+    assert_eq!(full.envelopes.len(), snapshot.inventory.envelopes.len());
+}
+
 /// A local cut that deletes in many chunks leaves the roster's generation alone until its run
 /// stops, so a fold under way publishes. Forgetting the views after every chunk restarted the
 /// roster's fold before it could publish, all through a run.

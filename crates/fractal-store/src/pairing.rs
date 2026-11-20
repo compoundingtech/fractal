@@ -483,6 +483,64 @@ mod tests {
         assert!(!retained.client_operation_is_trusted(&completed).unwrap());
     }
 
+    /// A receiver that released the envelope of a client operation and its receipt still trusts
+    /// it, and still counts both admitted: the receipt carries its writer's own signature, by the
+    /// key membership admits for the issuer. Without that signature it is not trusted.
+    #[test]
+    fn an_operation_receipt_stays_trusted_once_its_envelope_is_released() {
+        let key = std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let source = Store::open_memory("issuer").unwrap();
+        source.bind_fleet("receipt-fleet").unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("receipt-fleet", key.public(), "listening").unwrap();
+        let attached = source.append_client_operation_claim(&ClaimInput {
+            subject:"custom/client/terminal-sample".into(), kind:"custom.client.terminal-attached".into(),
+            actor:Some("person/example".into()),
+            fields:serde_json::from_value(json!({"person_id":"person/example","terminal_operation_version":1})).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+        // Later writes, so the receipt's envelope is not the issuer's newest.
+        for n in 0..2 {
+            let mut later = completion_input(None);
+            later.subject = format!("custom/client/later-{n}");
+            source.append_claim(&later).unwrap();
+        }
+        source.replication_snapshot().unwrap();
+        while !source.sign_own_claims().unwrap().done {}
+        let exchange = source.export_replication_exchange("receipt-fleet", &Default::default()).unwrap();
+        let target = Store::open_memory("receiver").unwrap();
+        target.bind_fleet("receipt-fleet").unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
+        target.receive_replication_exchange("issuer", "receipt-fleet", &exchange).unwrap();
+        target.validate_replication_backlog().unwrap();
+        target.project_replication_backlog().unwrap();
+        while target.promote_claim_member_signatures().unwrap() > 0 {}
+        let admitted = || -> i64 {
+            target.readers.get().query_row(&format!(
+                "SELECT COUNT(*) FROM claims WHERE batch_id=?1 AND {}",
+                smallclaims::store::record_bytes::admitted_claim_sql("claims")),
+                [&attached.batch_id], |row| row.get(0)).unwrap()
+        };
+        assert!(target.client_operation_is_trusted(&attached).unwrap());
+        assert_eq!(admitted(), 2, "the operation and its receipt");
+
+        while !target.release_envelopes(0).unwrap().done {}
+        let released: bool = target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM released_envelopes WHERE batch_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
+            [&attached.batch_id], |row| row.get(0)).unwrap();
+        assert!(released, "the operation's envelope is released");
+        assert!(target.client_operation_is_trusted(&attached).unwrap());
+        assert_eq!(admitted(), 2);
+
+        target.connection.write().execute(
+            "DELETE FROM claim_member_signatures WHERE claim_id IN (SELECT id FROM claims WHERE subject=?1)",
+            [format!("custom/client/operation-{}", attached.id)],
+        ).unwrap();
+        assert!(!target.client_operation_is_trusted(&attached).unwrap(), "the writer's signature is what it trusts");
+    }
+
     #[test]
     fn pairing_migration_allowances_require_the_person_writer_and_honor_issuer_withdrawal() {
         for actor in [None, Some("person/other"), Some("person/example")] {
