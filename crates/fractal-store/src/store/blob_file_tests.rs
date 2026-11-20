@@ -59,6 +59,31 @@ fn restore_all(store: &Store, now: u64) -> usize {
 }
 
 #[test]
+fn archive_blob_digest_keeps_the_logical_table_before_and_after_bytes_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
+    let legacy_blob_digest = || {
+        smallclaims::store::projection_digest::oracle(&store.readers.get(), &[("blobs", &[])])
+            .unwrap()["blobs"].clone()
+    };
+    let empty = store.backup_header().unwrap();
+    assert_eq!(empty.tables["blobs"].count, 0);
+    assert_eq!(empty.tables["blobs"].digest, legacy_blob_digest());
+
+    document(&store, "doc/example/archive", b"archive bytes");
+    document(&store, "doc/example/empty-archive", b"");
+    let before = store.backup_header().unwrap();
+    assert_eq!(before.tables["blobs"].count, 2);
+    assert_eq!(before.tables["blobs"].digest, legacy_blob_digest());
+    let later = start_window(&store) + WINDOW_MS;
+    assert_eq!(move_all(&store, later).0, 1);
+    let after = store.backup_header().unwrap();
+    assert_eq!(after.tables, before.tables);
+    assert_eq!(after.graph_digest, before.graph_digest);
+    assert!(!projection_digest::tables(&store.readers.get()).unwrap().contains_key("blobs"));
+}
+
+#[test]
 fn bytes_stay_through_the_window_then_move_and_read_the_same() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");

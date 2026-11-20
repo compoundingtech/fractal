@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "summary": "Backup archives retain the logical blobs table digest, including when it is empty, so moving blob bytes to their own file does not change the archive contract with the previous release.",
+  "compatibility": {
+    "status": "fixed",
+    "detail": "Archive headers hash the original logical blob rows using bytes from either file. Live replication projection digests still exclude the physical blobs table. Empty-shard archives keep the previous release's table inventory and graph digest."
+  }
+}
