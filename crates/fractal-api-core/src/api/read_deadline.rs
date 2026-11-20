@@ -233,7 +233,7 @@ fn construct_timeout_response(construct: impl FnOnce() -> Response) -> Response 
 fn body_timeout_response(state: &AppState) -> Response {
     // Static route and phase only: never include the forwarded JSON or credentials.
     eprintln!(
-        "st3: read cancelled route={:?} phase=request-body callsite={} deadline_elapsed=true",
+        "fractal: read cancelled route={:?} phase=request-body callsite={} deadline_elapsed=true",
         crate::peer::CLIENT_READ_FORWARD_PATH,
         std::panic::Location::caller(),
     );

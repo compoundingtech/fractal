@@ -604,6 +604,7 @@ mission "example/report" state="ready" {
     mod revision_seat_tests;
     mod rollout_tests;
     mod run_report_tests;
+    mod escalation;
     mod start_spacing_loop;
     mod start_preemption;
     mod seat_admission_queue;
@@ -1288,7 +1289,18 @@ mission "native-exit-evidence" state="ready" {{
 
     #[test]
     fn one_shot_exit_evidence_survives_stop_and_explains_missing_mission_agent() {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+        one_shot_retirement_explains_missing_mission_agent(true);
+    }
+
+    #[test]
+    fn one_shot_vanished_without_exit_evidence_explains_missing_mission_agent() {
+        one_shot_retirement_explains_missing_mission_agent(false);
+    }
+
+    fn one_shot_retirement_explains_missing_mission_agent(receipt: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let expected = if receipt { "code 23" } else { "vanished-without-exit-evidence" };
         apply_source(&store, r#"version 2
 agent "worker" { workspace "/tmp"; command "printf 'worker failed\n' >&2; exit 23"; one-shot }
 mission "exit-evidence" state="ready" {
@@ -1300,13 +1312,15 @@ mission "exit-evidence" state="ready" {
             .find(|subject| subject.subject == "agent/node.worker").unwrap();
         let member = subject.member.as_ref().unwrap();
         let runtime = Arc::new(FakeRuntime::default());
-        runtime.exit_evidence.lock().unwrap().insert(
-            (member.runtime_id.clone(), "worker-one".into()),
-            fractal_runtime::PtyExitEvidence {
-                incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
-                output_tail: Some("worker failed".into()),
-            },
-        );
+        if receipt {
+            runtime.exit_evidence.lock().unwrap().insert(
+                (member.runtime_id.clone(), "worker-one".into()),
+                fractal_runtime::PtyExitEvidence {
+                    incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
+                    output_tail: Some("worker failed".into()),
+                },
+            );
+        }
         let reconciler = Reconciler::new(
             store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
         );
@@ -1324,11 +1338,23 @@ mission "exit-evidence" state="ready" {
         ).unwrap());
         let actual = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("stopped"));
-        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(23));
-        assert_eq!(actual_field(&actual, "exit_evidence").unwrap()["outputTail"], "worker failed");
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), receipt.then_some(23));
+        let evidence = actual_field(&actual, "exit_evidence").unwrap();
+        assert_eq!(evidence["incarnation"], "worker-one");
+        assert_eq!(evidence["lastObservedState"], "vanished");
+        assert!(evidence["observedAtUnixMs"].is_u64());
+        if receipt {
+            assert_eq!(evidence["outputTail"], "worker failed");
+        } else {
+            assert_eq!(evidence["exitStatus"], "unknown");
+            assert_eq!(evidence["reason"], expected);
+        }
+        let stop = store.desired_subjects().unwrap().into_iter()
+            .find(|item| item.subject == subject.subject).unwrap();
+        assert!(stop.desired["reason"].as_str().unwrap().contains(expected));
         let decision = store.latest_observation(&subject.subject, "runtime.reconcile-decision").unwrap().unwrap();
         let reason = decision.body["fields"]["reason"].as_str().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         let run = store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "exit-evidence".into(), revision: None, workspace: "/tmp".into(),
             requester: Some("person/test".into()), mode: Some("run".into()),
@@ -1341,13 +1367,13 @@ mission "exit-evidence" state="ready" {
         let step = &run.steps[0];
         assert_eq!(step.status, "blocked");
         let reason = step.blocked_reason.as_deref().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         for kind in ["operational.failure", "mission-run.state"] {
             let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
                 .unwrap_or_else(|| panic!("missing {kind}: run={run:?}; faults={:?}",
                     store.observations_for(&run.subject, "reconcile.fault").unwrap()));
             let reason = claim.body["fields"]["reason"].as_str().unwrap();
-            assert!(reason.contains("code 23") && reason.contains("worker failed"), "{kind}: {reason}");
+            assert!(reason.contains(expected), "{kind}: {reason}");
         }
         let replica = Store::open_memory("replica").unwrap();
         replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
@@ -1418,7 +1444,7 @@ mission "retained-reason" state="ready" {
         let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
         let mut fields = BTreeMap::from([("status".into(), Value::from("exited"))]);
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
-        assert!(fields.get("exit_evidence").is_none_or(Value::is_null));
+        assert_eq!(fields["exit_evidence"]["reason"], "exited-without-exit-evidence");
         runtime.exit_evidence.lock().unwrap().get_mut(&("worker".into(), "one".into())).unwrap().incarnation = "one".into();
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
         let reason = runtime_exit_reason(&serde_json::to_value(fields).unwrap()).unwrap();
@@ -1538,7 +1564,16 @@ mission "retained-reason" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open_memory("node").unwrap());
         let runtime = Arc::new(FakeRuntime::default());
-        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), fractal_runtime::ResourceProfileSeed {
+                cores: 1, memory: 256 * 1024 * 1024, memory_high: None,
+                learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly, recovery_capable: false,
+                source: Some("declared".into()), reason: Some("shell outcome fixture".into()), disk: None, io: None,
+            })]),
+            ..Default::default()
+        };
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
         reconciler.driver_state_dir = root.path().join("drivers");
         reconciler.ensure_resource_authority().unwrap();
         let owner = if expire_owner {
@@ -1558,18 +1593,21 @@ mission "shell-owner" state="ready" {{
         } else {
             Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
         };
-        let lane = LaneRequest {
+        let mut lane = LaneRequest {
             id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
-            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            capacity: None,
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+            profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
         };
+        // Released shells retain the execution host's accepted profile snapshot on recovery.
+        reconciler.resolve_resource_profile(&mut lane).unwrap();
         let now = u64::try_from(now_ms()).unwrap();
         let mut execution = store.submit_shell_resource(Command {
-            id: "outcome".into(), lane: lane.clone(), argv: vec!["true".into()],
+            id: "outcome".into(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
             cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
         }, now).unwrap();
-        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let fit = Fit { room: lane.capacity, ..Fit::default() };
         let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
             panic!("fixture was not admitted");
         };
@@ -1592,6 +1630,7 @@ mission "shell-owner" state="ready" {{
             head_start: Some("abc123".into()), head_end: Some("def456".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
             wall_duration_ms: 1234, memory_peak_bytes: None,
+            ..PayloadResult::default()
         }).unwrap()).unwrap();
         if expire_owner {
             store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
@@ -1616,6 +1655,7 @@ mission "shell-owner" state="ready" {{
     fn shell_recovery_reads_synced_helper_result_before_predecessor_retirement() {
         let (_root, store, runtime, reconciler) = released_shell_fixture(false);
         assert!(store.shell_resource("outcome").unwrap().result.is_none());
+        store.take_shell_environment("outcome");
         drop(reconciler);
         let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
         recovered.driver_state_dir = _root.path().join("drivers");
@@ -1644,6 +1684,25 @@ mission "shell-owner" state="ready" {{
     }
 
     #[test]
+    fn never_launched_shell_without_transient_environment_is_refused_without_spawn() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        let original = store.shell_resource("outcome").unwrap();
+        let grant = store.resource_membership_record(&original.command.lane.id, &original.command.lane.owner)
+            .unwrap().grant.unwrap();
+        let mut command = original.command;
+        command.id = "lost-environment".into();
+        command.parent = Some(grant);
+        store.submit_shell_resource(command, u64::try_from(now_ms()).unwrap()).unwrap();
+        store.take_shell_environment("lost-environment");
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("lost-environment").unwrap();
+        assert_eq!(execution.state, "refused");
+        assert!(execution.reason.contains("environment-unavailable"));
+        assert!(execution.started_at.is_none());
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn running_shell_recovery_awaits_payload_publication_before_generic_retirement() {
         use crate::store::shell_resources::PayloadResult;
         let (root, store, runtime, reconciler) = released_shell_fixture(false);
@@ -1658,6 +1717,7 @@ mission "shell-owner" state="ready" {{
                 head_start: Some("abc123".into()), head_end: Some("def456".into()),
                 clean_start: Some(true), clean_end: Some(false),
                 exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+                ..PayloadResult::default()
             }).unwrap()).unwrap();
             fs::rename(temporary, path).unwrap();
         }));
@@ -15390,6 +15450,116 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         assert_eq!(report().status, "cancelled");
     }
 
+    #[test]
+    fn root_cancellation_stops_subscription_descendant_execs_only_under_that_root() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+mission "subscription-root" state="ready" {
+  goal "Own subscription deliveries."
+  concurrent-runs
+  step "wait" {
+    agentless
+    gate "wait" { document "doc/root-release" }
+  }
+}
+mission "subscription-child" state="ready" {
+  goal "Keep a delivered exec live."
+  concurrent-runs
+  step "work" {
+    agentless
+    exec "worker" { command "sleep 60"; restart "never" }
+    gate "wait" { document "doc/child-release" }
+  }
+}
+"#,
+            "subscription-cancellation-missions",
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        for name in ["root", "other", "child", "unrelated"] {
+            std::fs::create_dir(workspace.path().join(name)).unwrap();
+        }
+        let request = |mission: &str, key: &str| MissionRunRequest {
+            mission: mission.into(),
+            revision: None,
+            workspace: workspace.path().join(key).display().to_string(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let root = store.create_mission_run(&request("subscription-root", "root")).unwrap();
+        let other = store.create_mission_run(&request("subscription-root", "other")).unwrap();
+        // Both deliveries use the same subscription, but inherit different root identities.
+        // Their synthetic parent is deliberately not a generation's ordinary step.
+        let child = store.create_subscription_mission_run(
+            &request("subscription-child", "child"), Some(&root),
+            "subscription/shared", "resource/item", "discovery-child",
+        ).unwrap();
+        let unrelated = store.create_subscription_mission_run(
+            &request("subscription-child", "unrelated"), Some(&other),
+            "subscription/shared", "resource/item", "discovery-unrelated",
+        ).unwrap();
+        assert_eq!(child.parent_step_run.as_deref(), Some("step-run/subscription/shared"));
+        assert!(store.step_run("step-run/subscription/shared").unwrap().is_none());
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+            for member in runtime.started_members.lock().unwrap().iter() {
+                runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(),
+                    terminal: false,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("live-{}", member.runtime_id)),
+                });
+            }
+        }
+        let exec = |run: &MissionRunView| {
+            store.desired_subjects_for_owner_run(&run.subject).unwrap().into_iter()
+                .find(|subject| subject.kind == "exec").expect("the delivered exec is declared")
+        };
+        let child_exec = exec(&child);
+        let unrelated_exec = exec(&unrelated);
+        assert_eq!(actual_field(&store.latest_actual_value(&child_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(actual_field(&store.latest_actual_value(&unrelated_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        store.request_mission_run_cancellation(&root.id, "operator cancelled the root").unwrap();
+        let cancelling = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelling.phase, "cleanup-cancelled", "subscription descendants need durable cancellation");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["phase"], "cleanup-cancelled");
+        let step = &cancelling.steps[0];
+        let claim = store.latest_claim(&step.subject, Some("step-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        // Exercise root cleanup itself: no independent child cleanup or generic
+        // terminal-owner runtime sweep may rescue the missing descendant stop.
+        reconciler.reconcile_mission_run_cleanup(
+            &store.mission_run(&root.id).unwrap().unwrap(),
+        ).unwrap();
+        let desired = store.desired_subjects().unwrap();
+        assert!(desired.iter().any(|subject| subject.subject == child_exec.subject && subject.kind == "stop"),
+            "root cleanup must emit an exact stop for its descendant exec");
+        assert_eq!(store.mission_run(&other.id).unwrap().unwrap().status, other.status);
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+        assert!(desired.iter().any(|subject| subject.subject == unrelated_exec.subject && subject.kind == "exec"));
+        // The fake runtime confirms that this exact exec has ended, allowing
+        // the existing cleanup lifecycle to write the terminal cancellation.
+        runtime.execs.lock().unwrap().remove(&child_exec.member.as_ref().unwrap().runtime_id);
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let cancelled = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.phase, "terminal");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+    }
+
     #[tokio::test]
     async fn one_cancellation_wake_converges_through_runtime_cleanup() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -24571,6 +24741,90 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["subject"], "github-event/repo/issue/2/comment/5");
         assert_eq!(comment_event(5), 1);
+    }
+
+    #[tokio::test]
+    async fn unavailable_recovery_clears_the_reason_in_merged_stored_item_facts() {
+        use crate::resource::test_github::{FakeGithub, age_pull_request_check, observe};
+        use serde_json::json;
+
+        for mode in ["rest", "graphql", "refresh", "webhook"] {
+            let (github, base) = FakeGithub::start().await;
+            let store = Store::open_memory("node").unwrap();
+            apply_source(&store, r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "pull_requests"
+}"#, "unavailable-recovery");
+            let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+            let listing = json!([
+                {"number": 1, "node_id": "I_unavailable", "state": "open", "state_reason": "reopened",
+                    "html_url": "https://github.com/acme/garden/issues/1", "updated_at": "2026-09-10T00:00:00Z"},
+                {"number": 2, "node_id": "PR_unavailable", "state": "open", "pull_request": {},
+                    "html_url": "https://github.com/acme/garden/pull/2", "updated_at": "2026-09-10T00:00:00Z"},
+            ]);
+            github.route("/repos/acme/garden", json!({"id": 7}));
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", listing.clone());
+            *github.graphql_pulls.lock() = Some((vec![], 100));
+            *github.graphql.lock() = json!({
+                "data": {"nodes": [null, null]},
+                "errors": [
+                    {"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Unavailable issue"},
+                    {"type": "NOT_FOUND", "path": ["nodes", 1], "message": "Unavailable pull request"},
+                ],
+            }).to_string();
+            let mut request = ObservationRequest {
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
+                cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
+                webhook_covered: false, workflow_runs: None, github_capture: None,
+            };
+            let unavailable = observe(request.clone(), &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                unavailable.cursor.as_deref(), &unavailable.facts, 1, &[], None).unwrap();
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "closed", "{mode}: {stored}");
+                assert_eq!(stored["facts"]["state_reason"], "not_found", "{mode}: {stored}");
+            }
+
+            let cursor: Value = serde_json::from_str(unavailable.cursor.as_deref().unwrap()).unwrap();
+            // These fixture times are whole seconds, and discovery includes the prior second.
+            assert_eq!(cursor["items_since"], "2026-09-10T00:00:00Z");
+            github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+                if mode == "rest" { listing } else { json!([]) });
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
+            *github.graphql.lock() = json!({"data": {"nodes": [
+                {"id": "I_unavailable", "number": 1, "state": "OPEN", "stateReason": "REOPENED",
+                    "url": "https://github.com/acme/garden/issues/1"},
+                {"id": "PR_unavailable", "number": 2, "state": "OPEN",
+                    "url": "https://github.com/acme/garden/pull/2"},
+            ]}}).to_string();
+            if mode == "graphql" {
+                *github.graphql_pulls.lock() = Some((vec![json!({
+                    "id": "PR_unavailable", "number": 2, "url": "https://github.com/acme/garden/pull/2",
+                })], 100));
+                age_pull_request_check(&base, Duration::from_secs(3600));
+            }
+            request.cursor = unavailable.cursor;
+            request.previous_facts = Some(unavailable.facts);
+            request.refresh = matches!(mode, "refresh" | "webhook");
+            request.webhook_covered = mode == "webhook";
+            let recovery = observe(request, &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                recovery.cursor.as_deref(), &recovery.facts, 2, &[], None).unwrap();
+
+            // Assert the store's real partial-fact overlay, not just the provider's open state.
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                if mode == "graphql" && subject.ends_with("/issue/1") {
+                    continue; // The open-PR discovery query cannot rediscover issues.
+                }
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "open", "{mode}: {stored}");
+                assert!(stored["facts"].get("state_reason").is_none(), "{mode}: {stored}");
+            }
+        }
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real

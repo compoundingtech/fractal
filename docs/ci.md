@@ -10,8 +10,9 @@ that exact landed source. Otherwise it retains the hosted queue proof without re
 Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
 lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
-disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
-public-content guard. Public checks keep only the latest main push. Main upkeep retains
+disabled. PR updates cancel obsolete runs for that PR in Workspace CI and both
+public-content guards. Public checks retain each main push in its own run group;
+only pull-request events cancel in-progress runs. Main upkeep retains
 each landed source for any required post-merge proof. Manual dispatch
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The four required queue checks and complete test partitions are retained.
@@ -67,6 +68,10 @@ A stacked PR can retain workflow files from an older base that lacks these job g
 code. It reads the target run and current PR metadata, rechecks readiness before requesting
 cancellation, and never checks out PR code or downloads its artifacts. Ready PRs and
 merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
+The observer runs on the existing owned priority role, independently of the hosted
+queue it drains. Its inline payload is generated from main, never from the triggering
+PR; even fork-triggered admission only reads metadata and exposes no new secret.
+It qualifies Python 3.10+ before executing the unchanged cancellation helper.
 Cancellation is asynchronous: the request summary is not terminal cancellation proof,
 and scheduling can start a legacy job before the observer runs. The one-day observation
 records actual build/test job starts as well as accepted requests and final cancellations.
@@ -86,7 +91,7 @@ head: it tests that head merged with the current base. The merge queue combines 
 the current `main`; the head does not need to be rebased first. No `pull_request_target` job runs PR code,
 and the gate has only `contents: read` permission. Forks do not receive publishing secrets.
 
-The fast `upgrade-impact` job starts independently on GitHub-hosted `ubuntu-latest`, using only
+The fast `upgrade-impact` job starts independently on ephemeral Namespace capacity, using only
 Python and Git. The adoption boundary is **PR #1661**: PR numbers above it require a fresh valid
 upgrade fragment, including documentation changes. PRs #1661 and below without a fragment retain
 their prior merge policy; they still require classification before public release. Supplied
@@ -112,8 +117,24 @@ gate explicitly permits to skip; failure, cancellation or an unexplained skip fa
 the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
 Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
 the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
-`genie-freshness`, `typescript-client` and the `linux-gate` aggregate use GitHub-hosted
-`ubuntu-latest`, keeping lightweight checks off reserved build capacity.
+The four required Workspace gates (`linux-gate`, `typescript-client`, `fractal-web`,
+`genie-freshness`) and tiny supporting controls (eight evidence gates,
+`upgrade-impact`, and web change detection) use the existing `ci1-priority` owned
+role only for `merge_group` and protected-main `push` events. Their labels do not
+depend on picker output. Every PR, including same-repository and fork PRs, and
+every manual run retains GitHub-hosted `ubuntu-latest` for these jobs.
+Genie and TypeScript retain their existing Nix setup and commands; TypeScript's
+Node setup is already explicit. The moved web aggregator installs pinned Node
+on owned runners only when uncovered relevant receipts need validation.
+CI-script tests, Home Manager evaluation, compatibility archives and real web
+execution retain their existing hosted placement.
+No new Namespace usage or provisioned capacity is introduced. The picker and
+queue watchers remain hosted independently of both workload pools.
+In baseline run `44693797114`, the initial fourteen hosted jobs waited a median
+1,249 seconds (range 798–1,356). Nine of those initial dispatches move to owned
+capacity for merge groups; five remain independently hosted. Across the full
+workflow, fourteen gate/control definitions change placement, while all required
+check names, predicates, dependency edges, evidence decisions and work remain unchanged.
 
 By default, required merge-group producers, the first two test shards and supporting
 Rust jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common
@@ -676,8 +697,10 @@ for account permissions, state bootstrap and manual deployment commands.
 
 ### Fractal web
 
-The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
-workflow-level path filters. `linux-gate` does not depend on them.
+Fractal web detection and aggregation use the trusted-event control placement
+above; every PR stays hosted. Real `fractal-web-execution` work retains
+GitHub-hosted `ubuntu-latest` and its existing performance environment. There are
+no workflow-level path filters, and `linux-gate` does not depend on these jobs.
 Only `fractal-web-execution` enables unprivileged user namespaces with
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral
 Ubuntu runner VM before entering the web lanes. The effect-utils Buck TypeScript
@@ -1017,7 +1040,7 @@ fall back to hosted or fleet runners.
 
 ### ci1 and ci2: owned pool and Namespace admission
 
-All required merge-group stages share the picker's pool selection, independent
+Required merge-group Rust build/test stages share the picker's pool selection, independent
 of `CI1_RUNNERS`; by default this is `ci1-priority` on either physical host.
 Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
@@ -1070,7 +1093,8 @@ image by changing a label. Restore it only through a reviewed dedicated
 persistent-store placement, preserving exact native qualification and cache
 semantics. Cancelled partial proofs remain incomplete rather than passes.
 
-Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
+CI-script tests and Home Manager evaluation remain hosted. The four required gates
+and tiny merge/main controls use the owned role; all PR placements stay unchanged.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
 merge worker, with dynamic label lending.
 Priority PRs share the lane; this sharing is accepted, with release/merge-first ordering owned
@@ -1556,11 +1580,31 @@ enable the disabled persistent-store verification job or occupy merge-serving wo
 Configure `FRACTAL_CACHIX_CACHE_NAME` and a cache-scoped
 `FRACTAL_CACHIX_AUTH_TOKEN` repository secret through the cache owner before activation.
 Only the main publication step receives the write token; PRs never execute it.
-The producer uploads the complete output closure, including already-cached references,
-then queries the remote store recursively and retains the exact source/output/cache
-receipt and closure manifest as `fractal-native-publication`. Consumers must configure
+The producer pushes the output closure; Cachix may omit dependencies already available
+from `cache.nixos.org`. Verification first requires the exact output in the owned cache,
+then enumerates its local closure and checks the whole batch against `cache.nixos.org`.
+One authenticated owned-cache batch checks the remainder. `nix-store --check-validity
+--print-invalid` reports missing members; any path still missing fails publication.
+This uses at most three remote commands regardless of closure size, and local
+availability alone never satisfies the remote proof. Private-cache queries use
+the same cache-scoped token through a job-temporary, owner-only netrc containing only
+the named cache host; an exit trap removes it on success or failure. The exact
+source/output/cache receipt and enumerated closure manifest are retained as
+`fractal-native-publication`. Consumers must configure
 read access and trust for that same cache through their fleet cache-client declarations;
 no consumer should substitute an unrelated installed binary when this output is absent.
+
+Each publication has a commit-keyed job concurrency group with cancellation disabled;
+there is no workflow-wide group that can replace another commit's pending publisher.
+For backfills, dispatch `nix.yml` on `main` with the required `sha` input set to a full
+40-character commit SHA. Checkout uses that exact SHA at depth one; the guard fetches
+the remaining main history explicitly with `--no-tags --unshallow`, avoiding evidence
+tags. Before Nix
+setup or any token-bearing step, the guard checks the SHA syntax, verifies checkout
+identity, fetches current `origin/main`, and requires the SHA to be its ancestor.
+The build and receipt use this validated SHA, not the dispatch event's main-tip SHA.
+Dispatches from other branches, scheduled events, and PRs cannot publish. This lane
+does not add a required check or merge-queue job.
 
 | Workflow | What it runs |
 | --- | --- |

@@ -190,6 +190,7 @@ for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   for (const type of ["session", "ready"]) {
     const binding = readFrames().slice(bindingStart).find((frame) => frame.type === type);
     assert.deepStrictEqual(binding, { type, sessionId: "session-smoke",
+      ...(type === "ready" ? { inputAcceptanceClock: true } : {}),
       ...(ctx === fullCtx ? { sessionFile: path.join(dir, "session-smoke.jsonl") } : {}),
     }, `${type} binds the native transcript when available and tolerates an absent getter`);
   }
@@ -700,6 +701,64 @@ for (const heldBy of ["batch", "ask"]) {
   fs.rmSync(outboxPath, { force: true });
 }
 
+// The correlation deadline is observational, not a delivery timeout. Drive it
+// explicitly so each reason is tested without waiting thirty seconds.
+for (const outcome of ["content-mismatch", "no-message-start", "timeout", "matched",
+  "reject-content-mismatch", "reject-no-message-start"]) {
+  const rejected = outcome.startsWith("reject-");
+  const reason = rejected ? outcome.slice("reject-".length) : outcome;
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  let finishRun;
+  let rejectRun;
+  let expireCorrelation;
+  const run = new Promise((resolve, reject) => { finishRun = resolve; rejectRun = reject; });
+  handoffSend = () => run;
+  const meta = { messageId: `message/fallback-${outcome}`, identity: "fixture.worker",
+    inputIncarnation: "fixture-incarnation" };
+  const content = `private mail ${reason}`;
+  const nativeTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, ms, ...args) => ms === 30_000
+    ? (expireCorrelation = callback, { unref() {} }) : nativeTimeout(callback, ms, ...args);
+  try {
+    fs.appendFileSync(outboxPath, JSON.stringify({ type: "message", content, meta }) + "\n");
+    await pause(150);
+  } finally {
+    globalThis.setTimeout = nativeTimeout;
+  }
+  assert.strictEqual(typeof expireCorrelation, "function");
+  const fallbacks = () => readFrames().filter(frame =>
+    frame.type === "admission_fallback" && frame.meta?.messageId === meta.messageId);
+  if (reason === "content-mismatch" || reason === "matched") {
+    await handlers.get("message_start")({ message: { role: "user", content: "transformed private text" } }, holdCtx);
+  }
+  if (reason === "matched") {
+    await handlers.get("message_start")({ message: { role: "user", content } }, holdCtx);
+    await awaitAcknowledgement(meta.messageId);
+  } else if (reason === "timeout") {
+    expireCorrelation();
+    await pause(50);
+    assert.deepStrictEqual(fallbacks(), [{ type: "admission_fallback", reason, meta }]);
+    assert.ok(!acknowledged().includes(meta.messageId), "deadline never fabricates admission");
+  }
+  if (rejected) {
+    rejectRun(new Error("unmatched run rejected"));
+    await pause(100);
+    assert.strictEqual(readFrames().filter(frame => frame.type === "failed" &&
+      frame.meta?.messageId === meta.messageId).length, 1);
+    assert.ok(!acknowledged().includes(meta.messageId), "rejected run never fabricates admission");
+  } else {
+    finishRun();
+    await awaitAcknowledgement(meta.messageId);
+  }
+  await pause(50);
+  assert.deepStrictEqual(fallbacks(), reason === "matched" ? [] : [{
+    type: "admission_fallback", reason, meta,
+  }], "one bounded reason per fallback handoff, with identity but never content");
+  handoffSend = undefined;
+  fs.rmSync(outboxPath, { force: true });
+}
+
 // Failure before the matching message starts remains a failed admission. Replay
 // retries it, whereas an admitted replay is acknowledged without another send.
 if (process.argv[2]?.includes("st-omp-channel")) {
@@ -825,7 +884,7 @@ fs.rmSync(delayedHelloPath, { force: true });
 // omp loads this extension into every in-process subagent, as a second instance sharing the
 // process-wide stash (compoundingtech/fractal#852). A subagent's lifecycle must leave the seat's
 // channel alone: no channel of its own, and its shutdown does not close the seat's channel. Mail
-// that arrives afterwards still reaches the top-level session. st's asset reports the subagent's
+// that arrives afterwards still reaches the top-level session. Fractal's asset reports the subagent's
 // runs on the seat's channel and nothing else of it; the legacy asset sends no frame at all.
 const subHandlers = new Map();
 const subHandedOver = [];
@@ -871,8 +930,8 @@ assert.deepStrictEqual(
     : [],
   "a subagent's events reach the channel only as its runs",
 );
-// While its runs last, st's asset reports each minute every subagent omp says is busy, as in a long
-// tool call. A subagent whose session went idle without its end reports nothing, so st ends it once
+// While its runs last, Fractal's asset reports each minute every subagent omp says is busy, as in a long
+// tool call. A subagent whose session went idle without its end reports nothing, so Fractal ends it once
 // it has been quiet long enough.
 const heartbeats = [];
 const realSetInterval = globalThis.setInterval;
@@ -1016,7 +1075,7 @@ assert.deepStrictEqual(readFrames().slice(framesBeforeMain), [expectedState("act
 await handlers.get("agent_end")(successfulEnd, mainCtx);
 fs.rmSync(outboxPath, { force: true });
 
-// st3's dedicated todo observation is deliberately absent from the legacy st2 asset.
+// Fractal's dedicated todo observation is deliberately absent from the legacy st2 asset.
 if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo")) {
   const totals = (pending = 0, in_progress = 0, completed = 0, blocked = 0, abandoned = 0) =>
     ({ pending, in_progress, completed, blocked, abandoned });

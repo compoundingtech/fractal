@@ -7,9 +7,10 @@
 //!
 //! - `claim_verdicts`: one row per signed claim, keyed by the claim ID (a content hash), so a
 //!   different claim never reuses a verdict.
-//! - `claim_verdict_links`: a conservative dependency superset for retained candidates
-//!   (delegations, keys, nonces and roots), maintained by each judgment page. Relevant changes
-//!   queue linked verdicts; claim removal or explicit recheck owns dependency cleanup.
+//! - `claim_verdict_links`: the default writer's conservative dependency superset.
+//!   `claim_verdict_dependency_links` reads it together with integer-key edges from a
+//!   later writer format. Both retain delegations, keys, nonces and roots regardless
+//!   of whether a judgment is cold; relevant changes queue every linked verdict.
 //! - `claim_verdict_queue`: claims to judge again.
 //! - `claim_verdict_fresh`: claims whose signature was just stored, at sealing or admission; a
 //!   pass judges them and queues whatever they change. Nothing scans the claims.
@@ -30,7 +31,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h47095dd529d7 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -133,6 +134,13 @@ CREATE INDEX IF NOT EXISTS claim_candidate_verdict_links_claim_index ON claim_ve
 CREATE TABLE IF NOT EXISTS claim_verdict_queue (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+-- A settled small fold keeps no judging row. A claim queued for judgment again must still read
+-- as pending until judged, as a dirty row made it before: give it a dirty placeholder row. As a
+-- trigger, a release that predates pruning also marks pruned claims when it requeues them.
+CREATE TRIGGER IF NOT EXISTS claim_verdict_queue_marks_pruned AFTER INSERT ON claim_verdict_queue BEGIN
+    INSERT OR IGNORE INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty)
+    VALUES (NEW.claim_id,0,'','','',0,1);
+END;
 CREATE TABLE IF NOT EXISTS claim_verdict_fresh (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -353,6 +361,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
     )
 }
 
+mod dependencies;
 mod judging;
 mod legacy;
 mod migration;
@@ -956,8 +965,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     // Absence of a formerly live nonce use can make a retained candidate valid again.
     // Queue its dependents before deleting the relation, in the deletion transaction.
     // The indexed join includes non-winning cryptographic uses, not just the facade.
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd26d59e3827d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4ff355fec1f2 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h953da2f52162 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he72e0837252e owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_dependency_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     queue_affected_by_tx(connection, claim_id)?;
     if legacy::active(connection)? {
         legacy::queue_affected_by_tx(connection, claim_id)?;
@@ -970,6 +979,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
                 .execute(/* sqlite-large-value: allow-for-now lv-h1a31bc53b2c8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
         }
     }
+    dependencies::forget_keys(connection, claim_id)?;
     for table in [
         "claim_signatures",
         "claim_signature_candidates",
@@ -977,6 +987,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_signature_judging",
         "claim_verdicts",
         "claim_verdict_links",
+        "claim_verdict_dependency_edges",
         "claim_verdict_queue",
         "claim_verdict_fresh",
         "claim_signature_originals",
@@ -1005,12 +1016,7 @@ fn start_root_requeue_tx(connection: &Connection, roots_digest: &str) -> Result<
 /// Queue one page of the claims linked to `link` after `after`, in claim order, and keep or end
 /// its cursor. Returns whether more remain.
 fn requeue_page_tx(connection: &Connection, link: &str, after: &str) -> Result<bool> {
-    let page = params![link, after, REQUEUE_PAGE as i64];
-    let (last, count): (Option<String>, usize) = connection
-        .prepare_cached("SELECT MAX(claim_id), COUNT(*) FROM (SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3)")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h26d9a509862a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page, |row| Ok((row.get(0)?, row.get(1)?)))?;
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he8dea43d15fe owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3)")?.execute(/* sqlite-large-value: allow-for-now lv-h745c77576b29 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page)?;
-    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc142559507cb owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT claim_id FROM claim_verdict_links WHERE link=?1 AND claim_id>?2 ORDER BY claim_id LIMIT ?3")?.execute(/* sqlite-large-value: allow-for-now lv-h86a60c947619 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ page)?;
+    let (last, count) = dependencies::queue_page(connection, link, after)?;
     let key = format!("{REQUEUE}{link}");
     match last.filter(|_| count == REQUEUE_PAGE) {
         Some(last) => {
@@ -1117,7 +1123,7 @@ fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>>
 pub(super) fn requeue_ahead_of(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
     Ok(connection
         .prepare_cached(
-            "SELECT l.link FROM meta m JOIN claim_verdict_links l
+            "SELECT l.link FROM meta m JOIN claim_verdict_dependency_links l
                ON l.link=substr(m.key, ?3) AND l.claim_id=?4
              WHERE m.key>=?1 AND m.key<?2 AND m.value<?4 ORDER BY m.key LIMIT 1",
         )?
@@ -1223,6 +1229,15 @@ impl ClaimSigner {
             && signature.on_behalf == self.on_behalf
             && signature.chain == self.chain
     }
+}
+
+/// One page of [`Store::prune_settled_signature_judgments`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct JudgingPrune {
+    pub examined: usize,
+    pub deleted: usize,
+    /// Every row that predates this release has been looked at; later pages do nothing.
+    pub finished: bool,
 }
 
 /// What a verdict recheck found.
@@ -1635,6 +1650,21 @@ impl Store {
         })
     }
 
+    /// Drop one page of the settled judging rows that earlier releases kept after a verdict was
+    /// published (see `judging::discard_settled_tx`), in one short background writer loan.
+    /// Waits until the candidate model serves: during bootstrap the rows are still being built.
+    pub fn prune_settled_signature_judgments(&self) -> Result<JudgingPrune> {
+        if !self.signature_migration()?.done() {
+            return Ok(JudgingPrune { examined: 0, deleted: 0, finished: false });
+        }
+        let mut connection = self.connection.write_background();
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (examined, deleted, finished) = judging::prune_settled_page_tx(&transaction)?;
+        transaction.commit()?;
+        Ok(JudgingPrune { examined, deleted, finished })
+    }
+
     /// Whether a pass has anything to judge: a newly signed claim, a queued one, or a link whose
     /// verdicts are still being queued. Three probes of small tables on a reader.
     pub fn verdicts_pending(&self) -> Result<bool> {
@@ -1839,6 +1869,10 @@ impl Store {
                     .execute(/* sqlite-large-value: allow-for-now lv-h29105e98503c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A signature can arrive for a claim a checkpoint has since dropped.
                 let Some(row) = claim_row(&transaction, claim_id)? else {
+                    // Nothing judges it again: drop the placeholder its queueing made.
+                    transaction
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7fff7fbe77a9 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging WHERE claim_id=?1 AND candidate_count=0 AND complete=0 AND dirty=1")?
+                        .execute(/* sqlite-large-value: allow-for-now lv-h84587f2a5297 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id])?;
                     continue;
                 };
                 let (result, used) = judging::advance(
@@ -1859,6 +1893,8 @@ impl Store {
                     // A changed delegation or revocation changes what relied on it.
                     queue_affected_by_row_tx(&transaction, &row)?;
                 }
+                // Its verdict is published: a settled small fold keeps no resume state.
+                judging::discard_settled_tx(&transaction, claim_id)?;
                 judged += 1;
             }
             if track_bootstrap && candidates_judged != 0 {
@@ -1964,7 +2000,7 @@ impl Store {
             // A claim an unfinished requeue has not reached counts as held, as it reads. The
             // per-row probe runs only while a requeue is pending.
             connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_dependency_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
             .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, true], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
@@ -2009,7 +2045,8 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h617a09575246 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
+                /* sqlite-large-value: allow-for-now lv-h645d37687e9f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
+                 DELETE FROM claim_verdict_dependency_edges; DELETE FROM claim_verdict_dependency_keys;
                  DELETE FROM claim_verdict_queue;
                  INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;",
             )?;
@@ -2665,7 +2702,7 @@ mod paced_verdict_tests {
             let connection = store.readers.get();
             let requeuing = requeue_pending(&connection).unwrap();
             connection
-                .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")
+                .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_dependency_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")
                 .unwrap()
                 .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()

@@ -1,5 +1,5 @@
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
 /// Resolve against the approved revision, or the exact candidate being approved, not the
@@ -689,7 +689,7 @@ pub(super) async fn run_mission_view(
                     .context("missing run in mission summary")?
                     .to_owned();
             }
-            let run = client
+            let mut run = client
                 .get::<MissionRunView>(&format!(
                     "/v1/mission-runs/{}",
                     urlencoding::encode(&selected)
@@ -701,12 +701,15 @@ pub(super) async fn run_mission_view(
             if json_output {
                 return print_value(&run, true);
             }
+            load_run_source_provenance(client, &mut run).await?;
             let page = load_mission_run_tree(client, &run, args.cursor.as_deref(), args.limit).await?;
             let now = current_unix_ms()?;
             print!(
                 "{}",
                 render_mission_run_page(&run, &page.runs, OutputStyle::stdout(), now)
             );
+            let publication = load_run_publication(client, &run).await?;
+            print!("{}", mission_publication_note(publication.as_ref()));
             print_mission_tree_continuation(&run, &page, args.limit);
             // A daemon without lanes answers 404; the run itself is still shown.
             if let Ok(lanes) = client
@@ -761,7 +764,7 @@ pub(super) async fn run_mission_view(
     }
 }
 
-/// `st missions check FILE`: exit status 1 when a gate is broken.
+/// `fractal missions check FILE`: exit status 1 when a gate is broken.
 async fn check_mission_file(
     client: &Client,
     args: MissionCheckArgs,
@@ -788,7 +791,7 @@ async fn check_mission_file(
         },
     )
     .await?;
-    let view = checked.context("this st daemon cannot check exec gates; update it")?;
+    let view = checked.context("this fractal daemon cannot check exec gates; update it")?;
     if json_output {
         print_value(&view, true)?;
     } else if view.gates.is_empty() {
@@ -1071,7 +1074,7 @@ fn render_mission_overview(view: &Value) -> String {
     out
 }
 
-/// The lanes a mission run owns, for `st missions show`.
+/// The lanes a mission run owns, for `fractal missions show`.
 fn render_run_lanes(lanes: &[fractal_daemon::model::LaneView], now: u128) -> String {
     use std::fmt::Write as _;
 

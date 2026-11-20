@@ -30,6 +30,7 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
+mod roster_assembly;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -498,6 +499,8 @@ impl ApiError {
             | "stale-subject"
             | "stale-fence"
             | "idempotency-conflict"
+            | "resource-request-conflict"
+            | "resource-request-cancelled"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -637,6 +640,38 @@ async fn test_record_message_mark(
     Ok(Json(receipt))
 }
 
+#[cfg(feature = "test-support")]
+#[derive(serde::Deserialize)]
+struct TestMailRetirement {
+    now_ms: u64,
+}
+
+/// Test support: retire closed graph mail as the daemon's hourly pass would at `now_ms`, so a
+/// test need not wait a week or an hour.
+#[cfg(feature = "test-support")]
+async fn test_retire_closed_mail(
+    State(state): State<AppState>,
+    Json(request): Json<TestMailRetirement>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let (threads, claims) = tokio::task::spawn_blocking(move || -> anyhow::Result<(usize, usize)> {
+        let (mut threads, mut claims) = (0, 0);
+        loop {
+            let step = store.retire_closed_mail_step(request.now_ms)?;
+            threads += step.threads;
+            claims += step.claims;
+            if !step.more {
+                return Ok((threads, claims));
+            }
+        }
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    signal_visible_change(&state);
+    Ok(Json(json!({"threads": threads, "claims": claims})))
+}
+
 /// [`router`] with the route families of the crates above.
 pub fn router_with(state: AppState, families: &[RouteFamily]) -> Router {
     crate::relay_trace::init();
@@ -664,6 +699,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
+        .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
+        .route("/v1/internal/resources/by-request/{request_id}", get(resources::show_request))
+        .route("/v1/internal/resources/by-request/{request_id}/cancel", post(resources::cancel_request))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -853,7 +891,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/claims", get(records::list_claims).post(records::post_claim))
         .route("/v1/usage", get(operations::get_usage))
-        .route("/v1/slo", get(operations::get_slo))
+        .route("/v1/slo", get(operations::get_slo).post(operations::ingest_roll))
+        .route("/v1/slo/observe", post(operations::observe_roll))
+        .route("/v1/slo/roll-intent", get(operations::roll_intent))
         .route("/v1/slo/history", get(operations::get_slo_history))
         .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
@@ -873,6 +913,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
@@ -887,6 +928,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/effects/by-key", get(effects::by_key))
         .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
+        .route("/v1/storage/status", get(operations::storage_status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
@@ -1118,7 +1160,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
-        .route("/v1/internal/test/message-marks", post(test_record_message_mark));
+        .route("/v1/internal/test/message-marks", post(test_record_message_mark))
+        .route("/v1/internal/test/mail-retirement", post(test_retire_closed_mail));
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -3284,9 +3327,8 @@ pub fn client_agent_resources_cached(
     }))
 }
 
-/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
-/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
-/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+/// Run a roster fold not enclosed by a request or snapshot in a snapshot of its own.
+/// Background refreshes supply a wall budget; direct folds retain the card CPU budget.
 fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
         return fold();
@@ -6476,39 +6518,49 @@ fn agent_roster_cut_not_ready(wanted: u64) -> ApiError {
 /// How many agents one short snapshot reduces while the refresher warms the roster.
 const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 
+/// Scheduling and I/O waits count too: card CPU limits alone do not release a WAL reader.
+const AGENT_ROSTER_SNAPSHOT_BUDGET: Duration = Duration::from_secs(2);
+
+fn agent_roster_snapshot<T>(
+    store: &Store,
+    fold: impl FnOnce(u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new("roster/refresh", AGENT_ROSTER_SNAPSHOT_BUDGET),
+        |parent| parent.child(AGENT_ROSTER_SNAPSHOT_BUDGET),
+    );
+    smallclaims::read_budget::with(Some(budget), || store.read_snapshot(|index| {
+        smallclaims::read_budget::check()?;
+        let result = fold(index)?;
+        smallclaims::read_budget::check()?;
+        Ok(result)
+    }))
+}
+
 /// Reduce every agent's current-view and card status in short snapshots of at most
 /// [`AGENT_ROSTER_WARM_CHUNK`] agents. These per-agent reductions stay cached until a claim
 /// they depend on arrives, so the folds that follow at one cut read them instead of the log.
 fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
-    let subjects = store.read_snapshot(|index| {
-        let connection = store.readers.get();
-        crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
-            Ok(connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2154055540e0 owner=fractal_api_core::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
-                .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?)
-        })
-    })?;
-    for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
-        let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
-        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
-        }))?;
+    let mut lower = "agent/".to_owned();
+    loop {
+        let names = agent_roster_snapshot(store, |index| {
+            let connection = store.readers.get();
+            let names = connection.prepare_cached(&crate::store::seats::AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+                .query_map(rusqlite::params![index, lower, "agent0", AGENT_ROSTER_WARM_CHUNK],
+                    |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false)?;
+            Ok(names)
+        })?;
+        let Some(last) = names.last() else { break; };
+        lower = format!("{last}\0");
+        if names.len() < AGENT_ROSTER_WARM_CHUNK { break; }
     }
     Ok(())
 }
 
-/// How many times a refresh folds the roster in chunks before it gives up on a roster that
-/// keeps changing in ways it cannot follow card by card.
-const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
-
-/// Publish the complete roster at a new cut, never folding more than
-/// [`AGENT_ROSTER_WARM_CHUNK`] cards in one snapshot. A snapshot completes the roster only once
-/// the newest rows say which cards changed and at most that many are changed or missing.
-/// Otherwise the cards fold in chunks, each at its own cut, refolding the already folded cards
-/// whose claims changed, and completion is tried again. Readers keep the previous complete
-/// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
-/// refresh fails and is tried again on the next request.
+/// Publish a complete roster, retaining completed keyset/delta pages across cancellation.
+/// Each short snapshot has its own deadline; the pass budget bounds total background work.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
     let generation = store.agents_publication_build()?;
     let Some(CapturedPresentedAgents { source, subagents, now }) =
@@ -6539,46 +6591,39 @@ fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<Capture
 fn refresh_agent_roster_source(
     store: &Store, history: bool,
 ) -> anyhow::Result<Option<CapturedPresentedAgents>> {
-    store.begin_agent_roster_fault_retries(history);
-    let (current, captured) = store.read_snapshot(|index| {
-        let current = store.agent_roster_current(index, history)?;
-        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
-        Ok((current, captured))
-    })?;
-    if current { return Ok(captured); }
-    let complete = |store: &Store| store.read_snapshot(|index| {
-        if let Some(reason) =
-            store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
-        {
-            return Ok((Some(reason), None));
+    let budget = smallclaims::read_budget::current().map_or_else(
+        || smallclaims::read_budget::ReadBudget::new_quiet("roster/refresh-pass", Duration::from_secs(10)),
+        |parent| parent.child(Duration::from_secs(10)),
+    );
+    smallclaims::read_budget::with(Some(budget), || {
+        if roster_assembly::active(store, history) {
+            return roster_assembly::resume(store, history);
         }
-        client_agent_resources_cached(store, history, index)?;
-        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
-        Ok((None, captured))
-    });
-    for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let (reason, captured) = complete(store)?;
-        let Some(reason) = reason else {
-            return Ok(captured);
-        };
-        store.note_agent_roster_chunked(&reason);
-        let order = store.read_snapshot(|index| {
-            Ok(client_agent_page_refs(store, history, index)?.iter()
-                .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>())
-        })?;
-        for chunk in order.chunks(AGENT_ROSTER_WARM_CHUNK) {
-            let chunk = chunk.iter().cloned().collect::<BTreeSet<_>>();
-            store.read_snapshot(|index| {
-                client_agent_cards_selected(store, history, index, &chunk, true).map(drop)
-            })?;
+        store.begin_agent_roster_fault_retries(history);
+        let complete = agent_roster_snapshot(store, |index| {
+            if store.agent_roster_current(index, history)? {
+                return Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }));
+            }
+            if let Some(reason) = store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)? {
+                return Ok((Some(reason), None));
+            }
+            client_agent_resources_cached(store, history, index)?;
+            Ok((None, if history { None } else { Some(capture_presented_agents(store, index)?) }))
+        });
+        match complete {
+            Ok((None, captured)) => Ok(captured),
+            Ok((Some(reason), _)) => {
+                store.note_agent_roster_chunked(&reason);
+                roster_assembly::start(store, history);
+                roster_assembly::resume(store, history)
+            }
+            Err(error) => {
+                // Do not keep retrying an indivisible membership/completion scan.
+                roster_assembly::start(store, history);
+                Err(error)
+            }
         }
-    }
-    let (reason, captured) = complete(store)?;
-    if reason.is_none() {
-        return Ok(captured);
-    }
-    anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
+    })
 }
 
 /// Every current agent's refs, and the cards of as many as the largest window or page shows.
@@ -7386,7 +7431,7 @@ async fn refresh_agent_roster_admitted(
                     // Queue the complete follow-on before publishing the head: a projection
                     // reset after that publication must be able to cancel this old demand.
                     reader.fractal.request_roster_refresh();
-                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                    agent_roster_snapshot(&reader, |index| client_agent_roster_head(&reader, index))
                 })
             } else {
                 let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
@@ -8452,7 +8497,9 @@ pub async fn guard_bound_request(
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
     }
-    if ![
+    let message_path = messages::is_message_path(path);
+    let message_send = matches!(path, "/v1/messages" | "/v1/messages/");
+    if !message_path && ![
         "/v1/intent/apply",
         "/v1/sets/",
         "/v1/agent-queue-moves",
@@ -8482,7 +8529,6 @@ pub async fn guard_bound_request(
         "/v1/subscription-requests/",
         "/v1/reviews/",
         "/v1/claims",
-        "/v1/messages/",
         "/v1/schema/registrations",
         "/v1/custom/reply",
         "/v1/diagnostic",
@@ -8511,10 +8557,16 @@ pub async fn guard_bound_request(
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
         }
-        for key in ["actor", "requester"] {
+        let message_write = message_path
+            || parts.uri.path() == "/v1/claims" && value.get("kind").and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("message."));
+        for key in ["actor", "requester"].into_iter().chain(message_send.then_some("from")) {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
+                if message_write {
+                    return Err(messages::attribution_error());
+                }
                 return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
@@ -8596,8 +8648,8 @@ async fn health(
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"mission_run_follow_head":1},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":2,"mission_resource_lane":2,"resource_profile_keys":1,"resource_recovery_observations":1,"mission_run_follow_head":1},
     });
     let replication = state.store.replication_health(state.fleet_id.is_some()).map_err(ApiError::internal)?;
     health["replication"] = json!({
@@ -10742,6 +10794,10 @@ mod replication_guard_tests;
 #[path = "api/checkpoint_plan_tests.rs"]
 mod checkpoint_plan_tests;
 
+#[cfg(test)]
+#[path = "api/storage_census_tests.rs"]
+mod storage_census_tests;
+
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
 fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
@@ -11830,6 +11886,7 @@ pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow:
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, domain_rows));
+    rows.insert(budgets, crate::roll_completion::row(store, now));
     let admission = crate::admission_objectives::rows(store, now)?;
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     drop(rows.splice(budgets..budgets, admission));

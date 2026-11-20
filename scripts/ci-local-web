@@ -9,8 +9,8 @@
 #
 # As scripts/ci-local does for the Linux gate stages, it runs with a home of its own: HOME and the XDG directories are a scratch
 # directory on the account's disk (never /tmp), removed afterwards (kept when CI_LOCAL_KEEP is set, as fractal-test --keep
-# sets it), with a CI runner's umask (022), no preloaded allocator and no st, GitHub or SSH agent variable, so nothing it starts
-# can reach this account's st state or credentials. The pnpm store is kept
+# sets it), with a CI runner's umask (022), no preloaded allocator and no Fractal, GitHub or SSH agent variable, so nothing it starts
+# can reach this account's Fractal state or credentials. The pnpm store is kept
 # (pnpm_config_store_dir, default ~/.cache/ci-local-pnpm-store), as CI keeps it between runs.
 set -euo pipefail
 umask 022
@@ -37,16 +37,16 @@ while IFS='=' read -r -d '' name value; do
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*|LD_PRELOAD|KIT_*|APP_TEST_SET) unset "$name" ;;
   esac
 done < <(env -0)
-# Neither a seat's command recorder (inside the account's st state) nor the account's own tool wrappers (~/.local/bin: the host's
+# Neither a seat's command recorder (inside the account's Fractal state) nor the account's own tool wrappers (~/.local/bin: the host's
 # build admission front doors for nix, npm and cargo) stay on PATH: a CI runner has neither, and a wrapper that execs "the next
 # nix on PATH" loops forever under a test that puts its own nix stub first (scripts/ci-web-shell-test). The run is already
 # governed: fractal-test starts it under one heavy-slot ticket in builds.slice.
-st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
+fractal_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 account_bin=$HOME/.local/bin
 kept=()
 IFS=':' read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  case "$entry" in "$st_state"|"$st_state"/*|"$account_bin"|"$account_bin"/) ;; *) kept+=("$entry") ;; esac
+  case "$entry" in "$fractal_state"|"$fractal_state"/*|"$account_bin"|"$account_bin"/) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 # The kit plays keep several browsers busy, and they start no cargo or nix the host's build admission would see: two of them at once took

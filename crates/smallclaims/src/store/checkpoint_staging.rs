@@ -239,6 +239,33 @@ fn u128_of(value: i64) -> u128 {
 }
 
 impl Store {
+    /// Export only planner-approved historical claim evidence. This does not retire claims,
+    /// apply a checkpoint, or activate archive-aware readers. Use a consistent offline store.
+    pub fn write_claim_archive(
+        &self,
+        staged: &StagedSet,
+        ids: &[String],
+        as_of_unix_ms: u128,
+        window: crate::claim_archive::HotWindow,
+        destination: &Path,
+    ) -> Result<crate::claim_archive::ClaimSeal> {
+        anyhow::ensure!(!ids.is_empty() && ids.len() <= crate::claim_archive::MAX_CLAIMS, "invalid claim segment count");
+        anyhow::ensure!(ids.windows(2).all(|pair| pair[0] < pair[1]), "claim identities must be strictly ordered");
+        anyhow::ensure!(staged.cut_unix_ms == as_of_unix_ms, "archive observation time differs from checkpoint cut");
+        let plan = self.plan_staged_checkpoint(staged)?;
+        for id in ids {
+            anyhow::ensure!(staged.drops_claim(id)?, "protected or unsealed claim cannot be archived: {id}");
+        }
+        let claims = self.checkpoint_capture_page(staged.epoch, || {
+            let connection = self.readers.get();
+            ids.iter().map(|id| {
+                crate::claim_archive::ClaimEvidence::capture(&connection, id)?
+                    .ok_or_else(|| anyhow::anyhow!("captured claim is missing: {id}"))
+            }).collect::<Result<Vec<_>>>()
+        })?;
+        crate::claim_archive::write_selected(claims, plan.rules_digest, as_of_unix_ms, window, destination)
+    }
+
     /// Capture the sealed set before `cut_unix_ms`, as of `through_rowid`, into a staging file in
     /// `dir`, resuming a capture of the same store-index cut that a previous pass or process left
     /// there. See `checkpoint_sealed_set_paged` for the epoch: three conflicting changes to the
@@ -486,6 +513,7 @@ impl StagedSet {
     ) -> Result<Self> {
         let connect = || -> Result<Connection> {
             let staging = Connection::open(path)?;
+            crate::sqlite::census_files::register(&staging);
             // The file is a cache of the store: a crash may lose the last page, never corrupt
             // what was committed, and a lost file is captured again.
             staging.execute_batch(/* sqlite-large-value: allow-for-now lv-h2b1120fcc098 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!(

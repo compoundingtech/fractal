@@ -27,6 +27,9 @@ pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+pub mod resource_profile_learner;
+#[cfg(test)]
+mod resource_profile_policy_tests;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -145,6 +148,7 @@ pub mod seat_status;
 pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
+mod card_actual;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -306,6 +310,7 @@ pub mod claim_pages;
 pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
+pub mod storage_census;
 pub mod database_archive_size;
 pub mod answers_check;
 pub mod local_trim_fault;
@@ -324,6 +329,9 @@ pub mod wake_demand;
 pub mod message_marks;
 pub mod mail_input_acceptance;
 pub mod mail_delivery_source;
+pub mod mail_retirement;
+#[cfg(test)]
+mod mail_retirement_tests;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -414,6 +422,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod escalation;
 pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
@@ -852,7 +861,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5268709f026 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9d1b1deb0cb owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1204,6 +1213,9 @@ CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
 WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_person_ask_origin_index
+ON claims(json_extract(body, '$.fields.origin_step'), json_extract(body, '$.fields.origin_attempt'), subject)
+WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_recipient_index
 ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
 
@@ -1274,6 +1286,10 @@ BEGIN
     DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
+CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
+    run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS capabilities (
     secret_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -1907,6 +1923,8 @@ pub struct SubjectCache {
 }
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
+/// Dependency invalidation is cheaper to discard than to read an unbounded claim backlog.
+const SUBJECT_CACHE_DELTA_ROWS: usize = 4096;
 
 /// One subject's reduction, read at snapshot `read_at`, so it holds from there on. The claims
 /// mode is part of the answer: a summary reduction and a full one are cached side by side.
@@ -2465,6 +2483,8 @@ const TRIM_SCAN_PAGE: i64 = 5_000;
 pub struct Store {
     /// Identity of this open, including same-process reopen or restore.
     membership_lifetime: uuid::Uuid,
+    /// Live shell launch values never enter durable executions or claims.
+    shell_environments: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2493,6 +2513,7 @@ pub struct Store {
     pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
     /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
     pub fleet_residue_wanted: tokio::sync::Notify,
+    pub storage_census: storage_census::State,
 }
 
 /// How often the daemon audits the operation projection against the claim log and counts the
@@ -2952,6 +2973,34 @@ impl Store {
         self.fractal.ivm_views.clone()
     }
 
+    /// Initialize the canonical native source lifetime for producers without shadow views.
+    /// This installs no view, certifies no projection, and preserves existing source
+    /// epochs, event retention and unavailable-state fences.
+    pub fn initialize_native_source_lifecycle(&self) -> Result<()> {
+        static EMPTY: std::sync::LazyLock<smallclaims::ivm::Views> =
+            std::sync::LazyLock::new(|| smallclaims::ivm::Views::new(Vec::new())
+                .expect("empty native source registry is valid"));
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        EMPTY.create_schema(&transaction)?;
+        let cut = match smallclaims::ivm::source_cut(&transaction)? {
+            Some(cut) => cut,
+            None => smallclaims::ivm::SourceCut {
+                epoch: 1, admitted: current_index_tx(&transaction)?, projected: 0, local_generation: 0,
+            },
+        };
+        EMPTY.initialize_empty(&transaction, cut)?;
+        let installed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ivm_event_state')",
+            [], |row| row.get(0),
+        )?;
+        if !installed {
+            smallclaims::ivm::events::install(&transaction, 4096)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open(path, origin, fractal.clone())?;
@@ -2976,6 +3025,7 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2987,6 +3037,8 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3011,6 +3063,7 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -3021,6 +3074,8 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -3051,11 +3106,14 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
@@ -5026,6 +5084,13 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<ObservationTrim> {
+        self.storage_census.start();
+        let mut pin_sample = storage_census::PinSample {
+            sampled_at_unix_ms: 0,
+            retention_cutoff_unix_ms: older_than_unix_ms,
+            protected_observations: 0,
+            oldest_pin: None,
+        };
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
@@ -5048,12 +5113,12 @@ impl Store {
                 let connection = self.readers.get();
                 let mut statement = connection.prepare_cached(
                     "SELECT id, observed_at_unix_ms,
-                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
-                            AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                          AND newer.id>old.id)
+                            CASE WHEN kind IN ('agent.launcher-bound', 'agent.helper-launched')
+                               OR EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                               OR old.id IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            THEN 1 WHEN EXISTS (SELECT 1 FROM local_observations AS newer
+                                    WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                      AND newer.id>old.id) THEN 2 ELSE 0 END
                      FROM local_observations AS old
                      WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
                      ORDER BY observed_at_unix_ms, id
@@ -5062,11 +5127,23 @@ impl Store {
                 let rows = statement
                     .query_map(
                         params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, u8>(2)?)),
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                self.storage_census.scanned(rows.len());
+                for (id, at, state) in &rows {
+                    if *state == 1 {
+                        pin_sample.protected_observations += 1;
+                        if pin_sample.oldest_pin.is_none() {
+                            pin_sample.oldest_pin = Some(storage_census::Pin {
+                                local_id: *id, observed_at_unix_ms: *at,
+                            });
+                        }
+                    }
+                }
                 let last = rows.last().map(|(id, at, _)| (*at, *id));
-                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                let due: Vec<i64> = rows.iter().filter(|(_, _, state)| *state == 2)
+                    .map(|(id, _, _)| *id).collect();
                 (due, rows.len() as i64, last)
             };
             #[cfg(test)]
@@ -5093,6 +5170,7 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
             }
             match last {
                 Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
@@ -5145,11 +5223,14 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
+        pin_sample.sampled_at_unix_ms = now_ms();
+        self.storage_census.completed(pin_sample);
         Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
@@ -5694,7 +5775,18 @@ impl Store {
             let conflicts = connection
                 .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h021ae8b69609 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
-            if conflicts != cache.conflicts {
+            let populated = !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
+                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
+                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty();
+            // Probe only the store-index B-tree, before reading any claim bodies. Clearing
+            // these rebuildable entries does no eager reductions: a roster page rebuilds
+            // only its selected subjects, even if every subsequent interval overflows too.
+            let overflow = populated && connection.prepare_cached(
+                "SELECT count(*) FROM (SELECT 1 FROM claims WHERE store_index>?1
+                 AND store_index<=?2 LIMIT ?3)",
+            )?.query_row(params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
+                |row| row.get::<_, usize>(0))? > SUBJECT_CACHE_DELTA_ROWS;
+            if conflicts != cache.conflicts || overflow {
                 cache.views.clear();
                 cache.serving_views.clear();
                 cache.statuses.clear();
@@ -5703,9 +5795,7 @@ impl Store {
                 cache.card_statuses.clear();
                 cache.serving_card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
-                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
-                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
+            } else if populated {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
@@ -6520,6 +6610,32 @@ impl Store {
             }
         }
         Ok(hosted)
+    }
+
+    /// Declared agents with a readable member on `host`, in subject order. Seek the
+    /// existing host index and decode only matching members, never declaration bodies.
+    pub fn hosted_agents(&self, host: &str) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject, member FROM desired INDEXED BY desired_agent_host_index
+             WHERE kind='agent' AND json_extract(member, '$.host')=?1 ORDER BY subject",
+        )?;
+        let rows = statement.query_map([host], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut agents = Vec::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row: future or malformed members are unavailable.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                agents.push(subject);
+            }
+        }
+        Ok(agents)
     }
 
     /// The current desired declaration of `subject` and the actor its claim records. A
@@ -22544,7 +22660,7 @@ pub fn step_execution_timing_at(
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
     Ok(fold_step_timing(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22559,7 +22675,7 @@ pub fn step_execution_clock_at(
     currently_active: bool,
 ) -> rusqlite::Result<StepTiming> {
     Ok(fold_step_clock(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22576,6 +22692,15 @@ pub fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
+    Ok(shared_step_timing_events(connection, subject)?.as_ref().clone())
+}
+
+/// Borrow the immutable history for clock folds without cloning its JSON bodies. Only the
+/// history is reused: attempt, snapshot time, and active state are folded on every read.
+fn shared_step_timing_events(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<Arc<Vec<(String, Value, u128)>>> {
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
     // A committed read of a database file keys the events on the newest index and the count of
@@ -22603,7 +22728,7 @@ pub fn step_timing_events(
             .filter(|(kept, _)| *kept == key)
             .map(|(_, events)| events.clone())
     {
-        return Ok(events.as_ref().clone());
+        return Ok(events);
     }
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha579e98adb61 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
@@ -22622,7 +22747,7 @@ pub fn step_timing_events(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
-    let events = events
+    let events = Arc::new(events
         .into_iter()
         .map(|(kind, body, accepted)| {
             (
@@ -22631,13 +22756,13 @@ pub fn step_timing_events(
                 accepted.parse::<u128>().unwrap_or(0),
             )
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>());
     if let (Some(file), Some(key)) = (file, key) {
         let mut kept = STEP_TIMING_EVENTS.lock().unwrap_or_else(PoisonError::into_inner);
         if kept.len() >= ACTUAL_CACHE_LIMIT && !kept.contains_key(&file) {
             kept.clear();
         }
-        kept.insert(file, (key, Arc::new(events.clone())));
+        kept.insert(file, (key, Arc::clone(&events)));
     }
     Ok(events)
 }
@@ -22984,8 +23109,8 @@ pub fn apply_effective_step_state_with_owner(
         run_phase,
         current_generation,
         generation_status,
-        root_status,
-        root_phase,
+        _root_status,
+        _root_phase,
     )) = owner
     else {
         return Ok(());
@@ -23008,13 +23133,13 @@ pub fn apply_effective_step_state_with_owner(
             }
         }
     }
+    // Cancellation is a durable owner/generation transition, not a presentation
+    // inference from the root. The shared descendant traversal performs that transition.
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
         || run_phase == "terminal"
         || is_terminal_generation_state(&generation_status)
         || generation_id != current_generation
-        || is_terminal_run_state(&root_status)
-        || root_phase == "terminal"
     {
         if !matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
             view.status = "cancelled".into();
@@ -23221,8 +23346,17 @@ pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
+    // A root owns subscription deliveries by root identity, even though their
+    // synthetic parent subjects have no step_runs row. Keep generation-scoped
+    // ordinary child traversal for non-root runs and revision retirement.
     let mut statement = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h2f4e2cad1b68 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+        /* sqlite-large-value: allow-for-now lv-hd5e2a1b1feaa owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+           SELECT child.id
+           FROM run_generations generation
+           JOIN mission_runs root ON root.id=generation.run_id AND root.root_run_id=root.id
+           JOIN mission_runs child ON child.root_run_id=root.id AND child.id<>root.id
+           WHERE generation.id=?1
+           UNION
            SELECT child.id
            FROM mission_runs child
            JOIN step_runs parent_step ON parent_step.subject=child.parent_step_run

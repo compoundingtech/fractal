@@ -4,7 +4,7 @@ This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `e91bf306edf1a9f7579fb61a08e92441685725ff5298f5fb0cd4db8dbf0ba570`
+Storage digest: `8cb1905d419526d245818a8df77ecee03c088d2f8eb12a15c75b0fa58790bb6c`
 
 ## Subject families
 
@@ -236,7 +236,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `residency.wake-demand` | `residency` | `system-only` | `once` | `durable` | `demand_at!:integer`, `host!:string`, `origin_accepted_at!:integer`, `seat:subject-reference(agent)`, `source_message!:string`, `suspended_incarnation!:string` |  |
 | `resource.admission.coverage` | `resource-admission` | `system-only` | `append` | `durable` | `complete!:boolean`, `epoch!:string`, `host!:string` |  |
 | `resource.admission.observed` | `resource-admission` | `system-only` | `append` | `durable` | `admission_timeout_ms:integer`, `admitted_at:integer`, `class!:string`, `clock_uncertain!:boolean`, `coverage!:string`, `epoch!:string`, `finite!:boolean`, `host!:string`, `id!:string`, `owner!:object`, `queued_at!:integer`, `refusal:string`, `retired_at:integer`, `state!:string` |  |
-| `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `queue_wait_ms!:integer`, `state!:string`, `wall_duration_ms!:integer` |  |
+| `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `admissionDecision:object`, `argv:array`, `argv_sha256:string`, `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_path:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `ioStat:array`, `launched:boolean`, `learningCoverage:string`, `learningDecision:object`, `memoryEvents:object`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `preRetirementPopulated:boolean`, `profile_estimate:object`, `profile_key:string`, `queue_wait_ms!:integer`, `refusal_code:string`, `request_id:string`, `state!:string`, `timed_out:boolean`, `wall_duration_ms!:integer` |  |
 | `resource.observed` | `resource` | `ordinary-client` | `append` | `durable` | `attribution_only:boolean`, `kind:string`, `observed_at:integer`, `state:any` | `resource` |
 | `revision-proposal.applied` | `revision-proposal` | `system-only` | `once` | `durable` | `reason:string`, `status:string`, `successor_generation:subject-reference` |  |
 | `revision-proposal.approved` | `revision-proposal` | `authorized-requester` | `once-per-actor` | `durable` | `all_approved:boolean`, `preview_hash:string`, `reviewer:subject-reference` |  |
@@ -537,6 +537,39 @@ event, and once folds the claims that predate the triggers, tracked by `claim_ra
 takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
 loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
 import are both empty. Nothing reads them yet.
+
+## Verdict dependency readers
+
+The default writer storage version remains 20; readers accept through version 22 without
+lowering an existing marker. Version-21 signature-reference behavior is unchanged.
+Initialization installs the following empty local derived index and read-only union view:
+
+```sql
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_keys (
+    id INTEGER PRIMARY KEY,
+    link TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_edges (
+    dependency_id INTEGER NOT NULL REFERENCES claim_verdict_dependency_keys(id)
+        DEFERRABLE INITIALLY DEFERRED,
+    claim_id TEXT NOT NULL,
+    PRIMARY KEY(dependency_id,claim_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_verdict_dependency_edges_claim
+    ON claim_verdict_dependency_edges(claim_id,dependency_id);
+CREATE VIEW IF NOT EXISTS claim_verdict_dependency_links AS
+    SELECT link,claim_id FROM claim_verdict_links
+    UNION ALL
+    SELECT k.link,e.claim_id FROM claim_verdict_dependency_keys k
+    JOIN claim_verdict_dependency_edges e ON e.dependency_id=k.id;
+```
+
+Readers conservatively include both dependency representations. Paged invalidation deduplicates
+claim IDs before applying canonical claim-ID order and the 1,024-row limit. Newly recorded
+dependencies still use `claim_verdict_links`, including in version-22 stores; this reader release
+does not populate integer edges, convert existing links, or activate a production writer cutover.
+These tables and their view are local caches outside shared digests, replicated claim vocabulary
+and historical reconstruction. Installation requires neither claim replay nor a history scan.
 
 ## Local message selectors
 

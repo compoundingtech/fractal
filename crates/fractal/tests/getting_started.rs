@@ -181,14 +181,14 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
             .try_run(args)
             .unwrap_or_else(|error| {
                 panic!(
-                    "st {} failed with nothing on stdin: {error}",
+                    "fractal {} failed with nothing on stdin: {error}",
                     args.join(" ")
                 )
             })
             .to_lowercase();
         assert!(
             !output.contains("key") && !output.contains("sign"),
-            "st {} talks about keys: {output}",
+            "fractal {} talks about keys: {output}",
             args.join(" ")
         );
     }

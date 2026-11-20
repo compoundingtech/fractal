@@ -11,7 +11,7 @@
 //! performance report, the busiest of twelve five-minute windows on 2026-10-03: seats posting harness
 //! events and claims, paging their mailboxes and reading their desired state, the replication
 //! worker exporting and receiving exchanges with a peer, lease renewals, status and work reads,
-//! and a person moving through stui. Thirty seats also hold event long-polls open, and 22 client
+//! and a person moving through the Fractal terminal interface. Thirty seats also hold event long-polls open, and 22 client
 //! WebSockets subscribe to the agents roster together and stay subscribed. Only kinds and rates;
 //! no contents. Roster snapshots have a 300 ms budget, including a separate connect-to-snapshot
 //! measurement. Their HTTP correctness oracle runs afterward, not as a cache-warming pre-read.
@@ -79,7 +79,7 @@ const BASELINE_RUNS: usize = 5;
 const CPU_SLACK: f64 = 0.05;
 
 /// The daemon's average CPU over the run may not pass this many cores: the `cpu` objective's
-/// `load-max-cores` in `slo/objectives.kdl`, built into st3, the bound under this synthetic load rather than the
+/// `load-max-cores` in `slo/objectives.kdl`, built into fractal, the bound under this synthetic load rather than the
 /// member's production target. A missing file fails the build and an invalid one fails the run;
 /// there is no default.
 fn cpu_budget() -> f64 {
@@ -383,7 +383,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
     let make_daemon = || {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
-            .thread_name("st3-daemon")
+            .thread_name("fractal-daemon")
             .enable_all()
             .build()
             .unwrap()
@@ -475,7 +475,7 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
     let make_daemon = || {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
-            .thread_name("st3-daemon")
+            .thread_name("fractal-daemon")
             .enable_all()
             .build()
             .unwrap()
@@ -1930,7 +1930,7 @@ fn run(
 
     let load = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
-        .thread_name("st3-load")
+        .thread_name("fractal-load")
         // Load threads must outlive the run, so their CPU is still there to subtract at its end.
         .thread_keep_alive(Duration::from_secs(3_600))
         .enable_all()
@@ -3138,7 +3138,7 @@ fn load_cpu(peer_threads: &BTreeSet<u32>) -> f64 {
             let stat = std::fs::read_to_string(format!("/proc/self/task/{thread}/stat")).ok()?;
             // The name sits in parentheses and may hold spaces; the fields after it are fixed.
             let (name, fields) = stat.split_once('(')?.1.rsplit_once(')')?;
-            let load = name.starts_with("st3-load") || peer_threads.contains(&thread);
+            let load = name.starts_with("fractal-load") || peer_threads.contains(&thread);
             let fields = fields.split_whitespace().collect::<Vec<_>>();
             // utime and stime are the 14th and 15th fields; the state is the 3rd.
             let cpu = fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;

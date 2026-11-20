@@ -27,6 +27,7 @@ import {
   nixCacheStep,
   linuxRunner,
   requiredLinuxRunner,
+  controlLinuxRunner,
   linuxStageJob as namespaceStageJob,
   evidenceStageJob,
   evidenceEnvironment,
@@ -290,7 +291,8 @@ const evidenceGateRunInputs: Record<string, { needs: string[], values: Record<st
 const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
   name: `evidence-gate-${check}`,
   ...(evidenceGateRunInputs[check] ? { needs: evidenceGateRunInputs[check].needs } : {}),
-  'runs-on': 'ubuntu-latest',
+  // Trusted merge/main controls use existing owned capacity; every PR stays hosted.
+  'runs-on': controlLinuxRunner,
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
@@ -444,10 +446,10 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     },
     ...evidenceGateJobs,
     'evidence-presign-notice': presignNoticeJob,
-    // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
+    // Start independently: Python/Git classification only, no build toolchain.
     'upgrade-impact': {
       name: 'upgrade-impact',
-      'runs-on': 'ubuntu-latest',
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 5,
       steps: [
         ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
@@ -462,11 +464,11 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
           run: `if [ -n "$IMPACT_PR_NUMBER" ]; then
   impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
   python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
-elif [ -n "$IMPACT_BASE_SHA" ]; then
+  elif [ -n "$IMPACT_BASE_SHA" ]; then
   python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"${queue ? '' : ' --queue-ref "$IMPACT_QUEUE_REF"'}
-else
+  else
   echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
-fi`,
+  fi`,
         },
       ],
     },
@@ -499,7 +501,7 @@ fi`,
       env: { CI_CACHE_DEV_SHELL: 'genie' },
       ...afterPickRunner,
       needs: [...afterPickRunner.needs, 'evidence-gate-genie-freshness'],
-      'runs-on': 'ubuntu-latest',
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 20,
       ...evidenceStepJob(),
       steps: skipIfCovered('genie-freshness', [
@@ -569,7 +571,7 @@ fi`,
       // Keep generated-file validation ahead of its consumers.
       needs: ['pick-runner', 'genie-freshness', 'evidence-gate-typescript-client'],
       if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
-      'runs-on': 'ubuntu-latest',
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 10,
       ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
@@ -586,7 +588,7 @@ fi`,
           id: 'lockfiles',
           // ci1's Nix runner lacks the Node 20 helper used by GitHub's hashFiles expression.
           run: `lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
-printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
+  printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         },
         {
           name: 'Cache the locked TypeScript and Effect toolchain',
@@ -718,8 +720,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
-      // Aggregation needs no build caches and must not queue behind the work it summarizes.
-      'runs-on': 'ubuntu-latest',
+      // Aggregation needs no build caches and no picker output.
+      'runs-on': controlLinuxRunner,
       'timeout-minutes': 5,
       steps: [
         refusedStep('linux-gate'),
@@ -728,18 +730,18 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           // The stages only: pick-runner is skipped whenever ci1 is off.
           env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: aggregateStages.map((id) => `\${{ needs.${id}.result }}`).join(' '), EVENT: queue ? 'merge_group' : '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
           run: `set -eu
-set -- $RESULTS
-[ "$#" = ${aggregateStages.length} ] || { echo "incomplete base-stage results"; exit 1; }
-if [ "$EVENT" = merge_group ]; then
+  set -- $RESULTS
+  [ "$#" = ${aggregateStages.length} ] || { echo "incomplete base-stage results"; exit 1; }
+  if [ "$EVENT" = merge_group ]; then
   set -- $MERGE_RESULTS
   [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
   RESULTS="$RESULTS $MERGE_RESULTS"
-else
+  else
   [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
-fi
-echo "stage results: $RESULTS (evidence skip: \${GATE_SKIP:-none})"
-position=0
-for result in $RESULTS; do
+  fi
+  echo "stage results: $RESULTS (evidence skip: \${GATE_SKIP:-none})"
+  position=0
+  for result in $RESULTS; do
   position=$((position + 1))
   [ "$result" = success ] && continue
   # A stage an evidence gate skipped reports \`skipped\`: accepted only when a gate the stages read decided to skip,
@@ -750,7 +752,7 @@ for result in $RESULTS; do
     case "$position" in ${skippablePositions.join('|')}) continue ;; esac
   fi
   exit 1
-done`,
+  done`,
         },
         {
           // ci-script-tests is not a required context of its own (a head from before it existed has no run of it, and would be blocked):
@@ -759,10 +761,10 @@ done`,
           name: 'Require ci-script-tests to pass',
           env: { SCRIPT_TESTS_RESULT: '${{ needs.ci-script-tests.result }}', SCRIPT_TESTS_SKIPPED_BY_GATE: '${{ needs.evidence-gate-ci-script-tests.outputs.skip }}' },
           run: `set -eu
-echo "ci-script-tests: $SCRIPT_TESTS_RESULT (evidence skip: \${SCRIPT_TESTS_SKIPPED_BY_GATE:-none})"
-[ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
-[ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "\${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
-exit 1`,
+  echo "ci-script-tests: $SCRIPT_TESTS_RESULT (evidence skip: \${SCRIPT_TESTS_SKIPPED_BY_GATE:-none})"
+  [ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
+  [ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "\${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
+  exit 1`,
         },
         {
           name: 'Require fixture-only HM activation proof to pass',
@@ -809,8 +811,8 @@ exit 1`,
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
-git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+  git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+  git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
         },
         { name: 'May this job use the signing key?', id: 'guard', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard' },
         {
@@ -820,7 +822,7 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
           'continue-on-error': true,
           env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
           run: `set -o pipefail
-python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+  python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
         },
         {
           name: 'Sign the linux-gate note',
@@ -828,10 +830,10 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-python3 "$helper" once linux-gate
-python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
-home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \\
+  python3 "$helper" once linux-gate
+  python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
+  home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+  HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \\
   --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
@@ -847,11 +849,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           env: fractalWebNoteEnv,
           // A base whose helper predates the whole-check note would sign the linux-gate shape under this name: skip it.
           run: `helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
-python3 "$helper" once fractal-web
-python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
-home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \\
+  grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
+  python3 "$helper" once fractal-web
+  python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
+  home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+  HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \\
   --aggregate "$RUNNER_TEMP/fractal-web-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/fractal-web"`,
@@ -873,11 +875,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
-key_path=.st/evidence-keys
-if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
-git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
-python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
+  key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+  key_path=.st/evidence-keys
+  if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+  git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
+  python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
   --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
         },
         // Shadow verification: what would a gate that fetched these refs from the remote say about each lane? Reported
@@ -888,8 +890,8 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
           if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
-[ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
-python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \\
+  [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+  python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \\
   --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --optional "${evidenceLaneNames.join(',')}" --remote origin`,
         },
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
@@ -926,8 +928,8 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
           id: 'base',
           'continue-on-error': true,
           run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
-git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+  git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+  git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
         },
         {
           name: 'Collect the test shards\' JUnit reports',
@@ -942,7 +944,7 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
           if: "${{ steps.base.outcome == 'success' }}",
           'continue-on-error': true,
           run: `[ -f "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" ] || { echo "no ci-rust-test-notes at the base commit; nothing is signed"; exit 1; }
-python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"`,
+  python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"`,
         },
         {
           name: 'May this job use the signing key?',
@@ -950,7 +952,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "
           if: "${{ steps.plan.outcome == 'success' }}",
           'continue-on-error': true,
           run: `python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard`,
+  python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard`,
         },
         {
           name: 'Write the signer configuration and key',
@@ -959,7 +961,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard`,
           'continue-on-error': true,
           env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
           run: `set -o pipefail
-python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+  python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
         },
         {
           name: 'Sign the per-crate rust-tests notes',
@@ -967,8 +969,8 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" once rust-tests
-home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"`,
+  home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+  HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"`,
         },
         // Whatever was signed is published, even when some crate's signature failed: each record stands on its own.
         {
@@ -976,12 +978,12 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sig
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `[ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
-# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
-key_path=.st/evidence-keys
-if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
-git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
-python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \\
+  # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+  key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+  key_path=.st/evidence-keys
+  if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+  git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
+  python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \\
   --checks rust-tests --limit 400 --remote origin`,
         },
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
@@ -992,7 +994,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...buildFractalWebJobs(context),
   }),
-}, {
+  }, {
   "hm-module-eval": "Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.",
   "bundled-sqlite-packages": "Uses the runner's Nix store and declared read-only binary caches; no separate Actions build cache.",
   "swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))

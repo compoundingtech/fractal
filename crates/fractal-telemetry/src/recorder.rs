@@ -1,7 +1,7 @@
-//! Records every `git` and `gh` call that st3 starts, then runs the real program unchanged.
+//! Records every `git` and `gh` call that Fractal starts, then runs the real program unchanged.
 //!
-//! `st3 up` links `git` and `gh` in `<state>/recorder/bin` to its own executable and puts that
-//! directory first on the PATH of the daemon and of every member it starts. When st3 starts under
+//! `fractal up` links `git` and `gh` in `<state>/recorder/bin` to its own executable and puts that
+//! directory first on the PATH of the daemon and of every member it starts. When Fractal starts under
 //! one of those names, it runs the next program of that name on PATH that is not a recorder, waits
 //! for it, appends one JSON line to `<state>/recorder/commands.jsonl`, and exits the way the real
 //! program exited.
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// The programs st3 records.
+/// The programs Fractal records.
 pub const PROGRAMS: [&str; 2] = ["git", "gh"];
 
 /// Every recorder directory holds this file. A lookup for the real program skips any directory
@@ -218,7 +218,7 @@ pub fn invoked_program() -> Option<&'static str> {
 /// Runs the real program, records the call, and exits the way the real program exited.
 pub fn run(program: &'static str) -> ! {
     if std::env::var_os(depth_variable(program)).is_some() {
-        eprintln!("st recorder: refusing recursive {program} recorder invocation");
+        eprintln!("fractal recorder: refusing recursive {program} recorder invocation");
         std::process::exit(126);
     }
     let started_at = SystemTime::now();
@@ -252,7 +252,7 @@ pub fn run(program: &'static str) -> ! {
         }
         Some(real) => relay(program, real, &argv0, &arguments, &delegated, capture, &mut last_line),
         None => {
-            eprintln!("st recorder: {program}: command not found after the recorder on PATH");
+            eprintln!("fractal recorder: {program}: command not found after the recorder on PATH");
             Outcome::Exited(127)
         }
     };
@@ -881,7 +881,7 @@ fn spawn_unrelayed(mut command: std::process::Command, real: &Path) -> Outcome {
 }
 
 fn spawn_failure(real: &Path, error: &std::io::Error) -> Outcome {
-    eprintln!("st recorder: cannot run {}: {error}", real.display());
+    eprintln!("fractal recorder: cannot run {}: {error}", real.display());
     if error.kind() == std::io::ErrorKind::NotFound {
         Outcome::Exited(127)
     } else {
@@ -1213,18 +1213,18 @@ mod tests {
         let tools = root.path().join("tools");
         fs::create_dir(&tools).unwrap();
         executable(&tools.join("git"));
-        let st3 = root.path().join("st3");
-        executable(&st3);
+        let fractal = root.path().join("st3");
+        executable(&fractal);
         let state = root.path().join("state");
         fs::create_dir_all(state.join("recorder/bin")).unwrap();
-        std::os::unix::fs::symlink(&st3, state.join("recorder/bin/gh")).unwrap();
+        std::os::unix::fs::symlink(&fractal, state.join("recorder/bin/gh")).unwrap();
 
-        let installation = install(&state, "test-host", &st3, &[tools.as_os_str()]).unwrap();
+        let installation = install(&state, "test-host", &fractal, &[tools.as_os_str()]).unwrap();
 
         assert_eq!(installation.programs, ["git"]);
         assert_eq!(
             fs::read_link(installation.directory.join("git")).unwrap(),
-            st3
+            fractal
         );
         assert!(fs::symlink_metadata(installation.directory.join("gh")).is_err());
         let marker: Marker =
@@ -1252,7 +1252,7 @@ mod tests {
                 & 0o777,
             0o600
         );
-        let again = install(&state, "test-host", &st3, &[tools.as_os_str()]).unwrap();
+        let again = install(&state, "test-host", &fractal, &[tools.as_os_str()]).unwrap();
         assert_eq!(again.programs, ["git"]);
     }
 
@@ -1267,9 +1267,9 @@ mod tests {
         let tools = root.path().join("tools");
         fs::create_dir(&tools).unwrap();
         executable(&tools.join("gh"));
-        let st3 = root.path().join("st3");
-        executable(&st3);
-        let installation = install(&state, "test-host", &st3, &[tools.as_os_str()]).unwrap();
+        let fractal = root.path().join("st3");
+        executable(&fractal);
+        let installation = install(&state, "test-host", &fractal, &[tools.as_os_str()]).unwrap();
         let (recording, message) = health(&state);
         assert!(recording, "{message}");
         assert!(

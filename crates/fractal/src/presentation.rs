@@ -153,6 +153,8 @@ pub(crate) fn render_mission_run(
     let _ = writeln!(output, "REVISION  {}", selected.revision);
     if let Some(provenance) = &selected.provenance {
         output.push_str(&fractal_daemon::provenance::render(provenance));
+    } else {
+        let _ = writeln!(output, "PROVENANCE unavailable: source commit and pull request were not recorded for this revision.");
     }
     let _ = writeln!(output, "GENERATION {}", selected.generation);
     let _ = writeln!(output, "WORKSPACE {}", selected.workspace);
@@ -466,7 +468,7 @@ fn render_object_fields(
             if !nested.is_empty() {
                 let padding = " ".repeat(indent);
                 let _ = writeln!(output, "{padding}{}", style.heading("Declared admission — declared, not enforced."));
-                let _ = writeln!(output, "{padding}st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+                let _ = writeln!(output, "{padding}Fractal stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
                 render_object_fields(output, nested, indent + 2, style, None);
             }
             continue;
@@ -1979,7 +1981,7 @@ mod tests {
             "mission": {"declared_admission": {"lane": "check"}}
         }), OutputStyle::plain());
         assert!(rendered.contains("Declared admission — declared, not enforced."));
-        assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
+        assert!(rendered.contains("Fractal stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
         assert!(rendered.contains("check"));
         assert!(!render_human_value(&serde_json::json!({
             "declared_admission": {}
@@ -2305,6 +2307,35 @@ mod tests {
             [first, reported, completed].map(|run| mission_run_signature(&[run]).unwrap());
         assert_ne!(signatures[0], signatures[1]);
         assert_ne!(signatures[1], signatures[2]);
+    }
+
+    #[test]
+    fn mission_run_shows_source_commit_and_known_pull_request_separately_from_requester() {
+        let mut republished = run("mission-run/demo/republished", None, vec![]);
+        republished.requester = "agent/mission-owner".into();
+        republished.provenance = Some(fractal_daemon::provenance::Provenance {
+            reason: "Republished after the source merge.".into(),
+            source: fractal_daemon::provenance::Source {
+                repository: "example/factory".into(),
+                commit: "a".repeat(40),
+                path: "missions/demo.kdl".into(),
+                renderer: "graph-applier".into(),
+            },
+            decision: vec!["https://github.com/example/factory/pull/42".into()],
+            evidence: vec![],
+        });
+        let rendered = render_mission_run(
+            &republished, std::slice::from_ref(&republished), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains(&format!("Commit: {}", "a".repeat(40))));
+        assert!(rendered.contains("https://github.com/example/factory/pull/42"));
+        assert!(rendered.contains("REQUESTER agent/mission-owner"));
+        republished.provenance = None;
+        let historical = render_mission_run(
+            &republished, std::slice::from_ref(&republished), OutputStyle::plain(), 3_000,
+        );
+        assert!(historical.contains("PROVENANCE unavailable: source commit and pull request were not recorded"));
+        assert!(!historical.contains("example/factory"));
     }
 
     #[test]

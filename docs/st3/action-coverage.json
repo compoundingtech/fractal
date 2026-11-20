@@ -1665,6 +1665,32 @@
       "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
     },
     {
+      "command": "st resources cancel",
+      "description": "Cancel an exact execution or owner-scoped request and optionally await retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::cancel_selects_exact_execution_identity",
+        "crates/fractal-api-core/src/api/resources.rs::absent_request_cancel_returns_confirmed_owner_scoped_tombstone"
+      ],
+      "verification": "real Clap execution/request selectors and authenticated durable cancellation tombstones"
+    },
+    {
+      "command": "st resources member-scope",
+      "description": "Inspect the authenticated execution's exact enforced member cgroup",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::member_scope_requires_exact_execution_selector",
+        "crates/fractal-api-core/src/api/resources.rs::nested_member_scope_keeps_current_generation_separate_from_verified_root"
+      ],
+      "verification": "real Clap exact-execution selector and nested generation/root custody checks"
+    },
+    {
+      "command": "st resources in-member",
+      "description": "Inspect local kernel member placement without granting execution authority",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::offline_membership_requires_explicit_owner_uid"
+      ],
+      "verification": "real Clap parsing requires an explicit owner UID for offline inspection"
+    },
+    {
       "command": "st resources hold",
       "description": "Place a native execution-host admission hold without reserving capacity",
       "tests": [
@@ -2644,12 +2670,28 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st slo ingest-roll",
+      "description": "Admit one existing signed graph roll receipt claim",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
+    },
+    {
       "command": "st slo ls",
       "description": "List every objective and budget: target, current value, window and what is left",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo roll-intent",
+      "description": "Resolve immutable native creation time and pinned revision for one enrolled roll intent",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
     },
     {
       "command": "st setup",

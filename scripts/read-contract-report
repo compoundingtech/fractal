@@ -332,7 +332,7 @@ def registered_claim_specs(schema_source, directive_notes_source):
             "    ];\n    for (kind", 1
         )[0]
     except IndexError as error:
-        raise InventoryError("cannot bound st3-schema claim definitions") from error
+        raise InventoryError("cannot bound fractal-schema claim definitions") from error
     directive_kind = re.findall(
         r'(?m)^pub const KIND: &str = "([^"]+)";', directive_notes_source
     )

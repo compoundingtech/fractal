@@ -365,7 +365,12 @@ impl CheckpointConfig {
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
 /// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped.
+/// that drops more goes on the next day where it stopped. With `mail = true`, a member that
+/// trims locally also retires closed agent and daemon graph mail a week after it closes, at its
+/// own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default for such members (Factory's
+/// decision of 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person
+/// mail where it is on).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -374,11 +379,19 @@ pub struct TrimConfig {
     pub notify: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_claims: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<bool>,
 }
 
 impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// Whether this member retires closed graph mail: only one that trims locally and sets
+    /// `mail = true`.
+    pub fn retires_mail(&self) -> bool {
+        self.local && self.mail == Some(true)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1202,6 +1215,12 @@ impl Config {
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
+        if let Some(resources) = &self.finite_resources {
+            for (key, seed) in &resources.profiles {
+                fractal_runtime::validate_profile_key(key)?;
+                seed.validate().with_context(|| format!("finite_resources.profiles.{key}"))?;
+            }
+        }
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -1642,6 +1661,52 @@ mod tests {
                 &format!("[agents_request_slo_fault]\n{fields}\n")
             ).is_err(), "{fields}");
         }
+    }
+
+    #[test]
+    fn resource_profile_configuration_is_host_local_strict_and_validated() {
+        let configured: super::Config = toml::from_str(r#"
+            [finite_resources]
+            diskFloorBytes = 85000000000
+            heavyIoSlots = 1
+            [finite_resources.profiles.check-native]
+            cores = 4
+            memory = 8589934592
+            memoryHigh = 6442450944
+            disk = 10000000000
+            io = "heavy"
+            source = "declared-provisional"
+            reason = "Reviewed bootstrap pending complete pilot observations"
+            learningCoverage = "client-only"
+            recoveryCapable = false
+        "#).unwrap();
+        configured.validate().unwrap();
+        let policy = configured.finite_resources.as_ref().unwrap();
+        assert_eq!(policy.disk_floor_bytes, 85_000_000_000);
+        assert_eq!(policy.profiles["check-native"].memory_high, Some(6 << 30));
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.finite_resources, configured.finite_resources);
+        for invalid in [
+            ("memory = 8589934592", "memory = 1"),
+            ("cores = 4", "cores = 0"),
+            ("reason = \"Reviewed bootstrap pending complete pilot observations\"", "reason = \"\""),
+            ("memoryHigh = 6442450944", "memoryHigh = 10000000000"),
+        ] {
+            let text = toml::to_string(&configured).unwrap().replace(invalid.0, invalid.1);
+            let invalid: super::Config = toml::from_str(&text).unwrap();
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    /// Explicit acceptance probe for a managed, rendered daemon configuration; never starts it.
+    #[test]
+    #[ignore = "requires FRACTAL_RENDERED_CONFIG pointing to a rendered host configuration"]
+    fn validate_rendered_resource_profile_configuration() {
+        let path = std::path::PathBuf::from(std::env::var_os("FRACTAL_RENDERED_CONFIG")
+            .expect("FRACTAL_RENDERED_CONFIG is required"));
+        let configured = super::Config::load_unvalidated(Some(&path)).unwrap();
+        configured.validate().unwrap();
+        assert!(!configured.finite_resources.as_ref().expect("finite_resources is required").profiles.is_empty());
     }
 
     #[test]
@@ -2383,6 +2448,12 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(!config.trim.retires_mail(), "retiring closed mail is off unless set");
+        let retiring: Config = toml::from_str("[trim]\nlocal = true\nmail = true\n").unwrap();
+        assert!(retiring.trim.retires_mail());
+        let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
+        assert!(!kept.trim.retires_mail());
+        assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

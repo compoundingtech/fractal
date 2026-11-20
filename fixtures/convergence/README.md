@@ -553,3 +553,13 @@ The current v39 never-trim list is `[2, 34, 179]`, retaining the prior seed-179 
 and adding the two measured changes. This run does not establish a full dense-seed
 characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
 cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
+
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
+The simulation and audit reports select v40. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.

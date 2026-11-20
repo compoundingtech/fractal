@@ -12,7 +12,7 @@ use fractal_conversation_ui::{Cache, Theme, Timeline, adapt};
 use fractal_feed::{Command, Update, Window};
 use std::collections::{BTreeMap, HashSet};
 
-/// Kept unchanged until st acknowledges it. Retrying a lost response cannot duplicate the send.
+/// Kept unchanged until Fractal acknowledges it. Retrying a lost response cannot duplicate the send.
 #[derive(Clone)]
 pub struct Send {
     pub id: String,
@@ -291,7 +291,7 @@ impl App {
         );
         let tail = doc.lines.len().saturating_sub(inner.height as usize);
         frame.render_widget(
-            Paragraph::new(doc.lines.into_iter().skip(tail).collect::<Vec<_>>()),
+            Paragraph::new(doc.lines.iter().skip(tail).map(|line| line.to_ratatui()).collect::<Vec<_>>()),
             inner,
         );
         frame.render_widget(

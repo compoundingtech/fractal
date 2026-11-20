@@ -1,11 +1,11 @@
 //! Attach this terminal to a terminal that another fleet host owns, PTY to PTY over Fabric.
 //!
-//! `st terminals expose-fabric` has the owning host's Fabric forward each tunnel under the fleet's
+//! `fractal terminals expose-fabric` has the owning host's Fabric forward each tunnel under the fleet's
 //! PTY protocol to the owner daemon's terminal socket (`TerminalSocket`), one connection per
 //! tunnel. `expose-fabric --exec`, and any exposure made before the socket existed, runs
-//! `st terminals serve-fabric --stdio` for each tunnel instead (`serve_stdio`), which needs no
+//! `fractal terminals serve-fabric --stdio` for each tunnel instead (`serve_stdio`), which needs no
 //! daemon. The dialing CLI sends one route line that names the PTY session, the
-//! subject, and the runtime incarnation st selected. The owner proves that
+//! subject, and the runtime incarnation Fractal selected. The owner proves that
 //! incarnation against the PTY itself, as a local attach does, answers `{"ok":true}`, and then
 //! splices the tunnel to the session socket: the attach client speaks the PTY session protocol to
 //! the session. The route line is the `pty remote-serve` control line with two more fields.
@@ -115,7 +115,7 @@ pub async fn serve_stdio(pty_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The daemon's Fabric terminal service: `st terminals expose-fabric` has Fabric forward each
+/// The daemon's Fabric terminal service: `fractal terminals expose-fabric` has Fabric forward each
 /// tunnel to this socket, one connection per tunnel, so no process or pipe exists per attach.
 ///
 /// It runs on its own thread and runtime and reads nothing but the PTY registry and the kernel's
@@ -148,7 +148,7 @@ impl TerminalSocket {
                         Ok(listener) => {
                             serve_terminal_socket(listener, pty_root, route_timeout, counted).await
                         }
-                        Err(error) => eprintln!("st3: serve the terminal socket: {error}"),
+                        Err(error) => eprintln!("fractal: serve the terminal socket: {error}"),
                     }
                 }));
             })
@@ -200,7 +200,7 @@ async fn serve_terminal_socket(
             Ok((tunnel, _)) => tunnel,
             // Running out of file descriptors fails one accept; it must not end the service.
             Err(error) => {
-                eprintln!("st3: accept a terminal connection: {error}");
+                eprintln!("fractal: accept a terminal connection: {error}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }

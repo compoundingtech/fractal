@@ -2833,6 +2833,52 @@ fn agent_card_status_cache_has_a_fixed_entry_cap_and_repair_clears_it() {
 }
 
 #[test]
+fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
+    let store = Store::open_memory("node").unwrap();
+    let names = (0..8).map(|n| format!("agent/overflow-{n}")).collect::<BTreeSet<_>>();
+    for name in &names { observe_runtime(&store, name, "running", "one"); }
+    let selected = BTreeSet::from([names.first().unwrap().clone()]);
+    for round in 0..2 {
+        let before = store.index().unwrap();
+        store.agent_card_status_at(Some(&names), before, true).unwrap();
+        store.agent_card_status_for_generic_reads_at(Some(&names), before, false).unwrap();
+        store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Full).unwrap();
+        store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Summary).unwrap();
+        assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
+        store.connection.batched(|transaction| -> Result<()> {
+            for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
+                append_claim_tx(transaction, &store.origin, "custom/overflow", "custom.example.reading",
+                    None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let cut = store.index().unwrap();
+        store.advance_subject_cache(&store.readers.get(), cut).unwrap();
+        {
+            let cache = store.fractal.subject_cache.lock().unwrap();
+            assert_eq!(cache.through, cut, "overflow commits the invalidation frontier");
+            assert!(cache.views.is_empty() && cache.serving_views.is_empty()
+                && cache.statuses.is_empty() && cache.summary_statuses.is_empty()
+                && cache.runtime_statuses.is_empty() && cache.card_statuses.is_empty()
+                && cache.serving_card_statuses.is_empty());
+        }
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
+        let rebuilt = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 1,
+            "even repeated overflowing cycles rebuild only the requested page, not the fleet");
+        assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), 1);
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
+        let hit = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(hit, rebuilt);
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0,
+            "the same backlog must not repeatedly clear freshly rebuilt entries");
+        store.forget_current_views();
+        let cold = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(cold, rebuilt);
+    }
+}
+
+#[test]
 fn status_projection_threads_inherit_cancellation_and_release_their_readers() {
     let store = Store::open_memory("node").unwrap();
     let names = (0..65).map(|n| format!("agent/budget/seat-{n}")).collect::<BTreeSet<_>>();
@@ -13496,4 +13542,53 @@ fn an_older_member_sees_control_diagnostics_as_before_and_still_sends_every_code
         .unwrap();
     sync(&older, &current);
     assert_eq!(current.claim_by_id(&sent.id).unwrap().unwrap().body, sent.body);
+}
+
+#[test]
+fn shared_step_timing_history_reuses_revision_but_refolds_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("timing.db"), "fixture").unwrap();
+    let subject = "step-run/timing/step";
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_claim(&serde_json::from_value(json!({
+            "subject": subject, "kind": kind, "actor": "daemon/runtime",
+            "fields": fields, "evidence": [],
+            "expected_subject": null, "idempotency_key": null
+        })).unwrap()).unwrap()
+    };
+    let claim = append(subject, "work.claimed", json!({"attempt": 1}));
+    let connection = store.readers.get();
+    let first = shared_step_timing_events(&connection, subject).unwrap();
+    let second = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    let at = claim.accepted_at_unix_ms;
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 10, true).unwrap().elapsed,
+        10,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, true).unwrap().elapsed,
+        20,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 2, at + 20, true).unwrap().elapsed,
+        0,
+    );
+    assert_eq!(
+        step_execution_clock_at(&connection, subject, 1, at + 20, false).unwrap().started,
+        None,
+    );
+    append("step-run/timing/other", "work.progress", json!({"attempt": 1}));
+    assert!(Arc::ptr_eq(
+        &first, &shared_step_timing_events(&connection, subject).unwrap(),
+    ));
+    append(subject, "work.progress", json!({"attempt": 1}));
+    let changed = shared_step_timing_events(&connection, subject).unwrap();
+    assert!(!Arc::ptr_eq(&first, &changed));
+    assert_eq!(changed.len(), first.len() + 1);
+    assert_eq!(step_timing_events(&connection, subject).unwrap(), *changed);
+    let transaction = connection.unchecked_transaction().unwrap();
+    let transactional = shared_step_timing_events(&transaction, subject).unwrap();
+    assert!(!Arc::ptr_eq(&changed, &transactional));
+    assert_eq!(*changed, *transactional);
 }
