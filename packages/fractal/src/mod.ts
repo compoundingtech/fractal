@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { Duration as EffectDuration, Schema, SchemaGetter } from 'effect'
+import { DateTime, Duration as EffectDuration, Schema, SchemaGetter } from 'effect'
 
 import { node, type Node, type Value } from './kdl.ts'
 import type {
@@ -33,6 +33,7 @@ import {
   ReviewSchema,
   DurationSchema as Duration,
   NonNegativeDurationSchema as NonNegativeDuration,
+  Instant,
   launchReferences,
   lowerDuration,
   lowerInstant,
@@ -54,6 +55,7 @@ export {
   DurationSchema,
   NonNegativeDurationSchema,
   InstantSchema,
+  Instant,
   normalizeDuration,
   normalizeInstant,
   lowerDuration,
@@ -1236,6 +1238,17 @@ export const MissionSchema = Schema.Struct({
   stalledAfter: Schema.optionalKey(Duration),
   reportStalls: Schema.optionalKey(Schema.Boolean),
   reportCompleted: Schema.optionalKey(Schema.Boolean),
+  /** Soft metadata only; no scheduling, notification or execution effect. */
+  targetAt: Schema.optionalKey(Instant),
+  milestones: Schema.optionalKey(Schema.Array(Schema.Struct({
+    id: LocalId,
+    at: Instant,
+  })).check(Schema.makeFilter(
+    (values) => new Set(values.map((value) => value.id)).size === values.length
+      && values.every((value, index) => index === 0
+        || value.at.epochMilliseconds > values[index - 1]!.at.epochMilliseconds),
+    { message: 'milestones need unique IDs and strictly increasing instants' },
+  ))),
   goal: Goal,
   gates: Schema.optionalKey(
     Gates.pipe(
@@ -2695,6 +2708,10 @@ export const missionWire = <const TMission extends string>(
   return {
     ...m,
     reportTo: { id: m.reportTo.id },
+    ...(m.targetAt === undefined ? {} : { targetAt: DateTime.formatIso(m.targetAt) }),
+    ...(m.milestones === undefined ? {} : {
+      milestones: m.milestones.map(({ id, at }) => ({ id, at: DateTime.formatIso(at) })),
+    }),
     ...(m.assignedTo !== undefined && 'id' in m.assignedTo
       ? { assignedTo: { id: m.assignedTo.id } }
       : {}),
@@ -2729,10 +2746,14 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
       ...(m.stalledAfter === undefined ? {} : { 'stalled-after': lowerDuration(m.stalledAfter) }),
       ...(m.reportStalls === undefined ? {} : { 'report-stalls': m.reportStalls }),
       ...(m.reportCompleted === undefined ? {} : { 'report-completed': m.reportCompleted }),
+      ...(m.targetAt === undefined ? {} : { 'target-at': DateTime.formatIso(m.targetAt) }),
     },
     children: [
       ...lowerEscalation(m.escalation),
       ...declaredAdmissionNodes(m),
+      ...(m.milestones ?? []).map(({ id, at }) =>
+        node({ name: 'milestone', args: [id], props: { at: DateTime.formatIso(at) } }),
+      ),
       ...resourceReferenceNodes(m.resourceReferences),
       ...(m.concurrentRuns === undefined
         ? []

@@ -56,6 +56,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     property(&mut root, "revision-cutover", match mission.revision_cutover { RevisionCutover::RestartActive => "restart-active", RevisionCutover::WhenIdle => "when-idle" });
     if let Some(agent) = &mission.report_to { property(&mut root, "report-to", agent.as_str()); }
     if let Some(ms) = mission.stalled_after_ms { property(&mut root, "stalled-after", format!("{ms}ms")); }
+    if let Some(at) = &mission.target_at { property(&mut root, "target-at", at.as_str()); }
     if mission.report_to.is_some() {
         property(&mut root, "report-stalls", mission.report_stalls);
         property(&mut root, "report-completed", mission.report_completed);
@@ -67,7 +68,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
 fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
     let MissionSpec { id: _, subject: _, state: _, revision: _, escalation, system, resources, authority, inputs,
-        max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
+        max_active_runs, timeout_ms: _, target_at: _, milestones, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
         declared_priority, declared_lane, declared_budgets,
@@ -76,6 +77,11 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
     if let Some(node) = escalation_node(escalation) { children.push(node); }
+    for milestone in milestones {
+        let mut item = text("milestone", &milestone.id);
+        property(&mut item, "at", milestone.at.as_str());
+        children.push(item);
+    }
     if let Some(priority) = declared_priority { children.push(text("declared-priority", priority.as_str())); }
     if let Some(lane) = declared_lane { children.push(text("declared-lane", lane.as_str())); }
     if let Some(budgets) = declared_budgets {

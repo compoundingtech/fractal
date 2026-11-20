@@ -9863,3 +9863,146 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
 }
+
+/// A closed thread written through the release's public routes: sent `from`, then delivered, read
+/// and closed by its reader. Answers its subject.
+async fn closed_graph_thread(node: &Node, from: &str, key: &str) -> String {
+    let receipt: Value = node
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": key, "from": from, "to": "agent/fleet-reader",
+            "content": format!("graph mail {key}"),
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().expect("a send receipt names its message").to_owned();
+    let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+    for lifecycle in ["delivered", "read", "closed"] {
+        let _: Value = node
+            .client()
+            .post(&path, &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("{key}-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    subject
+}
+
+/// The kinds of `node`'s claims about `subject`, sorted.
+async fn thread_kinds(node: &Node, subject: &str) -> Vec<String> {
+    let mut kinds: Vec<String> = node
+        .claims()
+        .await
+        .into_iter()
+        .filter(|claim| claim["subject"] == subject)
+        .filter_map(|claim| claim["kind"].as_str().map(str::to_owned))
+        .collect();
+    kinds.sort();
+    kinds
+}
+
+/// Closed agent mail retires a week after it closes on a member that trims locally, which was
+/// upgraded in place from the previous release with that mail in its store. Its person mail
+/// stays. The release beside it keeps its own copies and never sends a retired one back, and
+/// replication stays whole. Rolled back to the release, the member keeps what it retired retired.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    n1.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    // Only a member that trims locally retires mail, and only once it opts in after upgrading:
+    // the release refuses `mail`, an unknown key.
+    let config = n1.root.join("config/st3/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("\n[trim]\nlocal = true\n");
+    fs::write(&config, &text).unwrap();
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+
+    // The release's own mail, closed: an agent's thread and a person's.
+    let agent = closed_graph_thread(&n1, "agent/fleet-sender", "retire-agent").await;
+    let person = closed_graph_thread(&n1, PERSON, "retire-person").await;
+    let whole = ["message.closed", "message.delivered", "message.read", "message.sent"];
+    for node in [&o, &n1] {
+        for subject in [&agent, &person] {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while thread_kinds(node, subject).await != whole {
+                assert!(Instant::now() < deadline, "{}: {subject} did not replicate", node.name);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    // Upgrade the member in place and opt it in; a week later its closed agent thread retires.
+    n1.stop();
+    fs::write(&config, format!("{text}mail = true\n")).unwrap();
+    n1.binary = PathBuf::from(st3());
+    n1.start().await;
+    let week_later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+        + 8 * 24 * 60 * 60 * 1000;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        // Its retired ledger becomes the authority once the member's import finishes.
+        let retired: Value = n1
+            .client()
+            .post("/v1/internal/test/mail-retirement", &json!({"now_ms": week_later}))
+            .await
+            .unwrap();
+        if retired["threads"] == 1 {
+            assert_eq!(retired["claims"], 4, "{retired}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty());
+    assert_eq!(thread_kinds(&n1, &person).await, whole, "person mail stays");
+    assert_eq!(thread_kinds(&o, &agent).await, whole, "the release keeps its own copies");
+
+    // Replication goes on, and the release sends none of the retired claims back.
+    o.note("o-after-retire").await;
+    n1.note("n1-after-retire").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-after-retire".to_owned(),
+        "custom/fleet-test/n1-after-retire".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty(), "a retired claim came back");
+
+    // Roll the member back in place, without the key the release doesn't know: it reads the
+    // trimmed store and still refuses them.
+    n1.stop();
+    fs::write(&config, &text).unwrap();
+    n1.binary = old;
+    n1.start().await;
+    o.note("o-after-rollback").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty(), "rolled back, a retired claim came back");
+    assert_eq!(thread_kinds(&n1, &person).await, whole);
+}
