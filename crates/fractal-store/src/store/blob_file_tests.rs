@@ -218,7 +218,7 @@ fn a_row_keeps_its_bytes_until_a_checkpoint_has_put_the_copy_on_disk() {
     // A reader of the blob file whose snapshot predates the copy: no checkpoint can backfill the
     // frames the copy commits while it reads, so the copy is committed but not in the file.
     let reader = rusqlite::Connection::open(blob_file::location(&path)).unwrap();
-    reader.execute_batch("BEGIN; SELECT count(*) FROM blobs;").unwrap();
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-hd008c9bc7d60 owner=fractal_store::store::blob_file_tests TODO=trace-statement-and-value-representation */ "BEGIN; SELECT count(*) FROM blobs;").unwrap();
     let copy = store.move_blob_bytes_step(later, WINDOW_MS, Duration::from_secs(1)).unwrap();
     assert_eq!((copy.copied, copy.rows, copy.more), (1, 0, true), "the copy");
     for _ in 0..3 {
@@ -227,7 +227,7 @@ fn a_row_keeps_its_bytes_until_a_checkpoint_has_put_the_copy_on_disk() {
         assert_eq!(row(&store, &hash).0, body.len() as i64, "the row keeps its own bytes");
     }
     // The reader ends; the next checkpoint backfills and syncs the copy, and the row lets go.
-    reader.execute_batch("ROLLBACK").unwrap();
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h8c744bc68a88 owner=fractal_store::store::blob_file_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     drop(reader);
     assert_eq!(move_all(&store, later), (1, body.len() as u64));
     assert_eq!(row(&store, &hash).0, 0);

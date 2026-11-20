@@ -43,7 +43,7 @@ pub const COPIED: &str = "copied_through";
 /// Rows one step considers.
 const PAGE: i64 = 64;
 
-const BLOB_FILE_TABLE: &str = /* sqlite-large-value: allow-for-now lv-h8701f443162b owner=smallclaims::store::blob_file TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS blob_file.blobs (
+const BLOB_FILE_TABLE: &str = /* sqlite-large-value: allow-for-now lv-hca561fb42720 owner=smallclaims::store::blob_file TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS blob_file.blobs (
     hash TEXT PRIMARY KEY, bytes BLOB NOT NULL, size INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blob_file.meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
 
@@ -201,7 +201,7 @@ impl Store {
                 let mut through = page.last().map_or(copied, |(rowid, _)| *rowid);
                 {
                     let mut emptying = transaction.prepare_cached(
-                        "UPDATE main.blobs SET bytes=x'' WHERE rowid=?1 AND size>0 AND length(bytes)>0
+                        /* sqlite-large-value: allow-for-now lv-h9494108a8003 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "UPDATE main.blobs SET bytes=x'' WHERE rowid=?1 AND size>0 AND length(bytes)>0
                          AND EXISTS(SELECT 1 FROM blob_file.blobs AS moved
                                     WHERE moved.hash=main.blobs.hash AND length(moved.bytes)=main.blobs.size)",
                     )?;
@@ -210,7 +210,7 @@ impl Store {
                             through = page[n - 1].0;
                             break;
                         }
-                        if emptying.execute([rowid])? > 0 {
+                        if emptying.execute(/* sqlite-large-value: allow-for-now lv-h11e3ad89e964 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? > 0 {
                             done.rows += 1;
                             done.bytes += u64::try_from(size).unwrap_or(0);
                         }
@@ -220,14 +220,14 @@ impl Store {
                     let version: u32 = transaction.query_row("PRAGMA main.user_version", [], |row| row.get(0))?;
                     if version < STORAGE_VERSION {
                         transaction.execute(
-                            "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                            /* sqlite-large-value: allow-for-now lv-h05943313efeb owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
                             params![FENCED_FROM, version.to_string()],
                         )?;
                         transaction.pragma_update(Some(rusqlite::DatabaseName::Main), "user_version", STORAGE_VERSION)?;
                     }
                 }
                 transaction.execute(
-                    "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
+                    /* sqlite-large-value: allow-for-now lv-ha531b7e4f69f owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO main.meta(key, value) VALUES (?1, ?2)",
                     params![CURSOR, through.to_string()],
                 )?;
                 transaction.commit()?;
@@ -254,7 +254,7 @@ impl Store {
             let mut through = *page.last().unwrap_or(&copied);
             {
                 let mut copying = transaction.prepare_cached(
-                    "INSERT OR IGNORE INTO blob_file.blobs(hash, bytes, size)
+                    /* sqlite-large-value: allow-for-now lv-hc916442f4a28 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blob_file.blobs(hash, bytes, size)
                      SELECT hash, bytes, size FROM main.blobs WHERE rowid=?1 AND size>0 AND length(bytes)>0",
                 )?;
                 for (n, &rowid) in page.iter().enumerate() {
@@ -262,11 +262,11 @@ impl Store {
                         through = page[n - 1];
                         break;
                     }
-                    done.copied += copying.execute([rowid])?;
+                    done.copied += copying.execute(/* sqlite-large-value: allow-for-now lv-h4abc007bf491 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])?;
                 }
             }
             transaction.execute(
-                "INSERT OR REPLACE INTO blob_file.meta(key, value) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h4efe9877a623 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO blob_file.meta(key, value) VALUES (?1, ?2)",
                 params![COPIED, through.to_string()],
             )?;
             transaction.commit()?;
@@ -343,7 +343,7 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
         }
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h4cd859f27b01 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN (?1, ?2)", params![FENCED_FROM, CURSOR])?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h4ce425289061 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            /* sqlite-large-value: allow-for-now lv-h3b943e990626 owner=smallclaims::store::blob_file TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
             params![SINCE, now_ms.to_string()],
         )?;
     } else {
@@ -354,7 +354,7 @@ pub fn restore_page(connection: &Connection, now_ms: u64) -> Result<BlobBytes> {
         )?;
         for &(rowid, size) in &page {
             anyhow::ensure!(
-                restoring.execute(/* sqlite-large-value: allow-for-now lv-h4abc007bf491 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
+                restoring.execute(/* sqlite-large-value: allow-for-now lv-h6fc82c88c317 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ [rowid])? == 1,
                 "blob row {rowid} has no bytes here or in the blob file; the store can't be restored"
             );
             done.rows += 1;
