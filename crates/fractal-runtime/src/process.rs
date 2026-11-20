@@ -452,6 +452,12 @@ impl ExecRuntime {
         let unit = crate::scope_unit("st3", id);
         // Finite placement is host-supplied, never selected by payload environment.
         let mut env = env.clone();
+        env.remove(crate::payload_receipt::PATH_ENV);
+        if env.remove(crate::payload_receipt::TRACK_ENV).as_deref() == Some("1") {
+            let operation = env.get("ST3_START_OPERATION").context("tracked payload requires a start operation")?;
+            env.insert(crate::payload_receipt::PATH_ENV.into(),
+                crate::payload_receipt::path(&self.state_dir, id, operation).to_string_lossy().into_owned());
+        }
         let capacity = crate::lane::Capacity::take(&mut env);
         let coverage = self.finite_lane.as_ref().map(FiniteLane::coverage).transpose()?;
         let lane = match (&self.finite_lane, coverage) {
@@ -1148,10 +1154,33 @@ impl ExecRuntime {
         self.read_generation_path(&self.previous_record_path(id))
     }
 
+    /// Read the wrapper's independent receipt for this exact physical start operation.
+    /// No receipt means unknown/legacy, not a still-running payload.
+    pub fn payload_state(&self, id: &str, incarnation: &str) -> Result<Option<crate::payload_receipt::PayloadState>> {
+        let Some(generation) = self.read_generation_path(&self.record_path(id))? else { return Ok(None); };
+        if generation.generation_id != incarnation { return Ok(None); }
+        let Some(operation) = generation.start_operation.as_deref() else { return Ok(None); };
+        crate::payload_receipt::read(&crate::payload_receipt::path(&self.state_dir, id, operation), operation)
+    }
+
+    fn remove_payload_receipt(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
+        let Some(operation) = generation.start_operation.as_deref() else { return Ok(()); };
+        match fs::remove_file(crate::payload_receipt::path(&self.state_dir, id, operation)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
         self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
         let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
+        for path in [self.record_path(id), self.previous_record_path(id)] {
+            if let Some(generation) = self.read_generation_path(&path)? {
+                self.remove_payload_receipt(id, &generation)?;
+            }
+        }
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -1193,6 +1222,9 @@ impl ExecRuntime {
 
     fn rotate_generation(&self, id: &str) -> Result<()> {
         let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
+        if let Some(generation) = self.read_generation_path(&self.previous_record_path(id))? {
+            self.remove_payload_receipt(id, &generation)?;
+        }
         rotate_file(&self.record_path(id), &self.previous_record_path(id))?;
         rotate_file(&self.log_path(id, false), &self.log_path(id, true))?;
         for stream in ["stdout", "stderr"] {

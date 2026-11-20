@@ -36,6 +36,8 @@ pub mod missions;
 pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
+mod native_step_clock;
+pub use native_step_clock::execution_wait as native_execution_wait;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
@@ -8018,6 +8020,7 @@ impl Store {
         matches!(
             kind,
             "slo.breach-transition"
+                | "step.execution-phase"
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
@@ -22634,7 +22637,7 @@ pub fn step_execution_clock_at(
 /// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
 const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
     'work.progress','work.submitted','work.failed','work.released','work.extended',\
-    'work.person-asked','work.person-done','work.person-cancelled'";
+    'work.person-asked','work.person-done','work.person-cancelled','step.execution-phase'";
 
 /// A step's step and work events in canonical order, as its execution timing folds them.
 pub fn step_timing_events(
@@ -22798,6 +22801,9 @@ pub fn fold_step_clock(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> StepTiming {
+    if let Some(timing) = native_step_clock::fold(events, attempt, snapshot_unix_ms, currently_active) {
+        return timing;
+    }
     let ClockFold {
         mut started,
         mut elapsed,

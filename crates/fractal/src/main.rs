@@ -9965,21 +9965,28 @@ async fn trace_claims(client: &Client, args: &TraceArgs) -> Result<Vec<ClaimReco
 
 fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> Result<()> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let summary = ["state", "status", "verdict", "action", "reason"]
-        .into_iter()
+    let keys: &[&str] = if claim.kind == "step.execution-phase" {
+        &["attempt", "phase", "exec", "at_unix_ms", "host"]
+    } else {
+        &["state", "status", "verdict", "action", "reason"]
+    };
+    let summary = keys.iter().copied()
         .filter_map(|key| {
             fields
                 .get(key)
                 .filter(|value| !value.is_null())
-                .map(|value| format!("{key}={}", trace_scalar(value)))
+                .map(|value| {
+                    if key == "at_unix_ms" {
+                        value.as_u64().map(|at| format!("{key}={}", format_trace_timestamp(u128::from(at))))
+                            .unwrap_or_else(|| format!("{key}={}", trace_scalar(value)))
+                    } else {
+                        format!("{key}={}", trace_scalar(value))
+                    }
+                })
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let timestamp = chrono::DateTime::from_timestamp_millis(
-        claim.accepted_at_unix_ms.min(i64::MAX as u128) as i64,
-    )
-    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    .unwrap_or_else(|| claim.accepted_at_unix_ms.to_string());
+    let timestamp = format_trace_timestamp(claim.accepted_at_unix_ms);
     if summary.is_empty() {
         writeln!(
             output,
@@ -9994,6 +10001,13 @@ fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> R
         )?;
     }
     Ok(())
+}
+
+fn format_trace_timestamp(at_unix_ms: u128) -> String {
+    i64::try_from(at_unix_ms).ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| at_unix_ms.to_string())
 }
 
 fn trace_scalar(value: &Value) -> String {
