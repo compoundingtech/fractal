@@ -6,6 +6,11 @@ use fractal_daemon::cli_println as println;
 pub(super) enum HostsCommand {
     /// List active holds on the connected execution host.
     Ls,
+    /// Inspect or reversibly defer all new launches on the connected daemon.
+    LaunchFreeze {
+        #[command(subcommand)]
+        command: LaunchFreezeCommand,
+    },
     /// Close admission for affected operations until the authenticated owner resolves it.
     Hold {
         host: String,
@@ -45,9 +50,48 @@ pub(super) enum HostsCommand {
     },
 }
 
+#[derive(Subcommand)]
+pub(super) enum LaunchFreezeCommand {
+    /// Inspect the active launch freeze and deferred starts before replacing the daemon.
+    Show,
+    /// Drain earlier spawns and temporarily defer new launches for safe daemon replacement.
+    Set {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// Bounded lease, at most 1800000 milliseconds.
+        #[arg(long)]
+        duration_ms: u64,
+        /// Maximum time to drain earlier spawns; timeout never arms a lease.
+        #[arg(long, default_value_t = 5_000)]
+        wait_ms: u64,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
+        actor: Option<String>,
+    },
+    /// Release an owned launch freeze so deferred runtime starts can resume.
+    Clear {
+        #[arg(long)]
+        id: String,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
+        actor: Option<String>,
+    },
+}
+
 pub(super) async fn run(client: &Client, person: Option<&str>, command: HostsCommand, json_output: bool) -> Result<()> {
     let value: Value = match command {
         HostsCommand::Ls => client.get("/v1/hosts/holds").await?,
+        HostsCommand::LaunchFreeze { command } => match command {
+            LaunchFreezeCommand::Show => client.get("/v1/hosts/launch-freeze").await?,
+            LaunchFreezeCommand::Set { id, reason, duration_ms, wait_ms, actor } => {
+                let actor = actor.as_deref().or(person).context("launch-freeze set requires an authenticated actor")?;
+                client.post("/v1/hosts/launch-freeze", &json!({"actor":actor,"id":id,"reason":reason,"duration_ms":duration_ms,"wait_ms":wait_ms})).await?
+            }
+            LaunchFreezeCommand::Clear { id, actor } => {
+                let actor = actor.as_deref().or(person).context("launch-freeze clear requires an authenticated actor")?;
+                client.post("/v1/hosts/launch-freeze/clear", &json!({"actor":actor,"id":id})).await?
+            }
+        },
         HostsCommand::Hold { host, reason, operations, actor, originating_run, receipt } => {
             let actor = actor.as_deref().or(person).context("hosts hold requires --as, ST_AGENT, or a configured person")?;
             client.post("/v1/hosts/holds", &json!({"host":host,"reason":reason,"operations":operations,"actor":actor,"originating_run":originating_run,"receipt":receipt})).await?
@@ -134,5 +178,27 @@ mod tests {
         let cli = Cli::try_parse_from(["fractal", "hosts", "release", "host-a", "host-hold/example",
             "--expected-revision", "1", "--resolution", "repaired", "--as", "person/operator"]).unwrap();
         assert!(guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).is_err());
+    }
+    #[test]
+    fn launch_freeze_cli_preserves_lease_and_bounded_wait() {
+        let cli = Cli::try_parse_from(["fractal", "hosts", "launch-freeze", "set",
+            "--as", "person/operator", "--id", "activation", "--reason", "replace daemon",
+            "--duration-ms", "60000", "--wait-ms", "1000"]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).is_err());
+        let Command::Hosts { command: HostsCommand::LaunchFreeze {
+            command: LaunchFreezeCommand::Set { id, reason, duration_ms, wait_ms, actor },
+        } } = cli.command else { panic!("expected launch-freeze set") };
+        assert_eq!(id, "activation");
+        assert_eq!(reason, "replace daemon");
+        assert_eq!(duration_ms, 60_000);
+        assert_eq!(wait_ms, 1_000);
+        assert_eq!(actor.as_deref(), Some("person/operator"));
+    }
+    #[test]
+    fn launch_freeze_clear_cannot_borrow_operator_identity() {
+        let cli = Cli::try_parse_from(["fractal", "hosts", "launch-freeze", "clear",
+            "--as", "person/operator", "--id", "activation"]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).is_err());
+        assert!(Cli::try_parse_from(["fractal", "hosts", "launch-freeze", "show"]).is_ok());
     }
 }

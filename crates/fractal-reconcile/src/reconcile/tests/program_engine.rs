@@ -287,6 +287,72 @@ fn a_program_resumes_from_its_journal_after_its_host_is_killed() {
     assert_eq!(result.body["fields"]["value"], json!({"first": {"attempt": 1}, "waited": "opened"}));
 }
 
+/// The daemon's native-message checkpoint kills the registered host, not the daemon
+/// or the durable attempt. Actual provider commit cuts are exercised in API tests.
+#[cfg(feature = "test-support")]
+#[test]
+fn native_message_checkpoints_are_one_shot_and_resume_the_same_journaled_attempt() {
+    for stage in ["after-intent", "after-accept"] {
+        let fixture = fixture(Liveness::default());
+        let started = fixture.start(stage, "wait");
+        fixture.until("the program reaches its waiting effect", || pids(&started.pids).is_some());
+        let before = pids(&started.pids).unwrap();
+        let host = fixture.engine.host_pid().unwrap();
+        let first = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap()
+            .into_iter().find(|claim| claim.body["fields"]["key"] == "first"
+                && claim.body["fields"]["status"] == "completed").unwrap();
+        let operation_hex = "a".repeat(64);
+        let operation = format!("op/{operation_hex}");
+        let checkpoints = fixture.dir.path().join("test-native-message");
+        std::fs::create_dir_all(&checkpoints).unwrap();
+        let arm = checkpoints.join(format!("{operation_hex}.{stage}.arm"));
+        let reached = checkpoints.join(format!("{operation_hex}.{stage}.reached"));
+        assert!(!crate::reconcile::program::interrupt_message_for_test(
+            &fixture.store, fixture.dir.path(), &operation, stage,
+        ).unwrap());
+        assert_eq!(fixture.engine.host_pid(), Some(host));
+        std::fs::write(&arm, "").unwrap();
+        // The next PID file can only come from the resumed host's real effect.
+        std::fs::remove_file(&started.pids).unwrap();
+        assert!(crate::reconcile::program::interrupt_message_for_test(
+            &fixture.store, fixture.dir.path(), &operation, stage,
+        ).unwrap());
+        assert!(!arm.exists());
+        assert!(reached.exists());
+        fixture.without_passes("the checkpointed attempt resumes on a new host", || pids(&started.pids).is_some());
+        let resumed_host = fixture.engine.host_pid().unwrap();
+        assert_ne!(resumed_host, host);
+        assert!(before.iter().all(|pid| !alive(*pid)), "survivors of checkpoint {stage}: {before:?}");
+        assert_eq!(fixture.store.step_run(&started.step).unwrap().unwrap().attempt, 1);
+        // Consuming the arm is one-shot even after the host has been replaced.
+        assert!(!crate::reconcile::program::interrupt_message_for_test(
+            &fixture.store, fixture.dir.path(), &operation, stage,
+        ).unwrap());
+        assert_eq!(fixture.engine.host_pid(), Some(resumed_host));
+        std::fs::write(&started.gate, "").unwrap();
+        fixture.until("the resumed program completes", || fixture.status(&started.step) == "completed");
+        assert_eq!(
+            fixture.journal(&started.step),
+            entries(&[
+                ("first", "started"),
+                ("first", "completed"),
+                ("wait", "started"),
+                ("wait", "started"),
+                ("wait", "completed"),
+                (RESULT_KEY, "completed"),
+            ]),
+        );
+        let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
+        let completed_first: Vec<_> = claims.iter().filter(|claim|
+            claim.body["fields"]["key"] == "first" && claim.body["fields"]["status"] == "completed").collect();
+        assert_eq!(completed_first.len(), 1);
+        assert_eq!(completed_first[0].id, first.id);
+        let result = claims.iter().find(|claim| claim.body["fields"]["key"] == RESULT_KEY).unwrap();
+        assert_eq!(result.body["fields"]["value"], json!({"first": {"attempt": 1}, "waited": "opened"}));
+        assert_eq!(fixture.store.step_run(&started.step).unwrap().unwrap().attempt, 1);
+    }
+}
+
 /// A program run that `missions start` just created journals its first inner step from the
 /// change feed alone (R14): the follower evaluates the new run, which readies and dispatches its
 /// program step, with no pass, which would first wait out `StartSpacing`.

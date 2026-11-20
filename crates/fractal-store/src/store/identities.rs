@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 #[path = "identities_conflict_scope.rs"]
 mod conflict_scope;
+#[path = "identities_reads.rs"]
+mod reads;
 
 pub const AGENT_RENAMED: &str = "agent.renamed";
 pub const MISSION_RENAMED: &str = "mission.renamed";
@@ -65,9 +67,67 @@ pub struct RenameReceipt {
     pub replication: RenameReplication,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RenameRefusal {
+    pub code: String,
+    pub detail: String,
+}
+
+/// A read-only admission result. Unknown/unavailable sources have no resolved pins.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RenamePlan {
+    pub kind: IdentityKind,
+    pub identity: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub current_canonical_id: Option<String>,
+    pub naming_revision: Option<String>,
+    pub declaration: Option<String>,
+    pub request: RenameRequest,
+    pub request_digest: String,
+    pub admissible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<RenameRefusal>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenameProofAvailability {
+    Selected,
+    Superseded,
+    Conflicted,
+    PendingReplication,
+    NotFound,
+    Unavailable,
+}
+
+/// Native snapshot evidence, not a portable signed proof bundle.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RenameProof {
+    pub kind: IdentityKind,
+    pub identity: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub claim_id: Option<String>,
+    pub naming_revision: Option<String>,
+    pub current_canonical_id: Option<String>,
+    pub declaration: Option<String>,
+    pub previous_revision: Option<String>,
+    pub request_digest: Option<String>,
+    pub operation_id: Option<String>,
+    pub actor: Option<String>,
+    pub owner_host: Option<String>,
+    pub accepted_at_unix_ms: Option<u128>,
+    pub availability: RenameProofAvailability,
+    pub snapshot_index: u64,
+    pub claim: Option<ClaimRecord>,
+}
+
 pub trait IdentityStore {
     fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError>;
     fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, FractalError>;
+    fn plan_rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenamePlan, FractalError>;
+    fn rename_proof(&self, kind: IdentityKind, from: &str, to: &str, request_digest: Option<&str>) -> Result<RenameProof, FractalError>;
 }
 
 pub fn unavailable(id: &str, reason: &str) -> FractalError {
@@ -346,6 +406,33 @@ fn occupied(connection: &Connection, kind: IdentityKind, source: &ResolvedIdenti
     Ok(())
 }
 
+fn validate_request(kind: IdentityKind, request: &RenameRequest) -> Result<(), FractalError> {
+    validate_name(kind, &request.from)?;
+    validate_name(kind, &request.to)?;
+    if request.reason.trim().is_empty() { return Err(FractalError::new("invalid-rename", "identity rename needs a reason")); }
+    if request.idempotency_key.is_empty() || request.idempotency_key.len() > 512 || request.idempotency_key.chars().any(char::is_control) {
+        return Err(FractalError::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
+    }
+    Ok(())
+}
+
+/// One admission gate for both PLAN and the writer's commit-time check.
+fn rename_admission(connection: &Connection, store: &Store, kind: IdentityKind, request: &RenameRequest,
+    source: &ResolvedIdentity, declaration: &str, peers: &[String],
+) -> Result<(), FractalError> {
+    let current = resolve_identity_conn(connection, kind, &request.from)?;
+    retired_source(connection, kind, &current.identity)?;
+    if &current != source { return Err(unavailable(&source.identity, "stale-revision")); }
+    let token = declaration_token(connection, kind, &source.identity)?.ok_or_else(|| unavailable(&source.identity, "missing"))?;
+    if token != declaration || request.expected_declaration.as_ref().is_some_and(|expected| expected != &token)
+        || request.expected_naming_revision.as_ref().is_some_and(|expected| Some(expected) != current.naming_revision.as_ref()) {
+        return Err(unavailable(&source.identity, "stale-revision"));
+    }
+    occupied(connection, kind, &current, &request.to)?;
+    owner_admission(connection, kind, &source.identity, &token, store.origin())?;
+    check_fleet_registry_conn(connection, store.origin(), peers, &store.fractal.schema_digest())
+}
+
 fn receipt(claim: &ClaimRecord, request: &RenameRequest, already: bool) -> RenameReceipt {
     let fields = &claim.body["fields"];
     RenameReceipt {
@@ -364,14 +451,16 @@ impl IdentityStore for Store {
     fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError> {
         resolve_identity_conn(&self.readers.get(), kind, id)
     }
+    fn plan_rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenamePlan, FractalError> {
+        reads::plan(self, kind, request, peers)
+    }
+
+    fn rename_proof(&self, kind: IdentityKind, from: &str, to: &str, digest: Option<&str>) -> Result<RenameProof, FractalError> {
+        reads::proof(self, kind, from, to, digest)
+    }
 
     fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, FractalError> {
-        validate_name(kind, &request.from)?;
-        validate_name(kind, &request.to)?;
-        if request.reason.trim().is_empty() { return Err(FractalError::new("invalid-rename", "identity rename needs a reason")); }
-        if request.idempotency_key.is_empty() || request.idempotency_key.len() > 512 || request.idempotency_key.chars().any(char::is_control) {
-            return Err(FractalError::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
-        }
+        validate_request(kind, request)?;
         let request_value = serde_json::to_value(request).map_err(internal)?;
         let connection = self.readers.get();
         if let Some((_, claim_id, state)) = operation_tx(&connection, &operation_id_for_key(&request.idempotency_key)).map_err(internal)? {
@@ -401,19 +490,8 @@ impl IdentityStore for Store {
         };
         input.fields.retain(|_, value| !value.is_null());
         self.graph.ensure_principal_key(&actor)?;
-        let admission = |connection: &Connection| {
-            let current = resolve_identity_conn(connection, kind, &request.from)?;
-            retired_source(connection, kind, &current.identity)?;
-            if current != source { return Err(unavailable(&source.identity, "stale-revision")); }
-            let token = declaration_token(connection, kind, &source.identity)?.ok_or_else(|| unavailable(&source.identity, "missing"))?;
-            if token != declaration || request.expected_declaration.as_ref().is_some_and(|expected| expected != &token)
-                || request.expected_naming_revision.as_ref().is_some_and(|expected| Some(expected) != current.naming_revision.as_ref()) {
-                return Err(unavailable(&source.identity, "stale-revision"));
-            }
-            occupied(connection, kind, &current, &request.to)?;
-            owner_admission(connection, kind, &source.identity, &token, self.origin())?;
-            check_fleet_registry_conn(connection, self.origin(), peers, &self.fractal.schema_digest())
-        };
+        let admission = |connection: &Connection| rename_admission(connection, self, kind, request,
+            &source, &declaration, peers);
         let (claim, created) = append_claim_with_commit_context(&self.graph, &input, None, None, None, None,
             ClaimCommitContext { admission: Some(&admission), identity_writer: true, ..Default::default() })?;
         if !created { check_receipt(&self.readers.get(), &claim)?; }

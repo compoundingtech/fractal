@@ -365,6 +365,8 @@ values map to `other`; routes are matched templates, not raw paths.
 | Delivery `st.agent.desired` | `running`, `suspended`; selected from authoritative lifecycle, not observed liveness |
 | Mailbox `st.mailbox.state` | `pending`, `delivered`, `held` |
 | Mailbox `st.mailbox.age_band` | `recent`, `stale`; oldest accepted send younger than one day, or at least one day old, respectively |
+| Residency `result`, `source`, `outcome`, `kind`, `cause`, `class`, `measure` | Closed vocabularies in `fractal_telemetry::residency`; no identity axes |
+| Residency refusal `reason`, resume failure `code` | Fixed 13- and 7-value code lists including `other`; unknown codes collapse to `other` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -396,9 +398,9 @@ and `cancelled` when the request future is dropped before producing a response.
 An upstream 504 without the read-deadline marker is `server_error`. A drop guard
 records exactly once, including cancellation; the in-process meter and slow logs
 retain their completion-only behavior. The outcome has five values. An SDK cardinality
-limit caps this instrument at 1,500 series; excess combinations go to the
-`otel.metric.overflow=true` series. This runtime cap enforces O11Y-R14's 2,000 active-series
-budget rather than the theoretical label product.
+limit caps this instrument at 1,460 series, reserving 40 of its former 1,500-series
+allocation for residency; excess combinations go to the `otel.metric.overflow=true`
+series. This bounds HTTP independently; it does not prove daemon-wide O11Y-R14 compliance.
 
 Duration buckets are
 `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`,
@@ -435,7 +437,7 @@ eight attribute sets, without a separate outcome counter.
 
 Every storage metric carries `db.system.name=sqlite`. Writer hold, queue, and oldest-loan origins reuse
 the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
-by one of nine HTTP methods, the fourteen fixed task names in the storage origin table,
+by one of nine HTTP methods, the 121 entries in `TASK_ORIGINS` (including `other`),
 and `other` for unknown origins. No paths, SQL, ids, or raw request URIs are attributes.
 Each batch's hold uses its first queued operation's origin for its entire lifetime;
 loans use the borrowing caller's origin. When multiple stores share an origin, the
@@ -601,6 +603,10 @@ as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
 
+An API write is proved by its accepted request span and the `cause=api` wake
+counter, followed by an independent reconcile pass. Its pass label may name a
+later coalesced wake; tests must not require the last-writer-wins label to retain `api`.
+
 `st.reconcile.passes_per_wake` records the number of completed passes when an
 outer wake rests or reaches its 64-pass continuation cap. It includes the
 quiet confirmation pass, uses the outer wake's cause (not `continuation`),
@@ -618,7 +624,8 @@ notifications to request another outer wake.
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
 
 Every metric attribute is a constant closed value, never an identity.
-These instruments contribute at most `17 + 17 + 2 + 3 + 3 = 42` attribute series;
+These instruments, including runtime-observation drops, contribute at most
+`17 + 17 + 2 + 1 + 3 + 3 = 43` attribute series;
 histogram bucket count is separate. Duration uses the seconds buckets above,
 and metrics are independent of trace sampling.
 
@@ -844,10 +851,10 @@ belongs to its source conversation owner. For fleet-global sources select the
 fleet's authoritative source origin, not every replica that reads the item.
 An implementation must establish that unique origin before exporting those
 items; no person, message or source identifiers become labels.
-On every successful snapshot, `st.attention.open` emits all ten closed kinds,
+On every successful snapshot, `st.attention.open` emits all twelve closed kinds,
 including explicit zeros. A missing attention-kind series means exporter
 failure, not zero open items; use the last-success gauge to detect a stale
-snapshot whose ten cached series still export.
+snapshot whose twelve cached series still export.
 
 ### Cardinality budget
 
@@ -861,18 +868,18 @@ again cancels its empty deadline. Only live buckets and empty buckets inside
 this window count against the 256-bucket population budget.
 
 The theoretical per-host product is `6 drivers × 6 kinds × 9 repos × 21 legal
-pairs × 2 work flags = 13,608`, plus ten attention buckets and one last-success
+pairs × 2 work flags = 13,608`, plus twelve attention buckets and one last-success
 series. This is not an acceptable active-series allocation. Population's
-operational allocation is at most 256 live/retained buckets, plus ten attention
+operational allocation is at most 256 live/retained buckets, plus twelve attention
 buckets and one last-success series per daemon. A worked deployment bound of
 64 live seats plus 128 live children and at most 64 distinct buckets inside the
-empty retention window is `192 + 64 + 10 + 1 = 267` series per host. Each live
+empty retention window is `192 + 64 + 12 + 1 = 269` series per host. Each live
 agent contributes to one bucket, so simultaneous nonzero population series
 never exceed the number of included agents. Backend active-series accounting
 can outlive reporting; its additional churn cost still needs capacity review.
 
 Set the OTel SDK stream cardinality limit explicitly to 512 for each of these
-three instruments, above 266 and the combined 267-series allocation; do not
+three instruments, above the combined 269-series operational allocation; do not
 rely on the default. This is a safety margin, not permission to exceed the
 contract's allocation. OTel Rust SDK 0.30 emits an overflow data-point series
 with the attribute `otel.metric.overflow=true`, rendered in Mimir as
@@ -888,13 +895,67 @@ not an approved loss of labels or a valid substitute for capacity review.
 
 
 This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
-another 2,000. The HTTP request-duration instrument already reserves up to 1,500
-series; mailbox/delivery and other instruments consume the remainder. Capacity
-and label-churn review is an implementation gate, not a claim of current
-compliance. If inventory exceeds the allocation, the decision owner must approve
-a revised budget or a lossless
-dimension policy before rollout: never truncate agents, use SDK overflow to
-silently lose the contract's labels, or discard counts to meet a budget.
+another 2,000. The source inventory below counts OTLP attribute series, not
+Prometheus histogram bucket expansion or backend label churn. It is a potential
+occupied-series inventory, not a claim that every bucket is active on a running host.
+
+| Daemon stream group | Source allocation / potential occupied series | Explicit SDK cap |
+| --- | --- | --- |
+| HTTP duration | 1,460, formerly 1,500 | 1,460 plus one overflow |
+| Residency, inert until the stop/wake cutover | 40 = 3 suspend results + 13 refusal codes + 8 wake pairs + 7 failure codes + 1 short-sleep + 2 unrouted kinds + 6 gauge series | Closed vocabularies; zero active before construction |
+| Reconcile, FIFO, startup, projection skips | 37 + 6 + 13 + 4 = 60 | None |
+| Mailbox fence, webhook outcomes | 8 + 85 = 93 | None |
+| Assistant receipts, mission/runtime list publication | 2 + 4 = 6 | None |
+| Process/allocator/runtime/legacy admissions; trim | 10 + 3 = 13 on Linux GNU; 4 on macOS | None |
+| Index migrations, storage fixed axes | 6 + 24 = 30 | None |
+| **Fixed-axis subtotal, excluding HTTP/residency/population** | **202 Linux GNU; 193 macOS** | No aggregate cap |
+| Storage writer/read-loan origins and write-worker wait | `3(121+W) + (121+R) + (W+1)` | None |
+| Task CPU/polls | `2T` operation-name series | None |
+| Delivery + mailbox | `13A` for locally owned declared agents | None |
+| Population, opt-in | 256 retained buckets + 12 attention kinds + 1 success = 269 operational | 512 per instrument, plus one overflow each |
+| Conversation relay | `4(P+2)` owner/operation pairs | None |
+| Resource lanes | `3HK + 163K` | None |
+| GitHub responses/auth fallback; drain refusals | Repository × resource × 2; configured installation × reason; mutating route/method | None |
+
+The fixed subtotal is `60+93+6+13+30=202` on Linux GNU and 193 on macOS.
+Here `W`/`R` are writer/read-loan route origins; `T` is task call-site names;
+`A` local declared agents; `P` configured peers; `H` authorities; `K` lanes.
+The storage origin registry has 121 entries including `other`; route origins
+are additional. Non-viewed instruments rely on the SDK's per-stream default,
+not a daemon-wide limit. Replication-worker instruments belong to a separate
+service and are excluded.
+
+Residency's exact 40-series footprint is subtracted in code from HTTP's former
+1,500 cap: `1,460+40=1,500`; HTTP's possible overflow series is unchanged.
+No residency instrument is constructed by the daemon yet. Its observable
+callbacks read only a published in-memory summary, never SQLite or host sensors.
+
+**DQ1 decision:** residency's exact 40-series carve-out from HTTP satisfies its
+allocation requirement; it does not add headroom. The existing code has no
+fleet-independent 2,000-series bound: fixed axes, the existing reservation and
+64 local agents permit `202+1,500+13×64=2,534` potential series before other axes.
+This source-derived capacity gap predates residency and is tracked separately
+in [#6751](https://github.com/compoundingtech/fractal/issues/6751); it does not
+block residency activation. Never silently truncate agents, labels or counts.
+
+### Inert residency host sensors
+
+`fractal_telemetry::residency_host_sample` provides an explicit default-off
+sampling gate, not a daemon timer or claim writer. Its caller supplies the
+snapshot-consistent asleep-seat count and process set. On Linux it reads
+`/proc/meminfo` `MemAvailable` and each process's `smaps_rollup` private clean,
+dirty and huge-page bytes. These are not RSS sums. Missing/malformed files,
+incomplete process sets and unsupported platforms (including macOS) produce
+absent measurements, never zero. A real measured zero remains valid.
+Paired deltas use host available after minus before, and private before minus
+after; both endpoints are required and coverage is complete, partial or unavailable.
+
+The held-silent input interface distinguishes unavailable coverage from a
+caught-up projection cut with an optional oldest accepted timestamp. Empty or
+lagging coverage emits no age. The wake-demand reader in #6726 does not expose
+held-silent selection yet: **the store adapter and active host-sample producer
+are intentionally absent**, not stubbed. Integration must select held silent
+mail at the same proven frontier before enabling the five-minute host samples.
 
 ### Signal gaps and implementation boundary
 
@@ -1289,7 +1350,7 @@ are opt-in. Observation adds no reclamation calls or changes to checkpoint clean
 Proof: the completion-scope unit test checks production totals increase. Source
 review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
 integration test captures all five closed states with a common collection timestamp
-and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("fractal")`;
 the timestamp proves a common SDK collection, not the number of native calls.
 A fresh-test-process proof initializes real daemon telemetry with traces enabled and
 metrics disabled, asserting no meter provider is created; it does not infer absence
@@ -1322,7 +1383,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 `st.parent.sampled=true`.
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
-bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
+bridge dependencies, not an exporter or SDK initializer. `fractal` enables the feature;
 `fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from

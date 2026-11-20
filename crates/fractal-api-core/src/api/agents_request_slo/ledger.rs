@@ -14,6 +14,7 @@ pub(super) struct Ledger(Connection);
 impl Ledger {
     pub(super) fn open(path: &Path, node: &str) -> Result<Self> {
         let mut db = Connection::open(path)?;
+        smallclaims::sqlite::census_files::register(&db);
         db.execute_batch(
             /* sqlite-large-value: allow-for-now lv-ha6d34932f4e4 owner=fractal_api_core::api::agents_request_slo::ledger TODO=chunk-or-reference-variable-columns */
             "PRAGMA synchronous = FULL;

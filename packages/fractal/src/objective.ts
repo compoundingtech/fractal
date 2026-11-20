@@ -60,6 +60,45 @@ export interface Count {
   readonly only?: readonly FieldValues[]
 }
 
+/** Authored source and versioned roster references; no implicit host, membership or target. */
+export interface GithubMeasurement {
+  readonly source: string
+  readonly roster: string
+  readonly timezone: string
+  readonly cut: 'now' | 'watermark'
+  readonly measurement: 'only' | 'targeted'
+}
+
+/** Numeric events: one denominator event per subject and timestamp; strictly above is bad. */
+export interface Ratio extends Count {
+  readonly field: string
+  readonly badAbove: number
+}
+
+/** A reading covers time forward only until the next reading or maxAge, never across a gap. */
+export type Gauge = Omit<Ratio, 'badAbove'> & {
+  readonly maxAge: Duration
+  readonly cadence: Duration
+} & (
+  | { readonly badAbove: number; readonly badBelow?: never }
+  | { readonly badBelow: number; readonly badAbove?: never }
+)
+
+export interface BurnWindow {
+  readonly burnRate: number
+  readonly long: Duration
+  readonly short: Duration
+}
+
+export interface BudgetPolicy {
+  readonly allowance: number
+  readonly horizon: Duration
+  readonly minCoverage: number
+  readonly minSamples: number
+  readonly fast: BurnWindow
+  readonly slow: BurnWindow
+}
+
 /** How a sample is measured; `kind` is the KDL indicator name. */
 export type Indicator =
   | { readonly kind: 'latency'; readonly paths: readonly string[] }
@@ -72,6 +111,11 @@ export type Indicator =
   | { readonly kind: 'divergence' }
   | ({ readonly kind: 'interval' } & Interval)
   | ({ readonly kind: 'count' } & Count)
+  | ({ readonly kind: 'github-merged-count' } & GithubMeasurement)
+  | ({ readonly kind: 'github-ready-to-merged' } & GithubMeasurement)
+  | ({ readonly kind: 'ratio' } & Ratio)
+  | ({ readonly kind: 'gauge' } & Gauge)
+  | { readonly kind: 'native'; readonly objective: string }
 
 type IndicatorOf<K extends Indicator['kind']> = Extract<Indicator, { readonly kind: K }>
 
@@ -106,12 +150,13 @@ export interface ObjectiveInput {
   readonly about: string
   readonly indicator: Indicator
   readonly window?: Window
-  readonly targets: readonly Target[]
+  readonly budget?: BudgetPolicy
+  readonly targets?: readonly Target[]
   readonly onBreach?: Fault
 }
 
-/** A checked objective: exactly the fields of its input, frozen. */
-export type Objective = ObjectiveInput
+/** A checked objective, frozen, with an explicit (possibly empty) target list. */
+export type Objective = ObjectiveInput & { readonly targets: readonly Target[] }
 
 const freeze = <T extends object>(value: T): T => Object.freeze(value)
 
@@ -121,6 +166,13 @@ export const indicator = {
   interval: (input: Interval): IndicatorOf<'interval'> => freeze({ kind: 'interval', ...input }),
   /** Events in claims per hour, one per subject (a fleet declares this or `interval`). */
   count: (input: Count): IndicatorOf<'count'> => freeze({ kind: 'count', ...input }),
+  githubMergedCount: (input: GithubMeasurement): IndicatorOf<'github-merged-count'> =>
+    freeze({ kind: 'github-merged-count', ...input }),
+  githubReadyToMerged: (input: Omit<GithubMeasurement, 'measurement'> & { readonly measurement: 'only' }): IndicatorOf<'github-ready-to-merged'> =>
+    freeze({ kind: 'github-ready-to-merged', ...input }),
+  ratio: (input: Ratio): IndicatorOf<'ratio'> => freeze({ kind: 'ratio', ...input }),
+  gauge: (input: Gauge): IndicatorOf<'gauge'> => freeze({ kind: 'gauge', ...input }),
+  native: (input: { readonly objective: string }): IndicatorOf<'native'> => freeze({ kind: 'native', ...input }),
   /** Daemon routes, stream first snapshots, publications or phone reports, by `METHOD /route`. */
   latency: ({ paths }: { readonly paths: readonly string[] }): IndicatorOf<'latency'> =>
     freeze({ kind: 'latency', paths }),
@@ -159,6 +211,13 @@ export const validWord = (word: string): boolean =>
 /** One or more words joined by `/`: `cpu`, `ops/change-rollout`. */
 export const validName = (name: string): boolean =>
   name.length <= 128 && name.split('/').every(validWord)
+
+/** Built-in row segments also contain underscore-joined words, such as `writer_hold`. */
+const validNativeName = (name: string): boolean =>
+  name.length <= 128 &&
+  // Enforce ASCII through the true end of input (JavaScript `$` also matches before a final newline).
+  !/[^a-z0-9/_-]/u.test(name) &&
+  name.split('/').every((segment) => segment.split('_').every(validWord))
 
 const units = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const
 
@@ -293,6 +352,47 @@ const parseCount = ({ value, fail }: { readonly value: Fields; readonly fail: Fa
   return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze({ kind: count.event.kind, at: count.event.at }), ...labelsAndFilters(count) })
 }
 
+const parseNumeric = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'ratio'> | IndicatorOf<'gauge'> => {
+  const gauge = value.kind === 'gauge'
+  only({ value, allowed: ['kind', 'subjectPrefix', 'event', 'field', 'badAbove', 'labels', 'exclude', 'only', ...(gauge ? ['maxAge', 'cadence', 'badBelow'] : [])], what: 'numeric indicator', fail })
+  const count = parseCount({ value: { kind: 'count', subjectPrefix: value.subjectPrefix, event: value.event, labels: value.labels, exclude: value.exclude, only: value.only }, fail })
+  if (!isField(value.field)) return fail('`value` needs a field name')
+  if ((value.badAbove === undefined) === (value.badBelow === undefined)) return fail('value needs exactly one threshold')
+  const limit = value.badAbove ?? value.badBelow
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0) return fail('threshold must be finite and nonnegative')
+  const { kind: _kind, ...fields } = count
+  const common = { ...fields, field: value.field }
+  if (!gauge) return freeze({ kind: 'ratio', ...common, badAbove: limit })
+  const maxAge = durationMs({ value: value.maxAge, fail })
+  const cadence = durationMs({ value: value.cadence, fail })
+  if (maxAge < cadence) return fail("a gauge's maxAge must cover at least one cadence")
+  const threshold = value.badBelow === undefined ? { badAbove: limit } : { badBelow: limit }
+  return freeze({ kind: 'gauge', ...common, ...threshold, maxAge: value.maxAge as Duration, cadence: value.cadence as Duration })
+}
+
+const parseBudget = ({ value, fail }: { readonly value: unknown; readonly fail: Fail }): BudgetPolicy => {
+  if (!isRecord(value)) return fail('budget needs a policy')
+  only({ value, allowed: ['allowance', 'horizon', 'minCoverage', 'minSamples', 'fast', 'slow'], what: 'budget', fail })
+  const { allowance, minCoverage, minSamples } = value
+  if (typeof allowance !== 'number' || !Number.isFinite(allowance) || allowance <= 0 || allowance >= 1) return fail('allowance must be in (0,1)')
+  if (typeof minCoverage !== 'number' || !Number.isFinite(minCoverage) || minCoverage <= 0 || minCoverage > 1) return fail('minCoverage must be in (0,1]')
+  if (typeof minSamples !== 'number' || !Number.isSafeInteger(minSamples) || minSamples <= 0) return fail('minSamples is not a positive integer')
+  const horizon = durationMs({ value: value.horizon, fail })
+  const pair = (raw: unknown): BurnWindow => {
+    if (!isRecord(raw)) return fail('budget needs fast and slow burn windows')
+    only({ value: raw, allowed: ['burnRate', 'long', 'short'], what: 'burn window', fail })
+    const { burnRate } = raw
+    const long = durationMs({ value: raw.long, fail })
+    const short = durationMs({ value: raw.short, fail })
+    if (typeof burnRate !== 'number' || !Number.isFinite(burnRate) || burnRate <= 1 || short >= long || long > horizon) return fail('burnRate must exceed 1 and short < long <= horizon')
+    return freeze({ burnRate, long: raw.long as Duration, short: raw.short as Duration })
+  }
+  const fast = pair(value.fast)
+  const slow = pair(value.slow)
+  if (fast.burnRate <= slow.burnRate || durationMs({ value: fast.long, fail }) >= durationMs({ value: slow.long, fail }) || durationMs({ value: fast.short, fail }) >= durationMs({ value: slow.short, fail })) return fail('fast burn must be higher and its windows shorter than slow burn')
+  return freeze({ allowance, horizon: value.horizon as Duration, minCoverage, minSamples, fast, slow })
+}
+
 const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'interval'> => {
   only({
     value,
@@ -369,6 +469,16 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
   const allow = (fields: readonly string[]) =>
     only({ value, allowed: ['kind', ...fields], what: `indicator \`${kind}\``, fail })
   switch (kind) {
+    case 'github-merged-count':
+    case 'github-ready-to-merged': {
+      allow(['source', 'roster', 'timezone', 'cut', 'measurement'])
+      const { source, roster, timezone, cut, measurement } = value
+      if (typeof source !== 'string' || source.trim() === '' || typeof roster !== 'string' || roster.trim() === '' ||
+          typeof timezone !== 'string' || timezone.trim() === '') return fail('GitHub source, roster and timezone must be nonempty')
+      if (cut !== 'now' && cut !== 'watermark') return fail('GitHub cut must be now or watermark')
+      if (measurement !== 'only' && measurement !== 'targeted') return fail('GitHub measurement must be only or targeted')
+      return freeze({ kind, source, roster, timezone, cut, measurement })
+    }
     case 'latency': {
       allow(['paths'])
       const paths = value.paths
@@ -403,6 +513,13 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
       return parseInterval({ value, fail })
     case 'count':
       return parseCount({ value, fail })
+    case 'ratio':
+    case 'gauge':
+      return parseNumeric({ value, fail })
+    case 'native':
+      allow(['objective'])
+      if (typeof value.objective !== 'string' || !validNativeName(value.objective)) return fail('native objective must name a well-formed built-in row')
+      return freeze({ kind, objective: value.objective })
     default:
       return fail(`has an unknown indicator \`${kind}\``)
   }
@@ -474,6 +591,10 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
     (number > 0 || (zero && number === 0)) &&
     (integer === false || Number.isInteger(number))
   switch (indicator.kind) {
+    case 'github-merged-count':
+      return target.stat === 'per-hour' && 'min' in target && number !== undefined && number > 0
+    case 'github-ready-to-merged':
+      return false
     case 'latency':
       return target.stat === 'p99' && within
     case 'share':
@@ -493,6 +614,10 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
       return target.stat === 'per-hour' && ('min' in target ? number !== undefined && number > 0 : max({ integer: false, zero: true }))
     case 'interval':
       return percentile(target.stat) !== undefined && within
+    case 'ratio':
+    case 'gauge':
+    case 'native':
+      return false
   }
 }
 
@@ -507,6 +632,11 @@ const requiredStats: Readonly<Record<Indicator['kind'], readonly string[]>> = {
   divergence: ['open'],
   interval: [],
   count: ['per-hour'],
+  'github-merged-count': [],
+  'github-ready-to-merged': [],
+  ratio: [],
+  gauge: [],
+  native: [],
 }
 
 const checkTargets = ({
@@ -522,18 +652,31 @@ const checkTargets = ({
   readonly hasBreach: boolean
   readonly fail: Fail
 }): void => {
-  const local = (stat: string) => targets.find(({ target }) => target.stat === stat && target.scope === undefined)
   targets.forEach(({ target }, index) => {
     if (targets.findIndex((other) => other.target.stat === target.stat && other.target.scope === target.scope) !== index) {
       fail(`repeats target \`${target.stat}\``)
     }
     if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
   })
+  if (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') {
+    if (hasWindow) fail('GitHub indicators own their rolling hour and calendar windows')
+    if (indicator.measurement === 'only') {
+      if (targets.length !== 0 || hasBreach) fail('measurement only has neither targets nor onBreach')
+      return
+    }
+    if (indicator.kind === 'github-ready-to-merged') fail('ready-to-merged is measured-only until latency policy is approved')
+    if (targets.length !== 1 || statBound({ indicator, checked: targets[0]! }) === false) {
+      fail('targeted GitHub merged count needs one per-hour minimum')
+    }
+    return
+  }
+  const local = (stat: string) => targets.find(({ target }) => target.stat === stat && target.scope === undefined)
   const wrong = targets.find((checked) => statBound({ indicator, checked }) === false)
   if (wrong !== undefined) fail(`a \`${indicator.kind}\` indicator has no target \`${wrong.target.stat}\` with that bound`)
   const missing = requiredStats[indicator.kind].find((stat) => local(stat) === undefined)
   if (missing !== undefined) fail(`a \`${indicator.kind}\` indicator needs target \`${missing}\``)
-  if (targets.length === 0) fail('has no `target`')
+  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge'
+  if (targets.length === 0 && !numeric && indicator.kind !== 'native') fail('has no `target`')
   const remote = targets.find(({ target }) => target.stat === 'p99' && target.scope === 'remote')
   if (remote !== undefined && remote.ms! < (local('p99')?.ms ?? 0)) fail('its remote latency is below its own')
   if (indicator.kind === 'statement' && local('max')!.ms! < local('p99')!.ms!) fail('its max is below its p99')
@@ -548,8 +691,8 @@ const checkTargets = ({
   if (claims === false && hasWindow) {
     fail('only an interval or a count takes a `window`; native telemetry keeps its own')
   }
-  if (claims === false && hasBreach) {
-    fail('only an interval or a count takes `onBreach`; native objectives respond as they are built')
+  if (claims === false && !numeric && indicator.kind !== 'native' && hasBreach) {
+    fail('only claim indicators take `onBreach`; native objectives respond as they are built')
   }
 }
 
@@ -567,7 +710,7 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
   const fail: Fail = (message) => {
     throw new TypeError(name === undefined ? `objective: ${message}` : `objective \`${name}\`: ${message}`)
   }
-  only({ value: input, allowed: ['name', 'about', 'indicator', 'window', 'targets', 'onBreach'], what: 'an objective', fail })
+  only({ value: input, allowed: ['name', 'about', 'indicator', 'window', 'budget', 'targets', 'onBreach'], what: 'an objective', fail })
   if (input.about === undefined) fail('has no `about`')
   if (typeof input.about !== 'string') fail('`about` needs one string')
   if (input.about.trim() === '') fail('`about` is empty')
@@ -583,9 +726,19 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
       fail('minSamples is not a positive integer')
     }
   }
-  if (Array.isArray(input.targets) === false) fail('has no `target`')
-  const targets = input.targets.map((value) => parseTarget({ value, fail }))
+  const rawTargets = input.targets === undefined && (
+    indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge' ||
+    ((indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') && indicator.measurement === 'only')
+  ) ? [] : input.targets
+  if (Array.isArray(rawTargets) === false) fail('has no `target`')
+  const targets = rawTargets!.map((value) => parseTarget({ value, fail }))
   const onBreach = input.onBreach === undefined ? undefined : parseBreach({ value: input.onBreach, fail })
+  const budget = input.budget === undefined ? undefined : parseBudget({ value: input.budget, fail })
+  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge'
+  if (numeric && (budget === undefined || targets.length !== 0 || window !== undefined)) fail('ratio and gauge need budget and take no diagnostic target or window')
+  if (budget !== undefined && (indicator.kind === 'interval' || indicator.kind === 'count')) fail('interval and count take window and targets, not budget')
+  if (budget !== undefined && (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged')) fail('GitHub measurements do not take claim budgets')
+  if (indicator.kind === 'native' && (budget !== undefined || window !== undefined || targets.length !== 0)) fail('a native binding inherits targets, window and budget; none may be overridden')
   checkTargets({ indicator, targets, hasWindow: window !== undefined, hasBreach: onBreach !== undefined, fail })
   if (indicator.kind === 'count' && input.window?.minSamples !== undefined) {
     fail("a count's window takes no `minSamples`: an empty window is a real 0")
@@ -603,6 +756,7 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
           }),
         }),
     targets: freeze(targets.map(({ target }) => target)),
+    ...(budget === undefined ? {} : { budget }),
     ...(onBreach === undefined ? {} : { onBreach }),
   })
 }
@@ -639,6 +793,15 @@ const intervalChildren = (interval: Interval): Node[] => {
 
 const indicatorChildren = (indicator: Indicator): Node[] => {
   switch (indicator.kind) {
+    case 'github-merged-count':
+    case 'github-ready-to-merged':
+      return [
+        node({ name: 'source', args: [indicator.source] }),
+        node({ name: 'roster', args: [indicator.roster] }),
+        node({ name: 'timezone', args: [indicator.timezone] }),
+        node({ name: 'cut', args: [indicator.cut] }),
+        node({ name: 'measurement', args: [indicator.measurement] }),
+      ]
     case 'latency':
       return indicator.paths.map((path) => node({ name: 'path', args: [path] }))
     case 'share':
@@ -650,6 +813,19 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
       ]
     case 'interval':
       return intervalChildren(indicator)
+    case 'native':
+      return [node({ name: 'objective', args: [indicator.objective] })]
+    case 'ratio':
+    case 'gauge':
+      return [
+        node({ name: 'subject-prefix', args: [indicator.subjectPrefix] }),
+        node({ name: 'event', args: [indicator.event.kind], props: { at: indicator.event.at } }),
+        node({ name: 'value', args: [indicator.field], props: indicator.kind === 'gauge' && indicator.badBelow !== undefined ? { 'bad-below': indicator.badBelow } : { 'bad-above': indicator.badAbove! } }),
+        ...(indicator.kind === 'gauge' ? [node({ name: 'max-age', args: [indicator.maxAge] }), node({ name: 'cadence', args: [indicator.cadence] })] : []),
+        ...(indicator.labels ?? []).map((label) => node({ name: 'label', args: [label] })),
+        ...(indicator.exclude ?? []).map(({ field, values }) => node({ name: 'exclude', args: [field, ...values] })),
+        ...(indicator.only ?? []).map(({ field, values }) => node({ name: 'only', args: [field, ...values] })),
+      ]
     case 'count':
       return [
         node({ name: 'subject-prefix', args: [indicator.subjectPrefix] }),
@@ -697,6 +873,11 @@ export const objectiveNode = (input: ObjectiveInput & { readonly name: string })
             }),
           ]),
       ...o.targets.map((target) => node({ name: 'target', args: [target.stat], props: targetProps(target) })),
+      ...(o.budget === undefined ? [] : [node({
+        name: 'budget',
+        props: { allowance: o.budget.allowance, horizon: o.budget.horizon, 'min-coverage': o.budget.minCoverage, 'min-samples': o.budget.minSamples },
+        children: (['fast', 'slow'] as const).map((name) => node({ name, props: { 'burn-rate': o.budget![name].burnRate, long: o.budget![name].long, short: o.budget![name].short } })),
+      })]),
       ...(o.onBreach === undefined
         ? []
         : [

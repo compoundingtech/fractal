@@ -152,7 +152,7 @@ impl Ui {
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
             Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
-            Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
+            Hit::DetailsPreview(_) | Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
             Hit::ContentImage(_) => "load image".into(),

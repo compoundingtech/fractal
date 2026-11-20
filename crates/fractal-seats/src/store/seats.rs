@@ -762,6 +762,7 @@ impl SeatsStore for Store {
             .expect("agent resources cache poisoned").iter()
             .any(|entry| entry.history == history && entry.covered.is_none()
                 && entry.index == index && entry.local == local
+                && entry.idle_residency == crate::config::idle_residency_policy()
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)))
     }
 
@@ -789,6 +790,7 @@ impl SeatsStore for Store {
                 .iter()
                 .find(|entry| {
                     entry.history == history
+                        && entry.idle_residency == crate::config::idle_residency_policy()
                         && entry.covered.is_none()
                         && entry.index == cut
                         && entry.published_at_unix_ms == published_at
@@ -919,6 +921,7 @@ impl SeatsStore for Store {
             .expect("agent page refs cache poisoned");
         cache.push_back(runtime::AgentResourcesEntry {
             index, local: 0, history, covered: None, valid_until_unix_ms, items: Arc::clone(&items),
+            idle_residency: crate::config::idle_residency_policy(),
             published_at_unix_ms: now,
         });
         let evicted = if cache.len() > 8 { cache.pop_front() } else { None };
@@ -994,8 +997,10 @@ impl SeatsStore for Store {
             return Ok(items);
         }
         let now = now_ms();
+        let idle_residency = crate::config::idle_residency_policy();
         let valid = |entry: &&runtime::AgentResourcesEntry| {
-            entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
+            entry.idle_residency == idle_residency
+                && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
         // Local agent timeline rows do not advance the graph index, but do change cards; the
         // frontier ignores heartbeats and every other local kind, none of which a card reads.
@@ -1030,6 +1035,7 @@ impl SeatsStore for Store {
         // Expired entries are diff sources only, never hits: refreshing their queue metadata
         // is sufficient to discover the cards moved by a deadline without dropping the fleet.
         let previous = cache.iter().filter(own)
+            .filter(|entry| entry.idle_residency == idle_residency)
             .filter(|entry| entry.index <= index && entry.local <= local && entry.history == history)
             .max_by_key(|entry| (entry.index, entry.local)).cloned();
         drop(cache);
@@ -1148,6 +1154,7 @@ impl SeatsStore for Store {
                     crate::otel::record_roster("incremental", previous.items.len());
                     return Ok(runtime::AgentResourcesEntry {
                         index, local, history, covered,
+                        idle_residency,
                         valid_until_unix_ms: if refresh_queues {
                             declaration_restart_valid_until(valid_until_unix_ms, &previous.items, now)
                         } else { valid_until_unix_ms },
@@ -1174,6 +1181,7 @@ impl SeatsStore for Store {
                 crate::otel::record_roster("incremental", items.len());
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered,
+                    idle_residency,
                     valid_until_unix_ms: declaration_restart_valid_until(valid_until_unix_ms, &items, now),
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
@@ -1194,6 +1202,7 @@ impl SeatsStore for Store {
                 crate::otel::roster_attribute("st.roster.publication_cut", index as i64);
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered: selected.cloned(),
+                    idle_residency,
                     valid_until_unix_ms: declaration_restart_valid_until(self.agent_queue_valid_until(now, exact)?, &items, now),
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
@@ -1783,6 +1792,14 @@ impl SeatsStore for Store {
             mode.as_deref() == Some("eval"),
             "only eval runs can retire their desired graph"
         );
+        let removed_subjects = transaction.prepare(
+            "SELECT subject FROM desired WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
+               SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1)",
+        )?.query_map([run_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for subject in removed_subjects {
+            fractal_store::store::runtime_cleanup::forget_subject(&transaction, &subject)?;
+        }
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
              WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (

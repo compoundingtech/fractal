@@ -1610,6 +1610,7 @@ dependencies = [
  "fractal-api-core",
  "fractal-client",
  "fractal-drivers",
+ "fractal-github",
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
@@ -1815,6 +1816,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fractal-client",
+ "fractal-ui-model",
  "ratatui",
  "serde",
  "serde_json",
@@ -2065,6 +2067,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "fractal-evidence",
  "fractal-github",
  "fractal-schema",
@@ -2093,6 +2096,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-github-base",
  "fractal-runtime",
+ "fractal-schema",
  "fractal-secrets",
  "futures-util",
  "hex",
@@ -2303,6 +2307,7 @@ dependencies = [
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-telemetry",
  "futures-util",
  "hex",
  "libc",
@@ -2320,6 +2325,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "uuid",
 ]
@@ -5720,6 +5726,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
 ]
 
 [[package]]
@@ -5731,6 +5738,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

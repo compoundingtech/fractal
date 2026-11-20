@@ -66,6 +66,8 @@ Use these documents for implementation details:
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `fractal agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
+- [Idle residency](idle-residency.md) specifies daemon-owned suspension of quiet seats after an idle
+  time and their resume when a wake-class message arrives (specified, not implemented).
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
   message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow

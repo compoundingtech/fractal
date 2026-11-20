@@ -2,7 +2,7 @@
 //! SOURCE row of `work claim`. Paths print repository-relative with a short sha; GitHub links
 //! are pinned to the full sha.
 use super::*;
-// The same print macros as main.rs: CLI output goes through st3's writer.
+// The same print macros as main.rs: CLI output goes through fractal's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 use fractal_schema::source_map::index::{Revisions, Where, WhereSubject};
 use fractal_schema::source_map::locate::{self, Location, short_sha};

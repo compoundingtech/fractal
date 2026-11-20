@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reap owned execution children independently of cancelled run observations and preserve their exit receipts; keep receipt persistence free of Clippy borrow warnings",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "Execution receipt format is unchanged."},
+  "rules": {"status": "none", "detail": "Cancellation and containment authority are unchanged. Group completion does not imply that an owning parent has consumed its child's wait status."},
+  "compatibility": {"status": "changed", "detail": "One process-wide completion reactor receives Linux pidfd/epoll or macOS kqueue NOTE_EXIT events, independently of active mission or step membership. Reactor thread creation is fallible and precedes child creation; there are no per-child worker threads or healthy-subscription timers. Only unavailable or failed native subscriptions use 100 ms exact-child nonblocking waitid probes with WNOWAIT. SIGCHLD is not redirected because the host may already have other threads and child-owning subsystems. Receipt finalization is fenced by runtime identifier, exact generation and PID; replacement receipts are never overwritten."},
+  "downtime": {"status": "changed", "detail": "The daemon must receive the updated runtime through the normal deployment process. No live restart is part of this change."},
+  "manual": {"status": "changed", "detail": "Pre-existing zombies clear only when their owning daemon exits. This fix does not reap children owned by an older runtime instance."},
+  "recovery": {"status": "changed", "detail": "Consumed wait statuses survive receipt-write failures in memory until persistence succeeds. Exit statuses lost when an old daemon exits cannot be recovered into existing receipts; process or scope absence proves closure, not an exit code or signal."}
+}

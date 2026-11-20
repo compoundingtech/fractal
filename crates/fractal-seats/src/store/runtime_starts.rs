@@ -12,7 +12,7 @@ use fractal_store::store::invocation_receipts::{append_native_receipt_tx, Invoca
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
 pub struct RuntimeObservationCapture {
-    previous: Option<(std::path::PathBuf, u64)>,
+    previous: Option<(std::path::PathBuf, u64, u64)>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -35,6 +35,129 @@ pub enum RuntimeStartAdmission {
     SeatBusy,
     CapacityBusy,
     Superseded,
+}
+
+/// A shell's explicit first work claim can establish running authority, but only
+/// for its completed, still-current launch and a freshly checked process birth.
+/// The caller must run this inside the work action's writer savepoint.
+pub fn admit_starting_work_claim_tx(
+    store: &Store,
+    tx: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    host: &str,
+    alive: impl Fn(u32, u64) -> Result<bool>,
+) -> Result<bool> {
+    let current: Option<String> = tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-hc2a32f40789d owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */
+        &format!("{} LIMIT 1", newest_claims_of_kind_query("claims.id", "runtime.observed")),
+        params![subject, i64::MAX], |row| row.get(0),
+    ).optional()?;
+    let current = current.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten();
+    if current.as_ref().is_some_and(|claim| claim.body["fields"]["status"] != "starting")
+        && work_incarnation_live(tx, subject, incarnation)?
+    {
+        return Ok(true);
+    }
+    // A worker's verified completion is sufficient: applying it is a planner
+    // task, and must not sit between a freshly spawned shell and its first claim.
+    let mut statement = tx.prepare(
+        "SELECT * FROM local_runtime_starts
+         WHERE subject=?1 AND finished=1 AND revoked_by IS NULL
+           AND json_extract(result,'$.incarnation')=?2
+           AND (applied=0 OR json_extract(result,'$.runtime_observation.receipt.id')=?3)"
+    )?;
+    let mut operations = statement.query_map(
+        params![subject, incarnation, current.as_ref().map(|claim| &claim.id)], read,
+    )?;
+    let Some(operation) = operations.next().transpose()? else { return Ok(false); };
+    if operations.next().is_some() { return Ok(false); }
+    let Some(result) = operation.result.as_ref() else { return Ok(false); };
+    let member = &operation.body["member"];
+    let selected = current_desired_row_tx(tx, subject)?;
+    if result["operation_id"] != operation.id || result["subject"] != subject
+        || result["phase"] != "completed" || !result["error"].is_null()
+        || result["verification"] != "operation-incarnation"
+        || result["incarnation"] != incarnation
+        || result["runtime_id"] != member["runtime_id"]
+        || result["terminal"] != member["terminal"]
+        || member["host"] != host || !member["driver"].is_null()
+        || operation.body["subject"]["subject"] != subject
+        || selected.as_ref().is_none_or(|row| {
+            Some(row.claim_id.as_str()) != operation.body["selected_token"].as_str()
+        })
+        || !recovery_intent_current(tx, store.origin(), &operation)?
+        || !mission_publication_current(store, tx, &operation)?
+        || (!operation.applied
+            && !runtime_start_requests_retained(tx, store.origin(), &operation.body)?)
+    {
+        return Ok(false);
+    }
+    let same_starting = current.as_ref().is_some_and(|claim| {
+        let fields = &claim.body["fields"];
+        claim.origin == store.origin() && fields["status"] == "starting"
+            && fields["incarnation_id"] == incarnation
+            && fields["runtime_id"] == member["runtime_id"]
+            && fields["terminal"] == member["terminal"]
+    });
+    // Before planner application there may be no runtime row at all, or just the
+    // predecessor. Only the unchanged pre-spawn observation may be superseded.
+    let unchanged_before_start = !operation.applied && result.get("runtime_before_start").is_some()
+        && current.as_ref().map(|claim| claim.id.as_str())
+            == result["runtime_before_start"].as_str();
+    if !same_starting && !unchanged_before_start { return Ok(false); }
+    let newer: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND id<>?2
+         AND (finished=0 OR applied=0 OR
+           CAST(json_extract(body,'$.start_request_position') AS INTEGER)>?3))",
+        params![subject, operation.id, operation.body["start_request_position"].as_i64().unwrap_or(0)],
+        |row| row.get(0),
+    )?;
+    if newer { return Ok(false); }
+    let decode_identity = |fields: &Value| {
+        fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+            .zip(fields["runtime_pid_start_token"].as_str().and_then(|token| token.parse::<u64>().ok()))
+    };
+    let mut identity = decode_identity(result);
+    // Already-applied results from earlier builds retain their process witness
+    // in the launch receipt rather than in the worker result.
+    if identity.is_none() && operation.applied
+        && let Some(receipts) = result["result_receipts"].as_array()
+    {
+        for receipt in receipts.iter().filter_map(Value::as_str) {
+            let Some(receipt) = retained_runtime_start_request(tx, store.origin(), receipt)? else { continue; };
+            let fields = &receipt.body["fields"];
+            if receipt.subject == subject && receipt.kind == "runtime.action.succeeded"
+                && fields["action"] == "start" && fields["operation"] == operation.id
+                && fields["runtime_id"] == member["runtime_id"]
+                && fields["incarnation_id"] == incarnation
+            {
+                identity = decode_identity(fields);
+            }
+        }
+    }
+    let Some((pid, token)) = identity else { return Ok(false); };
+    let mut fields = if same_starting {
+        current.as_ref().expect("starting observation").body["fields"].clone()
+    } else {
+        result["runtime_start_fields"].clone()
+    };
+    if fields["status"] != "starting" || fields["incarnation_id"] != incarnation
+        || fields["runtime_id"] != member["runtime_id"] || fields["terminal"] != member["terminal"]
+    {
+        return Ok(false);
+    }
+    // Fresh kernel liveness, inside the same writer savepoint as the claim.
+    if !alive(pid, token)? { return Ok(false); }
+    fields["status"] = Value::from("running");
+    let predecessors = latest_claim_id_tx(tx, subject)?.into_iter().collect::<Vec<_>>();
+    let evidence = current.as_ref().map(|claim| &claim.id).into_iter().collect::<Vec<_>>();
+    append_receipt_claim_tx(
+        tx, store.origin(), subject, "runtime.observed", None,
+        &json!({"fields":fields, "evidence":evidence}), &predecessors, None,
+        &format!("start-work-running:{}", operation.id),
+    )?;
+    Ok(true)
 }
 
 fn pin_evidence(tx: &Transaction<'_>, operation: &str, origin: &str, evidence: &str) -> Result<()> {
@@ -228,6 +351,8 @@ pub trait RuntimeStartsStore {
     /// A late physical snapshot cannot turn the prior target into a replacement
     /// for a newly verified launch. Admission order comes from the exact local
     /// request position, never UUID creation time or claim publication time.
+    /// A captured status also cannot overwrite a later completion observation
+    /// of the same incarnation, including its terminal status and exit evidence.
     fn append_reconciled_runtime_observation(
             &self,
             input: &ClaimInput,
@@ -251,6 +376,8 @@ pub trait RuntimeStartsStore {
             limit: usize,
         ) -> Result<RuntimeStartAdmission>;
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool>;
+    /// Transfer a never-dispatched durable operation to the current daemon before dispatch.
+    fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool>;
     fn runtime_start_failure(&self, subject: &str) -> Result<Option<String>>;
     fn runtime_start_counts(&self) -> Result<(u64, u64)>;
     fn unresolved_runtime_start_counts(&self) -> Result<(u64, u64)>;
@@ -289,13 +416,16 @@ pub trait RuntimeStartsStore {
 impl RuntimeStartsStore for Store {
 
     fn capture_runtime_observations(&self) -> Result<RuntimeObservationCapture> {
-        let epoch = self.readers.get().query_row(
-            "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+        // One SQLite snapshot binds the ledger epoch and claim frontier before
+        // physical reads. Ordinary runtime observations do not mutate the ledger.
+        let (epoch, store_index) = self.readers.get().query_row(
+            "SELECT value, (SELECT COALESCE(MAX(store_index),0) FROM claims)
+             FROM local_runtime_start_observation_generation WHERE id=1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
         )?;
         let previous = RUNTIME_OBSERVATION_CAPTURE
-            .with(|capture| capture.replace(Some((self.path.clone(), epoch))));
+            .with(|capture| capture.replace(Some((self.path.clone(), epoch, store_index))));
         Ok(RuntimeObservationCapture {
             previous,
             _thread: std::marker::PhantomData,
@@ -314,8 +444,8 @@ impl RuntimeStartsStore for Store {
             capture
                 .borrow()
                 .as_ref()
-                .filter(|(path, _)| path == &self.path)
-                .map(|(_, epoch)| *epoch)
+                .filter(|(path, _, _)| path == &self.path)
+                .map(|(_, epoch, _)| *epoch)
         });
         let admission = |connection: &Connection| -> Result<(), FractalError> {
             let latest: Option<RuntimeStartOperation> = connection.query_row(
@@ -338,14 +468,19 @@ impl RuntimeStartsStore for Store {
                     )
                     .map_err(internal)?;
                 // The capture serial predates physical reads. Only this subject's
-                // later mutation invalidates it; other subjects cannot starve exits.
-                let stale_capture = capture_epoch.is_none_or(|captured| current > captured);
-                if observed != Some(actual)
-                    && (stale_capture || (observed.is_some() && observed == prior))
+                // later ledger mutation invalidates it; heartbeat, work, usage
+                // claims and other subjects cannot starve physical observations.
+                // Exact incarnation equality does not make an old status fresh:
+                // completion may have published that same incarnation's exit.
+                let superseded_capture = capture_epoch.is_some_and(|captured| current > captured);
+                let stale_capture = capture_epoch.is_none() || superseded_capture;
+                if superseded_capture
+                    || (observed != Some(actual)
+                        && (stale_capture || (observed.is_some() && observed == prior)))
                 {
                     return Err(FractalError::new(
                         "stale-runtime-observation",
-                        "physical snapshot precedes the verified start incarnation",
+                        "physical snapshot precedes a mutation of the verified start ledger",
                     ));
                 }
             }
@@ -390,6 +525,11 @@ impl RuntimeStartsStore for Store {
             );
             validate_local_observation(input)?;
         }
+        let capture_index = RUNTIME_OBSERVATION_CAPTURE.with(|capture| {
+            capture.borrow().as_ref()
+                .filter(|(path, _, _)| path == &self.path)
+                .map(|(_, _, store_index)| *store_index)
+        });
         self.connection
             .batched(|tx| -> Result<bool> {
                 let operation =
@@ -545,9 +685,9 @@ impl RuntimeStartsStore for Store {
                             validate_local_observation(&input)?;
                         }
                         let claim = if input.kind == "runtime.observed" {
-                            // Reconciliation can observe a published child while its
-                            // launcher is still returning. A delayed completion must
-                            // not regress that exact runtime from running to starting.
+                            // Preserve a same-incarnation observation published after
+                            // the completion's physical capture, including terminal
+                            // evidence from the broad pass. Keep launch success separate.
                             let current: Option<String> = tx
                                 .query_row(
                                     /* sqlite-large-value: allow-for-now lv-h78cc0dbbbfdf owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
@@ -565,21 +705,17 @@ impl RuntimeStartsStore for Store {
                                 .map(|id| claim_by_id_tx(tx, &id))
                                 .transpose()?
                                 .flatten();
-                            if input
-                                .fields
-                                .get("status")
-                                .is_some_and(|status| status == "starting")
-                                && let Some(current) = current.filter(|current| {
-                                    current.origin == self.origin()
-                                        && current.body.pointer("/fields/incarnation_id")
-                                            == Some(&result["incarnation"])
-                                        && current.body.pointer("/fields/runtime_id")
-                                            == Some(&operation.body["member"]["runtime_id"])
-                                        && current
-                                            .body
-                                            .pointer("/fields/status")
-                                            .is_some_and(|status| status != "starting")
-                                })
+                            if let Some(current) = current.filter(|current| {
+                                current.origin == self.origin()
+                                    && current.body.pointer("/fields/incarnation_id")
+                                        == Some(&result["incarnation"])
+                                    && current.body.pointer("/fields/runtime_id")
+                                        == Some(&operation.body["member"]["runtime_id"])
+                            })
+                                && (capture_index.is_none_or(|captured| current.store_index > captured)
+                                    || (input.fields.get("status").is_some_and(|status| status == "starting")
+                                        && current.body.pointer("/fields/status")
+                                            .is_some_and(|status| status != "starting")))
                             {
                                 let key = canonical::claim_key(tx, &current.id)?;
                                 observation_receipt = Some(json!({"receipt":current,
@@ -642,6 +778,16 @@ impl RuntimeStartsStore for Store {
                     /* sqlite-large-value: allow-for-now lv-ha13d8dc7b51f owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET receipted=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
+                if result["verification"] == "operation-incarnation"
+                    && let (Some(runtime_id), Some(incarnation)) = (
+                        operation.body["member"]["runtime_id"].as_str(),
+                        result["incarnation"].as_str(),
+                    )
+                {
+                    fractal_store::store::runtime_cleanup::apply_generation(
+                        tx, &operation.subject, runtime_id, incarnation,
+                    )?;
+                }
                 Ok(true)
             })
             .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -856,6 +1002,14 @@ impl RuntimeStartsStore for Store {
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
             Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h6ff77fe772f5 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET owner=?2
+                WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL",
+                params![id, owner])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -1224,6 +1378,49 @@ mod tests {
     use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn cleanup_receipts_are_reclaimed_only_by_a_fenced_start_result() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/current";
+        let historical = "agent/example/history";
+        publish(&store, "version 2\nagent \"example/current\" { command \"true\" }\nagent \"example/history\" { command \"true\" }\n", "cleanup-generations");
+        let desired = store.desired_subjects_named(&[subject.into()]).unwrap().remove(0);
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let mut start = operation("cleanup-forward", subject, store.selected_desired_token(subject).unwrap());
+        start.body["subject"] = serde_json::to_value(&desired).unwrap();
+        start.body["member"] = serde_json::to_value(desired.member.as_ref().unwrap()).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "incarnation":"new", "verification":"operation-incarnation",
+        })).unwrap();
+        store.settle_runtime_cleanup(subject, &runtime_id, "old").unwrap();
+        store.settle_runtime_cleanup(historical, &runtime_id, "historical").unwrap();
+        store.settle_runtime_cleanup("agent/forgotten", &runtime_id, "forgotten").unwrap();
+        let mut observed = ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("starting")),
+                ("runtime_id".into(), json!(runtime_id)),
+                ("terminal".into(), json!(true)),
+                ("incarnation_id".into(), json!("wrong")),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("cleanup-forward-observed".into()),
+        };
+        assert!(!store.apply_runtime_start_result(&start.id, &[observed.clone()]).unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
+        observed.fields.insert("incarnation_id".into(), json!("new"));
+        assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), observed]).unwrap());
+        assert!(!store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
+        assert!(!store.runtime_cleanup_settled(&runtime_id, "forgotten").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
+        store.settle_runtime_cleanup(subject, &runtime_id, "new").unwrap();
+        // Replaying the already-receipted result is not another generation transition.
+        assert!(store.apply_runtime_start_result(&start.id, &[]).unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "new").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
+    }
 
     #[test]
     fn initially_unverified_launch_retains_later_producer_closure_and_ends_trace() {
@@ -1657,6 +1854,116 @@ mission "launch-publication" state="ready" {
             "writer-cost profile={}",
             output.join("slow.jsonl").display()
         );
+    }
+
+    #[test]
+    fn completion_preserves_terminal_observations_published_after_its_running_capture() {
+        for status in ["exited", "stopped", "vanished"] {
+            let store = Store::open_memory("node").unwrap();
+            let subject = "agent/example/reciprocal-exit";
+            let incarnation = "actual-incarnation";
+            let mut start = operation("reciprocal-exit", subject, None);
+            store.admit_runtime_start(&mut start, 2).unwrap();
+            store.finish_runtime_start(&start.id, &json!({
+                "incarnation": incarnation, "verification": "operation-incarnation"
+            })).unwrap();
+            // Completion physically sees running. The pass then observes the end
+            // and publishes it before completion reaches its writer transaction.
+            let _capture = store.capture_runtime_observations().unwrap();
+            let running = ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), Value::from("running")),
+                    ("runtime_id".into(), Value::from(subject)),
+                    ("terminal".into(), Value::from(true)),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("adopted".into(), Value::from(true)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("start-observed:{}", start.id)),
+            };
+            let exit_evidence = json!({"incarnation": incarnation, "exit_code": 23});
+            let mut ended = running.clone();
+            ended.idempotency_key = None;
+            ended.fields.insert("status".into(), Value::from(status));
+            ended.fields.insert("exit_code".into(), Value::from(23));
+            ended.fields.insert("exit_evidence".into(), exit_evidence.clone());
+            let terminal = store.append_reconciled_runtime_observation(&ended).unwrap().unwrap();
+            assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), running]).unwrap());
+            store.runtime_start_applied(&start.id).unwrap();
+            let retained = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+            assert_eq!(retained.id, terminal.id);
+            assert_eq!(retained.body["fields"]["status"], status);
+            assert_eq!(retained.body["fields"]["incarnation_id"], incarnation);
+            assert_eq!(retained.body["fields"]["exit_code"], 23);
+            assert_eq!(retained.body["fields"]["exit_evidence"], exit_evidence);
+            assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+            assert_eq!(store.latest_observation(subject, "runtime.action.succeeded").unwrap()
+                .unwrap().body["fields"]["operation"], start.id);
+            let completed = store.readers.get().query_row(
+                "SELECT * FROM local_runtime_starts WHERE id=?1", [&start.id], read,
+            ).unwrap();
+            assert!(completed.finished && completed.applied && completed.receipted);
+            assert_eq!(completed.result.unwrap()["runtime_observation"]["receipt"]["id"], terminal.id);
+        }
+    }
+
+    #[test]
+    fn completion_exit_refuses_a_previously_captured_running_status_for_the_same_incarnation() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/completion-exit";
+        let incarnation = "actual-incarnation";
+        let mut start = operation("completion-exit", subject, None);
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({
+            "incarnation": incarnation, "verification": "operation-incarnation"
+        })).unwrap();
+        let capture = store.capture_runtime_observations().unwrap();
+        // The broad pass has physically observed running, but has not appended it.
+        let running = ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::from("running")),
+                ("runtime_id".into(), Value::from(subject)),
+                ("terminal".into(), Value::from(true)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("adopted".into(), Value::from(true)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let exit_evidence = json!({"incarnation": incarnation, "exit_code": 23});
+        let mut exited = running.clone();
+        exited.fields.insert("status".into(), Value::from("exited"));
+        exited.fields.insert("exit_code".into(), Value::from(23));
+        exited.fields.insert("exit_evidence".into(), exit_evidence.clone());
+        exited.idempotency_key = Some(format!("start-observed:{}", start.id));
+        // Completion publishes a newer observation under the same writer transaction
+        // that advances this subject's runtime-start ledger generation.
+        assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), exited]).unwrap());
+        let completed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+        assert!(store.append_reconciled_runtime_observation(&running).unwrap().is_none());
+        let retained = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+        assert_eq!(retained.id, completed.id);
+        assert_eq!(retained.body["fields"]["status"], "exited");
+        assert_eq!(retained.body["fields"]["incarnation_id"], incarnation);
+        assert_eq!(retained.body["fields"]["exit_code"], 23);
+        assert_eq!(retained.body["fields"]["exit_evidence"], exit_evidence);
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+        drop(capture);
+        // A later physical capture can still publish legitimate observations.
+        let _fresh_capture = store.capture_runtime_observations().unwrap();
+        let mut stopped = running;
+        stopped.fields.insert("status".into(), Value::from("stopped"));
+        assert!(store.append_reconciled_runtime_observation(&stopped).unwrap().is_some());
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
     }
 
     #[test]
@@ -2516,6 +2823,9 @@ mission "launch-publication" state="ready" {
         // actual operation, revocation, observation-generation or format-cut state.
         let (before_roots, before_generation, before_cuts) = {
             let connection = store.connection.write();
+            connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
+            connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
+            connection.execute_batch("DROP VIEW claim_verdict_dependency_links; DROP TABLE claim_verdict_dependency_edges; DROP TABLE claim_verdict_dependency_keys;").unwrap();
             connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
                 DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
                 CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);

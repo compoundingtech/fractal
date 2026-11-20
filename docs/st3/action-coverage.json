@@ -5,7 +5,7 @@
     {"command":"harness-questions.get","tests":["crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::metadata_routes_and_action_route_use_the_real_daemon_boundary"],"behavior":"Canonical question detail with stable observation revision and runtime incarnation."},
     {"command":"collections.inventory","tests":["crates/fractal/tests/client_only.rs::an_older_member_reads_fleet_on_focus_without_attempting_inventory_subscriptions","crates/fractal-e2e/tests/feed/inventory.rs::inventories_follow_sources_switch_periods_leave_and_reconnect_over_a_real_socket","crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal/tests/client_only.rs::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_open_period_uses_wall_time_on_an_empty_graph","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
     {"command":"resources.list","tests":["crates/fractal-tui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/fractal-tui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
-    {"command":"observations.report","tests":["crates/fractal-api-core/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/fractal-api-core/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/fractal-api-core/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
+    {"command":"observations.report","tests":["crates/fractal-api-core/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/fractal-api-core/src/api/client_observations.rs::producer_fixture_replicates_reopens_and_evaluates_all_seven_native_rows","crates/fractal-api-core/src/api/client_observations.rs::destination_pairing_rotation_preserves_phone_source_and_historical_evidence","crates/fractal-store/src/store/observation_minutes.rs::observation_admission_and_live_window_seek_partial_indexes"],"behavior":"Paired-only atomic immutable minute claims with authenticated stable phone identity. Exact retries survive replication, store reopen and destination pairing rotation without double counting; conflicting source/report or source/minute content is refused. Native objective rows use trusted replicated claims; missing minutes remain unknown. Response wire has no snapshot fence or action receipt."}
   ],
   "typed_actions": [
     {
@@ -711,11 +711,11 @@
     },
     {
       "command": "st agents rename-id",
-      "description": "Change a seat's canonical ID while preserving its immutable identity and harness",
+      "description": "Preview or change a seat's canonical ID while preserving its immutable identity and harness",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st agents rename-id proof export",
@@ -732,6 +732,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st agents rename-proof",
+      "description": "Read selected native agent rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st agents repos",
@@ -1579,6 +1587,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st hosts launch-freeze show",
+      "description": "Inspect the connected host's launch freeze and deferred starts",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; inspect absent, active and cleared host-local barriers"
+    },
+    {
+      "command": "st hosts launch-freeze set",
+      "description": "Drain earlier spawns and arm an owned bounded launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; verify barrier identity, owner, reason and expiry"
+    },
+    {
+      "command": "st hosts launch-freeze clear",
+      "description": "Release a matching owned launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; reject wrong identity and actor before clearing"
+    },
+    {
       "command": "st hosts hold",
       "description": "Place an authenticated execution-host admission hold",
       "tests": [
@@ -1631,6 +1663,32 @@
         "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
       ],
       "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
+    },
+    {
+      "command": "st resources cancel",
+      "description": "Cancel an exact execution or owner-scoped request and optionally await retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::cancel_selects_exact_execution_identity",
+        "crates/fractal-api-core/src/api/resources.rs::absent_request_cancel_returns_confirmed_owner_scoped_tombstone"
+      ],
+      "verification": "real Clap execution/request selectors and authenticated durable cancellation tombstones"
+    },
+    {
+      "command": "st resources member-scope",
+      "description": "Inspect the authenticated execution's exact enforced member cgroup",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::member_scope_requires_exact_execution_selector",
+        "crates/fractal-api-core/src/api/resources.rs::nested_member_scope_keeps_current_generation_separate_from_verified_root"
+      ],
+      "verification": "real Clap exact-execution selector and nested generation/root custody checks"
+    },
+    {
+      "command": "st resources in-member",
+      "description": "Inspect local kernel member placement without granting execution authority",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::offline_membership_requires_explicit_owner_uid"
+      ],
+      "verification": "real Clap parsing requires an explicit owner UID for offline inspection"
     },
     {
       "command": "st resources hold",
@@ -1924,11 +1982,11 @@
     },
     {
       "command": "st missions rename-id",
-      "description": "Change a mission's canonical ID while preserving its immutable identity and revision history",
+      "description": "Preview or change a mission's canonical ID while preserving its immutable identity and revision history",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st missions rename-id proof export",
@@ -1945,6 +2003,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st missions rename-proof",
+      "description": "Read selected native mission rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st missions report-to",
@@ -2133,6 +2199,16 @@
         "crates/fractal/tests/action_coverage.rs::cli_local_skill_completions_holds_and_repairs_use_private_files"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st replication archive-candidates",
+      "description": "Build analysis-only 30-day and 14-day wire archive candidates from an explicitly acknowledged offline copy; never activate them",
+      "tests": [
+        "crates/fractal/src/replication_cli.rs::archive_candidates_builds_both_fixture_windows_without_daemon_discovery",
+        "crates/fractal/src/replication_cli.rs::archive_candidates_dispatches_without_a_daemon",
+        "crates/fractal/src/replication_cli.rs::archive_candidates_dispatch_refuses_missing_acknowledgement"
+      ],
+      "verification": "real CLI dispatch over a private disk-backed fixture with an unusable endpoint; both analysis-only windows are published without daemon discovery, source bytes stay unchanged, missing inputs and acknowledgement publish nothing"
     },
     {
       "command": "st replication checkpoint excuse",
@@ -2594,12 +2670,28 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st slo ingest-roll",
+      "description": "Admit one existing signed graph roll receipt claim",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
+    },
+    {
       "command": "st slo ls",
       "description": "List every objective and budget: target, current value, window and what is left",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo roll-intent",
+      "description": "Resolve immutable native creation time and pinned revision for one enrolled roll intent",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_native_roll_receipts_and_intent_proof_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; authenticated source admission, immutable pinned native intent, rejected missing claims and replay after disk-backed restart"
     },
     {
       "command": "st setup",

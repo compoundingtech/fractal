@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep bundled SQLite in all native Rust Nix packages, preserving disabled allocation memory statistics and the 1 TiB mmap ceiling even when nixpkgs defaults to system libraries",
+  "replay": { "status": "none", "detail": "Build environment correction only; no replay behavior changes." },
+  "schema": { "status": "none", "detail": "No database schema or storage format changes." },
+  "rules": { "status": "none", "detail": "No runtime rules or authority changes." },
+  "compatibility": { "status": "none", "detail": "Restores the existing rusqlite bundled feature and .cargo/config.toml SQLite compilation flags; adds no system SQLite dependency." },
+  "downtime": { "status": "none", "detail": "No migration or special deployment procedure is required." },
+  "manual": { "status": "none", "detail": "Nix consumers receive the correction when updating their Fractal pin and may remove their equivalent downstream build override." },
+  "recovery": { "status": "none", "detail": "Normal package rollback remains available; no persistent state changes." }
+}

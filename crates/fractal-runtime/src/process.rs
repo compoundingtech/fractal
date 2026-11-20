@@ -13,7 +13,28 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod reaper;
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
+
+// All receipt updates and rotations share the generation fence, including fresh observers.
+static RECORD_WRITES: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OwnedChildKey {
+    id: String,
+    generation: String,
+    pid: u32,
+}
+
+impl OwnedChildKey {
+    fn new(id: &str, generation: &ExecGeneration) -> Self {
+        Self { id: id.into(), generation: generation.generation_id.clone(), pid: generation.pid }
+    }
+
+    fn matches(&self, generation: &ExecGeneration) -> bool {
+        self.generation == generation.generation_id && self.pid == generation.pid
+    }
+}
 
 /// Positive producer evidence: this exact attempt returned before creating any child.
 /// Absence of a generation record after a child was created is not this proof.
@@ -80,10 +101,24 @@ pub enum ResourceCoverage {
     LogicalOnly,
 }
 
+/// Exact live kernel scope evidence for one authenticated member execution.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberScope {
+    pub exec_id: String,
+    pub generation: String,
+    pub state: String,
+    /// Unified cgroup path as reported by /proc/PID/cgroup, not a filesystem prefix.
+    pub cgroup_path: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct FiniteLane {
     pub name: String,
     pub capacity: Option<crate::lane::Capacity>,
+    /// Frozen per-generation envelope; absent historical callers inherit the aggregate cap.
+    pub member_capacity: Option<crate::lane::Capacity>,
+    pub memory_high_bytes: Option<u64>,
     pub require_enforced: bool,
 }
 
@@ -134,11 +169,14 @@ impl FiniteLane {
 pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
-    owned_children: Arc<Mutex<BTreeMap<u32, OwnedChild>>>,
+    owned_children: Arc<Mutex<BTreeMap<OwnedChildKey, OwnedChild>>>,
+    #[cfg(test)]
+    reap_automatically: bool,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
     scope_join_limit: Duration,
     finite_lane: Option<FiniteLane>,
     resource_membership: Option<ResourceExecutionBinding>,
+    launch_operation: Option<crate::LaunchOperation>,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -223,11 +261,20 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(test)]
+            reap_automatically: true,
             unlaned_seat: None,
             scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
             finite_lane: None,
             resource_membership: None,
+            launch_operation: None,
         }
+    }
+
+    #[cfg(test)]
+    fn without_background_reaper(mut self) -> Self {
+        self.reap_automatically = false;
+        self
     }
 
     #[cfg(test)]
@@ -239,6 +286,11 @@ impl ExecRuntime {
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.
     pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
         self.unlaned_seat = policy;
+        self
+    }
+
+    pub fn with_launch_operation(mut self, operation: Option<crate::LaunchOperation>) -> Self {
+        self.launch_operation = operation;
         self
     }
 
@@ -316,7 +368,7 @@ impl ExecRuntime {
                     error
                 } else {
                     error.context(StartRejected {
-                        operation: env.get("ST3_START_OPERATION").cloned(),
+                        operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
                     })
                 }
             })
@@ -353,7 +405,7 @@ impl ExecRuntime {
             if self.finite_lane.is_some() {
                 return Err(error.context("finite execution replacement retains previous containment custody"));
             }
-            eprintln!("st3: WARN what the last generation of {id} left running did not end: {error:#}");
+            eprintln!("fractal: WARN what the last generation of {id} left running did not end: {error:#}");
         }
         self.rotate_generation(id)?;
         let log_path = self.log_path(id, false);
@@ -404,7 +456,9 @@ impl ExecRuntime {
         let coverage = self.finite_lane.as_ref().map(FiniteLane::coverage).transpose()?;
         let lane = match (&self.finite_lane, coverage) {
             (Some(policy), Some(ResourceCoverage::Enforced)) => {
-                Some(crate::lane::prepare_finite(&policy.name, policy.capacity)?)
+                Some(crate::lane::prepare_finite(
+                    policy, self.resource_membership.as_ref(), &unit,
+                )?)
             }
             (Some(_), _) => None,
             (None, _) => crate::lane::prepare(capacity, id)?,
@@ -459,7 +513,7 @@ impl ExecRuntime {
                 tracing::debug!(
                     caller = "spawn_inner",
                     runtime_id = id,
-                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    operation_id = self.launch_operation.as_ref().map_or("unavailable", |operation| operation.0.as_str()),
                     guard_decision = "skip",
                     reason = "spawn_guard_rejected",
                     %error,
@@ -467,11 +521,22 @@ impl ExecRuntime {
                 );
             })?;
         }
+        // Thread creation is fallible and precedes process creation, never stranding a child
+        // behind a thread-spawn panic or a failed reactor initialization.
+        let reaper = self.owned_reaper()?;
         let mut child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
         let pid = child.id();
         let mut payload_gate = child.stdin.take();
-        let start_token = process_start_token(pid)?;
+        let start_token = match process_start_token(pid) {
+            Ok(token) => token,
+            Err(error) => {
+                // No receipt can be named yet, but even this failed launch owns a wait.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -488,15 +553,20 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
-            start_operation: env.get("ST3_START_OPERATION").cloned(),
+            start_operation: self.launch_operation.as_ref().map(|operation| operation.0.clone()),
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
         };
-        self.write_generation(id, &generation)?;
-        self.owned_children
-            .lock()
-            .expect("exec child mutex poisoned")
-            .insert(pid, OwnedChild::Running(child));
+        let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
+        children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
+        let receipt = self.write_generation(id, &generation);
+        // Registration and initial persistence precede exposing custody to observers. A failed
+        // receipt write still leaves the reactor responsible for the successfully spawned child.
+        if let Some(reaper) = reaper {
+            reaper.register(self.clone(), OwnedChildKey::new(id, &generation), start_token);
+        }
+        drop(children);
+        receipt?;
         // `systemd-run` joins its scope only when the user manager starts it, and runs the task
         // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
         // this process only once it has joined.
@@ -521,8 +591,10 @@ impl ExecRuntime {
             let mut released_at = None;
             let release_result = (|| -> Result<()> {
                 if let Some(lane) = &lane {
-                    crate::lane::verify_finite(lane, policy.capacity,
-                        generation.scope_unit.as_deref().context("finite execution lacks its scope")?, pid)?;
+                    crate::lane::verify_finite(
+                        lane, policy, generation.resource_membership.as_ref(),
+                        generation.scope_unit.as_deref().context("finite execution lacks its scope")?, pid,
+                    )?;
                 }
                 let mut attempted = false;
                 let mut persisted = false;
@@ -538,7 +610,7 @@ impl ExecRuntime {
                     released_at = Some(timestamp);
                     let mut receipt = generation.clone();
                     receipt.payload_released_at_unix_ms = released_at;
-                    self.write_generation(id, &receipt)
+                    self.update_generation(id, &receipt)
                         .context("persist released payload receipt; execution custody retained on failure")?;
                     persisted = true;
                     Ok(timestamp)
@@ -584,6 +656,9 @@ impl ExecRuntime {
                 generation.schema
             ))));
         }
+        // Containment may have been finalized by a runtime without this child's handle.
+        // Consume our wait status before trusting any durable terminal shortcut.
+        self.reap_owned(id, &mut generation)?;
         // A terminal group is durable evidence about this exact exec. In particular, do not
         // let an unrelated process that later reuses the PID make a completed generation look
         // live again on platforms whose best available start token is the PID itself.
@@ -591,13 +666,6 @@ impl ExecRuntime {
             return Ok(Some(ExecObservation::Exited(generation)));
         }
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
-            return self.observe_exited_group(id, generation).map(Some);
-        }
-        let running = self.reap_owned(id, &mut generation)?;
-        if generation.group_exited {
-            return Ok(Some(ExecObservation::Exited(generation)));
-        }
-        if !running && (generation.exit_code.is_some() || generation.exit_signal.is_some()) {
             return self.observe_exited_group(id, generation).map(Some);
         }
         #[cfg(test)]
@@ -667,17 +735,19 @@ impl ExecRuntime {
     /// the record again. Otherwise an observer that read the record before the exit would find
     /// the process gone and record the exit without its code.
     fn reap_owned(&self, id: &str, generation: &mut ExecGeneration) -> Result<bool> {
+        let key = OwnedChildKey::new(id, generation);
         let exited = {
             let mut children = self
                 .owned_children
                 .lock()
                 .expect("exec child mutex poisoned");
-            match children.get_mut(&generation.pid) {
-                Some(OwnedChild::Running(child)) => {
+            match children.get_mut(&key) {
+                Some(owned @ OwnedChild::Running(_)) => {
+                    let OwnedChild::Running(child) = owned else { unreachable!() };
                     let Some(status) = child.try_wait()? else {
                         return Ok(true);
                     };
-                    children.insert(generation.pid, OwnedChild::Exited(status));
+                    *owned = OwnedChild::Exited(status);
                     Some(status)
                 }
                 Some(OwnedChild::Exited(status)) => Some(*status),
@@ -694,13 +764,13 @@ impl ExecRuntime {
                 }
             });
             // A failed write keeps the mark, so a later observer writes the exit again.
-            self.write_generation(id, generation)?;
+            self.persist_owned_exit(&key, status)?;
             let mut children = self
                 .owned_children
                 .lock()
                 .expect("exec child mutex poisoned");
-            if matches!(children.get(&generation.pid), Some(OwnedChild::Exited(_))) {
-                children.remove(&generation.pid);
+            if matches!(children.get(&key), Some(OwnedChild::Exited(_))) {
+                children.remove(&key);
             }
             return Ok(false);
         }
@@ -713,6 +783,53 @@ impl ExecRuntime {
             *generation = current;
         }
         Ok(false)
+    }
+
+    fn owned_reaper(&self) -> Result<Option<&'static reaper::CompletionReactor>> {
+        #[cfg(test)]
+        if !self.reap_automatically {
+            return Ok(None);
+        }
+        reaper::CompletionReactor::get().map(Some)
+    }
+
+    fn finish_owned_child(&self, key: &OwnedChildKey) -> Result<bool> {
+        let status = {
+            let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
+            match children.get_mut(key) {
+                Some(owned @ OwnedChild::Running(_)) => {
+                    let OwnedChild::Running(child) = owned else { unreachable!() };
+                    let Some(status) = child.try_wait()? else {
+                        return Ok(false);
+                    };
+                    *owned = OwnedChild::Exited(status);
+                    status
+                }
+                Some(OwnedChild::Exited(status)) => *status,
+                None => return Ok(true),
+            }
+        };
+        // Failure deliberately leaves Exited in the map as the kernel status's durable-in-memory
+        // owner. Concurrent observers can persist it too, but only for this exact receipt.
+        self.persist_owned_exit(key, status)?;
+        self.owned_children.lock().expect("exec child mutex poisoned").remove(key);
+        Ok(true)
+    }
+
+    fn persist_owned_exit(&self, key: &OwnedChildKey, status: std::process::ExitStatus) -> Result<()> {
+        // Rotation can move an old generation to the previous slot. Update only exact receipts,
+        // under the same fence as rotation; never recreate a removed receipt or replace a new one.
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
+        for path in [self.record_path(&key.id), self.previous_record_path(&key.id)] {
+            if let Some(mut generation) = self.read_generation_path(&path)?
+                && key.matches(&generation)
+            {
+                generation.exit_code = status.code();
+                generation.exit_signal = exit_signal(&status);
+                self.write_generation_file(&path, &generation)?;
+            }
+        }
+        Ok(())
     }
 
     fn observe_exited_group(
@@ -736,7 +853,7 @@ impl ExecRuntime {
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
                 generation.group_exited = true;
-                self.write_generation(id, &generation)?;
+                self.update_generation(id, &generation)?;
                 Ok(ExecObservation::Exited(generation))
             }
             observation => Ok(observation),
@@ -805,7 +922,7 @@ impl ExecRuntime {
                     tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
                 }
                 Err(error) => eprintln!(
-                    "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
+                    "fractal: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
             }
         }
@@ -838,6 +955,37 @@ impl ExecRuntime {
 
     pub fn kill_if(&self, id: &str, expected_generation: Option<&str>) -> Result<()> {
         self.end_if(id, expected_generation, libc::SIGKILL)
+    }
+
+    /// Return current kernel containment only after matching host-owned membership evidence.
+    pub fn member_scope(&self, exec_id: &str, expected: &ResourceExecutionBinding) -> Result<MemberScope> {
+        anyhow::ensure!(cfg!(target_os = "linux"), "member scope requires Linux kernel containment");
+        let observation = self.observe(exec_id)?.context("member execution is missing")?;
+        let ExecObservation::Running(generation) = &observation else {
+            anyhow::bail!("member execution is not running");
+        };
+        anyhow::ensure!(generation.resource_membership.as_ref() == Some(expected),
+            "member execution binding differs");
+        let unit = generation.scope_unit.as_deref().context("member execution has no scope")?;
+        let start_token = process_start_token(generation.pid)?;
+        let placement = fs::read_to_string(format!("/proc/{}/cgroup", generation.pid))?;
+        let actual = placement.lines().find_map(|line| line.strip_prefix("0::"))
+            .context("member execution has no unified cgroup")?;
+        let snapshot = crate::systemd::snapshot_after_admission()?;
+        let scope = snapshot.units.get(unit).context("member execution scope is missing")?;
+        anyhow::ensure!(scope.load == "loaded" && scope.active == "active",
+            "member execution scope is not active");
+        let scope_path = scope.control_group.as_deref().context("member scope control group is unavailable")?;
+        let result = verify_member_scope(exec_id, &observation, expected, start_token, actual, scope_path)?;
+        let current = self.observe(exec_id)?.context("member execution disappeared during scope readback")?;
+        anyhow::ensure!(matches!(&current, ExecObservation::Running(value)
+            if value.generation_id == generation.generation_id
+                && value.resource_membership.as_ref() == Some(expected)
+                && value.scope_unit == generation.scope_unit),
+            "member execution changed during scope readback");
+        anyhow::ensure!(process_generation_alive(generation.pid, generation.start_token)?,
+            "member execution exited during scope readback");
+        Ok(result)
     }
 
     /// Stop this exact generation and await both leader exit and whole-scope emptiness with
@@ -906,7 +1054,7 @@ impl ExecRuntime {
                 && current.scope_unit == generation.scope_unit,
                 "finite execution generation changed during scope reconciliation");
             generation.group_exited = true;
-            self.write_generation(id, &generation)?;
+            self.update_generation(id, &generation)?;
         }
         crate::isolate::mark_ended(unit);
         Ok(true)
@@ -1003,6 +1151,7 @@ impl ExecRuntime {
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
         self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -1043,6 +1192,7 @@ impl ExecRuntime {
     }
 
     fn rotate_generation(&self, id: &str) -> Result<()> {
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         rotate_file(&self.record_path(id), &self.previous_record_path(id))?;
         rotate_file(&self.log_path(id, false), &self.log_path(id, true))?;
         for stream in ["stdout", "stderr"] {
@@ -1061,11 +1211,23 @@ impl ExecRuntime {
     }
 
     fn write_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
+        self.write_generation_inner(id, generation, true)
+    }
+
+    fn update_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
+        self.write_generation_inner(id, generation, false)
+    }
+
+    fn write_generation_inner(&self, id: &str, generation: &ExecGeneration, create: bool) -> Result<()> {
         // Release receipts and exit evidence are monotonic facts. A concurrent observer may have
         // read the pre-release record; serialize read/merge/write so it cannot erase the receipt.
-        static RECORD_WRITES: Mutex<()> = Mutex::new(());
         let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         let current = self.read_generation_path(&self.record_path(id))?;
+        if !create && !current.as_ref().is_some_and(|current|
+            current.generation_id == generation.generation_id && current.pid == generation.pid)
+        {
+            return Ok(());
+        }
         let mut generation = std::borrow::Cow::Borrowed(generation);
         if let Some(current) = current.filter(|current| current.generation_id == generation.generation_id) {
             if generation.resource_membership.is_none() && current.resource_membership.is_some() {
@@ -1086,7 +1248,10 @@ impl ExecRuntime {
                 generation.to_mut().group_exited = true;
             }
         }
-        let path = self.record_path(id);
+        self.write_generation_file(&self.record_path(id), generation.as_ref())
+    }
+
+    fn write_generation_file(&self, path: &Path, generation: &ExecGeneration) -> Result<()> {
         // Two observers in this process can write one record at once.
         static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1096,10 +1261,10 @@ impl ExecRuntime {
             .write(true)
             .mode(0o600)
             .open(&temporary)?;
-        serde_json::to_writer(&mut file, generation.as_ref())?;
+        serde_json::to_writer(&mut file, generation)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        fs::rename(&temporary, &path)?;
+        fs::rename(&temporary, path)?;
         Ok(())
     }
 }
@@ -1322,45 +1487,44 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+struct ProcessExitSubscription {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    descriptor: std::os::fd::OwnedFd,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pid: u32,
+}
+
+fn wait_process_exit(pid: u32, start_token: u64) -> Result<()> {
+    subscribe_process_exit(pid, start_token)?.map_or(Ok(()), ProcessExitSubscription::wait)
+}
+
 /// Subscribe before rechecking identity so an exit between the snapshot and wait is not lost.
 #[cfg(target_os = "linux")]
-fn wait_process_exit(pid: u32, start_token: u64) -> Result<()> {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+fn subscribe_process_exit(pid: u32, start_token: u64) -> Result<Option<ProcessExitSubscription>> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if descriptor < 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+            return Ok(None);
         }
         return Err(error).context("subscribe to execution pidfd");
     }
     // SAFETY: pidfd_open returned a fresh owned descriptor.
     let descriptor = unsafe { OwnedFd::from_raw_fd(i32::try_from(descriptor)?) };
-    if !process_generation_alive(pid, start_token)? {
-        return Ok(());
+    match process_identity(pid) {
+        // A zombie leader can still have live threads. Only pidfd readiness proves that the
+        // whole process is waitable; do not shortcut the subscription on the leader's Z state.
+        Ok((_, token)) if token == start_token => {}
+        Ok(_) => return Ok(None),
+        Err(error) if process_is_absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
     }
-    let mut event = libc::pollfd {
-        fd: descriptor.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut event, 1, -1) };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error).context("wait for execution pidfd");
-        }
-        anyhow::ensure!(event.revents & libc::POLLIN != 0,
-            "execution pidfd produced an unreadable notification");
-        return Ok(());
-    }
+    Ok(Some(ProcessExitSubscription { descriptor, pid }))
 }
 
 #[cfg(target_os = "macos")]
-fn wait_process_exit(pid: u32, _start_token: u64) -> Result<()> {
+fn subscribe_process_exit(pid: u32, _start_token: u64) -> Result<Option<ProcessExitSubscription>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     let descriptor = unsafe { libc::kqueue() };
     if descriptor < 0 {
@@ -1380,33 +1544,129 @@ fn wait_process_exit(pid: u32, _start_token: u64) -> Result<()> {
     if result < 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+            return Ok(None);
         }
         return Err(error).context("subscribe to execution exit kqueue");
     }
-    loop {
-        // SAFETY: the kernel initializes this single event record on successful return.
-        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-        let ready = unsafe {
-            libc::kevent(descriptor.as_raw_fd(), std::ptr::null(), 0, &mut event, 1, std::ptr::null())
-        };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error).context("wait for execution exit kqueue");
-        }
-        anyhow::ensure!(ready == 1 && event.flags & libc::EV_ERROR == 0
-            && event.ident == pid as libc::uintptr_t && event.fflags & libc::NOTE_EXIT != 0,
-            "execution kqueue produced an unreadable exit notification");
-        return Ok(());
-    }
+    Ok(Some(ProcessExitSubscription { descriptor, pid }))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn wait_process_exit(_pid: u32, _start_token: u64) -> Result<()> {
+fn subscribe_process_exit(_pid: u32, _start_token: u64) -> Result<Option<ProcessExitSubscription>> {
     anyhow::bail!("kernel execution exit subscriptions are unavailable on this platform")
+}
+
+impl ProcessExitSubscription {
+    #[cfg(target_os = "linux")]
+    fn wait(self) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let mut event = libc::pollfd {
+            fd: self.descriptor.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            let result = unsafe { libc::poll(&mut event, 1, -1) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("wait for execution pidfd");
+            }
+            anyhow::ensure!(event.revents & libc::POLLIN != 0,
+                "execution pidfd for {} produced an unreadable notification", self.pid);
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait(self) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+        loop {
+            // SAFETY: the kernel initializes this single event record on successful return.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let ready = unsafe {
+                libc::kevent(self.descriptor.as_raw_fd(), std::ptr::null(), 0,
+                    &mut event, 1, std::ptr::null())
+            };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("wait for execution exit kqueue");
+            }
+            anyhow::ensure!(ready == 1 && event.flags & libc::EV_ERROR == 0
+                && event.ident == self.pid as libc::uintptr_t && event.fflags & libc::NOTE_EXIT != 0,
+                "execution kqueue produced an unreadable exit notification");
+            return Ok(());
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn wait(self) -> Result<()> {
+        anyhow::bail!("kernel execution exit subscriptions are unavailable on this platform")
+    }
+}
+
+/// Probe only an owned child whose native exit subscription is unavailable. WNOWAIT keeps
+/// consumption and receipt custody in the normal child-map reaper; no global wait is used.
+fn owned_child_waitable(pid: u32) -> Result<bool> {
+    loop {
+        // SAFETY: waitid initializes this plain C record. P_PID confines the probe to our child;
+        // WNOHANG is nonblocking and WNOWAIT leaves its status for Child::try_wait.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut status,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG)
+        };
+        if result == 0 {
+            return Ok(status.si_signo != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            // A concurrent observer can have already consumed and persisted this exact child.
+            return Ok(true);
+        }
+        return Err(error).context("probe exact owned child without consuming status");
+    }
+}
+
+fn verify_member_scope(
+    exec_id: &str,
+    observation: &ExecObservation,
+    expected: &ResourceExecutionBinding,
+    start_token: u64,
+    actual: &str,
+    scope_path: &Path,
+) -> Result<MemberScope> {
+    let ExecObservation::Running(generation) = observation else {
+        anyhow::bail!("member execution is not running");
+    };
+    anyhow::ensure!(!generation.group_exited && generation.isolation_mode == "scope",
+        "member execution has no live kernel scope");
+    anyhow::ensure!(generation.resource_membership.as_ref() == Some(expected),
+        "member execution binding differs");
+    anyhow::ensure!(generation.start_token == start_token, "member execution PID changed incarnation");
+    let unit = generation.scope_unit.as_deref().context("member execution has no scope")?;
+    anyhow::ensure!(scope_path.file_name() == Some(std::ffi::OsStr::new(unit)),
+        "member execution scope identity differs");
+    let relative = scope_path.strip_prefix("/sys/fs/cgroup")
+        .context("member execution scope is outside the unified cgroup filesystem")?;
+    anyhow::ensure!(relative.components().all(|part| matches!(part, std::path::Component::Normal(_))),
+        "member execution scope path is not canonical");
+    let path = format!("/{}", relative.to_str().context("member scope path is not UTF-8")?);
+    anyhow::ensure!(actual == path, "member execution did not join its exact scope");
+    Ok(MemberScope {
+        exec_id: exec_id.into(),
+        generation: generation.generation_id.clone(),
+        state: "running".into(),
+        cgroup_path: path,
+    })
 }
 
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
@@ -1422,6 +1682,40 @@ fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128)
 mod tests {
     use super::*;
 
+    #[test]
+    fn member_scope_requires_exact_live_generation_placement() {
+        let binding = fixture_resource_binding();
+        let generation: ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema": SCHEMA, "pid": 123, "createdAtUnixMs": 1, "startToken": 456,
+            "generationId": "execution-generation", "isolationMode": "scope",
+            "scopeUnit": "st3-member-123-1.scope", "resourceMembership": binding
+        })).unwrap();
+        let current = ExecObservation::Running(generation.clone());
+        let path = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-member-123-1.scope";
+        let kernel_path = PathBuf::from(format!("/sys/fs/cgroup{path}"));
+        let proof = verify_member_scope("member", &current, &binding, 456, path, &kernel_path).unwrap();
+        assert_eq!(proof.cgroup_path, path);
+        assert_eq!(proof.generation, generation.generation_id);
+        assert_eq!(proof.state, "running");
+        for wrong in [
+            path.replace("st3-member-123-1.scope", "st3-sibling-123-2.scope"),
+            kernel_path.parent().unwrap().strip_prefix("/sys/fs/cgroup").unwrap().display().to_string(),
+            format!("{path}/descendant"),
+        ] {
+            assert!(verify_member_scope("member", &current, &binding, 456, &wrong, &kernel_path).is_err());
+        }
+        assert!(verify_member_scope("member", &ExecObservation::Exited(generation.clone()),
+            &binding, 456, path, &kernel_path).is_err());
+        let mut retired = generation.clone();
+        retired.group_exited = true;
+        assert!(verify_member_scope("member", &ExecObservation::Running(retired),
+            &binding, 456, path, &kernel_path).is_err());
+        let mut wrong_binding = binding.clone();
+        wrong_binding.generation = "replacement-membership".into();
+        assert!(verify_member_scope("member", &current, &wrong_binding, 456, path, &kernel_path).is_err());
+        assert!(verify_member_scope("member", &current, &binding, 457, path, &kernel_path).is_err());
+    }
+
     fn fixture_resource_binding() -> ResourceExecutionBinding {
         ResourceExecutionBinding {
             membership_id: "fixture-membership".into(),
@@ -1436,6 +1730,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "authorization_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let authorized = std::cell::Cell::new(false);
         let generation = runtime.spawn_in_lane_authorized(
@@ -1469,6 +1764,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "omitted_release_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let error = runtime.spawn_in_lane_authorized(
             "omitted", &crate::Launch::Shell("touch unauthorized-payload".into()),
@@ -1530,6 +1826,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "output_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let generation = runtime.spawn_in_lane_checked(
             "output", &crate::Launch::Shell("printf stdout-value; printf stderr-value >&2; exit 7".into()),
@@ -1561,6 +1858,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "wait_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None,
         };
         let generation = runtime.spawn_in_lane_checked(
             "wait", &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
@@ -1589,9 +1887,19 @@ mod tests {
         crate::lane::set_enforced(true);
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        struct EndFixture(ExecRuntime);
+        impl Drop for EndFixture {
+            fn drop(&mut self) {
+                let _ = self.0.kill("finite-tree");
+                let _ = self.0.end_leftovers("finite-tree");
+            }
+        }
+        let _cleanup = EndFixture(runtime.clone());
         let policy = FiniteLane {
             name: format!("fixture_{}", std::process::id()),
             capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            memory_high_bytes: None,
             require_enforced: true,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1619,6 +1927,108 @@ mod tests {
         assert!(runtime.retired_if("finite-tree", &generation.generation_id).unwrap());
         crate::lane::end(&format!("finite:{}", policy.name));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_generations_keep_frozen_limits_under_the_same_aggregate_lane() {
+        if crate::isolation_mode() != crate::Isolation::Scope || !crate::isolate::systemd_254() {
+            return;
+        }
+        let _switch = crate::lane::TEST_SWITCH.lock().unwrap();
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) { crate::lane::set_enforced(self.0); }
+        }
+        let _restore = Restore(crate::lane::enforced());
+        crate::lane::set_enforced(true);
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let name = lane_test_id("finite-members");
+        struct Cleanup(ExecRuntime, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for id in ["finite-small", "finite-nested", "finite-large"] {
+                    let _ = self.0.kill(id);
+                    let _ = self.0.end_leftovers(id);
+                }
+                crate::lane::end(&format!("finite:{}", self.1));
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone(), name.clone());
+        let aggregate = crate::lane::Capacity { cores: 2, memory: 768 * 1024 * 1024 };
+        let mut policy = FiniteLane {
+            name,
+            capacity: Some(aggregate),
+            member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
+            memory_high_bytes: Some(128 * 1024 * 1024),
+            require_enforced: true,
+        };
+        let spawn = |id: &str, policy: &FiniteLane, binding: &ResourceExecutionBinding| {
+            runtime.spawn_in_lane_authorized(
+                id, &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
+                root.path(), &std::env::vars().collect(), FiniteExecutionAuthorization {
+                    lane: policy, binding, guard: &|| Ok(()),
+                    authorize: &|_, release| { release()?; Ok(()) },
+                },
+            ).unwrap()
+        };
+        let binding = fixture_resource_binding();
+        let first = spawn("finite-small", &policy, &binding);
+        let nested = spawn("finite-nested", &policy, &binding);
+        policy.member_capacity = Some(crate::lane::Capacity { cores: 1, memory: 512 * 1024 * 1024 });
+        policy.memory_high_bytes = Some(384 * 1024 * 1024);
+        let mut other_binding = binding.clone();
+        other_binding.membership_id = "other-membership".into();
+        let second = spawn("finite-large", &policy, &other_binding);
+        let placement = |generation: &ExecGeneration| {
+            let value = fs::read_to_string(format!("/proc/{}/cgroup", generation.pid)).unwrap();
+            let path = value.lines().find_map(|line| line.strip_prefix("0::")).unwrap();
+            PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/'))
+        };
+        let first_scope = placement(&first);
+        let nested_scope = placement(&nested);
+        let second_scope = placement(&second);
+        let first_child = first_scope.parent().unwrap();
+        let nested_child = nested_scope.parent().unwrap();
+        let second_child = second_scope.parent().unwrap();
+        assert_ne!(first_child, nested_child);
+        assert_ne!(first_child, second_child);
+        let first_member = first_child.parent().unwrap();
+        let second_member = second_child.parent().unwrap();
+        assert_eq!(Some(first_member), nested_child.parent());
+        assert_ne!(first_member, second_member);
+        assert_eq!(first_member.parent(), second_member.parent());
+        let parent = first_member.parent().unwrap();
+        let proof = runtime.member_scope("finite-small", &binding).unwrap();
+        assert_eq!(proof.generation, first.generation_id);
+        assert_eq!(format!("/sys/fs/cgroup{}", proof.cgroup_path), first_scope.display().to_string());
+        assert!(runtime.member_scope("finite-small", &other_binding).is_err());
+        for (path, memory, high) in [
+            (parent, aggregate.memory, None),
+            (first_member, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (first_child, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (nested_child, 256 * 1024 * 1024, Some(128 * 1024 * 1024)),
+            (second_member, 512 * 1024 * 1024, Some(384 * 1024 * 1024)),
+            (second_child, 512 * 1024 * 1024, Some(384 * 1024 * 1024)),
+        ] {
+            assert_eq!(fs::read_to_string(path.join("memory.max")).unwrap().trim(), memory.to_string());
+            let expected_high = high.map_or_else(|| "max".to_owned(), |value: u64| value.to_string());
+            assert_eq!(fs::read_to_string(path.join("memory.high")).unwrap().trim(), expected_high);
+            assert!(fs::read_to_string(path.join("io.stat")).is_ok());
+            assert_eq!(systemctl_show(path.file_name().unwrap().to_str().unwrap(), "IOAccounting"), "yes");
+        }
+        runtime.kill_if("finite-small", Some(&first.generation_id)).unwrap();
+        runtime.retire_if("finite-small", &first.generation_id).unwrap();
+        assert!(runtime.member_scope("finite-small", &binding).is_err());
+        assert!(matches!(runtime.observe("finite-nested").unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(fs::read_to_string(first_member.join("memory.max")).unwrap().trim(), "268435456");
+        runtime.retire_if("finite-nested", &nested.generation_id).unwrap();
+        assert!(matches!(runtime.observe("finite-large").unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(fs::read_to_string(parent.join("memory.max")).unwrap().trim(), aggregate.memory.to_string());
+        runtime.kill_if("finite-large", Some(&second.generation_id)).unwrap();
+        runtime.retire_if("finite-large", &second.generation_id).unwrap();
+    }
+
     #[test]
     fn finite_final_guard_failure_never_releases_payload() {
         let root = tempfile::tempdir().unwrap();
@@ -1627,6 +2037,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let error = runtime.spawn_in_lane_checked(
@@ -1651,6 +2062,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1677,6 +2089,7 @@ mod tests {
         let mut policy = FiniteLane {
             name: "fixture".into(),
             capacity: Some(crate::lane::Capacity::DEFAULT),
+            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None,
             require_enforced: false,
         };
         assert_eq!(policy.coverage().unwrap(), ResourceCoverage::LogicalOnly);
@@ -1697,6 +2110,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "fixture".into(), capacity: None,
+            member_capacity: None, memory_high_bytes: None,
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1987,9 +2401,10 @@ mod tests {
     #[test]
     fn launch_operation_is_bound_to_the_persisted_exec_generation() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_launch_operation(Some(crate::LaunchOperation("operation-one".into())));
         let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        environment.insert("ST3_START_OPERATION".into(), "untrusted-payload-value".into());
         let launched = runtime
             .spawn(
                 "operation-proof",
@@ -2007,6 +2422,8 @@ mod tests {
             reopened.observe("operation-proof").unwrap(),
             Some(ExecObservation::Exited(exited))
         );
+        let bytes = fs::read(root.path().join("exec").join("operation-proof.json")).unwrap();
+        assert!(!bytes.windows(b"untrusted-payload-value".len()).any(|bytes| bytes == b"untrusted-payload-value"));
     }
 
     fn wait_for_exit(runtime: &ExecRuntime, id: &str) -> ExecGeneration {
@@ -2024,7 +2441,8 @@ mod tests {
     #[test]
     fn an_owned_exec_that_exits_while_it_is_observed_keeps_its_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let go = root.path().join("go");
         runtime
             .spawn(
@@ -2065,7 +2483,8 @@ mod tests {
     #[test]
     fn an_exit_reaped_by_a_concurrent_observer_keeps_its_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let go = root.path().join("go");
         runtime
             .spawn(
@@ -2115,7 +2534,8 @@ mod tests {
     #[test]
     fn an_observer_between_a_reap_and_its_record_takes_the_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let launched = runtime
             .spawn(
                 "work",
@@ -2157,12 +2577,183 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn owned_reap_regression_nonowning_terminal_observer() {
+        owned_reap_regression(false, false, RegressionReaper::Subscription);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_receipt_write_retry() {
+        owned_reap_regression(true, false, RegressionReaper::Subscription);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_replacement_receipt_is_fenced() {
+        owned_reap_regression(false, true, RegressionReaper::Subscription);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_terminal_shortcut_reaps_first() {
+        owned_reap_regression(false, false, RegressionReaper::Observer);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_fallback_stays_pending_while_child_is_alive() {
+        owned_reap_regression(false, false, RegressionReaper::ExactChildProbe);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, PartialEq)]
+    enum RegressionReaper {
+        Subscription,
+        Observer,
+        ExactChildProbe,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn owned_reap_regression(fail_write: bool, replace: bool, mode: RegressionReaper) {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("exec");
+        let owner = ExecRuntime::new(state.clone(), root.path().join("logs"));
+        let owner = if mode == RegressionReaper::Subscription {
+            owner
+        } else {
+            owner.without_background_reaper()
+        };
+        let observer = ExecRuntime::new(state.clone(), root.path().join("logs"));
+        let release_path = root.path().join("release");
+        let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
+        let generation = owner.spawn(
+            "work",
+            &crate::Launch::Argv(vec![
+                "sh".into(), "-c".into(), "read release < \"$1\"".into(),
+                "sh".into(), release_path.to_str().unwrap().into(),
+            ]),
+            root.path(), &std::env::vars().collect(),
+        ).unwrap();
+        let _release = fs::OpenOptions::new().write(true).open(release_path).unwrap();
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        let exited = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if mode == RegressionReaper::ExactChildProbe {
+            let reactor = reaper::CompletionReactor::get().unwrap();
+            let token = reactor.register_fallback(owner.clone(), OwnedChildKey::new("work", &generation));
+            // Wait for an actual fallback probe while the FIFO keeps this child alive.
+            // The probe must neither consume a status nor certify early completion.
+            assert!(reactor.wait_for_fallback_scan(token));
+            assert!(process_generation_alive(generation.pid, generation.start_token).unwrap());
+            let current = owner.read_generation_path(&owner.record_path("work")).unwrap().unwrap();
+            assert_eq!(current.exit_code, None);
+            assert_eq!(current.exit_signal, None);
+            assert!(!current.group_exited);
+            assert!(matches!(owner.owned_children.lock().unwrap()
+                .get(&OwnedChildKey::new("work", &generation)), Some(OwnedChild::Running(_))));
+        }
+        // Freeze only the owner's map. A different runtime can cancel and publish terminal
+        // containment, but cannot consume the parent's wait status.
+        let children = owner.owned_children.lock().unwrap();
+        observer.stop_if("work", Some(&generation.generation_id)).unwrap();
+        let mut event = libc::pollfd {
+            fd: exited.as_raw_fd(), events: libc::POLLIN, revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 5000) }, 1);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+        let Some(ExecObservation::Exited(terminal)) = observer.observe("work").unwrap() else {
+            panic!("non-owner must see terminal containment");
+        };
+        assert!(terminal.group_exited);
+        assert_eq!(terminal.exit_signal, None);
+        let mut neighbor = terminal.clone();
+        neighbor.generation_id = "unrelated-generation".into();
+        neighbor.pid = std::process::id();
+        observer.write_generation("neighbor", &neighbor).unwrap();
+        let neighbor_before = fs::read(observer.record_path("neighbor")).unwrap();
+        let receipt = if replace {
+            observer.rotate_generation("work").unwrap();
+            observer.write_generation("work", &neighbor).unwrap();
+            observer.previous_record_path("work")
+        } else {
+            observer.record_path("work")
+        };
+        let replacement_before = replace.then(|| fs::read(observer.record_path("work")).unwrap());
+        if fail_write {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        drop(children);
+        if mode == RegressionReaper::Observer {
+            let Some(ExecObservation::Exited(ended)) = owner.observe("work").unwrap() else {
+                panic!("owner must observe the terminal receipt");
+            };
+            assert_eq!(ended.exit_signal, Some(libc::SIGTERM));
+        }
+        // No owner.observe(), mission membership, or reconciliation after cancellation:
+        // the successful spawn alone must carry its wait/receipt obligation to completion.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while process_identity(generation.pid).is_ok() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let reaped = process_identity(generation.pid).is_err();
+        let retained = owner.owned_children.lock().unwrap().values()
+            .any(|child| matches!(child, OwnedChild::Exited(_)));
+        let write_failed = if fail_write && retained {
+            // Prove a real receipt-write failure while the consumed wait status is retained.
+            let status = match owner.owned_children.lock().unwrap().values().next().unwrap() {
+                OwnedChild::Exited(status) => *status,
+                OwnedChild::Running(_) => unreachable!(),
+            };
+            owner.persist_owned_exit(&OwnedChildKey::new("work", &generation), status).is_err()
+        } else {
+            false
+        };
+        if fail_write {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if !reaped {
+            for child in owner.owned_children.lock().unwrap().values_mut() {
+                if let OwnedChild::Running(child) = child {
+                    let _ = child.try_wait();
+                }
+            }
+        }
+        assert!(!fail_write || retained,
+            "failed receipt persistence must retain the consumed wait status");
+        assert!(!fail_write || write_failed, "receipt persistence must fail before retry");
+        // Restore permissions before any assertion unwinds, so temporary files can be removed.
+        assert!(reaped, "owning runtime never reaped the cancelled child after non-owner terminal observation");
+        let ended = loop {
+            let ended = owner.read_generation_path(&receipt).unwrap().unwrap();
+            if ended.exit_signal.is_some() || std::time::Instant::now() >= deadline {
+                break ended;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ended.generation_id, generation.generation_id);
+        assert_eq!(ended.exit_code, None);
+        assert_eq!(ended.exit_signal, Some(libc::SIGTERM));
+        assert!(ended.group_exited);
+        assert_eq!(fs::read(observer.record_path("neighbor")).unwrap(), neighbor_before);
+        if let Some(before) = replacement_before {
+            assert_eq!(fs::read(observer.record_path("work")).unwrap(), before);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn reaps_an_owned_child_before_committing_its_terminal_record() {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         use std::os::unix::ffi::OsStrExt as _;
 
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let release_path = root.path().join("release");
         let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
@@ -2191,7 +2782,7 @@ mod tests {
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
@@ -2235,7 +2826,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
 
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let _kill = KillOnDrop(runtime.clone());
         let descendant_release = root.path().join("descendant-release");
         let descendant_pid = root.path().join("descendant-pid");
@@ -2288,7 +2880,7 @@ mod tests {
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
@@ -2404,7 +2996,7 @@ libc.pthread_exit(None)
         // It must also bypass observe, which blocks in the broken implementation.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
         assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
-        struct Cleanup(ExecRuntime, u32, OwnedFd);
+        struct Cleanup(ExecRuntime, OwnedChildKey, OwnedFd);
         impl Cleanup {
             fn kill(&self) -> std::io::Result<()> {
                 let result = unsafe {
@@ -2437,7 +3029,7 @@ libc.pthread_exit(None)
                 }
             }
         }
-        let cleanup = Cleanup(runtime.clone(), generation.pid, unsafe {
+        let cleanup = Cleanup(runtime.clone(), OwnedChildKey::new("work", &generation), unsafe {
             OwnedFd::from_raw_fd(fd as i32)
         });
         let mut event = libc::pollfd {
@@ -2459,7 +3051,7 @@ libc.pthread_exit(None)
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
@@ -3171,6 +3763,12 @@ libc.pthread_exit(None)
             .unwrap();
         let orphan = read_orphan(root.path());
         wait_for_exit(&runtime, "work");
+
+        // Reproduce teardown immediately after a successful observation and a
+        // local control invalidation. The two-second manager admission bound
+        // must delay teardown, not abandon the descendant outside custody.
+        crate::systemd::snapshot_after_admission().unwrap();
+        crate::systemd::invalidate();
 
         // The reconciler asks this on each pass in which a stopped runtime is not running.
         runtime.end_leftovers("work").unwrap();

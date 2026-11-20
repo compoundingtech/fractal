@@ -1,0 +1,39 @@
+{
+  "request": {
+    "version": 1,
+    "type": "decision",
+    "question": "QUESTION: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "summary": "SUMMARY: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "why_person": "WHY_PERSON: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "reasons": [
+      "REASON_ONE: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+      "REASON_TWO: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"
+    ],
+    "recommendation": {"answer": "approve", "reason": "RECOMMENDATION_REASON: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"},
+    "subjects": [
+      {"kind": "commit", "label": "Exact approved commit", "ref": "0123456789abcdef0123456789abcdef01234567", "revision": "0123456789abcdef0123456789abcdef01234567"}
+    ],
+    "answers": [
+      {"id": "approve", "label": "Approve exact action", "outcome": "accept", "consequence": "ACCEPT_CONSEQUENCE: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```", "conditions": ["CONDITION_0: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"]},
+      {"id": "decline", "label": "Do not act", "outcome": "decline", "consequence": "DECLINE_CONSEQUENCE: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```", "conditions": ["CONDITION_1: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"]},
+      {"id": "revise", "label": "Request changes", "outcome": "request_changes", "consequence": "REVISE_CONSEQUENCE: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```", "conditions": ["CONDITION_2: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"]}
+    ]
+  },
+  "cases": [
+    {"name": "unsupported", "source": "| column | value |\n| --- | --- |\n| a | b |\n\n![alt](https://example.com/no-fetch.png)\n\n<b>literal</b>\n\n# literal heading\n> literal quote\n---\n- [x] literal task\n~~literal~~\nhttps://example.com/not-auto-linked", "expect": "Literal readable source, no table/image/HTML/widget or automatic bare-URL link."},
+    {"name": "links", "source": "[safe](https://example.com/path) [also safe](http://example.com) [unsafe](javascript:alert) [file](file:///etc/passwd)", "expect": "Only explicitly activated http/https destinations navigate."},
+    {"name": "inline-and-code", "source": "**bold with *italic* and `literal *code*`**; \\*escaped\\*; unmatched *\n\n```text\n  **literal**\n\n\tkeep tab and  two spaces\n```", "expect": "Combined emphasis, escapes, literal unmatched delimiter; code bytes retained."},
+    {"name": "soft-lines", "source": "One paragraph\ncontinues here.\n\nAnother paragraph.", "expect": "Two paragraphs; soft break becomes one space."},
+    {"name": "safe-prose-cells", "source": "a\tb\u200b\u001b[31m", "expected_text": "a    b"},
+    {"name": "safe-list-cells", "source": "- a\tb\u200b\u001b[31m", "expected_blocks": [{"list": "unordered", "items": [[{"text": "a    b"}]]}]},
+    {"name": "link-list-not-checkbox", "source": "- [label](https://example.com/list)", "expected_blocks": [{"list": "unordered", "items": [[{"link": {"label": "label", "url": "https://example.com/list"}}]]}]},
+    {"name": "literal-code-backslash", "source": "`C:\\`", "expected_text": "C:\\"},
+    {"name": "narrow", "source": "Long unbroken identifier `0123456789abcdef0123456789abcdef0123456789abcdef` and [a long label that wraps](https://example.com/exact-long-destination). 界界 café 👩🏽‍💻", "expect": "Wrap/scroll without content clipping or changed destination."}
+  ],
+  "prose": {
+    "envelope_reason": "ENVELOPE_REASON: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "review_question": "REVIEW_QUESTION: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "review_notes": "REVIEW_NOTES: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```",
+    "update_summary": "UPDATE_SUMMARY: **approve** with *care*, `release --exact`, and [evidence](https://example.com/proof).\n\n- Preserve scope\n- Keep uncertainty\n\n1. Review\n2. Act\n\n```sh\n  echo \"exact  spacing\"\n```"
+  }
+}

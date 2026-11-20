@@ -16,6 +16,34 @@ fields, so they cannot disagree.
 | `harness_state: working`, `observation: stale` | A turn can run for hours without a new harness claim, so a `working` report is kept until the harness says otherwise. `silent_since` already says how long the seat has been quiet. |
 | `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: Fractal has not heard from the harness. Fractal TUI and the phone app show this as idle for a reachable seat; the card does not claim it. |
 
+## A custom shell's first work claim
+
+Reconcile completion of a driver-less launch still records `starting`;
+spawning alone is not readiness. A locally bound shell may establish running
+authority with its first explicitly incarnation-fenced work claim, even before any
+reconcile pass applies the launch completion. The launch worker durably records the
+verified operation, incarnation, PID and kernel process-start identity when spawn
+finishes. Admission checks that exact current subject/runtime operation and freshly
+checks the process generation. Until reconcile applies completion, the latest runtime
+observation must still be the one captured before spawn, or already name this starting
+incarnation. A newer unrelated observation cannot be overwritten.
+The original start and control requests must also remain retained and unchanged;
+repairing or retracting them before application refuses the bootstrap claim.
+
+The custom shell need not supply `--incarnation`: inside a native PTY, the work CLI
+uses `PTY_SESSION`, `PTY_ROOT` and the launch-exported start operation to resolve
+its exact subject/operation incarnation from the local registry before consulting
+the possibly stale status projection. A missing exact local match does not borrow
+the predecessor's status incarnation.
+
+Running authority and the work claim commit in one writer savepoint; a refused claim
+publishes neither. Later reconciliation cannot regress that incarnation to `starting`.
+
+Missing process-birth evidence, a dead or reused PID, a different operation, subject or
+incarnation keeps the existing refusal. Unbound callers and omitted incarnation fences
+do not use this path. Native-driver binding and readiness rules are unchanged. Platforms
+without exact process-generation liveness checks cannot use this bootstrap path.
+
 ## What `down` means, and what it does not
 
 `down` is a statement about Fractal's session for the seat: a declaration exists, the runtime row is not

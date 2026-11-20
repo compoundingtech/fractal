@@ -414,6 +414,66 @@ fn a_cancelled_run_is_reported_without_the_reason() {
 }
 
 #[test]
+fn cancelling_ready_work_settles_steps_and_never_reports_a_later_stall() {
+    for mission in ["watched", "unwatched"] {
+        let (_clock, fixture) = fixture();
+        let run = fixture.start_by(mission, "cancel-ready-run", REPORTER);
+        fixture.passes(3);
+        let ready = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(
+            ready.steps.iter().find(|step| step.step == "build").unwrap().status,
+            "ready"
+        );
+        fixture
+            .store
+            .request_mission_run_cancellation(&run.id, "operator cancelled")
+            .unwrap();
+        // Cancellation owns settlement, before a reconciler pass or a stall deadline.
+        let cancelling = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert!(cancelling.steps.iter().all(|step| step.status == "cancelled"));
+        fixture.passes(6);
+        let cancelled = fixture.store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+
+        let _later = Clock::at(&fixture.store, fixture.quiet_since(&run) + 40 * MINUTE);
+        fixture.passes(4);
+        let reports = fixture.reports(REPORTER);
+        assert!(reports.iter().all(|message| {
+            !message.tags.contains(&"st3-run-report:stalled".to_owned())
+        }), "{reports:?}");
+        assert_eq!(reports.len(), usize::from(mission == "watched"));
+    }
+}
+
+#[test]
+fn terminal_status_prevents_stalls_even_with_an_active_phase_and_ready_steps() {
+    let (_clock, fixture) = fixture();
+    let mut run = fixture.start_by("watched", "terminal-ready-run", REPORTER);
+    fixture.passes(3);
+    run = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert!(run.steps.iter().any(|step| step.status == "ready"));
+    let report = fixture.reconciler.run_report(&run.subject).unwrap().unwrap();
+    fixture.reconciler.set_default_stall_reports(true);
+    let late = crate::reconcile::run_report::run_activity(&run) + 40 * MINUTE;
+    let _later = Clock::at(&fixture.store, late);
+
+    // Exercise the reporting boundary independently of cancellation's step settlement.
+    // Historical or inconsistent views must not turn terminal runs into timed work.
+    for status in ["cancelled", "completed", "failed"] {
+        for phase in ["normal", "revision-draining", "final"] {
+            run.status = status.into();
+            run.phase = phase.into();
+            assert_eq!(fixture.reconciler.report_run(&run, &report, late).unwrap(), None);
+            assert_eq!(
+                fixture.reconciler.report_stall_by_default(&run, late).unwrap(),
+                None
+            );
+        }
+    }
+    assert_eq!(fixture.report_claims(), 0);
+}
+
+#[test]
 fn a_queued_run_gets_its_full_timeout_after_admission() {
     let (_clock, fixture) = fixture();
     let source = SOURCE.replace(

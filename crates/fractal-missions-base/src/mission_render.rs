@@ -187,12 +187,14 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     if let Some(lane) = resource_lane {
         let mut lane_node = text("lane", &lane.name);
         property(&mut lane_node, "host", lane.host.as_str());
+        if let Some(profile) = &lane.profile {
+            property(&mut lane_node, "profile", profile.as_str());
+        }
+        if lane.disk.is_none() && let Some(path) = &lane.disk_path {
+            property(&mut lane_node, "disk-path", path.as_str());
+        }
         property(&mut lane_node, "max-members", i128::from(lane.max_members));
-        property(&mut lane_node, "class", match lane.class {
-            fractal_runtime::RequestClass::Landing => "landing",
-            fractal_runtime::RequestClass::Check => "check",
-            fractal_runtime::RequestClass::Agent => "agent",
-        });
+        property(&mut lane_node, "class", lane.class.as_str());
         if let Some(disk) = &lane.disk {
             property(&mut lane_node, "disk", fractal_runtime::show_lane_memory(disk.bytes));
             property(&mut lane_node, "disk-path", disk.path.as_str());
@@ -524,6 +526,32 @@ mod tests {
     }
 
     #[test]
+    fn keyed_lane_preserves_declaration_without_resolving_host_estimates() {
+        let mission = parse(r#"mission "test" state="ready" {
+            goal "Verify."
+            step "verify" {
+                agentless
+                lane "checks" host="node" profile="check.unit" disk-path="/workspace" max-members=3 class="check"
+                exec "verify" { command "true"; }
+            }
+        }"#);
+        let lane = mission.steps["verify"].resource_lane.as_ref().unwrap();
+        assert_eq!(lane.profile.as_deref(), Some("check.unit"));
+        assert_eq!(lane.disk_path.as_deref(), Some("/workspace"));
+        assert!(lane.capacity.is_none());
+        assert!(lane.disk.is_none());
+        let rendered = render_mission_kdl(&mission).unwrap();
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let rendered_lane = document.get("mission").unwrap().children().unwrap()
+            .get("step").unwrap().children().unwrap().get("lane").unwrap();
+        assert_eq!(rendered_lane["profile"].as_string(), Some("check.unit"));
+        assert_eq!(rendered_lane["disk-path"].as_string(), Some("/workspace"));
+        let stored = serde_json::to_value(lane).unwrap();
+        assert!(stored.get("profile_estimate").is_none());
+        assert_eq!(serde_json::from_value::<crate::model::ResourceLaneSpec>(stored).unwrap(), *lane);
+    }
+
+    #[test]
     fn finite_exec_lane_displays_redacted_execution_without_changing_seat_capacity() {
         let source = r#"mission "test" state="ready" {
             goal "Verify."
@@ -589,7 +617,7 @@ mod tests {
         assert!(assigned.steps["verify"].resource_lane.as_ref().unwrap().capacity.is_none());
         assert_eq!(assigned.steps["verify"].resource_lane.as_ref().unwrap().class, fractal_runtime::RequestClass::Agent);
         let stored_lane = serde_json::to_value(assigned.steps["verify"].resource_lane.as_ref().unwrap()).unwrap();
-        for field in ["class", "disk", "io"] {
+        for field in ["class", "disk", "io", "profile", "disk_path"] {
             assert!(stored_lane.get(field).is_none(), "default fields must preserve historical lane bytes");
         }
         let historical_lane: crate::model::ResourceLaneSpec = serde_json::from_value(stored_lane.clone()).unwrap();
@@ -601,6 +629,9 @@ mod tests {
     fn finite_lane_rejects_ambiguous_or_invalid_policies() {
         for body in [
             r#"lane "verify"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile=""; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile="check.unit" disk-path=""; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" profile-estimate="caller"; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" max-members=0; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" max-members=1.5; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" coverage="advisory"; exec "check" { command "true"; }"#,

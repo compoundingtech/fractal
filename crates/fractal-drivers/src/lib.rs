@@ -66,8 +66,8 @@ pub mod materialize;
 pub mod message;
 pub mod metrics;
 pub mod migrations;
-/// The stdio framing shared by the native channels; crate-internal.
-mod native_channel;
+/// Native channel framing and durable input acceptance receipts.
+pub mod native_channel;
 pub mod omp_session;
 pub mod omp_questions;
 pub mod opencode_session;

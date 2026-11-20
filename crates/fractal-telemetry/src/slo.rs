@@ -206,8 +206,14 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
                 let value = Divergence { about, max_open: whole(max("open")?, "open maximum")? };
                 one(&mut divergence, "divergence", "projection-divergence", name, value)?;
             }
-            Indicator::Interval(_) | Indicator::Count(_) => {
-                bail!("objective {name} is an interval or count over claims: Fractal ships none; a fleet declares one with `fractal apply`")
+            Indicator::Interval(_)
+            | Indicator::Count(_)
+            | Indicator::GithubMergedCount(_)
+            | Indicator::GithubReadyToMerged(_)
+            | Indicator::Ratio(_)
+            | Indicator::Gauge(_)
+            | Indicator::Native { .. } => {
+                bail!("objective {name} is a fleet declaration: Fractal ships native measurement definitions, not claim indicators, GitHub indicators or owner bindings")
             }
         }
     }
@@ -307,6 +313,82 @@ pub fn shipped() -> &'static [Objective] {
 /// The built-in targets.
 pub fn targets() -> &'static Targets {
     &BUILT_IN.1
+}
+
+/// Stable identities bind bad counters to their original measurement boundary.
+static LATENCY_STREAMS: LazyLock<Vec<[String; 2]>> = LazyLock::new(|| {
+    targets().latency.iter().map(|target| [
+        format!("latency/{}/local/{}", target.name, target.p99_ms),
+        format!("latency/{}/remote/{}", target.name, target.remote_p99_ms.unwrap_or(target.p99_ms)),
+    ]).collect()
+});
+
+fn store_stream(work: StoreWork) -> String {
+    let ms = match work {
+        StoreWork::Statement => targets().statement.p99_ms,
+        StoreWork::WriterHold => targets().writer_hold.max_ms,
+        _ => targets().transaction.max_ms,
+    };
+    format!("{}/{ms}", work.name())
+}
+
+/// The daemon supplies a host-local state path and checkpoints this ledger every minute.
+/// Existing diagnostic windows are deliberately not used as historical evidence.
+pub fn install_budget_ledger(path: &std::path::Path, node: &str) -> Result<()> {
+    install();
+    let streams = LATENCY_STREAMS.iter().flat_map(|pair| pair.iter().cloned())
+        .chain([StoreWork::ReadTransaction, StoreWork::WriteTransaction, StoreWork::WriterHold]
+            .into_iter().map(store_stream)).collect();
+    smallclaims::windows::budgets::install(path, node, streams)
+}
+
+pub fn checkpoint_budgets() -> Result<()> {
+    smallclaims::windows::budgets::checkpoint()
+}
+
+/// Hot-path counters only: no claim, SQLite statement, or per-event allocation.
+pub fn note_latency(index: usize, remote: bool, _now: std::time::Instant, over: bool) {
+    if let Some(pair) = LATENCY_STREAMS.get(index) {
+        smallclaims::windows::budgets::record(&pair[usize::from(remote)], over);
+    }
+}
+
+fn evidence(result: Result<Value>) -> Value {
+    result.unwrap_or_else(|error| json!({"available": false, "error": error.to_string(), "windows": {}}))
+}
+
+pub fn latency_budget(index: usize, remote: bool, _now: std::time::Instant) -> Value {
+    LATENCY_STREAMS.get(index).map_or_else(
+        || json!({"available": false, "windows": {}}),
+        |pair| evidence(smallclaims::windows::budgets::report(&pair[usize::from(remote)])),
+    )
+}
+
+fn store_windows(work: StoreWork) -> Value {
+    let mut windows = smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
+    windows["budget"] = evidence(smallclaims::windows::budgets::report(&store_stream(work)));
+    windows
+}
+
+fn database_stream() -> String {
+    format!("database/{}/{}", targets().database.max_live_gb, targets().database.max_growth_mb_per_day)
+}
+
+/// The hourly source is held at most two hours. Its missing growth baseline cannot prove
+/// a healthy conjunction, but an already excessive live size is independently known bad.
+fn database_sample(size: &DatabaseSize) -> Option<f64> {
+    let live = size.live_bytes as f64 / (targets().database.max_live_gb * 1_000_000_000.0);
+    size.growth_bytes_per_day.map(|growth| {
+        live.max(growth as f64 / (targets().database.max_growth_mb_per_day * 1_000_000.0))
+    }).or_else(|| (live > 1.0).then_some(live))
+}
+
+fn database_budget() -> Value {
+    let mut value = evidence(smallclaims::windows::budgets::gauge_report(
+        &database_stream(), smallclaims::windows::budgets::unix_ms(), 2 * 60 * 60 * 1000, 1.0,
+    ));
+    value["cadence_ms"] = json!(60 * 60 * 1000);
+    value
 }
 
 impl Targets {
@@ -432,12 +514,77 @@ pub struct DatabaseSize {
     pub physical_growth_span_ms: Option<u128>,
 }
 
+/// Independently measured archive file lengths, never subtracted from the hot-store gauge.
+/// These are capacity measurements, not proof of object integrity or catalogue completeness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ArchiveBytes {
+    pub segment_file_bytes: u64,
+    pub index_bytes: u64,
+    pub overlay_bytes: u64,
+    pub staging_bytes: u64,
+    pub orphan_bytes: u64,
+    pub backup_bytes: u64,
+    pub files: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArchiveSizeStatus { NotActivated, Available, Unavailable }
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DatabaseArchiveSize {
+    pub measured_at_unix_ms: u128,
+    /// Hash of the canonical local measurement root, never the private filesystem path.
+    pub scope: String,
+    pub status: ArchiveSizeStatus,
+    pub bytes: Option<ArchiveBytes>,
+    /// Segment files plus separately owned index and overlay files.
+    pub archive_bytes: Option<u64>,
+    /// All files, additionally including staging, orphans and backup-owned copies.
+    pub capacity_bytes: Option<u64>,
+    pub growth_bytes_per_day: Option<i64>,
+    pub growth_span_ms: Option<u128>,
+    pub baseline_at_unix_ms: Option<u128>,
+    pub error: Option<String>,
+}
+
+static DATABASE_ARCHIVE: std::sync::Mutex<Option<DatabaseArchiveSize>> = std::sync::Mutex::new(None);
+
+pub fn note_database_archive_size(size: &DatabaseArchiveSize) {
+    *DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size.clone());
+}
+
+pub fn database_archive_size() -> Option<DatabaseArchiveSize> {
+    DATABASE_ARCHIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+fn database_archive_row(size: Option<DatabaseArchiveSize>, now: u128) -> Value {
+    let fresh = size.as_ref().is_some_and(|size| size.measured_at_unix_ms <= now
+        && now - size.measured_at_unix_ms <= 2 * 60 * 60 * 1000);
+    json!({
+        "name": "database-archive",
+        "kind": "gauge",
+        "about": "Separately measured local wire-archive bytes and net daily growth; not a hot-store saving or durability proof",
+        "fresh": fresh,
+        "status": if fresh { size.as_ref().map(|size| size.status) } else { None },
+        "size": size,
+        "integrity": "not-assessed",
+        "catalogue_coverage": Value::Null,
+        "budget": Value::Null,
+    })
+}
+
 /// This member's newest store size, which the daemon measures hourly.
 static DATABASE: std::sync::Mutex<Option<DatabaseSize>> = std::sync::Mutex::new(None);
 
 /// Remember the newest store size for its readers.
 pub fn note_database_size(size: &DatabaseSize) {
     *DATABASE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size.clone());
+    if let Err(error) = smallclaims::windows::budgets::record_gauge(
+        &database_stream(), size.measured_at_unix_ms.min(u128::from(u64::MAX)) as u64, database_sample(size),
+    ) {
+        tracing::error!(%error, "persisting native database SLO observation");
+    }
 }
 
 /// The newest store size the daemon measured: the one sample every reader of the store's size
@@ -450,7 +597,7 @@ pub fn database_size() -> Option<DatabaseSize> {
 /// with their targets.
 pub fn store_report(cpu: Value) -> Vec<Value> {
     let targets = targets();
-    let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
+    let series = store_windows;
     vec![
         json!({
             "name": "sql-statement",
@@ -475,7 +622,9 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "max_live_gb": targets.database.max_live_gb,
             "max_growth_mb_per_day": targets.database.max_growth_mb_per_day,
             "size": database_size().map_or(Value::Null, |size| json!(size)),
+            "budget": database_budget(),
         }),
+        database_archive_row(database_archive_size(), u128::from(smallclaims::windows::budgets::unix_ms())),
     ]
 }
 
@@ -532,6 +681,15 @@ pub fn cpu_verdict(row: &Value) -> CpuVerdict {
     }
 }
 
+/// Productive seats alone made the idle minimum impossible, independently of any overlapping
+/// missing telemetry. This is ineligibility, not a passing measurement or a CPU coverage claim.
+pub fn cpu_idle_busy(row: &Value) -> bool {
+    let minutes = row["minutes"].as_u64();
+    let needed = row["idle_min_minutes"].as_u64();
+    let busy = row["idle"]["not_idle"]["seat"].as_u64();
+    matches!((minutes, needed, busy), (Some(60), Some(needed @ 1..=60), Some(busy)) if busy > 60 - needed)
+}
+
 /// `n` cores, as a target or a reading says it.
 pub fn cores(n: f64) -> String {
     format!("{n} core{}", if n <= 1.0 { "" } else { "s" })
@@ -546,7 +704,7 @@ const LOAN_ROUTES: usize = 8;
 /// held it; each read transaction past that target, and who kept it open.
 fn writer_hold_row() -> Value {
     let targets = targets();
-    let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
+    let series = store_windows;
     let mut row = json!({
         "name": "writer-hold",
         "about": targets.writer_hold.about,
@@ -696,6 +854,7 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
             }
             "cpu" => lines.extend(cpu_lines(target)),
             "database" => lines.push(database_line(target)),
+            "database-archive" => lines.push(database_archive_line(target)),
             "writer-hold" => lines.push(writer_hold_line(target)),
             _ => {
                 let own = verdict(&target["windows"], true);
@@ -766,6 +925,7 @@ fn cpu_lines(target: &Value) -> [(String, &'static str, String); 2] {
     let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
     let idle = match verdict.idle {
         Some(cores) => format!("{cores:.2} cores over {} idle minutes", verdict.idle_minutes),
+        None if cpu_idle_busy(target) => "not eligible: busy".into(),
         None if verdict.minutes < smallclaims::windows::cpu_minutes::MINUTES => {
             format!("the hour holds {} of 60 minutes, {} idle", verdict.minutes, verdict.idle_minutes)
         }
@@ -797,6 +957,33 @@ pub fn divergence_line(open: u64) -> (String, &'static str, String) {
             "open P1 projection bugs ≤ {max_open}: {open} open; `st subject daemon/NODE` for the member that found one shows it with what a reproduction needs"
         ),
     )
+}
+
+/// Archive capacity is observational: neither fresh bytes nor an absent baseline proves health.
+fn database_archive_line(target: &Value) -> (String, &'static str, String) {
+    let size = &target["size"];
+    let current = if size.is_null() {
+        "not measured yet".to_owned()
+    } else if target["fresh"] != true {
+        "stale measurement; current archive size and growth unknown".to_owned()
+    } else {
+        match target["status"].as_str() {
+            Some("not-activated") => "not activated; archive size and growth unknown".to_owned(),
+            Some("available") => {
+                let bytes = size["archive_bytes"].as_u64()
+                    .map_or_else(|| "archive bytes unknown".to_owned(), |bytes| format!("archive {bytes} bytes"));
+                let capacity = size["capacity_bytes"].as_u64()
+                    .map_or_else(|| "capacity bytes unknown".to_owned(), |bytes| format!("capacity {bytes} bytes"));
+                let growth = size["growth_bytes_per_day"].as_i64()
+                    .map_or_else(|| "growth unknown (daily baseline not available)".to_owned(), |bytes| format!("growth {bytes:+} bytes a day"));
+                format!("{bytes}, {capacity}, {growth}")
+            }
+            _ => "measurement unavailable; archive size and growth unknown".to_owned(),
+        }
+    };
+    ("slo/database-archive".into(), "info", format!(
+        "{current}; observational only, no configured target or budget; integrity not assessed; catalogue coverage unknown"
+    ))
 }
 
 /// `st doctor`'s line for the store's size: met when the pages in use and their daily growth are
@@ -831,6 +1018,95 @@ fn database_line(target: &Value) -> (String, &'static str, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_row_is_a_separate_informational_gauge_and_stale_is_unknown() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::Available, bytes: Some(ArchiveBytes::default()),
+            archive_bytes: Some(0), capacity_bytes: Some(0), growth_bytes_per_day: None,
+            growth_span_ms: None, baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size.clone()), 100);
+        assert_eq!(row["name"], "database-archive");
+        assert_eq!(row["kind"], "gauge");
+        assert_eq!(row["status"], "available");
+        assert!(row["budget"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert_eq!(row["integrity"], "not-assessed");
+        assert!(row["catalogue_coverage"].is_null());
+        for now in [99, 100 + 2 * 60 * 60 * 1000 + 1] {
+            let stale = database_archive_row(Some(size.clone()), now);
+            assert_eq!(stale["fresh"], false);
+            assert!(stale["status"].is_null());
+        }
+        let missing = database_archive_row(None, 100);
+        assert_eq!(missing["fresh"], false);
+        assert!(missing["size"].is_null());
+    }
+
+    #[test]
+    fn unconfigured_archive_is_not_a_zero_byte_success() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::NotActivated, bytes: None, archive_bytes: None,
+            capacity_bytes: None, growth_bytes_per_day: None, growth_span_ms: None,
+            baseline_at_unix_ms: None, error: None };
+        let row = database_archive_row(Some(size), 100);
+        assert_eq!(row["status"], "not-activated");
+        assert!(row["size"]["archive_bytes"].is_null());
+        assert!(row["size"]["growth_bytes_per_day"].is_null());
+        assert!(row["budget"].is_null());
+    }
+
+    #[test]
+    fn archive_doctor_uses_observations_never_latency_or_a_pass() {
+        let size = DatabaseArchiveSize { measured_at_unix_ms: 100, scope: "scope".into(),
+            status: ArchiveSizeStatus::Available, bytes: Some(ArchiveBytes::default()),
+            archive_bytes: Some(42), capacity_bytes: Some(64), growth_bytes_per_day: None,
+            growth_span_ms: None, baseline_at_unix_ms: None, error: None };
+        let mut inactive = size.clone();
+        inactive.status = ArchiveSizeStatus::NotActivated;
+        inactive.bytes = None;
+        inactive.archive_bytes = None;
+        inactive.capacity_bytes = None;
+        let mut unavailable = inactive.clone();
+        unavailable.status = ArchiveSizeStatus::Unavailable;
+        for (row, expected) in [
+            (database_archive_row(None, 100), "not measured yet"),
+            (database_archive_row(Some(size.clone()), 7_200_101), "stale measurement"),
+            (database_archive_row(Some(size), 100), "archive 42 bytes, capacity 64 bytes, growth unknown"),
+            (database_archive_row(Some(inactive), 100), "not activated"),
+            (database_archive_row(Some(unavailable), 100), "measurement unavailable"),
+        ] {
+            let lines = doctor_lines(&json!({"targets": [row]}));
+            assert_eq!(lines.len(), 1);
+            let (id, status, text) = &lines[0];
+            assert_eq!(id, "slo/database-archive");
+            assert_eq!(*status, "info");
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("no configured target or budget"));
+            assert!(text.contains("integrity not assessed"));
+            assert!(text.contains("catalogue coverage unknown"));
+            assert!(!text.contains("p99"));
+            assert!(!text.contains("≤"));
+        }
+    }
+
+    #[test]
+    fn database_unknown_growth_cannot_prove_health_or_hide_live_breach() {
+        let mut size = DatabaseSize {
+            measured_at_unix_ms: 0, file_bytes: 0, live_bytes: 0,
+            growth_bytes_per_day: None, growth_span_ms: None, wal_bytes: 0,
+            main_file_bytes: 0, physical_bytes: 0,
+            physical_growth_bytes_per_day: None, physical_growth_span_ms: None,
+        };
+        assert_eq!(database_sample(&size), None);
+        size.live_bytes = (targets().database.max_live_gb * 2_000_000_000.0) as u64;
+        assert_eq!(database_sample(&size), Some(2.0));
+        size.live_bytes = 0;
+        size.growth_bytes_per_day = Some((targets().database.max_growth_mb_per_day * 2_000_000.0) as i64);
+        assert_eq!(database_sample(&size), Some(2.0));
+        size.growth_bytes_per_day = Some(0);
+        assert_eq!(database_sample(&size), Some(0.0));
+    }
 
     #[test]
     fn the_built_in_objectives_file_is_valid_and_names_the_mission_targets() {
@@ -1030,7 +1306,7 @@ mod tests {
         let interval = format!(
             "{SOURCE}\nobjective \"change-rollout\" {{\n  about \"x\"\n  indicator \"interval\" {{\n    subject-prefix \"custom/acme/change/\"\n    start \"custom.acme.change-ready\"\n    stop \"custom.acme.change-applied\"\n  }}\n  window \"7d\"\n  target \"p95\" within=\"5m\"\n}}\n"
         );
-        assert!(error(&interval).contains("is an interval"), "{}", error(&interval));
+        assert!(error(&interval).contains("is a fleet declaration"), "{}", error(&interval));
     }
 
     #[test]

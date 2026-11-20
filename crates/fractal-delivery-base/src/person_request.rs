@@ -654,6 +654,12 @@ pub fn append_option_notes_summary(summary: &mut String, answer: &Value) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ask_markdown_fixture_is_a_valid_v1_request() {
+        let fixture: Value = serde_json::from_str(include_str!("../../../fixtures/clients/ask-markdown.json")).unwrap();
+        StructuredRequest::parse(&fixture["request"]).unwrap();
+    }
+
     fn decision() -> Value {
         json!({
             "version": 1,

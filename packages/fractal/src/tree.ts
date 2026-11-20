@@ -86,12 +86,13 @@ const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   schedule: 'A schedule file must declare a mission with a schedule',
 }
 
-/** A fleet declares only interval or count objectives named `NAMESPACE/NAME`; Fractal ships the rest. */
+/** Fleet declarations use namespaced claim, source-backed or native-binding objectives. */
 const declaredObjective = (id: string) =>
-  `A declared objective is an interval or count over claims named NAMESPACE/NAME; objective/${id} is not`
+  `A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/${id} is not`
 
-/** The indicators a fleet declares: over claims. */
-const declarable = (kind: unknown): boolean => kind === 'interval' || kind === 'count'
+const declarable = (kind: unknown): boolean =>
+  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' ||
+  kind === 'native' || kind === 'github-merged-count' || kind === 'github-ready-to-merged'
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>
   typeof value === 'object' && value !== null && '_tag' in value && value._tag === 'SubjectRef'
@@ -350,6 +351,13 @@ const programDeclaration = Effect.fnUntraced(function* ({
     state: 'ready',
     reportTo: intent.reportTo,
     goal: intent.goal,
+    ...(intent.resources === undefined ? {} : { resources: intent.resources }),
+    ...(intent.docs === undefined ? {} : { docs: intent.docs }),
+    ...('budget' in intent ? { budget: intent.budget } : {}),
+    ...('declaredPriority' in intent ? { declaredPriority: intent.declaredPriority } : {}),
+    ...('declaredLane' in intent ? { declaredLane: intent.declaredLane } : {}),
+    ...('declaredBudgets' in intent ? { declaredBudgets: intent.declaredBudgets } : {}),
+
     ...timeout,
     ...(intent.concurrentRuns === undefined ? {} : { concurrentRuns: intent.concurrentRuns }),
     ...(intent.authority === undefined ? {} : { authority: intent.authority }),
@@ -570,8 +578,8 @@ export const programMission = Effect.fn('fractal.programMission')(function* ({
 
 /**
  * Checks an objective module's intent: its `name`, if given, is the path ID; `onBreach` agent
- * references resolve to `agent/<id>`; and it is an interval or count over claims named
- * `NAMESPACE/NAME`, the only objectives a fleet declares (the native telemetry ones ship with Fractal).
+ * references resolve to `agent/<id>`; and it is a claim indicator named `NAMESPACE/NAME`
+ * (the built-in telemetry indicators ship with Fractal).
  */
 const loadObjective = Effect.fnUntraced(function* ({
   root,
@@ -689,8 +697,8 @@ const loadKdl = Effect.fnUntraced(function* ({
  * `objective/<id>`. KDL files must hold `version 2` and one node whose kind and ID match the path. A
  * TS module's default export is a `define*` definition for its own path and kind, a plain intent, or
  * a factory; factories receive `context`. Typed references are lowered, then intents are decoded
- * with `AgentSchema` or `MissionSchema`, or checked by `Fractal.objective`. A declared objective is an
- * interval or count over claims. Subject modules are trusted code and are imported.
+ * with `AgentSchema` or `MissionSchema`, or checked by `Fractal.objective`. A declared objective
+ * measures interval, count, ratio or gauge claims, or binds a native row's owner. Subject modules are trusted code and are imported.
  *
  * A program mission (`Fractal.mission(intent, program)` from `fractal/effect`) is bundled with
  * `bun build --target=bun` from the tree root into `bundleDir`, and loads as the mission that runs

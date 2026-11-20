@@ -135,7 +135,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
-            "the seat has a rollout; inspect it or retry with st agents rollout",
+            "the seat has a rollout; inspect it or retry with fractal agents rollout",
         )));
     }
     if crate::suspension::current(&state.store, &subject)
@@ -298,7 +298,7 @@ pub async fn override_placement_source(
     Ok(Json(claim))
 }
 
-/// Start a stopped mission seat on the declaration its run gave it, as `st agents start` does.
+/// Start a stopped mission seat on the declaration its run gave it, as `fractal agents start` does.
 pub async fn start_mission_seat(
     State(state): State<AppState>,
     Json(request): Json<MissionSeatStartRequest>,
@@ -474,7 +474,7 @@ pub async fn hold_lane_burst(
     // granted burst, set the seat's lane back to its own and the run's compiles were OOM-killed).
     let (burst, restored) = state.seat_admission.burst_ask(&subject, capacity, reason, now, request.held, live);
     if restored {
-        eprintln!("st3: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
+        eprintln!("fractal: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
             capacity.cores, capacity.memory);
         super::signal_changed(&state);
     }
@@ -684,6 +684,66 @@ async fn rename_identity_id(
     let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
     signal_changed(&state);
     Ok(Json(receipt))
+}
+
+pub async fn plan_agent_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn plan_mission_rename_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    plan_identity_rename(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn plan_identity_rename(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: crate::store::identities::RenameRequest,
+) -> Result<Json<crate::store::identities::RenamePlan>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    person_or_agent_actor(&request.actor, "invalid-rename-actor")?;
+    let store = state.store.clone();
+    let peers = state.configured_peers.clone();
+    blocking_action(move || store.plan_rename_identity(kind, &request, &peers)).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofQuery {
+    from: String,
+    to: String,
+    request_digest: Option<String>,
+}
+
+pub async fn agent_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, query).await
+}
+
+pub async fn mission_rename_proof(
+    State(state): State<AppState>,
+    Query(query): Query<RenameProofQuery>,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, query).await
+}
+
+async fn identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    query: RenameProofQuery,
+) -> Result<Json<crate::store::identities::RenameProof>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.rename_proof(kind, &query.from, &query.to, query.request_digest.as_deref())
+    }).await.map(Json)
 }
 
 #[derive(Deserialize)]

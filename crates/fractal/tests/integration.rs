@@ -32,6 +32,7 @@ mod cli_output;
 mod demo_play;
 mod deploy_verify;
 mod web_cli;
+mod resources_payload;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.

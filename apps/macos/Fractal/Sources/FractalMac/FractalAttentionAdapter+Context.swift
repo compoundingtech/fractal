@@ -2,33 +2,26 @@ import FractalMacCore
 import Foundation
 import FractalClient
 
-/// A card's page: the row read again (`attentionGet`, which carries the whole request), its work
-/// step (`workGet`), its pull requests and issues through Fractal's GitHub plugin, the asking
-/// agent's newest timeline page, and image attachments as blobs.
+/// Enriches the list snapshot with work and GitHub state. The timeline and image bytes are
+/// independent reads; none is a prerequisite for presenting the request.
 extension FractalAttentionAdapter {
   /// Timeline items read for an excerpt: tool calls, results and bookkeeping share the page with
   /// the prose turns, so read several per turn shown.
   static let timelineItems = 40
 
   func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
-    let item: AttentionResource
-    do {
-      guard case .attention(let read) = try await client.attentionGet(id: record.id).value else {
-        throw ReadFailure(message: "Fractal returned something other than an attention row for \(record.id)")
-      }
-      item = read
-    } catch {
-      throw ReadFailure(error)
-    }
-    let subjects = (item.request?.subjects ?? item.update?.subjects ?? []).map(Self.subject)
-    async let work = readWork(item.sourceID)
-    async let statuses = readStatuses(subjects)
+    let snapshot = record.snapshotContext ?? AttentionContext(detail: record.detail, request: nil)
+    async let work = readWork(record.sourceID)
+    async let statuses = readStatuses(snapshot.subjects)
     let (workResult, linked) = await (work, statuses)
-    let request = item.request.map { Self.request($0, subjects: linked, carrier: item.sourceID) }
-    let detail = item.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+    let request = snapshot.request.map {
+      RequestContext(
+        question: $0.question, whyPerson: $0.whyPerson, summary: $0.summary, reasons: $0.reasons,
+        recommendation: $0.recommendation, subjects: linked, attachments: $0.attachments)
+    }
     return AttentionContext(
-      detail: detail.isEmpty || detail == item.title ? nil : detail, request: request,
-      updateSubjects: item.request == nil ? linked : [],
+      detail: snapshot.detail, request: request,
+      updateSubjects: request == nil ? linked : [],
       work: try? workResult?.get(), workFailure: workResult?.failure)
   }
 
@@ -171,9 +164,10 @@ extension FractalAttentionAdapter {
         continue
       }
     }
-    let kept = Array(turns.suffix(ConversationExcerpt.turnLimit))
+    let readable = ConversationExcerpt.readable(turns)
+    let kept = Array(readable.suffix(ConversationExcerpt.turnLimit))
     return ConversationExcerpt(
-      conversationID: conversationID, turns: kept, hasEarlier: page.page.hasMore || turns.count > kept.count)
+      conversationID: conversationID, turns: kept, hasEarlier: page.page.hasMore || readable.count > kept.count)
   }
 
   private static let hidden: Set<String> = ["internal", "hidden-by-harness"]

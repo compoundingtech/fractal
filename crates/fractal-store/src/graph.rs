@@ -28,6 +28,8 @@ const ROOT_NODES: &[&str] = &[
     "planning-session",
     "message",
     "objective",
+    "github-source",
+    "github-scope",
     "notice-owner",
     "repair",
     "schedule",
@@ -389,6 +391,12 @@ fn parse_desired_node(
             "an objective declaration must be at the root",
         ));
     }
+    if matches!(kind, "github-source" | "github-scope") && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "github-configuration-inside-mission",
+            "GitHub acquisition and effective-dated membership are root declarations",
+        ));
+    }
     if kind == crate::notice_owner::KIND && context.owner_run.is_some() {
         return Err(FractalError::new(
             "notice-owner-inside-mission",
@@ -448,6 +456,7 @@ fn parse_mission_run_declaration(
         body,
         &[
             "mission",
+            "follow-head",
             "workspace",
             "requester",
             "mode",
@@ -466,6 +475,7 @@ fn parse_mission_run_declaration(
         matches!(
             child.name().value(),
             "mission"
+                | "follow-head"
                 | "workspace"
                 | "requester"
                 | "mode"
@@ -478,6 +488,14 @@ fn parse_mission_run_declaration(
     let creation = if has_creation {
         let mission_ref = required_child_string(body, "mission", &subject)?;
         let (mission, revision) = exact_mission_revision(&mission_ref)?;
+        let follow_head = match child_string(body, "follow-head")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => return Err(FractalError::new(
+                "invalid-follow-head",
+                format!("`follow-head` is `true` when present, not `{other}`"),
+            )),
+        };
         let workspace = required_child_string(body, "workspace", &subject)?;
         if !workspace.starts_with('/') {
             return Err(FractalError::new(
@@ -557,6 +575,7 @@ fn parse_mission_run_declaration(
         Some(MissionRunCreation {
             mission,
             revision,
+            follow_head,
             workspace,
             requester,
             inputs,
@@ -1520,6 +1539,19 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
+    // Memberless roots need placement in their declaration. Launched roots already
+    // retain resolved placement in MemberSpec; keep their historical revisions stable.
+    if primary.is_none() {
+        let canonical_children = desired
+            .as_object_mut()
+            .expect("canonical node is an object")
+            .entry("children")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("canonical children are an array");
+        canonical_children.retain(|child| child.get("name").and_then(Value::as_str) != Some("host"));
+        canonical_children.insert(0, serde_json::json!({"name": "host", "arguments": [host]}));
+    }
     // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
     let mut references = Vec::new();
     let mut resource_names = BTreeSet::new();
@@ -1621,11 +1653,14 @@ fn parse_agent(
             },
         )?;
     }
+    // A top-level root may be an inert identity/mail owner. A run-owned agent must
+    // still supply work to execute; declared launches were validated above.
     if context
         .subjects
         .get(&subject)
         .is_some_and(|subject| subject.member.is_none())
         && task_names.is_empty()
+        && context.owner_run.is_some()
     {
         return Err(FractalError::new(
             "missing-agent-launch",
@@ -1705,6 +1740,14 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     match kind {
         "account" => validate_account(node)?,
         "objective" => validate_objective(node)?,
+        "github-source" => {
+            fractal_schema::github_capture::declarations::parse_source(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-source", message))?;
+        }
+        "github-scope" => {
+            fractal_schema::github_capture::declarations::parse_roster(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-scope", message))?;
+        }
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -2185,14 +2228,14 @@ fn driver_member(
     let extra = child_strings(children, "args")?.unwrap_or_default();
     let mut provider = vec![child_string(children, "executable")?.unwrap_or_else(|| name.clone())];
     if name == "claude" {
-        // A typed Claude harness is always the real interactive TUI and always carries st3's
+        // A typed Claude harness is always the real interactive TUI and always carries Fractal's
         // native channel. `dev-channels #true` is retained only so declarations written before
         // the channel became intrinsic continue to parse; opting out would create an agent that
         // cannot receive graph messages, so false is rejected below.
         provider.extend(["--channels".into(), fractal_drivers::claude_channel::FRACTAL_CHANNEL.into()]);
         // The channel wakes the real TUI, while Claude's own lifecycle hooks externalize the
         // resulting turn. Supplying the canonical registration as an additional native settings
-        // source keeps arbitrary user workspaces untouched and gives every typed st seat the
+        // source keeps arbitrary user workspaces untouched and gives every typed Fractal seat the
         // same UserPromptSubmit/Stop state edges.
         provider.extend([
             "--settings".into(),
@@ -2474,6 +2517,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "under",
         "restart",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2520,6 +2564,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "workspace",
         "checkout",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2567,6 +2612,23 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
             return Err(FractalError::new(
                 "invalid-agent-lifecycle",
                 format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
+    }
+    if let Some(policy) = unique_child(document, "idle-suspend")? {
+        ensure_no_properties(policy)?;
+        ensure_no_children(policy)?;
+        if policy.ty().is_some() || policy.entries().iter().any(|entry| entry.ty().is_some()) {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend cannot have type annotations",
+            ));
+        }
+        let value = one_string(policy)?;
+        if crate::model::AgentIdleSuspend::parse(&value).is_none() {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend must be never or member",
             ));
         }
     }
@@ -4538,6 +4600,43 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_launch_agents_retain_resolved_host_placement() {
+        for (source, expected) in [
+            ("version 2\nagent \"example/owner\" { host \"other\" }", "other"),
+            ("version 2\nhost \"other\" { agent \"example/owner\" {} }", "other"),
+            ("version 2\nagent \"example/owner\" { host \"local\" }", "node"),
+            ("version 2\nagent \"example/owner\" {}", "node"),
+        ] {
+            let intent = parse_intent(source, "node").unwrap();
+            let owner = &intent.subjects["agent/example/owner"];
+            assert!(owner.member.is_none());
+            assert_eq!(
+                canonical_child_value(&owner.desired, "host").and_then(Value::as_str),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn inert_roots_do_not_relax_run_owned_or_declared_launch_validation() {
+        assert_eq!(
+            parse_execution_intent(
+                "version 2\nagent \"owner\" { host \"node\"; }",
+                "node",
+                "run-1",
+            )
+            .unwrap_err()
+            .code,
+            "missing-agent-launch",
+        );
+        assert!(parse_intent(
+            "version 2\nagent \"example/owner\" { host \"node\"; command \"true\"; argv \"false\"; }",
+            "node",
+        )
+        .is_err());
+    }
 
     #[test]
     fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
@@ -6635,6 +6734,109 @@ mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seco
             assert_eq!(error.code, "invalid-declared-admission");
             assert_eq!(error.details["field"], "declared_budgets.attention");
             assert!(error.details["subject"].is_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod github_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_effective_scope_are_root_declarations() {
+        let intent = parse_intent(r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+github-scope "public-example" {
+    revision "authored-one"
+    repository "R_example" from-ms=100
+}
+"#, "member-one").unwrap();
+        assert_eq!(intent.subjects["github-source/public-example"].kind, "github-source");
+        assert_eq!(intent.subjects["github-scope/public-example"].kind, "github-scope");
+    }
+
+    #[test]
+    fn enabling_source_without_authority_is_a_typed_validation_error() {
+        let source = r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#;
+        assert_eq!(parse_intent(source, "member-one").unwrap_err().code, "invalid-github-source");
+        let disabled = source.replace("enabled #true", "enabled #false");
+        assert!(parse_intent(&disabled, "member-one").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod idle_suspend_tests {
+    use super::*;
+    use crate::model::{AgentIdleSuspend, declared_idle_suspend};
+
+    #[test]
+    fn idle_suspend_is_optional_typed_declaration_metadata() {
+        let baseline = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let original = &baseline.subjects["agent/example/worker"];
+        assert_eq!(declared_idle_suspend(Some(&original.desired)), None);
+        assert_eq!(declared_idle_suspend(None), None);
+        for (value, expected) in [
+            ("never", AgentIdleSuspend::Never),
+            ("member", AgentIdleSuspend::Member),
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; idle-suspend \"{value}\"; }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let desired = &intent.subjects["agent/example/worker"];
+            assert_eq!(declared_idle_suspend(Some(&desired.desired)), Some(expected));
+            assert_ne!(desired.desired, original.desired);
+            assert_eq!(desired.member, original.member, "policy is not launch metadata");
+            assert!(desired.member.as_ref().unwrap()
+                .launch_changes(original.member.as_ref().unwrap()).is_empty());
+            let decoded: NormalizedIntent = serde_json::from_value(
+                serde_json::to_value(&intent).unwrap(),
+            ).unwrap();
+            assert_eq!(
+                declared_idle_suspend(Some(&decoded.subjects["agent/example/worker"].desired)),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn idle_suspend_refuses_duplicates_and_malformed_children() {
+        for policy in [
+            "idle-suspend",
+            "idle-suspend #true",
+            "idle-suspend 1",
+            "(policy)idle-suspend \"never\"",
+            "idle-suspend (policy)\"never\"",
+            "idle-suspend \"always\"",
+            "idle-suspend \"Never\"",
+            "idle-suspend \"never\" \"member\"",
+            "idle-suspend \"never\" mode=\"member\"",
+            "idle-suspend \"never\" {}",
+            "idle-suspend \"never\"; idle-suspend \"member\"",
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; {policy}; }}"
+            );
+            assert!(parse_intent(&source, "node").is_err(), "{policy}");
         }
     }
 }

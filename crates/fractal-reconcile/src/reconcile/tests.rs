@@ -321,6 +321,63 @@ mission "example/report" state="ready" {
 }
 
     #[test]
+    fn closed_old_boot_producer_does_not_publish_a_clean_fault_pair() {
+        use sha2::{Digest, Sha256};
+        use serde_json::json;
+
+        if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        let producer = fractal_runtime::PtyRuntime::new(registry.clone());
+        let runtime_id = "closed-worker";
+        let operation = "closed-operation";
+        let directory = root.path().join(".st3-pty-spawn-locks")
+            .join(format!("{:x}", Sha256::digest(registry.as_os_str().as_encoded_bytes())))
+            .join(format!("{:x}.producers", Sha256::digest(runtime_id.as_bytes())))
+            .join(format!("{:x}", Sha256::digest(operation.as_bytes())));
+        fs::create_dir_all(&directory).unwrap();
+        let work = "st3-closed-worker-closed-operation.scope";
+        let server = fractal_runtime::server_unit(runtime_id, 123);
+        for (name, value) in [
+            ("owner.json", json!({"version":1, "runtime_id":runtime_id,
+                "operation":operation, "scope":work, "launcher_acknowledged":true,
+                "publication_pending":false})),
+            ("server-123.json", json!({"version":1, "unit":server, "pid":123,
+                "start_token":1, "boot_id":"linux:previous-boot"})),
+            ("closure.json", json!({"version":1, "reason":"runtime-vanished",
+                "publication_pending":false, "scopes":[
+                    {"version":1, "unit":work, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null},
+                    {"version":1, "unit":server, "load_state":"not-found",
+                        "active_state":"inactive", "control_group":"", "cgroup":null}
+                ]})),
+        ] {
+            fs::write(directory.join(name), serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()));
+        let subject = "agent/closed-worker";
+        for _ in 0..3 {
+            // The placement-away no-op reports clean before the stop's closure check.
+            reconciler.record_member_reconcile_result(subject, Ok(())).unwrap();
+            let result = producer.start_operation_closed(runtime_id, operation)
+                .and_then(|closed| {
+                    anyhow::ensure!(closed, "producer closure unverified");
+                    Ok(())
+                });
+            assert!(result.is_ok(), "{result:?}");
+            reconciler.record_member_reconcile_result(subject, result).unwrap();
+            assert!(store.member_reconcile_fault(subject, None).unwrap().is_none());
+            assert!(store.claims_for(subject, Some("runtime.reconcile-decision")).unwrap().is_empty(),
+                "an already-closed producer must not alternate clean and fault decisions");
+        }
+    }
+
+    #[test]
     fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
         for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
             "unsupported", "unproven-stop"] {
@@ -660,6 +717,53 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_shell_worker_receipt_precedes_reconcile_application() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"sleep 600\"; }",
+            "worker-process-provenance");
+        let subject = store.desired_subject_with_writer("agent/node.worker").unwrap().unwrap().0;
+        let member = subject.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-current".into()),
+        });
+        let pid = std::process::id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        runtime.process_identities.lock().unwrap().insert(
+            (member.runtime_id.clone(), "worker-current".into()), (pid, token),
+        );
+        let reconciler = Reconciler::new(
+            store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.wait_for_test_starts.store(false, Ordering::Release);
+        reconciler.perform_start(&subject, member, "worker receipt before planner").unwrap();
+        // Join only the launch worker, never the completion-application planner.
+        let (live, changed) = &*reconciler.start_jobs.live;
+        let mut live = live.lock().unwrap();
+        while !live.is_empty() {
+            live = changed.wait(live).unwrap();
+        }
+        drop(live);
+        let operation = store.runtime_start_for(&subject.subject).unwrap().unwrap();
+        assert!(operation.finished);
+        assert!(!operation.applied);
+        assert!(!operation.receipted);
+        let result = operation.result.unwrap();
+        assert_eq!(result["operation_id"], operation.id);
+        assert_eq!(result["incarnation"], "worker-current");
+        assert_eq!(result["verification"], "operation-incarnation");
+        assert_eq!(result["runtime_pid"], pid);
+        assert_eq!(result["runtime_pid_start_token"], token.to_string());
+        assert_eq!(result["runtime_start_fields"]["status"], "starting");
+        assert!(result["runtime_before_start"].is_null());
+        assert!(store.latest_claim(&subject.subject, Some("runtime.observed")).unwrap().is_none());
+        assert!(store.latest_observation(&subject.subject, "runtime.action.succeeded").unwrap().is_none());
+    }
+
 
     #[test]
     fn claude_login_screen_recognizes_only_explicit_auth_prompts() {
@@ -1021,6 +1125,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
 
+    type ResourceRecoveryHook = Box<dyn Fn(&Store) + Send>;
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
@@ -1030,6 +1136,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
+        resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
@@ -1051,6 +1160,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        settled_leftovers: Mutex<BTreeSet<(String, String)>>,
         lanes_ended: Mutex<Vec<String>>,
         pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
         pub lane_held: Mutex<Option<u64>>,
@@ -1178,7 +1288,18 @@ mission "native-exit-evidence" state="ready" {{
 
     #[test]
     fn one_shot_exit_evidence_survives_stop_and_explains_missing_mission_agent() {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+        one_shot_retirement_explains_missing_mission_agent(true);
+    }
+
+    #[test]
+    fn one_shot_vanished_without_exit_evidence_explains_missing_mission_agent() {
+        one_shot_retirement_explains_missing_mission_agent(false);
+    }
+
+    fn one_shot_retirement_explains_missing_mission_agent(receipt: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let expected = if receipt { "code 23" } else { "vanished-without-exit-evidence" };
         apply_source(&store, r#"version 2
 agent "worker" { workspace "/tmp"; command "printf 'worker failed\n' >&2; exit 23"; one-shot }
 mission "exit-evidence" state="ready" {
@@ -1190,13 +1311,15 @@ mission "exit-evidence" state="ready" {
             .find(|subject| subject.subject == "agent/node.worker").unwrap();
         let member = subject.member.as_ref().unwrap();
         let runtime = Arc::new(FakeRuntime::default());
-        runtime.exit_evidence.lock().unwrap().insert(
-            (member.runtime_id.clone(), "worker-one".into()),
-            fractal_runtime::PtyExitEvidence {
-                incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
-                output_tail: Some("worker failed".into()),
-            },
-        );
+        if receipt {
+            runtime.exit_evidence.lock().unwrap().insert(
+                (member.runtime_id.clone(), "worker-one".into()),
+                fractal_runtime::PtyExitEvidence {
+                    incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
+                    output_tail: Some("worker failed".into()),
+                },
+            );
+        }
         let reconciler = Reconciler::new(
             store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
         );
@@ -1214,11 +1337,23 @@ mission "exit-evidence" state="ready" {
         ).unwrap());
         let actual = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("stopped"));
-        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(23));
-        assert_eq!(actual_field(&actual, "exit_evidence").unwrap()["outputTail"], "worker failed");
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), receipt.then_some(23));
+        let evidence = actual_field(&actual, "exit_evidence").unwrap();
+        assert_eq!(evidence["incarnation"], "worker-one");
+        assert_eq!(evidence["lastObservedState"], "vanished");
+        assert!(evidence["observedAtUnixMs"].is_u64());
+        if receipt {
+            assert_eq!(evidence["outputTail"], "worker failed");
+        } else {
+            assert_eq!(evidence["exitStatus"], "unknown");
+            assert_eq!(evidence["reason"], expected);
+        }
+        let stop = store.desired_subjects().unwrap().into_iter()
+            .find(|item| item.subject == subject.subject).unwrap();
+        assert!(stop.desired["reason"].as_str().unwrap().contains(expected));
         let decision = store.latest_observation(&subject.subject, "runtime.reconcile-decision").unwrap().unwrap();
         let reason = decision.body["fields"]["reason"].as_str().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         let run = store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "exit-evidence".into(), revision: None, workspace: "/tmp".into(),
             requester: Some("person/test".into()), mode: Some("run".into()),
@@ -1231,13 +1366,13 @@ mission "exit-evidence" state="ready" {
         let step = &run.steps[0];
         assert_eq!(step.status, "blocked");
         let reason = step.blocked_reason.as_deref().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         for kind in ["operational.failure", "mission-run.state"] {
             let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
                 .unwrap_or_else(|| panic!("missing {kind}: run={run:?}; faults={:?}",
                     store.observations_for(&run.subject, "reconcile.fault").unwrap()));
             let reason = claim.body["fields"]["reason"].as_str().unwrap();
-            assert!(reason.contains("code 23") && reason.contains("worker failed"), "{kind}: {reason}");
+            assert!(reason.contains(expected), "{kind}: {reason}");
         }
         let replica = Store::open_memory("replica").unwrap();
         replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
@@ -1308,7 +1443,7 @@ mission "retained-reason" state="ready" {
         let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
         let mut fields = BTreeMap::from([("status".into(), Value::from("exited"))]);
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
-        assert!(fields.get("exit_evidence").is_none_or(Value::is_null));
+        assert_eq!(fields["exit_evidence"]["reason"], "exited-without-exit-evidence");
         runtime.exit_evidence.lock().unwrap().get_mut(&("worker".into(), "one".into())).unwrap().incarnation = "one".into();
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
         let reason = runtime_exit_reason(&serde_json::to_value(fields).unwrap()).unwrap();
@@ -1420,7 +1555,250 @@ mission "retained-reason" state="ready" {
         assert!(runtime.removes.lock().unwrap().is_empty());
     }
 
+    fn released_shell_fixture(expire_owner: bool) -> (
+        tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>,
+    ) {
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+        use crate::store::shell_resources::{Command, PayloadResult};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.ensure_resource_authority().unwrap();
+        let owner = if expire_owner {
+            let blob = store.put_blob(b"export default {}").unwrap();
+            apply_source(&store, &format!(r#"version 2
+mission "shell-owner" state="ready" {{
+  goal "Retain shell outcome when its owner ends."
+  step "work" {{ program "/unused.mjs" sha256="{blob}" }}
+}}"#), "shell-owner-source");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "shell-owner".into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "shell-owner-run".into(),
+            }).unwrap();
+            Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
+                attempt: run.steps[0].attempt, invocation: None }
+        } else {
+            Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
+        };
+        let lane = LaneRequest {
+            id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+            profile: None, profile_estimate: None, disk_path: None,
+        };
+        let now = u64::try_from(now_ms()).unwrap();
+        let mut execution = store.submit_shell_resource(Command {
+            id: "outcome".into(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
+            cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+        }, now).unwrap();
+        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
+            panic!("fixture was not admitted");
+        };
+        store.prepare_resource_membership(&grant, "outcome").unwrap();
+        let generation: fractal_runtime::ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema":"st.runtime.exec-generation.v1", "pid":1, "createdAtUnixMs":now,
+            "startToken":1, "generationId":"outcome-generation", "payloadReleasedAtUnixMs":now,
+        })).unwrap();
+        store.launch_resource_membership(&grant, "outcome", &generation, now).unwrap();
+        execution.state = "admitted".into();
+        execution.started_at = Some(now);
+        store.update_shell_resource(&execution).unwrap();
+        runtime.execs.lock().unwrap().insert("outcome".into(), RuntimeObservation {
+            runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
+            exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
+        });
+        let path = reconciler.shell_result_path("outcome");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&PayloadResult {
+            head_start: Some("abc123".into()), head_end: Some("def456".into()),
+            clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None,
+        }).unwrap()).unwrap();
+        if expire_owner {
+            store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
+        }
+        (root, store, runtime, reconciler)
+    }
+
+    fn assert_one_shell_outcome(store: &Store, state: &str) {
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, state);
+        assert_eq!(execution.exit_code, Some(37));
+        assert_eq!(execution.result.as_ref().unwrap().wall_duration_ms, 1234);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_code"], 37);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 1234);
+    }
+
+    #[test]
+    fn shell_recovery_reads_synced_helper_result_before_predecessor_retirement() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        assert!(store.shell_resource("outcome").unwrap().result.is_none());
+        store.take_shell_environment("outcome");
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = _root.path().join("drivers");
+        // The fake native recovery boundary refuses to retire any released shell lacking
+        // a persisted observation; the real Store and receipt transaction are unchanged.
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "completed");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ended_shell_owner_finalizes_refusal_with_payload_observations_exactly_once() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(true);
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(store.shell_resource("outcome").unwrap().state, "failing");
+        assert!(store.shell_resource("outcome").unwrap().cancellation_started_at.is_some());
+        assert_eq!(*runtime.stops.lock().unwrap(), vec!["outcome".to_owned()]);
+        tokio::task::yield_now().await;
+        reconciler.reconcile_shell_resources().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "refused");
+        assert!(store.shell_resource("outcome").unwrap().reason.contains("owner"));
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn never_launched_shell_without_transient_environment_is_refused_without_spawn() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        let original = store.shell_resource("outcome").unwrap();
+        let grant = store.resource_membership_record(&original.command.lane.id, &original.command.lane.owner)
+            .unwrap().grant.unwrap();
+        let mut command = original.command;
+        command.id = "lost-environment".into();
+        command.parent = Some(grant);
+        store.submit_shell_resource(command, u64::try_from(now_ms()).unwrap()).unwrap();
+        store.take_shell_environment("lost-environment");
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("lost-environment").unwrap();
+        assert_eq!(execution.state, "refused");
+        assert!(execution.reason.contains("environment-unavailable"));
+        assert!(execution.started_at.is_none());
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn running_shell_recovery_awaits_payload_publication_before_generic_retirement() {
+        use crate::store::shell_resources::PayloadResult;
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        let path = reconciler.shell_result_path("outcome");
+        fs::remove_file(&path).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // Publication occurs on another thread only after SIGTERM. Its exit notification
+        // follows the atomic publication, matching the real helper/native wait boundary.
+        *runtime.resource_exit_publication.lock().unwrap() = Some(Box::new(move || {
+            let temporary = path.with_extension("pending");
+            fs::write(&temporary, serde_json::to_vec(&PayloadResult {
+                head_start: Some("abc123".into()), head_end: Some("def456".into()),
+                clean_start: Some(true), clean_end: Some(false),
+                exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+            }).unwrap()).unwrap();
+            fs::rename(temporary, path).unwrap();
+        }));
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(|store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            let result = execution.result.unwrap();
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.exit_signal, Some(9));
+            assert_eq!(result.wall_duration_ms, 2345);
+        }));
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None); // The observer's exit code 37 is not the payload's.
+        assert_eq!(execution.exit_signal, Some(9));
+        assert_eq!(execution.result.unwrap().wall_duration_ms, 2345);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_signal"], 9);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 2345);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+    }
+
+    #[test]
+    fn recovered_observer_exit_without_payload_publication_leaves_payload_status_unknown() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        fs::remove_file(reconciler.shell_result_path("outcome")).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // The fake observer exits on TERM without publishing a payload result.
+        reconciler.prepare_shell_resource_recovery().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None);
+        assert_eq!(execution.exit_signal, None);
+        let result = execution.result.unwrap();
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.exit_signal, None);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+        assert!(page.claims[0].body["fields"].get("exit_signal").is_none());
+    }
+
     impl RuntimeControl for FakeRuntime {
+        fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
+            if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
+            for execution in store.shell_resources(host, true)? {
+                if execution.started_at.is_some() {
+                    anyhow::ensure!(execution.result.is_some(), "recovery retired a shell before preserving its observations");
+                }
+            }
+            Ok(0)
+        }
+        fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+            Ok(true)
+        }
+        fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+            let execs = self.execs.lock().unwrap();
+            let observation = execs.get(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            if observation.status == "exited" { wake(); }
+            else { self.resource_exit_watches.lock().unwrap().insert(id.into(), wake); }
+            Ok(())
+        }
+        fn resource_exec_output(&self, _id: &str, _generation: &str) -> Result<(String, String)> {
+            Ok((String::new(), String::new()))
+        }
+        fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
+            Ok(None)
+        }
+        fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+            let mut execs = self.execs.lock().unwrap();
+            let observation = execs.get_mut(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            observation.status = "exited".into();
+            self.stops.lock().unwrap().push(id.into());
+            drop(execs);
+            let wake = self.resource_exit_watches.lock().unwrap().remove(id);
+            if let Some(publish) = self.resource_exit_publication.lock().unwrap().take() {
+                std::thread::spawn(move || {
+                    publish();
+                    if let Some(wake) = wake { wake(); }
+                });
+            } else if let Some(wake) = wake { wake(); }
+            Ok(())
+        }
         fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
             Ok(self.exit_evidence.lock().unwrap()
                 .get(&(runtime_id.into(), incarnation.into())).cloned())
@@ -1637,6 +2015,10 @@ mission "retained-reason" state="ready" {
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+            Ok(self.settled_leftovers.lock().unwrap()
+                .contains(&(runtime_id.into(), incarnation.into())))
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
@@ -4825,7 +5207,198 @@ mission "legacy-child" state="ready" {
     }
 
     #[test]
+    fn restart_active_publication_only_retargets_head_following_runs() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |goal: &str| format!(r#"version 2
+mission "revision-intent" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  concurrent-runs
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &source("Use the first revision."), "intent-first");
+        let first = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        let start = |revision: Option<String>, key: &str| {
+            store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "revision-intent".into(),
+                revision,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: key.into(),
+            }).unwrap()
+        };
+        let pinned = start(Some(first.revision.clone()), "intent-pin");
+        let head = start(None, "intent-head");
+        apply_source(&store, &source("Use the second revision."), "intent-second");
+        let second = store.mission_spec("revision-intent", None).unwrap().unwrap();
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&pinned.id).unwrap().unwrap().superseded_by.is_none());
+        let replacement = store.mission_run(&head.id).unwrap().unwrap().superseded_by.unwrap();
+        assert_eq!(store.mission_run(&replacement).unwrap().unwrap().revision, second.revision);
+        store.set_mission_run_state(&pinned.id, "failed", "terminal", None).unwrap();
+        let retry = store.retry_mission_run(&pinned.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "intent-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision);
+        apply_source(&store, &source("Use the third revision."), "intent-third");
+        store.supersede_mission_publications().unwrap();
+        assert!(store.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+        assert!(store.mission_run(&replacement).unwrap().unwrap().superseded_by.is_some(),
+            "a head-following successor must still follow later heads");
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(false);
+    }
+
+    #[test]
+    fn restart_active_publication_preserves_legacy_exact_revision_children() {
+        assert_restart_active_preserves_exact_revision_child(true);
+    }
+
+    fn assert_restart_active_preserves_exact_revision_child(legacy: bool) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let child_source = |goal: &str| format!(r#"version 2
+mission "pinned-work" state="ready" revision-cutover="restart-active" {{
+  goal "{goal}"
+  step "wait" {{ assigned-to "agent/node.worker" }}
+}}"#);
+        apply_source(&store, &child_source("Review the first change."), "pin-first");
+        let first = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        apply_source(&store, &format!(r#"version 2
+mission "pin-parent" state="ready" {{
+  goal "Run the exact child."
+  step "execute" {{ agentless; uses-mission "pinned-work@{}"; }}
+}}"#, first.revision), "pin-parent");
+        let parent = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pin-parent".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: "pin-parent-run".into(),
+        }).unwrap();
+        if legacy {
+            // Author a pre-metadata creation receipt, rather than modifying signed history.
+            store.append_claim(&crate::model::ClaimInput {
+                subject: "mission-run/legacy-pin-child".into(),
+                kind: "mission-run.created".into(),
+                actor: Some("person/test".into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "mission": first.subject,
+                    "revision": first.revision,
+                    "initial_revision": first.revision,
+                    "current_generation": "run-generation/legacy-pin-generation",
+                    "root_revision": parent.revision,
+                    "root_mission_run": parent.subject,
+                    "parent_step_run": parent.steps[0].subject,
+                    "workspace": "/tmp",
+                    "requester": "person/test",
+                    "inputs": {},
+                    "mode": "run",
+                    "status": "running",
+                    "phase": "normal",
+                    "admission_publication": null,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("legacy-child-creation".into()),
+            }).unwrap();
+            store.replay_replication_graph().unwrap();
+            assert_eq!(store.mission_run("legacy-pin-child").unwrap().unwrap()
+                .parent_step_run.as_deref(), Some(parent.steps[0].subject.as_str()));
+        }
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let child = store.mission_run_for_parent_step(&parent.steps[0].subject)
+            .unwrap().expect("the exact-revision child is live");
+        assert_eq!(child.revision, first.revision);
+        assert!(child.superseded_by.is_none());
+        let creation = store.latest_claim(&child.subject, Some("mission-run.created"))
+            .unwrap().unwrap();
+        assert_eq!(creation.body.get("revision_pinned"),
+            if legacy { None } else { Some(&Value::Bool(true)) });
+        // The registry is unchanged from before pin metadata existed.
+        assert!(matches!(
+            crate::store::classify_replicated_claim_with_registry(
+                &creation, fractal_schema::registry(),
+            ).unwrap(),
+            smallclaims::store::ReplicatedClaimAdmission::Valid,
+        ));
+        assert!(smallclaims::hash::claim_id_is_content_hash(&creation).unwrap());
+        let signed_digest = smallclaims::principal::content_digest(
+            &creation.subject, &creation.kind, creation.actor.as_deref(), &creation.body,
+        );
+        let mut stripped = creation.clone();
+        if legacy {
+            stripped.body["revision_pinned"] = Value::Bool(true);
+        } else {
+            stripped.body.as_object_mut().unwrap().remove("revision_pinned");
+        }
+        assert!(!smallclaims::hash::claim_id_is_content_hash(&stripped).unwrap());
+        assert_ne!(signed_digest, smallclaims::principal::content_digest(
+            &stripped.subject, &stripped.kind, stripped.actor.as_deref(), &stripped.body,
+        ));
+        // Rebuilding projections must not turn either creation format into head intent.
+        store.replay_replication_graph().unwrap();
+        apply_source(&store, &child_source("Review a different change."), "pin-second");
+        let second = store.mission_spec("pinned-work", None).unwrap().unwrap();
+        assert_ne!(first.revision, second.revision);
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let retained = store.mission_run(&child.id).unwrap().unwrap();
+        assert!(retained.superseded_by.is_none(), "a head publication must not supersede an exact-revision child");
+        assert_eq!(retained.status, child.status);
+        assert_eq!(retained.revision, first.revision);
+        assert_eq!(retained.generation, child.generation);
+        let replica = Arc::new(Store::open_memory("node").unwrap());
+        replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+        replica.replay_replication_graph().unwrap();
+        let restarted = Reconciler::new(
+            replica.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&child.id).unwrap().unwrap().superseded_by.is_none());
+        replica.set_mission_run_state(&child.id, "failed", "terminal", None).unwrap();
+        let retry = replica.retry_mission_run(&child.id, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(),
+            same_revision: false,
+            reason: None,
+            idempotency_key: "pin-child-retry".into(),
+        }).unwrap();
+        assert_eq!(retry.revision, first.revision, "even a default retry retains a pin");
+        for _ in 0..4 {
+            restarted.reconcile_once().unwrap();
+        }
+        assert!(replica.mission_run(&retry.id).unwrap().unwrap().superseded_by.is_none());
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
+        exact_produced_mission_revision(false);
+    }
+
+    #[test]
+    fn a_step_uses_its_run_scoped_output_revision() {
+        exact_produced_mission_revision(true);
+    }
+
+    fn exact_produced_mission_revision(per_run: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
 version 2
@@ -4846,6 +5419,9 @@ version 2
   }
 
 "#;
+        let bootstrap = if per_run {
+            bootstrap.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+        } else { bootstrap.to_owned() };
         let first_work = r#"
 version 2
 
@@ -4857,12 +5433,7 @@ version 2
   }
 
 "#;
-        apply_source(&store, bootstrap, "publish-bootstrap");
-        apply_source(&store, first_work, "publish-first-work");
-        let first = store
-            .mission_spec("project/work", None)
-            .unwrap()
-            .expect("first work mission");
+        apply_source(&store, &bootstrap, "publish-bootstrap");
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "bootstrap".into(),
@@ -4874,6 +5445,10 @@ version 2
                 idempotency_key: "run-bootstrap".into(),
             })
             .unwrap();
+        let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+        let first_work = first_work.replace("project/work", &mission_id);
+        apply_source(&store, &first_work, "publish-first-work");
+        let first = store.mission_spec(&mission_id, None).unwrap().expect("first work mission");
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -4909,7 +5484,7 @@ version 2
                 &compile.subject,
                 "agent/node.planner",
                 Some("test"),
-                "project/work",
+                &mission_id,
                 &first,
                 "bind-first-work",
             )
@@ -4939,7 +5514,8 @@ version 2
   }
 
 "#;
-        apply_source(&store, second_work, "publish-second-work");
+        let second_work = second_work.replace("project/work", &mission_id);
+        apply_source(&store, &second_work, "publish-second-work");
         for _ in 0..4 {
             reconciler.reconcile_once().unwrap();
         }
@@ -8055,11 +8631,12 @@ mission "task" state="ready" {{
             ),
             "running-render-failure",
         );
+        let run_scratch = tempfile::tempdir().unwrap();
         store
             .create_mission_run(&MissionRunRequest {
                 mission: "task".into(),
                 revision: None,
-                workspace: workspace_path.clone(),
+                workspace: run_scratch.path().to_string_lossy().into_owned(),
                 requester: Some("person/test".into()),
                 mode: None,
                 inputs: BTreeMap::new(),
@@ -8456,6 +9033,57 @@ agent "good" { workspace "/tmp"; command "true" }
             &[("exec.node.app.web".to_owned(), false)]
         );
         assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn historical_exec_cleanup_settlement_survives_reconciler_and_store_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cleanup.sqlite");
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        apply_source(&store, r#"version 2
+agent "app" {
+  workspace "/tmp"
+  exec "settled" { command "sleep infinity" }
+  exec "unsettled" { command "sleep infinity" }
+}
+"#, "cleanup-root");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        for name in ["settled", "unsettled"] {
+            let id = format!("exec.node.app.{name}");
+            runtime.execs.lock().unwrap().insert(id.clone(), RuntimeObservation {
+                runtime_id: id, terminal: false, status: "exited".into(),
+                exit_code: Some(0), incarnation_id: Some(format!("{name}-one")),
+            });
+        }
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "cleanup-stop");
+        // Both have stopped leaders, but neither yet has whole-scope empty proof.
+        reconciler.reconcile_once().unwrap();
+        let calls = |name: &str| runtime.leftovers.lock().unwrap().iter()
+            .filter(|(id, _)| id == &format!("exec.node.app.{name}")).count();
+        assert_eq!((calls("settled"), calls("unsettled")), (1, 1));
+        runtime.settled_leftovers.lock().unwrap()
+            .insert(("exec.node.app.settled".into(), "settled-one".into()));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 2));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 3));
+        drop(reconciler);
+        drop(store);
+        // Forget native in-memory proof too: only the daemon's durable receipt remains.
+        runtime.settled_leftovers.lock().unwrap().clear();
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 4));
+        // The durable receipt cannot settle a later incarnation using the same runtime ID.
+        runtime.execs.lock().unwrap().get_mut("exec.node.app.settled").unwrap()
+            .incarnation_id = Some("settled-two".into());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (3, 5));
     }
 
     #[test]
@@ -12045,6 +12673,91 @@ schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
     }
 
     #[test]
+    fn scheduled_recovery_acknowledges_existing_checkout_runs_before_admission() {
+        use serde_json::json;
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            apply_source(&store, &format!(r#"version 2
+schedule "cycle" {{ every "7d"; anchor "2030-01-01T00:00:00Z"
+  work {{ mission "scheduled-cycle@{revision}"; workspace "{}" }}
+}}"#, root.path().display()), "recovery-cycle");
+            let request = store.append_claim(&ClaimInput {
+                subject: "schedule/cycle".into(), kind: "schedule.work-requested".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), json!("node")), ("occurrence".into(), json!(4)),
+                    ("mission".into(), json!("mission/scheduled-cycle")),
+                    ("mission_revision".into(), json!(revision)),
+                    ("workspace".into(), json!(root.path().to_string_lossy())), ("inputs".into(), json!({})),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let run_request = MissionRunRequest {
+                mission: "scheduled-cycle".into(), revision: Some(revision),
+                workspace: root.path().join("pre-upgrade-run").to_string_lossy().into_owned(),
+                requester: Some("daemon/node".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: format!("schedule-work:{}", request.id),
+            };
+            let run = if legacy {
+                store.create_mission_run(&run_request).unwrap()
+            } else {
+                store.create_scheduled_mission_run(&run_request, None, "schedule/cycle", 4).unwrap()
+            };
+            // Model an already admitted pre-upgrade checkout without bypassing admission.
+            fs::write(root.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            let schedule = store.desired_subjects().unwrap().into_iter().find(|s| s.subject == "schedule/cycle").unwrap();
+            reconciler.reconcile_schedule_work_with_start(&schedule, |_, _, _, _| {
+                panic!("an existing run must be acknowledged without starting or inspecting scratch")
+            }).unwrap();
+            let starts = store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].body["fields"]["mission_run"], run.subject);
+            assert!(store.claims_for(&schedule.subject, Some("schedule.work-failed")).unwrap().is_empty());
+            assert!(store.pending_schedule_work_requests(&schedule.subject).unwrap().is_empty());
+            assert!(store.schedule_has_active_started_run(&schedule.subject).unwrap());
+            reconciler.reconcile_schedule_work(&schedule).unwrap();
+            assert_eq!(store.claims_for(&schedule.subject, Some("schedule.work-started")).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn inherited_checkout_scratch_fails_child_and_loop_steps_durably() {
+        for loop_round in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let revision = scheduled_mission_revision(&store);
+            let body = if loop_round {
+                r#"loop "dispatch" { max-rounds 1; round { completion { when "all-steps-exhausted"; }; step "done" { agentless; }; }; }"#.to_owned()
+            } else {
+                format!(r#"step "dispatch" {{ agentless; uses-mission "scheduled-cycle@{revision}"; }}"#)
+            };
+            apply_source(&store, &format!(r#"version 2
+mission "parent" state="ready" {{
+  goal "Handle an inherited unsafe scratch directory."
+  completion {{ when "all-steps-exhausted"; }}
+  {body}
+}}"#), "inherited-checkout-parent");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "parent".into(), revision: None,
+                workspace: root.path().to_string_lossy().into_owned(),
+                requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "inherited-checkout-run".into(),
+            }).unwrap();
+            fs::create_dir(root.path().join(".git")).unwrap();
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+            for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
+            let current = store.mission_run(&run.subject).unwrap().unwrap();
+            assert_eq!(current.steps.iter().find(|step| step.step == "dispatch").unwrap().status, "failed");
+            assert!(store.mission_run_for_parent_step(&current.steps[0].subject).unwrap().is_none());
+            assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+                claim.body.pointer("/fields/code").and_then(Value::as_str)
+                    == Some("mission-workspace-in-worktree")
+            }));
+        }
+    }
+
+    #[test]
     fn subscription_start_contention_waits_without_durable_failure_then_starts() {
         use serde_json::json;
         for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
@@ -13321,6 +14034,41 @@ schedule "{name}" {{
             .and_then(Value::as_str)
             .unwrap();
         assert!(Path::new(&store.mission_run(run).unwrap().unwrap().workspace).is_dir());
+    }
+
+    #[tokio::test]
+    async fn scheduled_work_rejects_checkout_scratch_before_creating_a_directory() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(checkout.path().join(".git"), "gitdir: /unused/worktrees/branch\n").unwrap();
+        let workspace_root = checkout.path().join("cycles");
+        let at = (Utc::now() + chrono::Duration::milliseconds(50))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nschedule \"cycle\" {{ at \"{at}\"; work {{ mission \"scheduled-cycle@{revision}\"; workspace {:?} }} }}",
+                workspace_root.display().to_string()
+            ),
+            "schedule-unsafe-workspace",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        reconciler.reconcile_once().unwrap();
+        assert!(!workspace_root.exists(), "admission must not dirty the checkout");
+        assert!(store.claims_for("schedule/cycle", Some("schedule.work-started")).unwrap().is_empty());
+        assert!(!store.claims_for("schedule/cycle", Some("schedule.work-failed")).unwrap().is_empty());
+        assert!(store.observations_for("daemon/node", "daemon.diagnostic").unwrap().iter().any(|claim| {
+            claim.body.pointer("/fields/code").and_then(Value::as_str)
+                == Some("mission-workspace-in-worktree")
+        }));
     }
 
     #[tokio::test]
@@ -14688,6 +15436,116 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         assert_eq!(report().status, "cancelled");
     }
 
+    #[test]
+    fn root_cancellation_stops_subscription_descendant_execs_only_under_that_root() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+mission "subscription-root" state="ready" {
+  goal "Own subscription deliveries."
+  concurrent-runs
+  step "wait" {
+    agentless
+    gate "wait" { document "doc/root-release" }
+  }
+}
+mission "subscription-child" state="ready" {
+  goal "Keep a delivered exec live."
+  concurrent-runs
+  step "work" {
+    agentless
+    exec "worker" { command "sleep 60"; restart "never" }
+    gate "wait" { document "doc/child-release" }
+  }
+}
+"#,
+            "subscription-cancellation-missions",
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        for name in ["root", "other", "child", "unrelated"] {
+            std::fs::create_dir(workspace.path().join(name)).unwrap();
+        }
+        let request = |mission: &str, key: &str| MissionRunRequest {
+            mission: mission.into(),
+            revision: None,
+            workspace: workspace.path().join(key).display().to_string(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let root = store.create_mission_run(&request("subscription-root", "root")).unwrap();
+        let other = store.create_mission_run(&request("subscription-root", "other")).unwrap();
+        // Both deliveries use the same subscription, but inherit different root identities.
+        // Their synthetic parent is deliberately not a generation's ordinary step.
+        let child = store.create_subscription_mission_run(
+            &request("subscription-child", "child"), Some(&root),
+            "subscription/shared", "resource/item", "discovery-child",
+        ).unwrap();
+        let unrelated = store.create_subscription_mission_run(
+            &request("subscription-child", "unrelated"), Some(&other),
+            "subscription/shared", "resource/item", "discovery-unrelated",
+        ).unwrap();
+        assert_eq!(child.parent_step_run.as_deref(), Some("step-run/subscription/shared"));
+        assert!(store.step_run("step-run/subscription/shared").unwrap().is_none());
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+            for member in runtime.started_members.lock().unwrap().iter() {
+                runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(),
+                    terminal: false,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("live-{}", member.runtime_id)),
+                });
+            }
+        }
+        let exec = |run: &MissionRunView| {
+            store.desired_subjects_for_owner_run(&run.subject).unwrap().into_iter()
+                .find(|subject| subject.kind == "exec").expect("the delivered exec is declared")
+        };
+        let child_exec = exec(&child);
+        let unrelated_exec = exec(&unrelated);
+        assert_eq!(actual_field(&store.latest_actual_value(&child_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(actual_field(&store.latest_actual_value(&unrelated_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        store.request_mission_run_cancellation(&root.id, "operator cancelled the root").unwrap();
+        let cancelling = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelling.phase, "cleanup-cancelled", "subscription descendants need durable cancellation");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["phase"], "cleanup-cancelled");
+        let step = &cancelling.steps[0];
+        let claim = store.latest_claim(&step.subject, Some("step-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        // Exercise root cleanup itself: no independent child cleanup or generic
+        // terminal-owner runtime sweep may rescue the missing descendant stop.
+        reconciler.reconcile_mission_run_cleanup(
+            &store.mission_run(&root.id).unwrap().unwrap(),
+        ).unwrap();
+        let desired = store.desired_subjects().unwrap();
+        assert!(desired.iter().any(|subject| subject.subject == child_exec.subject && subject.kind == "stop"),
+            "root cleanup must emit an exact stop for its descendant exec");
+        assert_eq!(store.mission_run(&other.id).unwrap().unwrap().status, other.status);
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+        assert!(desired.iter().any(|subject| subject.subject == unrelated_exec.subject && subject.kind == "exec"));
+        // The fake runtime confirms that this exact exec has ended, allowing
+        // the existing cleanup lifecycle to write the terminal cancellation.
+        runtime.execs.lock().unwrap().remove(&child_exec.member.as_ref().unwrap().runtime_id);
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let cancelled = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.phase, "terminal");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+    }
+
     #[tokio::test]
     async fn one_cancellation_wake_converges_through_runtime_cleanup() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -15388,7 +16246,7 @@ mission "collision" state="ready" {
         let mut request = MissionRunRequest {
             mission: "collision".into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
             inputs: BTreeMap::new(),
@@ -23278,6 +24136,54 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
     }
 
+    /// Capture replaces only the durable merge writer. Historical merged baselines stay
+    /// silent; live mirror transitions remain visible and unrelated events still replicate.
+    #[test]
+    fn capture_retires_only_configured_durable_merge_events() {
+        for (enabled, repository, canonical) in [
+            (Some(true), "ACME/GARDEN", true),
+            (Some(false), "acme/garden", false),
+            (Some(true), "acme/other", false),
+            (None, "acme/garden", false),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            if let Some(enabled) = enabled {
+                apply_source(&store, &format!(r#"version 2
+github-source "public-capture" {{
+  host "github.com"; generation 1; authority-grant "grant-one"
+  repository "{repository}"; enabled #{enabled}; checkpoint-every-ms 60000; replicate-private #false
+}}"#), "capture-event-ownership");
+            }
+            let plugin = github_plugin_store::GithubPluginStore::memory();
+            let spec = crate::model::ObserverSpec {
+                resource: "resource/github/acme/garden".into(),
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: Vec::new(), every_ms: None, stopped: false,
+            };
+            let item = |number, state: &str, merged| crate::model::RecordedItem {
+                subject: format!("{}/pull-request/{number}", spec.resource),
+                kind: "vcs.pull-request".into(),
+                facts: serde_json::json!({"number": number, "state": state, "merged": merged}),
+                claim: format!("claim-{number}"),
+            };
+            let observer = "observer/github/acme/garden";
+            let baseline = [item(7, "open", false), item(8, "closed", true), item(9, "open", false)];
+            mirror_observation(&store, &plugin, observer, &spec, None, Some("c1"), &baseline);
+            assert!(plugin.events(&spec.resource, None, 10).unwrap().is_empty(), "history is not live");
+            assert!(store.github_events(&spec.resource, None, 10).unwrap().is_empty());
+            let changed = [item(7, "closed", true), item(8, "closed", true), item(9, "closed", false)];
+            mirror_observation(&store, &plugin, observer, &spec, Some("c1"), Some("c2"), &changed);
+            let live = plugin.events(&spec.resource, Some(7), 10).unwrap();
+            assert_eq!(live.len(), 1, "the live merge remains in the operational mirror");
+            assert_eq!(live[0]["event"], "merged");
+            assert_eq!(store.github_events(&spec.resource, Some(7), 10).unwrap().len(), usize::from(!canonical));
+            assert_eq!(store.github_events(&spec.resource, Some(9), 10).unwrap()[0]["event"], "closed");
+            mirror_observation(&store, &plugin, observer, &spec, Some("c2"), Some("c3"), &changed);
+            assert_eq!(plugin.events(&spec.resource, Some(7), 10).unwrap().len(), 1, "no repeated merge");
+            assert!(plugin.events(&spec.resource, Some(8), 10).unwrap().is_empty(), "backfill never emits");
+        }
+    }
+
     /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`
     /// alone, and each derived event as one `github.event` claim. A change to a fact a wake or
     /// a delivery reads, such as a new comment, still writes a full snapshot, so when polling
@@ -23821,6 +24727,90 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["subject"], "github-event/repo/issue/2/comment/5");
         assert_eq!(comment_event(5), 1);
+    }
+
+    #[tokio::test]
+    async fn unavailable_recovery_clears_the_reason_in_merged_stored_item_facts() {
+        use crate::resource::test_github::{FakeGithub, age_pull_request_check, observe};
+        use serde_json::json;
+
+        for mode in ["rest", "graphql", "refresh", "webhook"] {
+            let (github, base) = FakeGithub::start().await;
+            let store = Store::open_memory("node").unwrap();
+            apply_source(&store, r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "pull_requests"
+}"#, "unavailable-recovery");
+            let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+            let listing = json!([
+                {"number": 1, "node_id": "I_unavailable", "state": "open", "state_reason": "reopened",
+                    "html_url": "https://github.com/acme/garden/issues/1", "updated_at": "2026-09-10T00:00:00Z"},
+                {"number": 2, "node_id": "PR_unavailable", "state": "open", "pull_request": {},
+                    "html_url": "https://github.com/acme/garden/pull/2", "updated_at": "2026-09-10T00:00:00Z"},
+            ]);
+            github.route("/repos/acme/garden", json!({"id": 7}));
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", listing.clone());
+            *github.graphql_pulls.lock() = Some((vec![], 100));
+            *github.graphql.lock() = json!({
+                "data": {"nodes": [null, null]},
+                "errors": [
+                    {"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Unavailable issue"},
+                    {"type": "NOT_FOUND", "path": ["nodes", 1], "message": "Unavailable pull request"},
+                ],
+            }).to_string();
+            let mut request = ObservationRequest {
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: BTreeSet::from(["issues".into(), "pull_requests".into()]),
+                cursor: None, previous_facts: None, every_ms: Some(0), refresh: false,
+                webhook_covered: false, workflow_runs: None, github_capture: None,
+            };
+            let unavailable = observe(request.clone(), &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                unavailable.cursor.as_deref(), &unavailable.facts, 1, &[], None).unwrap();
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "closed", "{mode}: {stored}");
+                assert_eq!(stored["facts"]["state_reason"], "not_found", "{mode}: {stored}");
+            }
+
+            let cursor: Value = serde_json::from_str(unavailable.cursor.as_deref().unwrap()).unwrap();
+            // These fixture times are whole seconds, and discovery includes the prior second.
+            assert_eq!(cursor["items_since"], "2026-09-10T00:00:00Z");
+            github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+                if mode == "rest" { listing } else { json!([]) });
+            github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
+            *github.graphql.lock() = json!({"data": {"nodes": [
+                {"id": "I_unavailable", "number": 1, "state": "OPEN", "stateReason": "REOPENED",
+                    "url": "https://github.com/acme/garden/issues/1"},
+                {"id": "PR_unavailable", "number": 2, "state": "OPEN",
+                    "url": "https://github.com/acme/garden/pull/2"},
+            ]}}).to_string();
+            if mode == "graphql" {
+                *github.graphql_pulls.lock() = Some((vec![json!({
+                    "id": "PR_unavailable", "number": 2, "url": "https://github.com/acme/garden/pull/2",
+                })], 100));
+                age_pull_request_check(&base, Duration::from_secs(3600));
+            }
+            request.cursor = unavailable.cursor;
+            request.previous_facts = Some(unavailable.facts);
+            request.refresh = matches!(mode, "refresh" | "webhook");
+            request.webhook_covered = mode == "webhook";
+            let recovery = observe(request, &base).await.unwrap();
+            store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+                recovery.cursor.as_deref(), &recovery.facts, 2, &[], None).unwrap();
+
+            // Assert the store's real partial-fact overlay, not just the provider's open state.
+            for subject in ["resource/repo/issue/1", "resource/repo/pull-request/2"] {
+                if mode == "graphql" && subject.ends_with("/issue/1") {
+                    continue; // The open-PR discovery query cannot rediscover issues.
+                }
+                let stored = store.latest_actual_value(subject).unwrap().unwrap();
+                assert_eq!(stored["facts"]["state"], "open", "{mode}: {stored}");
+                assert!(stored["facts"].get("state_reason").is_none(), "{mode}: {stored}");
+            }
+        }
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
@@ -25679,7 +26669,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "resource-input".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::from([("source".into(), "resource/source".into())]),
@@ -25734,7 +26724,7 @@ version 2
         let request = |mission: &str| MissionRunRequest {
             mission: mission.into(),
             revision: None,
-            workspace: ".".into(),
+            workspace: "/tmp".into(),
             requester: None,
             mode: None,
             inputs: BTreeMap::new(),
@@ -25808,7 +26798,7 @@ version 2
             .create_mission_run(&MissionRunRequest {
                 mission: "restart".into(),
                 revision: None,
-                workspace: ".".into(),
+                workspace: "/tmp".into(),
                 requester: None,
                 mode: None,
                 inputs: BTreeMap::new(),

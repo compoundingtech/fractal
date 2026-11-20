@@ -582,7 +582,7 @@ checkouts, object import, replacement-object resistance and provenance mismatche
 
 ## Protected CI observer
 
-The internal `st3 evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
+The internal `fractal evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
 command accepts numeric selectors only. It reads its operator-owned configuration
 from the profile's private HOME at `.config/st/evidence-ci.json`. A sekrets grant
 must allow only that installed command prefix, after review and binary pinning.
@@ -985,6 +985,12 @@ scripts/evidence-verify --repo . --revision HEAD --check genie-freshness \
 Exit 0 is satisfied, exit 1 is not satisfied, exit 2 is a usage error. Both print one JSON
 document: `{"satisfied":true,"tree","check","record","kind","signer","trust_level","tier","observed_at","command"}`
 or `{"satisfied":false,"reason","check","detail"}`.
+
+`scripts/evidence-verify --batch` answers many questions in one process. It reads a JSON array of argument vectors on stdin. For each vector, in
+order, it writes `{"exit","stdout","stderr"}` to a JSON array on stdout, exactly what a run of its own with that vector gives. A record's statement,
+and its signature against one key list, are read once per process. The signature memo is keyed by the record and the key and revocation lists'
+contents, never their paths, and nothing is written to disk. Each check looks at the signature of every record of the tree, and `ssh-keygen` takes
+about 140 ms a record, so one batch saves most of the time a run per check spends on the same signatures.
 
 Trust comes only from the key list: `--keys FILE`, or `--keys-from COMMIT`, which reads
 `.st/evidence-keys` (OpenSSH allowed-signers syntax, `namespaces="git"`) from the
@@ -2035,8 +2041,18 @@ is signed like any other since 2026-10-26 (the base's `evidence-wrap` records th
 "tree"` accepts), so it is covered only by such a note; against an older base, whose wrapper refuses it, the check reads `lane edit: CI runs it`,
 and the pre-push hook refuses that row like a missing note. Unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
+It asks the base's verifier about every check, and the per-crate members, in one `--batch`. A base whose verifier has no `--batch` is asked one
+process per check, as before. A batch that fails or answers in another shape is every check's answer, so each reads as a
+verifier that gave no answer (not covered); nothing is then asked one process per check to hide it.
 
-**An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
+**This repository's PR proof is hosted CI at the exact head.** Agents must not run `scripts/fractal-test` or `scripts/st-test`
+locally for PR proof. The accepted `"pr-proof": "hosted"` setting in `<remote>/main`'s `.fractal/prepush-policy.json`
+(falling back to `.st/prepush-policy.json` only when absent) makes the hook print
+`PR proof is hosted CI at the exact head (policy on main); no local evidence run`, record `hosted_proof`, and allow the push.
+It does no local evidence work, not even a status query, for anyone, including an agent with a listed signer.
+Candidate-tree policy has no effect. The public-content guard still runs first and blocks unsafe publication.
+
+**Without accepted hosted policy, an agent's push is refused unless its tree is covered.** In that default flow, agents run
 `scripts/fractal-test --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on
 main, the pre-push hook only asks `fractal-test --status` about HEAD's tree. Covered, and the push goes silently (receipt `covered`). Not covered,
 or the status cannot be read, and the push is refused (receipt `refused`, with the uncovered checks): the hook prints the status and the command to
@@ -2120,9 +2136,9 @@ first CI run sees it. A tree that edits a lane's definition is not signed for th
 4 when nothing else failed, and the hook says CI runs that check, not that a check failed. One signing run per tree: a push of a tree that another
 push on the machine is still signing (in the background, say) says so and goes, and that run's notes follow. Each push of the checked-out head appends
 one line to `~/.local/state/st3/evidence-prepush/receipts.jsonl` (`time`, `tree`, `branch`, `agent`, `outcome`: `covered`, `signed`,
-`signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off`, `not_signing:REASON`, and for an agent `refused` or `override`), append only, so the pre-sign rate can be read per push.
+`signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off`, `hosted_proof`, `not_signing:REASON`, and for an agent `refused` or `override`), append only, so the pre-sign rate can be read per push.
 **The hook's environment is scrubbed (st2#3014).** Git exports repository-selection variables such as `GIT_DIR` to hooks in linked worktrees. The stub drops repository-selection and author/committer variables before starting the content guard or evidence runner, so nested fixture repositories cannot accidentally operate on the caller's checkout. Transport and credential variables remain available for evidence publication. The scrub uses `export -p`, not `compgen`, and refuses publication if it cannot remove the selecting variables. Reinstall with `scripts/install-git-hooks` (also run on shell entry) to upgrade an older marked stub. Linked-worktree fixture tests exercise the real hook and require the caller's repository to remain unchanged.
-Apart from an agent's refusal, the evidence-signing path never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
+Without accepted hosted policy, apart from an agent's refusal, the evidence-signing path never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
 a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` does not wait: the push
 goes at once, the same signing runs in the background, and the hook says that a CI run that starts before a note is there runs that check in full.
 `ST_EVIDENCE_LOCAL=off` does no local signing work at all, not even the status question, and says so in one line (for a seat or unit where

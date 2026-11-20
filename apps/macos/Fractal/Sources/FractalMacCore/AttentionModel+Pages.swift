@@ -15,13 +15,12 @@ extension AttentionModel {
   /// Attachments larger than this are left to Fractal web.
   public static let attachmentByteLimit = 8 << 20
 
-  /// Shows a page (callers animate it). A page still on the stack (the top level always is) is
-  /// returned to as it was, popping the pages above it; any other page is pushed as a fresh
-  /// entry, so a page popped before starts anew. The shown page is no change. Otherwise the
-  /// previous receipt is cleared, since the person moved on. A card's page then needs
-  /// `readOpenPage()`.
+  /// Attention is a selection beside the current page, not another navigation level.
+  /// Selecting another card replaces it; opening a non-attention page clears it. Other
+  /// pages retain their existing stack identity and Back behavior.
   public func open(_ next: PanelRoute) {
     guard next != route else { return }
+    if case .attention = route { navigationEntries.removeLast() }
     if let live = navigationEntries.lastIndex(where: { $0.route == next }) {
       navigationEntries.removeSubrange((live + 1)...)
     } else {
@@ -38,24 +37,115 @@ extension AttentionModel {
     backFrom = navigationEntries.removeLast().route
   }
 
-  /// Reads the open card's detail and its asker's conversation concurrently, each kept on
-  /// failure, then any image attachment not read yet. Nothing for other pages.
+  /// Synchronous content for every layout. An older revision must never overwrite the list's
+  /// current question, reasons or recommendation while enrichment is being refreshed.
+  public func detail(for record: AttentionRecord) -> AttentionContext {
+    if detailRevisions[record.id] == record.revision, let cached = contexts[record.id]?.value { return cached }
+    return record.snapshotContext ?? AttentionContext(
+      detail: record.detail.isEmpty ? nil : record.detail, request: nil)
+  }
+
+  public static let detailCapacity = 12
+  public static let detailWarmCount = 5
+  public static let detailFreshness: TimeInterval = 15
+
+  /// Coalesced across opening, polling and warming. Never clears cached content on a reread.
   public func readOpenPage(now: Date? = nil) async {
-    guard let adapter, case .attention(let id) = route, let record = record(id: id) else { return }
-    async let context = Self.capture { try await adapter.readContext(record) }
-    async let excerpt = Self.capture { try await adapter.readExcerpt(record) }
-    let (contextResult, excerptResult) = await (context, excerpt)
-    var contextSection = contexts[id] ?? LiveSection()
-    Self.applyPage(contextResult, to: &contextSection, lastRead: &contextReadAt[id], now: now ?? .now)
-    var excerptSection = excerpts[id] ?? LiveSection()
-    Self.applyPage(excerptResult, to: &excerptSection, lastRead: &excerptReadAt[id], now: now ?? .now)
-    // The card may have left while these were read.
-    guard self.record(id: id) != nil else { return }
-    // Fresh timestamps alone are not a content change. Keep the observable sections stable
-    // on a successful identical read; failures and recovery still publish their state.
-    if !Self.samePageSection(contexts[id], contextSection) { contexts[id] = contextSection }
-    if !Self.samePageSection(excerpts[id], excerptSection) { excerpts[id] = excerptSection }
-    await readAttachments(contextSection.value?.request?.attachments ?? [], from: adapter, now: now)
+    guard case .attention(let id) = route, let record = record(id: id) else { return }
+    await readDetail(record, now: now)
+  }
+
+  /// Warm likely asks first, then visible updates. Serial prefetch bounds background I/O to
+  /// one context + one timeline; an explicit open can proceed without waiting for the queue.
+  public func warmDetails(now: Date? = nil) async {
+    guard isPanelVisible else { return }
+    guard !isWarmingDetails else { return }
+    isWarmingDetails = true
+    defer { isWarmingDetails = false }
+    let likely = asks + updates.filter { rowsInPanel[$0.id] != nil }
+    for record in likely.prefix(Self.detailWarmCount) {
+      guard isPanelVisible, !Task.isCancelled else { return }
+      if route == .attention(record.id) { continue }
+      await readDetail(record, now: now, images: false)
+    }
+  }
+
+  func keepDetails(_ page: AttentionPage) {
+    let revisions = Dictionary(uniqueKeysWithValues: page.records.map { ($0.id, $0.revision) })
+    for (id, read) in detailReads where revisions[id] != read.revision {
+      read.task.cancel()
+      detailReads[id] = nil
+    }
+    detailAccess.removeAll { revisions[$0] == nil }
+    detailRevisions = detailRevisions.filter { revisions[$0.key] == $0.value }
+  }
+
+  private func readDetail(_ record: AttentionRecord, now: Date?, images: Bool = true) async {
+    guard let adapter else { return }
+    let id = record.id
+    detailAccess.removeAll { $0 == id }
+    detailAccess.append(id)
+    // Admission is bounded before suspension. A late read for an evicted entry must not
+    // recreate untracked cache state after another card has taken its place.
+    trimDetails()
+    if let running = detailReads[id], running.revision == record.revision {
+      await running.task.value
+    } else {
+      let clock = now ?? .now
+      let fresh = detailRevisions[id] == record.revision
+        && contextReadAt[id].map { (0..<Self.detailFreshness).contains(clock.timeIntervalSince($0)) } == true
+        && excerptReadAt[id].map { (0..<Self.detailFreshness).contains(clock.timeIntervalSince($0)) } == true
+      if !fresh {
+        let task = Task { [weak self] in
+          guard let self else { return }
+          await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+              let result = await Self.capture { try await adapter.readContext(record) }
+              await self.applyContext(result, record: record, now: now ?? .now)
+            }
+            group.addTask {
+              let result = await Self.capture { try await adapter.readExcerpt(record) }
+              await self.applyExcerpt(result, record: record, now: now ?? .now)
+            }
+          }
+        }
+        detailReads[id] = (record.revision, task)
+        await task.value
+        if detailReads[id]?.revision == record.revision { detailReads[id] = nil }
+      }
+    }
+    guard self.record(id: id)?.revision == record.revision, detailAccess.contains(id) else { return }
+    if images { await readAttachments(detail(for: record).request?.attachments ?? [], from: adapter, now: now) }
+    trimDetails()
+  }
+
+  private func applyContext(_ result: Result<AttentionContext, Error>, record: AttentionRecord, now: Date) {
+    guard self.record(id: record.id)?.revision == record.revision, detailAccess.contains(record.id), !Task.isCancelled else { return }
+    var section = contexts[record.id] ?? LiveSection()
+    Self.applyPage(result, to: &section, lastRead: &contextReadAt[record.id], now: now)
+    if case .success = result { detailRevisions[record.id] = record.revision }
+    if !Self.samePageSection(contexts[record.id], section) { contexts[record.id] = section }
+  }
+
+  private func applyExcerpt(_ result: Result<ConversationExcerpt?, Error>, record: AttentionRecord, now: Date) {
+    guard self.record(id: record.id)?.revision == record.revision, detailAccess.contains(record.id), !Task.isCancelled else { return }
+    var section = excerpts[record.id] ?? LiveSection()
+    Self.applyPage(result, to: &section, lastRead: &excerptReadAt[record.id], now: now)
+    if !Self.samePageSection(excerpts[record.id], section) { excerpts[record.id] = section }
+  }
+
+  private func trimDetails() {
+    while detailAccess.count > Self.detailCapacity {
+      let id = detailAccess.removeFirst()
+      if route == .attention(id) { detailAccess.append(id); continue }
+      contexts[id] = nil
+      excerpts[id] = nil
+      contextReadAt[id] = nil
+      excerptReadAt[id] = nil
+      detailRevisions[id] = nil
+    }
+    let named = Set(contexts.values.flatMap { $0.value?.request?.attachments.map(\.sha256) ?? [] })
+    attachments = attachments.filter { named.contains($0.key) }
   }
 
   private func readAttachments(_ refs: [AttachmentRef], from adapter: any AttentionAdapter, now: Date?) async {

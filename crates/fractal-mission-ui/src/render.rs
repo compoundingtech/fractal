@@ -4,7 +4,7 @@ pub use fractal_conversation_ui::doc::Doc;
 use fractal_conversation_ui::doc::Target;
 use fractal_conversation_ui::text::{self, run};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 /// Semantic colors. Defaults reproduce Fractal TUI's Catppuccin Mocha palette.
 #[derive(Clone, Copy, Debug)]

@@ -72,7 +72,8 @@ import FractalMacUI
         let height = host.fittingSize.height
         require(height.isFinite && height > 0 && height <= limit + 1,
           "\(phase): invalid ideal height \(height), cap \(limit)")
-        let size = CGSize(width: 360, height: min(limit, max(1, height)))
+        // A card opens beside the list, widening the panel into its split.
+        let size = CGSize(width: max(PanelMetrics.width, host.fittingSize.width), height: min(limit, max(1, height)))
         // This harness controls an offscreen window; it does not model MenuBarExtra sizing.
         window.setContentSize(size)
         host.setFrameSize(size)
@@ -213,11 +214,11 @@ import FractalMacUI
       await model.refresh()
       await settle("inbox row removed")
       unchanged(inbox, "inbox row removed")
-      await transition("push ask from inbox") { model.open(.attention("attention/ship-tray")) }
+      await transition("open ask beside inbox") { model.open(.attention("attention/ship-tray")) }
       _ = await scrollPartway()
       await stableRefresh("ask")
-      await transition("back to inbox") { model.back() }
-      unchanged(inbox, "back to inbox")
+      await transition("close ask beside inbox") { model.back() }
+      unchanged(inbox, "close ask beside inbox")
       await transition("back to home") { model.back() }
       unchanged(home, "back to home")
       await transition("fresh inbox") { model.open(.inbox) }
@@ -226,7 +227,8 @@ import FractalMacUI
         require(abs(fresh.offset.y) < 1, "fresh inbox did not start at top: \(fresh.offset)")
       }
       let liveInbox = await scrollPartway()
-      await transition("ask above live inbox") { model.open(.attention("attention/ship-tray")) }
+      await transition("ask beside live inbox") { model.open(.attention("attention/ship-tray")) }
+      // Opening the page the card sits beside closes the card; the list never moved.
       await transition("open existing live inbox") { model.open(.inbox) }
       unchanged(liveInbox, "open existing live inbox")
       await transition("back from fresh inbox") { model.back() }

@@ -26,6 +26,17 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"resource.admission.observed" = { class = "durable" }
+"resource.admission.coverage" = { class = "durable" }
+"gate.admission.observed" = { class = "durable" }
+"residency.wake-demand" = { class = "durable" }
+"residency.resumed" = { class = "durable" }
+"residency.first-turn" = { class = "durable" }
+"residency.outcome" = { class = "durable" }
+"residency.sleep-ended" = { class = "durable" }
+"residency.eligibility-outcome" = { class = "durable" }
+"residency.unrouted" = { class = "durable" }
+"residency.host-sample" = { class = "durable" }
 "harness.invocation" = { class = "durable" }
 "effect.intended" = { class = "durable" }
 "effect.in-flight" = { class = "durable" }
@@ -42,6 +53,8 @@
 "agent.launcher-bound" = { class = "durable", log = "local" }
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
+# Completed client minute summaries are durable history, not local observation samples.
+"custom.client.observation-minute" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
@@ -85,6 +98,11 @@
 "gate.review-verdict" = { class = "durable" }
 "gate.review-withdrawn" = { class = "durable" }
 "gate.reviewer-reassigned" = { class = "durable" }
+# Durable normalized history, capture visibility/coverage and fenced authority are not mirror events.
+"github.fact.observed" = { class = "durable" }
+"github.capture.committed" = { class = "durable" }
+"github.capture.authority" = { class = "durable" }
+"github.capture.fenced" = { class = "durable" }
 "github.posted" = { class = "durable" }
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
@@ -187,6 +205,7 @@
 # request replicates.
 "render.applied" = { class = "transition", window = "7d", log = "local" }
 "repair.applied" = { class = "durable" }
+"resource.exec-receipt" = { class = "durable" }
 "resource.observed" = { class = "current" }
 "revision-proposal.applied" = { class = "durable" }
 "revision-proposal.approved" = { class = "durable" }

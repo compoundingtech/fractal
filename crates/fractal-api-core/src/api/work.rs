@@ -514,6 +514,8 @@ pub async fn publish_work_mission(
             format!("step `{}` does not declare produces-mission", step.step),
         ))
     })?;
+    let expected_mission =
+        crate::mission::resolve_produced_mission(expected_mission, &run.id).map_err(ApiError::bad)?;
 
     let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
     if initial.missions.len() != 1 {
@@ -589,7 +591,7 @@ pub async fn publish_work_mission(
             &step.subject,
             &actor,
             request.incarnation.as_deref(),
-            expected_mission,
+            &expected_mission,
             mission,
             &format!("{}:bind", request.idempotency_key),
         )
@@ -698,6 +700,9 @@ pub async fn post_work_action(
     Json(mut request): Json<WorkRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
     let lease_view = query.lease_view(&action).map_err(ApiError::bad)?;
+    // Starting authority is never inferred for a missing fence, nor for an
+    // unbound caller or a non-claim action.
+    let starting_claim = bound.is_some() && action == "claim" && request.incarnation.is_some();
     bind_work_incarnation(
         &state,
         bound.as_ref(),
@@ -707,7 +712,8 @@ pub async fn post_work_action(
     if request.actor.as_deref().is_some_and(|actor| actor.starts_with("exec/")) {
         return exec_clock_response(state, action, subject, request).await;
     }
-    work_action_response_viewing(state, action, subject, request, None, None, lease_view).await
+    work_action_response_viewing(state, action, subject, request, None, None,
+        WorkResponseOptions { lease_view, starting_claim }).await
 }
 
 /// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch
