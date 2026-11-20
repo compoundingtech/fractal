@@ -106,8 +106,8 @@ for index, name in enumerate(('linux-tests', 'linux-tests-shard-2', 'linux-tests
         assert "github.event_name == 'push'" in condition and "refs/heads/main" in condition, name
 assert '[ "$EVENT" = merge_group ] || [ "$EVENT" = push ]' in blocks['linux-gate']
 assert "github.event.before" in blocks['upgrade-impact']
-assert 'CI_TEST_TOPOLOGY:' in blocks['evidence-note-rust-tests']
-assert "github.event_name == 'push'" in blocks['evidence-note-rust-tests']
+topology = next(line for line in blocks['evidence-note-rust-tests'].splitlines() if 'CI_TEST_TOPOLOGY:' in line)
+assert "github.event_name == 'push' && github.ref == 'refs/heads/main' && 'merge-group' || ''" in topology
 # Queue observer remains queue-only; push proof never waits for or cancels an ephemeral queue ref.
 assert "if: github.event_name == 'merge_group'" in blocks['namespace-capacity']
 print('passed: canonical main push graph, four partitions, exact base and no duplicate projection')

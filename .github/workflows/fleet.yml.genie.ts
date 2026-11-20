@@ -923,7 +923,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
         BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.before || github.sha }}',
-        CI_TEST_TOPOLOGY: `\${{ ${mergeOnly} && 'merge-group' || '' }}`,
+        CI_TEST_TOPOLOGY: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'merge-group' || '' }}",
       },
       steps: [
         // The tested commit with its whole history: a note's parent is that commit, and the server refuses a push from a shallow repository.

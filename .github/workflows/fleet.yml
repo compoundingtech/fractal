@@ -4430,7 +4430,7 @@ jobs:
       EVIDENCE_PUSH_TOKEN: ${{ github.token }}
       NEEDS_JSON: ${{ toJSON(needs) }}
       BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before || github.sha }}
-      CI_TEST_TOPOLOGY: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'merge-group' || '' }}
+      CI_TEST_TOPOLOGY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'merge-group' || '' }}
     steps:
       - name: Check out the tested commit
         continue-on-error: true
