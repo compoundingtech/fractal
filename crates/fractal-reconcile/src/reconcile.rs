@@ -13001,6 +13001,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut owner_runs = BTreeSet::from([run.subject.clone()]);
         owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
         smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
+        // Shell drivers are durable resource executions, not desired subjects. Their
+        // cancellation and receipts are driven by the execution host's shell sweep.
+        // Keep cleanup open until that sweep has confirmed exit and retired custody.
+        for owner in &owner_runs {
+            smallclaims::touched::note_read(|| format!("shell-resources:{owner}"));
+        }
+        let mut shells_live = false;
+        let mut shells_cancelled = false;
+        for execution in self.store.shell_resources(&self.host, true)? {
+            let owner = &execution.command.lane.owner;
+            if !owner_runs.contains(&owner.run) { continue; }
+            let Some(step) = self.store.step_run(&owner.step)? else { continue; };
+            if step.run != owner.run || owner.attempt > step.attempt { continue; }
+            shells_live = true;
+            if !execution.cancel {
+                self.store.cancel_shell_resource(&execution.command.id)?;
+                shells_cancelled = true;
+            }
+        }
+        if shells_cancelled { self.signal_changed(); }
         let mut owned = owner_runs
             .iter()
             .map(|owner| self.store.desired_subjects_for_owner_run(owner))
@@ -13083,8 +13103,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             let response = self
                 .store
                 .apply_internal(&intent, &format!("cleanup-mission-run:{}", run.generation))?;
-            return Ok(response.changed || intake_stopped);
+            return Ok(response.changed || intake_stopped || shells_cancelled);
         }
+        if shells_live { return Ok(intake_stopped || shells_cancelled); }
         // Cleanup waits for each owned runtime to stop, but not forever. A runtime on a host that
         // never answers, or one that cannot be killed, would otherwise hold the run and its slot.
         // Its stop declaration stays, so stopping continues after the run ends.
