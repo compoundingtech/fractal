@@ -22386,9 +22386,9 @@ async fn release_valid_record_bytes(store: Arc<Store>) {
             }
         }
     }
-    if emptied == 0 {
-        return;
-    }
+    // Every start gives free pages back, whether or not this start emptied anything: a start
+    // after the last page of bytes was emptied, but before its pages went back, finishes that.
+    // A store with no free page answers at once.
     let mut released = 0;
     loop {
         let vacuum_store = store.clone();
@@ -22402,7 +22402,9 @@ async fn release_valid_record_bytes(store: Arc<Store>) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    if emptied > 0 || released > 0 {
+        stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    }
 }
 
 /// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
