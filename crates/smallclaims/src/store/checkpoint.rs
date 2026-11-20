@@ -466,13 +466,12 @@ pub fn sealed_envelope_records_sql() -> String {
                 records.state, records.position
          FROM replica_record_rows records CROSS JOIN claims ON claims.id=records.claim_id
          JOIN batches ON batches.id=claims.batch_id
-         JOIN replica_envelopes envelopes
-           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
-             AND envelopes.envelope_hash=records.envelope_hash
          WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
            AND records.state<>'repaired'
-           AND envelopes.rowid <= ?4
-           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
+           AND EXISTS(SELECT 1 FROM replica_envelopes envelopes
+                      WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?5
+                        AND envelopes.rowid <= ?4
+                        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3)"
     )
 }
 
@@ -598,13 +597,11 @@ impl Store {
             let connection = self.readers.get();
             let page = connection
                 .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                            envelopes.accepted_at_unix_ms,
-                            (SELECT COUNT(*) FROM replica_record_rows records
-                             WHERE records.writer=envelopes.writer AND records.sequence=envelopes.sequence
-                               AND records.envelope_hash=envelopes.envelope_hash)
+                    /* sqlite-large-value: allow-for-now lv-haab6388ed742 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+                            envelopes.accepted_at_unix_ms, {}
                      FROM replica_envelopes envelopes
                      WHERE envelopes.rowid > ?1 AND envelopes.rowid <= ?2",
+                     super::record_bytes::envelope_record_count_sql("envelopes")),
                 )?
                 .query_map([after, upto], |row| {
                     Ok(SealedEnvelope {
