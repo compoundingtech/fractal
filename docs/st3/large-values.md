@@ -710,54 +710,40 @@ maintainer retains `trace-statement-and-value-representation` responsibility for
 these bindings and returned identifiers; fewer candidates and indexed seeks do
 not establish encoded-size or execution-cost bounds.
 
-## Incremental observed credit heads
-
-`fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
-`lv-ha6f6e9f76f2b`, `lv-h974bed02ce8f`, `lv-hfa1f0cadbda8`,
-`lv-hf26ee56ee42a`, `lv-h8e8ca6ee8350`, `lv-hb2a7b858df59`,
-`lv-h032c204ec84f` and `lv-h6308405566ae`.
-The projection retains one inline credit JSON object and claim ID per
-provider/account/credit ID/writer. Heads compare absorbing state precedence
-(`redeemed` > `forfeited` > `available`/`unknown`), then exact seconds/nanoseconds
-and claim ID within a state class. SQL extracts the rank from retained JSON.
-The pending table contains newly admitted claim IDs, drained in their append or
-replication transaction independently of historical completeness.
-Append and replication leave an absent projection absent: authoritative claims
-arriving before initialization are included in the worker's initial target.
-
-Historical catch-up persists a singleton numeric claim-store-index cursor and
-target. Open only installs/resumes metadata for an already-present projection;
-an absent projection with empty writer configuration is left absent. Configuring
-writers or directly reading credits starts a background worker, never a synchronous
-historical fold. Each writer transaction visits at most 64 claim rows and commits
-its cursor with the absorbing upserts, releasing the writer between batches.
-No history-sized pending insertion or index build is required. Interrupted workers
-resume from the committed cursor. Queue ownership follows the resource-backfill
-lifecycle: dropping the store prevents another batch from retaining its writer.
-Read snapshots expose `catching_up`, `through_index` and `target_index` atomically
-with the heads; incremental writes never promote partial historical heads to complete.
-Legacy timestamp-only heads are repaired by the same bounded refold. Explicit
-rebuild removes obsolete heads and resets the durable cursor.
-
-There is no numeric retention limit for durable usage observations. Provider,
-account, credit ID, actor and claim ID TEXT keys and credit JSON remain
-variable-size values. Bounded claim batches prove neither a per-claim byte bound
-nor a bound on the number of retained heads. The owner must preserve exact
-ordering, resumability and writer-selectable evidence when moving these columns
-and queue reclamation to bounded/reference storage.
-
-The module's fixture-only reset/update sites are inventoried under
-`fractal_store::store::usage_credits::tests`. Regressions cover legacy recovery,
-pending catch-up, both delivery orders, replication, rebuild, configuration
-changes, interruption/reopen at several persisted cursors versus a full fold,
-and an incrementally appended claim while a historical worker is paused after
-commit. Preserve these scenarios when the representation changes.
+## Writer-scoped usage observations
 
 `fractal_store::store::limits` owns revised `lv-hc361226a445f` and
 `lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+## Native spend source/mirror evidence
+
+`fractal_api_core::credit_objectives` reads durable `usage.limits.observed`
+claims through the existing indexed claim-page API, at most 64 new claims per
+evaluation. The bounded source delta contract admits at most 128 combined quota,
+credit and reset-period facts per claim. It introduces no SQLite table, index,
+inline payload column or new SQL write site. The direct metadata read selects only
+`ivm_event_state.database_id` and `ivm_source.epoch`; replacement invalidates the
+in-memory replay cursor rather than inheriting a previous database's coverage.
+The existing durable claims and indexed page storage sites remain inventoried
+under their existing owners; no additional large-value SQL exception is granted.
+
+The former latest-credit projection and its background writer are removed; their
+tables are rebuildable state, never historical disposition authority. Native
+spend preserves original accepted predecessor IDs, fixed source rosters and
+incarnations while replaying. Unknown, missing and incomplete sources never
+manufacture healthy coverage. Retained facts are variable-size values: a bounded
+delta count is not a total byte, history-cardinality or in-memory work proof.
+
+The retirement DDL is inventoried as `lv-he6df9d2caad3`, owned by
+`fractal_store::store::projectors`; it drops the obsolete trigger before its
+three local projection tables and never deletes durable claims. Historical
+fixture DDL is `lv-h1e32e6d704d1`, owned by
+`fractal_store::store::projectors_tests`. Its legacy variable-size columns exist
+only to exercise reopening an old database and claim/digest preservation; no
+new production inline-value population or value-size proof is introduced.
 
 ## Operation-conflict bounded refold (#9101)
 

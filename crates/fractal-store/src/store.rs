@@ -120,8 +120,6 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
-pub mod usage_credits;
-pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
@@ -2472,7 +2470,6 @@ pub struct Store {
     _resource_backfill: Option<resource_references::BackfillWorker>,
     resource_observations: std::sync::OnceLock<std::sync::Mutex<resource_membership::Observations>>,
     resource_clocks: std::sync::OnceLock<std::sync::Mutex<resource_membership::Clocks>>,
-    usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     launch_admission: Arc<launch_freeze::Admission>,
@@ -2986,8 +2983,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
@@ -3021,8 +3017,7 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
@@ -3057,8 +3052,7 @@ impl Store {
         runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
-        Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
@@ -3088,10 +3082,6 @@ impl Store {
             }
         }
         *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
-        if !self.usage_limits_writers().is_empty() {
-            self.start_usage_credit_backfill()
-                .map_err(|error| FractalError::new("usage-credit-backfill", error.to_string()))?;
-        }
         Ok(())
     }
 
