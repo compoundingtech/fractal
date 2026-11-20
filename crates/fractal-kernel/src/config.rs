@@ -2533,7 +2533,7 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(retiring.trim.retires_mail());
         let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
         assert!(!kept.trim.retires_mail());
-        assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
+        assert!(!TrimConfig { local: false, mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
