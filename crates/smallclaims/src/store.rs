@@ -2175,9 +2175,11 @@ pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, a
     };
     let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
+    // Keep the optional upper bound seekable, especially for descending one-row history
+    // lookups. Store indexes are SQLite signed integers; NULL includes their full domain.
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND store_index<=COALESCE(?2 - 1, 9223372036854775807)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }

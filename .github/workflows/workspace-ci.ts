@@ -605,7 +605,7 @@ const signingCore = (
       ...soft,
       name: 'Take the evidence signer from the base commit',
       id: 'evidence-base',
-      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
 git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
 git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
@@ -639,7 +639,7 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       env: {
         ...facts.env,
         GATE_SKIP: gateSkipExpression(name),
-        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}',
+        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}',
       },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
@@ -701,7 +701,7 @@ export const nixEvidenceSteps = (name: string): unknown[] => {
     {
       name: 'Take the evidence signer from the base commit',
       id: 'evidence-base',
-      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
 git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
 git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
@@ -739,7 +739,7 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       ...soft,
       name: `Sign the nix record for ${name}`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
-      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before || github.sha }}' },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${record}
 home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")

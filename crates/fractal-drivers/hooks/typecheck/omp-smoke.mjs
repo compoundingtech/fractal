@@ -190,6 +190,7 @@ for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   for (const type of ["session", "ready"]) {
     const binding = readFrames().slice(bindingStart).find((frame) => frame.type === type);
     assert.deepStrictEqual(binding, { type, sessionId: "session-smoke",
+      ...(type === "ready" ? { inputAcceptanceClock: true } : {}),
       ...(ctx === fullCtx ? { sessionFile: path.join(dir, "session-smoke.jsonl") } : {}),
     }, `${type} binds the native transcript when available and tolerates an absent getter`);
   }
@@ -697,6 +698,64 @@ for (const heldBy of ["batch", "ask"]) {
   runEnded = true;
   handoffSend = undefined;
   await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// The correlation deadline is observational, not a delivery timeout. Drive it
+// explicitly so each reason is tested without waiting thirty seconds.
+for (const outcome of ["content-mismatch", "no-message-start", "timeout", "matched",
+  "reject-content-mismatch", "reject-no-message-start"]) {
+  const rejected = outcome.startsWith("reject-");
+  const reason = rejected ? outcome.slice("reject-".length) : outcome;
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  let finishRun;
+  let rejectRun;
+  let expireCorrelation;
+  const run = new Promise((resolve, reject) => { finishRun = resolve; rejectRun = reject; });
+  handoffSend = () => run;
+  const meta = { messageId: `message/fallback-${outcome}`, identity: "fixture.worker",
+    inputIncarnation: "fixture-incarnation" };
+  const content = `private mail ${reason}`;
+  const nativeTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, ms, ...args) => ms === 30_000
+    ? (expireCorrelation = callback, { unref() {} }) : nativeTimeout(callback, ms, ...args);
+  try {
+    fs.appendFileSync(outboxPath, JSON.stringify({ type: "message", content, meta }) + "\n");
+    await pause(150);
+  } finally {
+    globalThis.setTimeout = nativeTimeout;
+  }
+  assert.strictEqual(typeof expireCorrelation, "function");
+  const fallbacks = () => readFrames().filter(frame =>
+    frame.type === "admission_fallback" && frame.meta?.messageId === meta.messageId);
+  if (reason === "content-mismatch" || reason === "matched") {
+    await handlers.get("message_start")({ message: { role: "user", content: "transformed private text" } }, holdCtx);
+  }
+  if (reason === "matched") {
+    await handlers.get("message_start")({ message: { role: "user", content } }, holdCtx);
+    await awaitAcknowledgement(meta.messageId);
+  } else if (reason === "timeout") {
+    expireCorrelation();
+    await pause(50);
+    assert.deepStrictEqual(fallbacks(), [{ type: "admission_fallback", reason, meta }]);
+    assert.ok(!acknowledged().includes(meta.messageId), "deadline never fabricates admission");
+  }
+  if (rejected) {
+    rejectRun(new Error("unmatched run rejected"));
+    await pause(100);
+    assert.strictEqual(readFrames().filter(frame => frame.type === "failed" &&
+      frame.meta?.messageId === meta.messageId).length, 1);
+    assert.ok(!acknowledged().includes(meta.messageId), "rejected run never fabricates admission");
+  } else {
+    finishRun();
+    await awaitAcknowledgement(meta.messageId);
+  }
+  await pause(50);
+  assert.deepStrictEqual(fallbacks(), reason === "matched" ? [] : [{
+    type: "admission_fallback", reason, meta,
+  }], "one bounded reason per fallback handoff, with identity but never content");
+  handoffSend = undefined;
   fs.rmSync(outboxPath, { force: true });
 }
 

@@ -134,6 +134,21 @@ fn closed_agent_mail_retires_a_week_after_it_closes_and_the_rest_stays() {
 }
 
 #[test]
+fn closed_escalation_delivery_authority_stays_while_ordinary_mail_retires() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = member(&dir.path().join("claims.sqlite3"), true);
+    let mut notification = sent("message/escalation", "daemon/runtime", RECIPIENT, Vec::new());
+    notification.fields.insert("tags".into(), json!(["mission-escalation-v1", "mission-run/example"]));
+    let receipt = store.append_claim(&notification).unwrap();
+    store.append_claim(&lifecycle("message/escalation", "message.closed")).unwrap();
+    let ordinary = thread(&store, "message/ordinary", SENDER, RECIPIENT, true);
+    assert_eq!(retire_all(&store, now_ms() + RETAIN_AFTER_CLOSE_MS + DAY_MS).0, 1);
+    assert!(claims(&store).contains(&receipt.id));
+    assert!(ordinary.iter().all(|id| retired(&store).contains(id)));
+    assert!(store.message_sent("message/escalation").unwrap());
+}
+
+#[test]
 fn a_thread_any_other_claim_cites_stays() {
     let dir = tempfile::tempdir().unwrap();
     let store = member(&dir.path().join("claims.sqlite3"), true);
