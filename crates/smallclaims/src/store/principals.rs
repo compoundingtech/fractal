@@ -2460,7 +2460,16 @@ mod paced_verdict_tests {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
+        // The links name claims the store holds: a requeue drops a link whose claim is gone.
+        tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                    VALUES ('batch/studio/1','studio',1,'hash','1')", []).unwrap();
         for i in 0..count {
+            tx.execute(
+                "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                 VALUES (?1,'batch/studio/1','note/root','example.note','studio',NULL,'{}','[]','1')",
+                [format!("claim/{i:05}")],
+            )
+            .unwrap();
             tx.execute(
                 "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)",
                 [format!("claim/{i:05}")],
