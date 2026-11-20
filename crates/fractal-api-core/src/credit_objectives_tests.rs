@@ -352,7 +352,7 @@ fn unsupported_account_gap_is_visible_without_fabricated_digest_or_supported_suc
     let mut rows=rendered(&writer(vec![]));
     let gaps=BTreeMap::from([((ACTOR.into(),"unsupported-example".into(),"account/example".into()),
         Fact{claim_id:"gap-claim".into(),value:gap})]);
-    append_gap_rows(&mut rows,&gaps);
+    append_gap_rows(&mut rows,&gaps,true);
     assert_eq!(row(&rows,"spend/coverage/unresolved/unsupported-example/account/example")["status"],"no-data");
     assert_eq!(row(&rows,"spend/forfeited/unsupported-example/basic")["status"],"no-data");
     assert_eq!(cam(&rows,"cam-r01")["status"],"met");
@@ -418,10 +418,11 @@ fn retention_uses_the_common_cut_even_for_a_small_fresh_producer_lag() {
 }
 
 #[test]
-fn restart_replay_keeps_a_late_child_unknown_without_recovering_its_owner_episode() {
-    use crate::objective_faults::{ObjectiveResponse,check_with_response,end_unjudged,episode};
+fn restart_replay_preserves_real_native_binding_children_including_renamed_subtrees() {
+    use crate::declared_objectives as bindings;
+    use crate::objective_faults::{ObjectiveFaults,episode};
     const LATE:&str="agent/sample/late-usage-producer";
-    const CHILD:&str="spend/coverage/late-digest";
+    const CHILDREN:[&str;3]=["spend/coverage/late-digest","example/spend/coverage/late-digest","example/coverage/late-digest"];
     let directory=tempfile::tempdir().unwrap();
     let path=directory.path().join("replay.db");
     let store=Store::open(&path,"node").unwrap();
@@ -444,27 +445,52 @@ fn restart_replay_keeps_a_late_child_unknown_without_recovering_its_owner_episod
     quota["account"]=json!("late-digest");
     latest.claim.body["fields"]["readings"]=json!([quota]);
     append_delta(&store,LATE,latest);
-    let owner="version 2\nagent \"node.ops\" { command \"true\"; handles-faults }\n";
+    let owner=r#"version 2
+agent "node.ops" { command "true"; handles-faults }
+objective "spend" {
+  about "Unrenamed spend"
+  indicator "native" { objective "spend"; }
+  on-breach "fault" owner="agent/node.ops" condition="spend-budget-missed"
+}
+objective "example/spend" {
+  about "Renamed spend family"
+  indicator "native" { objective "spend"; }
+  on-breach "fault" owner="agent/node.ops" condition="spend-budget-missed"
+}
+objective "example/coverage" {
+  about "Renamed spend subtree"
+  indicator "native" { objective "spend/coverage"; }
+  on-breach "fault" owner="agent/node.ops" condition="spend-budget-missed"
+}
+"#;
     let intent=crate::graph::parse_intent(owner,"node").unwrap();
     let preview=store.mission(&intent,crate::model::IntentInput{kdl:owner.into(),source_name:None}).unwrap();
     store.apply(&intent,&preview.subject_tokens,"spend-replay-owner").unwrap();
     rows(&store,NOW,DAY).unwrap();
-    let closed=rows(&store,NOW,DAY).unwrap();
-    assert_eq!(row(&closed,CHILD)["status"],"exhausted");
-    let objectives=BTreeSet::from([CHILD.to_owned()]);
-    let response=||ObjectiveResponse{reviewer:"agent/node.ops",condition:"spend-budget-missed",title:"Spend coverage"};
-    assert_eq!(check_with_response(&store,&closed,&objectives,response()).unwrap().opened,1);
+    let native=rows(&store,NOW,DAY).unwrap();
+    let closed=bindings::rows(&store,NOW,&native).unwrap();
+    for child in CHILDREN { assert_eq!(row(&closed,child)["status"],"exhausted"); }
+    // Both account coverage children burn under each of the three real declarations.
+    assert_eq!(bindings::check(&store,&closed).unwrap().opened,6);
     drop(store);
     let store=Store::open(&path,"node").unwrap();
     store.set_usage_limits_writers(vec![ACTOR.into(),LATE.into()]).unwrap();
-    let replaying=rows(&store,NOW,DAY).unwrap();
-    assert_eq!(row(&replaying,CHILD)["status"],"no-data");
-    assert!(row(&replaying,CHILD)["remaining_percent"].is_null());
-    let judged=replaying.iter().filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
-    assert_eq!(end_unjudged(&store,|id|id.starts_with("spend/"),&judged).unwrap(),0);
+    let native=rows(&store,NOW,DAY).unwrap();
+    assert!(native.iter().any(|row|row["id"]=="spend/coverage/digest"));
+    assert!(!native.iter().any(|row|row["id"]=="spend/coverage/late-digest"));
+    let replaying=bindings::rows(&store,NOW,&native).unwrap();
+    for child in CHILDREN {
+        assert_eq!(row(&replaying,child)["status"],"no-data");
+        assert!(row(&replaying,child)["remaining_percent"].is_null());
+    }
+    assert_eq!(bindings::check(&store,&replaying).unwrap(),ObjectiveFaults::default());
     assert!(store.claims_for("daemon/node",Some("operational.recovered")).unwrap().is_empty());
-    assert_eq!(store.operational_failure(&episode("node",CHILD)).unwrap().unwrap().status,"pending");
-    let closed=rows(&store,NOW,DAY).unwrap();
-    assert_eq!(row(&closed,CHILD)["status"],"exhausted");
-    assert_eq!(check_with_response(&store,&closed,&objectives,response()).unwrap().recovered,0);
+    for child in CHILDREN {
+        assert_eq!(store.operational_failure(&episode("node",child)).unwrap().unwrap().status,"pending");
+    }
+    let native=rows(&store,NOW,DAY).unwrap();
+    let closed=bindings::rows(&store,NOW,&native).unwrap();
+    for child in CHILDREN { assert_eq!(row(&closed,child)["status"],"exhausted"); }
+    assert_eq!(bindings::check(&store,&closed).unwrap(),ObjectiveFaults::default(),
+        "completed replay must neither recover nor open replacement episodes");
 }

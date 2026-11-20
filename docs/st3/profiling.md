@@ -468,11 +468,15 @@ heartbeat. Empty configuration executes no source SQL. Quiet reads reuse derived
 an actual source or freshness boundary, without rescanning retained evidence. Quota history
 keeps one pre-horizon boundary; loss/decision history retains the 60d gauge lookback.
 
-Persisted open spend episodes retain no-data child rows during incomplete replay,
-including restart and source-epoch/configuration reset; missing scope cannot end an
-owner episode as recovered. History is pruned relative to the common certified cut,
-never wall-clock time or a faster producer's frontier. No pruning occurs before
-every expected writer has a positive frontier.
+Native source metadata distinguishes `source.scope_complete` (the child population
+has been replayed) from `source.coverage_known` (the evidence is usable and fresh).
+The native-binding boundary retains its previously judged and persisted owned
+children as no-data while source scope is incomplete, including renamed families
+and subtree bindings after restart or source-epoch/configuration reset. Identity
+comes from the declaration's mapped children, not a raw `spend/` episode prefix.
+Missing scope cannot end an owner episode as recovered. History is pruned relative
+to the common certified cut, never wall-clock time or a faster producer's frontier.
+No pruning occurs before every expected writer has a positive frontier.
 
 The source fence is always installed in local `meta`, independent of optional IVM
 view adapters. A per-database nonce and mutation epoch survive reopen. Ordinary

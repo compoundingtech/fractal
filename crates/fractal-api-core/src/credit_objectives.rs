@@ -141,7 +141,7 @@ struct Mirror {
     cursor: u64,
     sources: BTreeMap<(String, String), Writer>,
     active: BTreeMap<String, (u128, String)>,
-    cached: Option<(u64, u64, u64, bool, Vec<Value>)>,
+    cached: Option<(u64, u64, u64, Vec<Value>)>,
     gaps: BTreeMap<(String, String, String), Fact>,
 }
 impl Mirror {
@@ -200,7 +200,7 @@ impl Mirror {
     }
 }
 
-fn append_gap_rows(rows: &mut Vec<Value>, gaps: &BTreeMap<(String,String,String),Fact>) {
+fn append_gap_rows(rows: &mut Vec<Value>, gaps: &BTreeMap<(String,String,String),Fact>, complete: bool) {
     let mut seen = BTreeSet::new();
     for ((_,provider,reference),fact) in gaps {
         for row in rows.iter_mut() {
@@ -214,12 +214,14 @@ fn append_gap_rows(rows: &mut Vec<Value>, gaps: &BTreeMap<(String,String,String)
             "about":"Declared account without supported canonical source identity","target":"supported source coverage",
             "current":"unresolved identity or unsupported provider","status":"no-data","window":"30d","remaining_percent":null,
             "evidence":{"claim_id":fact.claim_id,"gap":fact.value},
+            "source":{"kind":"usage-source-mirror","coverage_known":false,"scope_complete":complete},
             "explain":"Explicit producer coverage gap outside the certified supported source roster. No account digest, numeric success or empty provider population is invented."}));
         if let Some(plan)=fact.value["provider_plan"].as_str()
             && !rows.iter().any(|row|row["id"]==format!("spend/forfeited/{plan}"))
         { rows.push(json!({"id":format!("spend/forfeited/{plan}"),"kind":"objective","about":"Unmeasured declared provider-plan loss",
             "target":"rolling lost windows <=5 for 95% of covered time","current":"unresolved producer scope","status":"no-data",
-            "window":"30d","remaining_percent":null,"evidence":{"gap":fact.value}})); }
+            "window":"30d","remaining_percent":null,"evidence":{"gap":fact.value},
+            "source":{"kind":"usage-source-mirror","coverage_known":false,"scope_complete":complete}})); }
     }
 }
 
@@ -245,15 +247,9 @@ pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>
         *mirror = Mirror { identity: Some(identity), writers: configured, ..Mirror::default() };
     }
     if page.claims.is_empty()
-        && let Some((freshness, rendered_at, until, complete, cached)) = &mirror.cached
+        && let Some((freshness, rendered_at, until, cached)) = &mirror.cached
         && *freshness == fresh_ms && now >= *rendered_at && now < *until
-    {
-        let mut rows = cached.clone();
-        if !complete {
-            retain_open_children(store, &mut rows)?;
-        }
-        return Ok(rows);
-    }
+    { return Ok(cached.clone()); }
     let catching_up = page.next_cursor.is_some();
     let replayed = !page.claims.is_empty();
     for claim in page.claims {
@@ -268,31 +264,15 @@ pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>
     let complete = !catching_up && sources.len() == mirror.writers.len()
         && !mirror.sources.values().any(|source| source.enrolled_at == 0);
     let mut rendered = render(&sources, now, fresh_ms, complete);
-    append_gap_rows(&mut rendered, &mirror.gaps);
-    if !complete { retain_open_children(store, &mut rendered)?; }
+    append_gap_rows(&mut rendered, &mirror.gaps, complete);
     let until = sources.iter().flat_map(|(_, _, source)| [
         source.observed, source.observed.saturating_add(fresh_ms).saturating_add(1),
         source.through, source.through.saturating_add(fresh_ms).saturating_add(1),
     ]).filter(|boundary| *boundary > now).min().unwrap_or(u64::MAX);
-    mirror.cached = Some((fresh_ms, now, until, complete, rendered.clone()));
+    mirror.cached = Some((fresh_ms, now, until, rendered.clone()));
     Ok(rendered)
 }
 
-/// Persisted episodes outlive the disposable mirror, including restart and epoch replay.
-/// Their children are still judged (unknown), not retired, until source closure is known.
-fn retain_open_children(store: &Store, rows: &mut Vec<Value>) -> anyhow::Result<()> {
-    let prefix = crate::objective_faults::episode(store.origin(), "");
-    for fault in store.operational_failures()? {
-        let Some(id) = fault.subject.strip_prefix(&prefix).filter(|id| id.starts_with("spend/")) else { continue; };
-        if fault.status == "resolved" || rows.iter().any(|row| row["id"] == id) { continue; }
-        rows.push(json!({"id":id,"kind":"objective","about":"Previously judged spend objective",
-            "target":"awaiting complete source replay","current":"source scope not yet reconstructed",
-            "status":"no-data","window":"30d","remaining_percent":null,
-            "source":{"kind":"usage-source-mirror","coverage_known":false},
-            "explain":"An existing native owner episode retains its child while configured source replay is incomplete. Missing scope is unknown, never operational recovery."}));
-    }
-    Ok(())
-}
 
 fn state_class(state: &str) -> u8 {
     match state { "redeemed" => 2, "forfeited" => 1, _ => 0 }
@@ -328,7 +308,7 @@ fn render(sources: &[(&str, &str, &Writer)], now: u64, fresh_ms: u64, mirrored: 
     }
     if providers.is_empty() { providers.insert("unknown"); }
     let source = json!({
-        "kind": "usage-source-mirror", "coverage_known": known,
+        "kind": "usage-source-mirror", "coverage_known": known, "scope_complete": mirrored,
         "covered_from_unix_ms": from, "covered_through_unix_ms": cut,
         "freshness_ttl_ms": fresh_ms,
         "producers": sources.iter().map(|(actor, incarnation, source)| json!({
