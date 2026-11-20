@@ -74,6 +74,7 @@ pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
+mod program_turn;
 mod shell_resources;
 mod resource_profiles;
 mod lane_bursts;
@@ -6397,6 +6398,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(true);
         }
+        // A native request owns a work episode, not the standing harness's unrelated turn.
+        // Even an unclaimed busy turn must finish before an opt-in context replacement.
+        if step.run.starts_with("mission-run/native-turn/")
+            && self.store.current_harness(agent)?.is_some_and(|harness| harness.state == "working")
+        {
+            return Ok(false);
+        }
         let operation = crate::model::fresh_context_operation(step);
         let matches_operation = |claim: &crate::model::ClaimRecord| {
             claim.body.pointer("/fields/action").and_then(Value::as_str) == Some("fresh-context")
@@ -11930,6 +11938,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         mission: Option<MissionSpec>,
     ) -> Result<bool> {
+        if run.subject.starts_with("mission-run/native-turn/") {
+            return self.evaluate_native_turn(run);
+        }
         if matches!(run.phase.as_str(), "normal" | "supersession-waiting")
             && self.store.supersede_current_mission_run(run)?
         {
@@ -12450,25 +12461,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ) {
                         return Ok(changed);
                     }
-                    if view.status == "orphaned" {
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "ready",
-                            Some("the prior worker incarnation ended"),
-                        )?;
-                        return Ok(changed);
-                    }
-                    if matches!(
-                        view.status.as_str(),
-                        "claimed" | "working" | "verifying" | "blocked"
-                    ) && self.store.work_claim_is_orphaned(view)?
-                    {
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "orphaned",
-                            Some("the exact worker incarnation ended"),
-                        )?;
-                        return Ok(changed);
+                    if let Some(lease_changed) = self.reconcile_worker_lease(view)? {
+                        return Ok(changed | lease_changed);
                     }
                     if view.status == "ready"
                         && view.blocked_reason.as_deref() == Some("the worker lease expired")
@@ -12477,20 +12471,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             changed |= self.expire_step_timeout(view, &step)?;
                             return Ok(changed);
                         }
-                        changed |= self.store.set_step_state(
-                            &view.subject,
-                            "ready",
-                            Some("the worker lease expired"),
-                        )?;
-                        return Ok(changed);
-                    }
-                    if let Some(expiry) = view.claim_expires_at_unix_ms
-                        && expiry <= now_ms()
-                        && matches!(
-                            view.status.as_str(),
-                            "claimed" | "working" | "verifying" | "blocked"
-                        )
-                    {
                         changed |= self.store.set_step_state(
                             &view.subject,
                             "ready",
@@ -15966,6 +15946,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             if !products.is_empty() {
                 value["products"] = Value::Object(products);
             }
+            if let Some(result) = self.program_child_result(&view)? {
+                value["result"] = result;
+            }
             return Ok(serde_json::json!({"_tag": "Success", "value": value}));
         }
         let reason = self
@@ -15979,6 +15962,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
             .unwrap_or_else(|| format!("the child run is {status}"));
         Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason, "executions": executions}}))
+    }
+    /// Only a single native program has an unambiguous run return value. Resource products
+    /// remain separate: `$result` is the program's journaled output, never a resource claim.
+    fn program_child_result(&self, child: &MissionRunView) -> Result<Option<Value>> {
+        let Some(spec) = self.store.mission_spec(&child.mission, Some(&child.revision))? else {
+            return Ok(None);
+        };
+        let steps = flatten_mission_steps(&spec);
+        let [step] = steps.as_slice() else { return Ok(None); };
+        let Some(program) = &step.spec.program else { return Ok(None); };
+        let Some(view) = child.steps.iter().find(|view|
+            view.step == step.spec.path && view.status == "completed") else { return Ok(None); };
+        program::completed_result(&self.store, &view.subject, view.attempt, &program.bundle_hash)
     }
 
     fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
