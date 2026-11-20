@@ -7974,6 +7974,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
+                    "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 2,

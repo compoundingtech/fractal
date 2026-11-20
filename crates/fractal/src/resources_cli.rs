@@ -55,9 +55,9 @@ pub(super) enum ResourcesCommand {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(super) enum Class { Landing, Check, Agent }
+pub(super) enum Class { Recovery, Landing, Check, Agent }
 impl From<Class> for RequestClass {
-    fn from(value: Class) -> Self { match value { Class::Landing => Self::Landing, Class::Check => Self::Check, Class::Agent => Self::Agent } }
+    fn from(value: Class) -> Self { match value { Class::Recovery => Self::Recovery, Class::Landing => Self::Landing, Class::Check => Self::Check, Class::Agent => Self::Agent } }
 }
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(super) enum CliCoverage { Logical, Enforced }
@@ -137,7 +137,7 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
         ResourcesCommand::Ls { host, class, head, .. } => {
             let mut query = Vec::new();
             if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
-            if let Some(class) = class { query.push(format!("class={}", match class { Class::Landing => "landing", Class::Check => "check", Class::Agent => "agent" })); }
+            if let Some(class) = class { query.push(format!("class={}", match class { Class::Recovery => "recovery", Class::Landing => "landing", Class::Check => "check", Class::Agent => "agent" })); }
             if let Some(head) = head { query.push(format!("head={}", urlencoding::encode(&head))); }
             let inventory: Value = client.get(&format!("/v1/internal/resources?{}", query.join("&"))).await?;
             if json_output { return print_value(&inventory, true); }
@@ -376,7 +376,7 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
             .and_then(|group| fs::read_to_string(Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')).join("memory.peak")).ok())
             .and_then(|peak| peak.trim().parse().ok())
     } else { None };
-    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes };
+    let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes, ..PayloadResult::default() };
     let temporary = result_path.with_extension("pending");
     let mut file = fs::File::create(&temporary)?;
     std::io::Write::write_all(&mut file, &serde_json::to_vec(&result)?)?;
@@ -513,6 +513,7 @@ mod tests {
         completed.result = Some(PayloadResult {
             head_start: Some("start-head".into()), head_end: Some("end-head".into()), clean_start: Some(true), clean_end: Some(false),
             exit_code: Some(37), exit_signal: None, wall_duration_ms: 91, memory_peak_bytes: Some(42),
+            ..PayloadResult::default()
         });
         write_receipt(&path, &completed).unwrap();
         let receipt: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

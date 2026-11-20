@@ -1563,7 +1563,16 @@ mission "retained-reason" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open_memory("node").unwrap());
         let runtime = Arc::new(FakeRuntime::default());
-        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let policy = fractal_runtime::host::FinitePolicy {
+            profiles: BTreeMap::from([("check.unit".into(), fractal_runtime::ResourceProfileSeed {
+                cores: 1, memory: 256 * 1024 * 1024, memory_high: None,
+                learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly, recovery_capable: false,
+                source: Some("declared".into()), reason: Some("shell outcome fixture".into()), disk: None, io: None,
+            })]),
+            ..Default::default()
+        };
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
         reconciler.driver_state_dir = root.path().join("drivers");
         reconciler.ensure_resource_authority().unwrap();
         let owner = if expire_owner {
@@ -1583,19 +1592,21 @@ mission "shell-owner" state="ready" {{
         } else {
             Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
         };
-        let lane = LaneRequest {
+        let mut lane = LaneRequest {
             id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
-            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            capacity: None,
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
-            profile: None, profile_estimate: None, disk_path: None,
+            profile: Some("check.unit".into()), profile_estimate: None, disk_path: None,
         };
+        // Released shells retain the execution host's accepted profile snapshot on recovery.
+        reconciler.resolve_resource_profile(&mut lane).unwrap();
         let now = u64::try_from(now_ms()).unwrap();
         let mut execution = store.submit_shell_resource(Command {
             id: "outcome".into(), request_id: None, lane: lane.clone(), argv: vec!["true".into()],
             cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
         }, now).unwrap();
-        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let fit = Fit { room: lane.capacity, ..Fit::default() };
         let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
             panic!("fixture was not admitted");
         };
@@ -1618,6 +1629,7 @@ mission "shell-owner" state="ready" {{
             head_start: Some("abc123".into()), head_end: Some("def456".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
             wall_duration_ms: 1234, memory_peak_bytes: None,
+            ..PayloadResult::default()
         }).unwrap()).unwrap();
         if expire_owner {
             store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
@@ -1704,6 +1716,7 @@ mission "shell-owner" state="ready" {{
                 head_start: Some("abc123".into()), head_end: Some("def456".into()),
                 clean_start: Some(true), clean_end: Some(false),
                 exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+                ..PayloadResult::default()
             }).unwrap()).unwrap();
             fs::rename(temporary, path).unwrap();
         }));
