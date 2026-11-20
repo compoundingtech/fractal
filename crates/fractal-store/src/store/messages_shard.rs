@@ -640,6 +640,7 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
         .0
         .set(shard.clone())
         .map_err(|_| anyhow::anyhow!("the graph already has a messages shard"))?;
+    graph.fractal.mail_objective_inputs.invalidate();
     Ok(shard)
 }
 
@@ -744,6 +745,13 @@ fn append_item(store: &GraphStore, input: &ClaimInput) -> Result<(ClaimRecord, b
 }
 
 impl Runtime for MessagesRuntime {
+    fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
+        Some(Arc::new(super::observer_mail_inputs::ShardObserver {
+            graph: self.0.clone(),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
     fn migrate_schema(&self, _connection: &Connection) -> anyhow::Result<()> {
         Ok(())
     }
