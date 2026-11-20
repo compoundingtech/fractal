@@ -1168,19 +1168,23 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
                     && int_attribute(span, "http.response.status_code") == Some(200)
             })
     });
-    let timestamp = |span: &Value| {
-        span["startTimeUnixNano"].as_str().and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| span["startTimeUnixNano"].as_u64()).expect("OTLP timestamp")
+    let timestamp = |span: &Value, key: &str| {
+        span[key].as_str().and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| span[key].as_u64()).expect("OTLP timestamp")
     };
-    let write_span = daemon_spans(&write_export, "POST /v1/claims").into_iter()
-        .find(|span| span["traceId"].as_str() == Some(TRACE_ID)).unwrap();
-    let write_started = timestamp(write_span);
-    // Wake attribution is last-writer-wins when notifications coalesce. Prove
-    // a pass after the write and separately require the exact API wake counter.
+    let write_span = daemon_spans(&write_export, "POST /v1/claims")
+        .into_iter()
+        .find(|span| span["traceId"].as_str() == Some(TRACE_ID))
+        .expect("exported claim write");
+    let write_started = timestamp(write_span, "startTimeUnixNano");
+    // Notify coalesces wakes, and a reconciler wake may replace the API cause
+    // before take_wake. Bind the pass to this write's timing instead of its
+    // last-writer-wins label: a cached startup pass cannot satisfy this wait.
+    // The API counter below independently proves the write recorded its wake.
     daemon.await_export(&traces_path, |request| {
         daemon_spans(request, "st.reconcile_pass")
             .into_iter()
-            .any(|span| timestamp(span) >= write_started)
+            .any(|span| timestamp(span, "startTimeUnixNano") >= write_started)
     });
     let durations = daemon.await_export(&metrics_path, |request| {
         metric_points(request, "st.reconcile.pass.duration")
@@ -1228,7 +1232,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
             })
     });
     // Stop and drain the collector before checking every pass, including passes
-    // exported in other batches or at shutdown, not just the first API match.
+    // exported in other batches or at shutdown, not just the first post-write match.
     drop(daemon);
     let traces = std::fs::read_to_string(&traces_path).expect("otelite writes reconcile traces");
     let mut pass_count = 0;
@@ -1246,13 +1250,13 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
             let cause = string_attribute(span, "st.reconcile.wake_cause")
                 .expect("reconcile pass wake cause attribute");
             assert!(WAKE_CAUSES.contains(&cause), "unbounded reconcile wake cause: {span}");
-            if timestamp(span) >= write_started {
+            if timestamp(span, "startTimeUnixNano") >= write_started {
                 post_write_count += 1;
             }
         }
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
-    assert!(post_write_count > 0, "write must be followed by a reconcile pass:\n{traces}");
+    assert!(post_write_count > 0, "write must export a subsequent reconcile pass:\n{traces}");
     let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
     for name in [
