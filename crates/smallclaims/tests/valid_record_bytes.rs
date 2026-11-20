@@ -141,6 +141,30 @@ fn older_valid_record_bytes_empty_in_resumable_pages_and_nothing_else_changes() 
     assert_eq!(observable(&alder), before, "rows, positions and digests are unchanged");
     let again = alder.release_valid_record_bytes().unwrap();
     assert!(again.done && again.emptied == 0);
+    // An older build that runs the store after a rollback stores bytes for the records it
+    // admits; the next start empties them, and only them.
+    note(&alder, 601);
+    alder.replication_snapshot().unwrap();
+    alder
+        .connection
+        .write()
+        .execute(
+            "UPDATE replica_records SET raw=randomblob(64)
+             WHERE rowid=(SELECT MAX(rowid) FROM replica_records WHERE state='valid')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(record_bytes(&alder, "valid").1, 64);
+    assert!(!alder.valid_record_bytes_released().unwrap());
+    let mut later = alder.release_valid_record_bytes().unwrap();
+    while !later.done {
+        let page = alder.release_valid_record_bytes().unwrap();
+        later.emptied += page.emptied;
+        later.done = page.done;
+    }
+    assert_eq!(later.emptied, 1);
+    assert_eq!(record_bytes(&alder, "valid").1, 0);
+    assert!(alder.valid_record_bytes_released().unwrap());
 
     // Both an existing and a new peer still sync from it, to the same digests. The unknown
     // record stood for one from a peer; it has no envelope here, so it leaves first.

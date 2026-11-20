@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "No new table or column and no storage version change. Valid replica_records rows store an empty raw. Five triggers on replica_records that fired on any UPDATE (resource preparation, completion health and resource observation pending queues) are replaced by triggers under new names (_columns, resource_observations_record_change) that list every column but raw, so emptying the bytes queues no work. A meta cursor (valid_record_bytes_cursor) records the pass's progress."
+    "detail": "No new table or column and no storage version change. Valid replica_records rows store an empty raw. Five triggers on replica_records that fired on any UPDATE (resource preparation, completion health and resource observation pending queues) are replaced by triggers under new names (_columns, resource_observations_record_change) that list every column but raw, so emptying the bytes queues no work. A meta cursor (valid_record_bytes_cursor) records the last record the pass read; it stays after the pass, so each start reads only records added since. Only a record that was never admitted as valid keeps its bytes: a valid record later repaired, or marked invalid with its envelope, keeps an empty raw, which no reader takes."
   },
   "rules": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "No startup work. After start the daemon empties valid records' bytes a page at a time on the writer queue (at most 128 rows or 10 ms of updates per page, a cursor committed with each), then gives the freed pages back 128 at a time. Measured on a copy of a 52 GB member with the daemon's WAL checkpointer running: 3.2 M records emptied in 141 s (writer jobs p50 4 ms, p99 19 ms) and 742,497 pages given back in 68 s (p50 9 ms, p99 42 ms). 12 of 31,210 writes took over 100 ms (at most 377 ms); they waited on concurrent WAL checkpoints of up to 335 ms or on a cold read, as any write does at those moments."
+    "detail": "No startup work. After start the daemon empties valid records' bytes a page at a time on the writer queue (at most 512 records read and 10 ms of updates before each page's commit, a cursor committed with each), then gives the freed pages back 128 at a time. Measured on a copy of a 52 GB member with the daemon's WAL checkpointer running: 3.2 M records emptied in 141 s (writer jobs p50 4 ms, p99 19 ms) and 742,497 pages given back in 68 s (p50 9 ms, p99 42 ms). 12 of 31,210 writes took over 100 ms (at most 377 ms); they waited on concurrent WAL checkpoints of up to 335 ms or on a cold read, as any write does at those moments."
   },
   "manual": {
     "status": "none",

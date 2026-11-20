@@ -3731,7 +3731,8 @@ async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
 /// A release member upgrades in place, and this build empties its valid records' bytes while it
 /// keeps replicating with a release peer in both directions. Rolled back over those emptied
 /// records, the release still reads every note, answers a retried request with the same claim,
-/// writes its next sequence and exchanges with an upgraded member to equal digests.
+/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
+/// again, this build empties the bytes the release wrote meanwhile.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
@@ -3810,6 +3811,18 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
         assert_eq!(status["invalid_records"], 0, "{status}");
         assert_eq!(status["unsigned_envelopes"], 0, "{status}");
     }
+    // The release stored bytes for what it admitted and wrote; upgraded again, this build
+    // empties those too.
+    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    o.wait_listening().await;
+    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
 }
 
 fn backup_baseline_graph(old: &Node, directory: &Path) {

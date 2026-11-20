@@ -5,6 +5,10 @@
 //! `raw` for a valid record, and this pass empties the copies a store kept before, in bounded
 //! pages on the writer queue, so the hourly free-page pass can give their pages back.
 //!
+//! Only a record that was never admitted as valid keeps its bytes. A valid record that a repair
+//! later replaces, or that is marked invalid with its envelope, keeps the empty `raw`: no reader
+//! takes a record's bytes for those either.
+//!
 //! The row stays: its state, claim, position and repair link are what readers and triggers use,
 //! and an older build that runs this store after a rollback finds every row it expects. Only
 //! the triggers on `replica_records` that fire on any UPDATE notice the change, so they list the
@@ -23,9 +27,11 @@ pub const RECORD_COLUMNS_BUT_RAW: &str = "record_ref,writer,sequence,envelope_ha
 const CURSOR: &str = "valid_record_bytes_cursor";
 /// The next page of valid records that still keep bytes. NOT INDEXED keeps the walk on the
 /// rowid range: the state index would gather every valid record and sort them for each page.
-const PAGE_SQL: &str = "SELECT rowid, length(raw) FROM replica_records NOT INDEXED
-     WHERE rowid>?1 AND state='valid' AND length(raw)>0 ORDER BY rowid LIMIT ?2";
-const PAGE: usize = 128;
+/// It reads every record past the cursor, not only those with bytes, so a page's reads stay
+/// bounded however few records past the cursor still hold bytes.
+const PAGE_SQL: &str = "SELECT rowid, state='valid' AND length(raw)>0, length(raw)
+     FROM replica_records NOT INDEXED WHERE rowid>?1 ORDER BY rowid LIMIT ?2";
+const PAGE: usize = 512;
 /// One page's share of a writer batch. A row's update rewrites its leaf page and frees its
 /// overflow pages, and the commit writes them, so the page stops early to keep the whole
 /// writer hold well under 100 ms.
@@ -46,56 +52,66 @@ pub struct RecordBytesRelease {
 
 impl Store {
     /// Empty one bounded page of valid records' bytes. The cursor commits with the page, so an
-    /// interrupted pass resumes at the committed row, and a finished one reads one `meta` row.
+    /// interrupted pass resumes at the committed row. It is the last record the pass read, and
+    /// it stays after the pass finishes: the next start reads only the records added since,
+    /// which this build stored without bytes, or an older build stored with them after a
+    /// rollback.
     pub fn release_valid_record_bytes(&self) -> Result<RecordBytesRelease> {
         self.connection
             .batched(|tx| release_page(tx))
             .map_err(anyhow::Error::msg)?
     }
 
-    /// Whether every valid record's bytes have been emptied.
+    /// Whether the pass has read every record this store holds.
     pub fn valid_record_bytes_released(&self) -> Result<bool> {
-        Ok(cursor(&self.readers.get())?.as_deref() == Some("done"))
+        let connection = self.readers.get();
+        let newest: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM replica_records",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(cursor(&connection)? >= newest)
     }
 }
 
-fn cursor(connection: &Connection) -> Result<Option<String>> {
-    Ok(connection
+fn cursor(connection: &Connection) -> Result<i64> {
+    let value: Option<String> = connection
         .query_row("SELECT value FROM meta WHERE key=?1", [CURSOR], |row| row.get(0))
-        .optional()?)
+        .optional()?;
+    Ok(value.map(|value| value.parse::<i64>()).transpose()?.unwrap_or(0))
 }
 
 fn release_page(tx: &Connection) -> Result<RecordBytesRelease> {
-    let cursor = cursor(tx)?;
-    if cursor.as_deref() == Some("done") {
-        return Ok(RecordBytesRelease { done: true, ..Default::default() });
-    }
-    let mut after = cursor.map(|value| value.parse::<i64>()).transpose()?.unwrap_or(0);
+    let mut after = cursor(tx)?;
     let started = Instant::now();
     let mut report = RecordBytesRelease::default();
     let mut rows = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbdff2ded9fa8 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ PAGE_SQL)?;
     let mut empty = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4e2a24c654f7 owner=smallclaims::store::record_bytes TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET raw=?1 WHERE rowid=?2")?;
     let page = rows
-        .query_map(params![after, PAGE], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?)))?
+        .query_map(params![after, PAGE], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get::<_, u64>(2)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (rowid, bytes) in &page {
-        empty.execute(/* sqlite-large-value: allow-for-now lv-he251c91cb160 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ params![VALID_RECORD_RAW, rowid])?;
+    for (rowid, holds_bytes, bytes) in &page {
+        if *holds_bytes {
+            empty.execute(/* sqlite-large-value: allow-for-now lv-he251c91cb160 owner=smallclaims::store::record_bytes TODO=trace-statement-and-value-representation */ params![VALID_RECORD_RAW, rowid])?;
+            report.emptied += 1;
+            report.bytes += bytes;
+        }
         after = *rowid;
         report.scanned += 1;
-        report.emptied += 1;
-        report.bytes += bytes;
         if started.elapsed() >= BUDGET {
             break;
         }
     }
-    // Rows past the last one at the start keep an empty `raw` from admission, so a pass that
-    // finds nothing is finished for good.
     report.done = page.is_empty();
     report.work = started.elapsed();
-    tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h2d7339b795d8 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![CURSOR, if report.done { "done".to_owned() } else { after.to_string() }],
-    )?;
+    if report.scanned > 0 {
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h2d7339b795d8 owner=smallclaims::store::record_bytes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![CURSOR, after.to_string()],
+        )?;
+    }
     Ok(report)
 }
 
