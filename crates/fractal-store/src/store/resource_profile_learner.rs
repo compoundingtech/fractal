@@ -206,7 +206,7 @@ pub struct LearnedEstimate {
 pub fn memory_max(high: u64) -> Result<u64> {
     ensure!(high != 0, "memory high must be positive");
     high.checked_add(high / 5)
-        .and_then(|max| max.checked_add(u64::from(high % 5 != 0)))
+        .and_then(|max| max.checked_add(u64::from(!high.is_multiple_of(5))))
         .context("memory max overflows u64")
 }
 
