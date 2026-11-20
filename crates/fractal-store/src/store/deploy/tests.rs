@@ -162,8 +162,8 @@ fn local_clock_behind_own_signed_evidence_is_refused() {
         let connection = fixture.local.connection.write();
         match state {
             Some(state) => connection.execute(
-                "UPDATE replica_records SET state=?1 WHERE claim_id=?2", rusqlite::params![state, future.id]),
-            None => connection.execute("DELETE FROM replica_records WHERE claim_id=?1", [&future.id]),
+                /* sqlite-large-value: allow-for-now lv-hbd02fe722cc4 owner=fractal_store::store::deploy::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state=?1 WHERE claim_id=?2", rusqlite::params![state, future.id]),
+            None => connection.execute(/* sqlite-large-value: allow-for-now lv-h5856996ca744 owner=fractal_store::store::deploy::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1", [&future.id]),
         }
         .unwrap();
     };

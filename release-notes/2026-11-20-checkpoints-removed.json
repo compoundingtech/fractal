@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "On each older member that still runs shared checkpoints, a person either upgrades it or runs `fractal replication checkpoint excuse NAME --reason TEXT --as person/NAME` there (the command exists on older builds) for each member running this build, so the older members' shared checkpoints can become stable again. Nothing is needed on members running this build. A member that should keep everything sets [trim] local = false."
+    "detail": "On each older member that still runs shared checkpoints, a person either upgrades it or runs `fractal replication checkpoint excuse NAME --reason TEXT --as person/NAME` there (the command exists on older builds) for each member running this build, so the older members' shared checkpoints can become stable again. Nothing is needed on members running this build. A member that should keep everything sets [trim] local = false. Before rolling a member back to the previous release, set [trim] local = true explicitly in its config (this build omits the default line and the previous release defaults to false); otherwise the rolled-back member may re-admit claims this build retired from a peer that still holds them."
   },
   "recovery": {
     "status": "changed",
