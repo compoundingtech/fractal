@@ -184,6 +184,106 @@ pub async fn run_client_message_selectors_observed(
     drop(observer);
 }
 
+/// Retry held envelopes when a capped preparation publishes, never on unrelated commits.
+/// Startup also drains durable work published before this observer was installed. The
+/// observer only reads one indexed meta key; admission and projection run off the writer.
+pub async fn run_replication_admission(
+    store: std::sync::Weak<Store>,
+    on_changed: impl FnMut() + Send,
+) {
+    run_replication_admission_observed(store, on_changed, |_| {}).await;
+}
+
+async fn run_replication_admission_observed(
+    store: std::sync::Weak<Store>,
+    mut on_changed: impl FnMut() + Send,
+    mut on_turn: impl FnMut(bool) + Send,
+) {
+    let (observer, mut changed) = {
+        let Some(current) = store.upgrade() else { return; };
+        let generation = match crate::store::GraphStore::replication_admission_wake_generation(&current.readers.get()) {
+            Ok(generation) => generation,
+            Err(error) => {
+                tracing::error!(error = %error, "replication admission wake initialization failed");
+                return;
+            }
+        };
+        let (source, changed) = tokio::sync::watch::channel(generation);
+        let observer = current.observe_commits(move |connection| {
+            match crate::store::GraphStore::replication_admission_wake_generation(connection) {
+                Ok(generation) => {
+                    source.send_if_modified(|previous| {
+                        if *previous == generation { return false; }
+                        *previous = generation;
+                        true
+                    });
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "replication admission wake observation failed");
+                }
+            }
+        });
+        // A publication between the initial read and registration is covered by the
+        // unconditional startup pass, including when no further receive ever arrives.
+        (observer, changed)
+    };
+    loop {
+        // Mark seen before draining so a publication during admission remains pending.
+        changed.borrow_and_update();
+        let Some(current) = store.upgrade() else { return; };
+        on_turn(true);
+        let result = tokio::task::spawn_blocking(move || {
+            crate::task_cpu::profiled_blocking("maintenance.replication_admission", || {
+                let admission = current.validate_replication_backlog()?;
+                let repairs = current.apply_replication_repairs()?;
+                let was_deferred = current.replication_projection_deferred();
+                let projection_attempted = admission.changed
+                    || repairs != 0
+                    || was_deferred
+                    || current.replication_projection_needs_recovery()?;
+                let projected = if projection_attempted {
+                    current.project_replication_backlog_unless_catching_up()?
+                } else {
+                    Some(true)
+                };
+                let retry_after = if projected.is_none() {
+                    Some(current.replication_projection_throttle_remaining().unwrap_or_default())
+                } else {
+                    None
+                };
+                Ok::<_, anyhow::Error>((
+                    projected == Some(true) && (admission.changed || repairs != 0 || was_deferred),
+                    retry_after,
+                ))
+            })
+        }).await;
+        let retry_after = match result {
+            Ok(Ok((projected, retry_after))) => {
+                if projected { on_changed(); }
+                retry_after
+            }
+            Ok(Err(error)) => {
+                tracing::error!(error = %error, "replication admission maintenance stopped");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "replication admission maintenance task failed");
+                return;
+            }
+        };
+        on_turn(false);
+        if let Some(delay) = retry_after {
+            // Quiet peers need a continuation too. Release the Store and writer before
+            // waiting; a new publication can still advance this deadline.
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                result = changed.changed() => { if result.is_err() { break; } },
+            }
+        } else if changed.changed().await.is_err() { break; }
+    }
+    drop(observer);
+}
+
 /// Hydrate completion-health candidates only after serving starts. Every chunk releases the
 /// writer and rests before another loan; an idle worker owns no Store and performs no SQL.
 pub async fn run_completion_health(store: std::sync::Weak<Store>) {
@@ -238,6 +338,177 @@ pub fn divergence_check_interval(value: Option<&str>) -> Option<Duration> {
 mod tests {
     use super::*;
     use crate::model::ClaimInput;
+
+    const ADMISSION_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    const ADMISSION_SUBJECT: &str = "resource/quiet-admission";
+
+    fn held_replication_fixture() -> (tempfile::TempDir, Arc<Store>, String) {
+        smallclaims::sqlite::without_deferred_maintenance_for_test(|| {
+            let root = tempfile::tempdir().unwrap();
+            let source = Store::open_memory("quiet-source").unwrap();
+            let target = Arc::new(Store::open(&root.path().join("admission.sqlite"), "quiet-target").unwrap());
+            source.bind_fleet(ADMISSION_FLEET).unwrap();
+            target.bind_fleet(ADMISSION_FLEET).unwrap();
+            let claim = source.append_claim(&ClaimInput {
+                subject: ADMISSION_SUBJECT.into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(serde_json::json!({
+                    "kind": "vcs.pull-request", "facts": {"state": "open"}
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            {
+                let mut writer = target.connection.write();
+                let transaction = writer.transaction().unwrap();
+                transaction.execute(
+                    "INSERT INTO local_resource_preparation_deferred(subject) VALUES(?1)",
+                    [ADMISSION_SUBJECT],
+                ).unwrap();
+                transaction.execute(
+                    "INSERT INTO meta(key,value) VALUES('preparation_restarts/' || ?1,'4')",
+                    [ADMISSION_SUBJECT],
+                ).unwrap();
+                transaction.commit().unwrap();
+            }
+            let exchange = source.export_replication_exchange_answering(
+                ADMISSION_FLEET,
+                &target.replication_inventory().unwrap(),
+                &target.replication_signature_requests().unwrap(),
+            ).unwrap();
+            target.receive_replication_exchange("quiet-source", ADMISSION_FLEET, &exchange).unwrap();
+            let admission = target.validate_replication_backlog().unwrap();
+            assert_eq!(admission.held, 1);
+            assert!(!admission.changed);
+            (root, target, claim.id)
+        })
+    }
+
+    fn publish_capped_preparation(store: &Store) {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        while store.runtime.rebuild_deferred(&transaction, Duration::from_secs(1)).unwrap() {}
+        transaction.commit().unwrap();
+    }
+
+    async fn quiet_admission_after_publication(publish_before_start: bool) {
+        let (_root, store, claim_id) = held_replication_fixture();
+        if publish_before_start {
+            publish_capped_preparation(&store);
+            assert_eq!(crate::store::GraphStore::replication_admission_wake_generation(&store.readers.get()).unwrap(), 1);
+        }
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let reader_notify = notify.clone();
+        let (events, received) = tokio::sync::watch::channel(0u64);
+        let weak = Arc::downgrade(&store);
+        let worker = tokio::spawn(run_replication_admission_observed(
+            weak.clone(),
+            move || {
+                events.send_modify(|generation| *generation = generation.saturating_add(1));
+                reader_notify.notify_one();
+            },
+            move |working| { turns.send(working).unwrap(); },
+        ));
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        // No new receive, explicit admission call, or projection request follows publication.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert_eq!(*received.borrow(), 1);
+        let reader = store.readers.get();
+        assert!(reader.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
+            |row| row.get::<_, bool>(0),
+        ).unwrap());
+        assert_eq!(reader.query_row(
+            "SELECT receipt_state FROM replica_envelopes WHERE writer='quiet-source'", [],
+            |row| row.get::<_, String>(0),
+        ).unwrap(), "validated");
+        assert!(reader.query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+            [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+        ).unwrap(), "admitted resource must be projected before notifying readers");
+        drop(reader);
+        if !publish_before_start {
+            assert!(observed.recv().await.unwrap());
+            assert!(!observed.recv().await.unwrap());
+        }
+        // Once preparation has genuinely published, unrelated writes must not re-admit.
+        store.connection.write().execute(
+            "INSERT INTO meta(key,value) VALUES('quiet_admission_unrelated','1')", [],
+        ).unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(100), observed.recv()).await.is_err(),
+            "admission's own commits must not create a busy loop");
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+        assert!(weak.upgrade().is_none(), "idle admission worker must not retain its store");
+    }
+
+    #[tokio::test]
+    async fn admission_worker_retries_held_envelope_after_real_cap_publication_without_receive() {
+        quiet_admission_after_publication(false).await;
+    }
+
+    #[tokio::test]
+    async fn admission_worker_processes_persisted_publication_before_observer_registration() {
+        quiet_admission_after_publication(true).await;
+    }
+
+    #[tokio::test]
+    async fn admission_worker_projects_after_catch_up_throttle_expires_without_traffic() {
+        let (_root, store, claim_id) = held_replication_fixture();
+        publish_capped_preparation(&store);
+        let now = smallclaims::store::now_ms();
+        {
+            let mut peers = store.replication_sync.lock().unwrap();
+            let measured = peers.get_mut("quiet-source").unwrap().measured.as_mut().unwrap();
+            measured.peer_only_envelopes = u64::MAX;
+            measured.measured_at_unix_ms = now;
+        }
+        let interval = smallclaims::store::replication_settle_intervals_ms().0;
+        store.last_replication_projection_unix_ms.store(
+            (now as u64).saturating_sub(interval.saturating_sub(1_000)),
+            std::sync::atomic::Ordering::Release,
+        );
+        assert!(store.replication_catching_up());
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let projected = notify.clone();
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(run_replication_admission_observed(
+            Arc::downgrade(&store),
+            move || projected.notify_one(),
+            move |working| { turns.send(working).unwrap(); },
+        ));
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        assert!(store.replication_projection_deferred());
+        {
+            let reader = store.readers.get();
+            assert!(reader.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
+                |row| row.get::<_, bool>(0),
+            ).unwrap());
+            assert!(!reader.query_row(
+                "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+                [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(100), notify.notified()).await.is_err());
+        // No receives or writes follow admission: the throttle deadline must wake us.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.replication_projection_deferred());
+        assert!(store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM resource_observations WHERE subject=?1)",
+            [ADMISSION_SUBJECT], |row| row.get::<_, bool>(0),
+        ).unwrap(), "notify only after successful projection");
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        assert!(tokio::time::timeout(Duration::from_millis(100), observed.recv()).await.is_err());
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+    }
 
     fn legacy() -> (tempfile::TempDir, Arc<Store>) {
         let root = tempfile::tempdir().unwrap();
