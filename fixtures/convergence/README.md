@@ -563,3 +563,19 @@ classes and fences recovery refusal observations on signed support from every ac
 reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
 mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
+
+`claims-v41.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed`,
+separating native execution and delivery deadline phases. Versions 1 through 40
+remain frozen; the colliding execution-phase v38 snapshot was superseded, not
+written over the historical admission snapshot. Generate v41 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`.
+The simulation, diagnostics and audit reports select v41. The focused execution-phase
+regression compares both specs with the registry and validates a generated phase input.
+The prior `[2, 34, 179]` trim characterization is retained for hosted characterization,
+not claimed as a measured v41 result. Exact per-seed equality, old-build-excusal
+continuation, the three-seed cap and majority trim coverage remain enforced.
+
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.

@@ -2109,6 +2109,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["revision"],
         ),
         (
+            "step.execution-phase",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &["step"],
+        ),
+        (
             "step-run.state",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -3916,6 +3925,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("successor", reference()),
         ],
+        "step.execution-phase" => &[
+            ("attempt", required_integer()),
+            ("phase", required_enum(&[
+                "dispatched", "received", "admitted", "exec-started", "exec-exited",
+                "result-replicated", "dispatch-stalled", "execution-timeout",
+            ])),
+            ("exec", required_string()),
+            ("at_unix_ms", required_integer()),
+            ("host", required_string()),
+            ("reason", string()),
+            ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("timeout_extension_ms", integer()),
+        ],
         "step-run.state" => &[
             ("status", string()),
             ("reason", string()),
@@ -4522,7 +4545,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("exit_evidence", object()),
+            ("exec_exited_at_unix_ms", integer()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -5663,6 +5688,7 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("step.execution-phase").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
@@ -5710,8 +5736,9 @@ mod tests {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        for field in ["exit_evidence", "exec_exited_at_unix_ms", "start_operation"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }

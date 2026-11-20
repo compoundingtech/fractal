@@ -2203,6 +2203,74 @@ Add `--all` to show waiting and terminal work. Add `--json` to keep the stable m
 
 The default `work show` and `work claim` output gives a human-readable step view. It keeps every actionable subject exact.
 
+On a native daemon endpoint, human-readable `work show` also reads internal
+`step.execution-phase` claims for the current attempt. Its execution-phase section
+shows `dispatched`, `received`, `admitted`, `exec-started`, `exec-exited`,
+`result-replicated`, `execution-timeout`, and `dispatch-stalled` when recorded, with the exact exec
+subject, host, and millisecond UTC phase timestamp. The leading trace timestamp
+is the claim's acceptance time; `at_unix_ms` is the originating phase time.
+All claim pages are read, so a retry's phases cannot hide behind earlier attempts.
+The execution timeout starts at the executor's physical exec-registry creation,
+reported by `exec-started`, not at the coordinator's claim or dispatch. Only a live
+executor observation past that budget (`execution-timeout`), or a known exit
+duration past it, proves an execution timeout. A missing remote exit does not.
+The payload wrapper persists its running/completed state in an operation-fenced
+local receipt, independent of the daemon, and fsyncs completion before retrying
+its exit claim. Reconciliation checks that receipt before attesting an overrun;
+a wrapper waiting to deliver a completed result is not a running payload.
+A missing legacy receipt or exit timestamp remains unknown, never observation time.
+Result delivery does not lengthen a completed execution interval.
+Declared `work wait` intervals are excluded from both executor overrun evidence
+and known-exit duration, and appear as waited time in the native display clock.
+`work resume` ends the pause; otherwise its declared deadline resumes accounting
+automatically. The overall guard below remains wall-clock bounded, including waits.
+
+Native declared execs have a dispatch/replication/admission budget equal to the
+step's declared timeout and a separate result-replication budget of the same size.
+An overall guard is three declared timeouts plus execution extensions, measured
+from dispatch. `work extend` extends execution and the overall guard, not dispatch
+or result delivery. Without a declared execution timeout, dispatch and result
+delivery each default to one hour and the overall guard to 24 hours; these fail
+as `dispatch-stalled`, not as execution timeouts. Resource-lane payloads retain
+their separate admission/release budgets.
+These delivery guards close permanently once the exited actual state is
+replicated with the current attempt's exec incarnation and start operation;
+subject-scoped results from earlier attempts cannot close them. Later
+review/product waits are not delivery stalls. Known execution overruns remain
+independently enforceable. Terminal step transitions close any still-open display
+interval, preserving elapsed execution after failure/cancel.
+
+Only newly materialized native attempts (and retries of already tracked attempts)
+are enrolled. Existing declarations without dispatch evidence retain their
+original legacy execution clock and its deadline; upgrade does not shorten or
+disable that budget, or retroactively introduce new delivery-stall policy.
+Unknown legacy exit timestamps are not reconstructed from recovery time.
+New native attempts use the new policy.
+
+Deployment baseline `68cd28b9e2f5db8869b16f1426cfabb5bf8181d1` predates this
+feature: its `crates/fractal-reconcile/src/reconcile.rs:16898-16941` evaluates
+the legacy projected execution clock, not native `execution-timeout` phase
+claims. Its `crates/fractal-store/src/store.rs:22627-22656` folds that legacy
+clock, and `:22766-22782` already excludes declared waits. The baseline has
+neither the `step.execution-phase` registry kind nor the native phase emitter
+or evaluator; its `program_resources.rs:398` timeout is a separate resource
+command failure, not step-phase evidence. Thus the deployed baseline cannot
+produce or consume the pre-wait-fix native timeout evidence from intermediate
+revisions of this change. Those intermediate revisions are not deployment
+targets; participating coordinators and executors must adopt the final change
+together, as required by the release note.
+
+Expiry records `dispatch-stalled` with the exec and the waiting subphase, raises
+an operational fault, and fails the step with that reason, never with an execution
+timeout. This internal phase does not add a public work status. All new timing
+fields remain internal claims; the client-v0 schema and generated clients are unchanged.
+
+`fractal trace show STEP` and `fractal claims ls --subject STEP --kind step.execution-phase`
+show the same phase details across attempts; add `--json` to retain the raw numeric
+timestamps and claim evidence. `work show --json` keeps its frozen client resource
+shape. Fabric/client-only connections keep that resource-only view: the native
+`/v1/claims` evidence route is not part of client-v0.
+
 A worker completion report is not a correctness result. Products and gates still control final completion.
 
 The native driver renews active claims and transports messages. The reconciler creates one durable Fractal message for each readiness epoch and runtime incarnation.

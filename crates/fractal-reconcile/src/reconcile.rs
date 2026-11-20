@@ -77,6 +77,7 @@ mod shell_resources;
 mod resource_profiles;
 mod lane_bursts;
 mod step_lanes;
+mod step_execution_phases;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -563,6 +564,13 @@ pub trait RuntimeControl: Send + Sync + 'static {
         Ok(PtyRegistrySnapshot { observations, start_operations })
     }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// Physical exec-registry creation time, never the coordinator's work-claim time.
+    fn exec_started_at(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<u128>> {
+        Ok(None)
+    }
+    fn exec_payload_state(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        Ok(None)
+    }
     /// Retained, redacted terminal evidence for exactly this runtime incarnation.
     fn exit_evidence(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
         Ok(None)
@@ -902,6 +910,19 @@ impl RuntimeControl for NativeRuntime {
                 _ => None,
             })
         }
+    }
+
+    fn exec_started_at(&self, runtime_id: &str, incarnation: &str) -> Result<Option<u128>> {
+        Ok(match self.exec.observe(runtime_id)? {
+            Some(fractal_runtime::ExecObservation::Running(generation)
+                | fractal_runtime::ExecObservation::Exited(generation))
+                if generation.generation_id == incarnation => Some(generation.created_at_unix_ms),
+            _ => None,
+        })
+    }
+
+    fn exec_payload_state(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::payload_receipt::PayloadState>> {
+        self.exec.payload_state(runtime_id, incarnation)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -8225,6 +8246,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        self.record_native_exec_phase(subject, "received", now_ms(), None)?;
         if subject.kind == "agent" {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
@@ -8327,6 +8349,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !self.admit_seat_start(subject, member, request)? {
             return Ok(false);
         }
+        self.record_native_exec_phase(subject, "admitted", now_ms(), None)?;
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
             let mut operation = self
                 .store
@@ -8480,6 +8503,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
             self.driver_state_dir.to_string_lossy().into_owned());
         crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
+        if subject.kind == "exec" && subject.owner_step.is_some() && !member.terminal {
+            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
+        }
         if subject.kind == "agent" {
             crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
             crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
@@ -8717,6 +8743,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             incarnation.as_deref(),
             observation.is_some(),
         );
+        if subject.kind == "exec" {
+            starting.insert("start_operation".into(), Value::from(operation_id));
+        }
         if let Some(observation) = &observation {
             if let Some(code) = observation.exit_code {
                 starting.insert("exit_code".into(), Value::from(code));
@@ -8761,6 +8790,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if !applied {
             return Ok(start_jobs::StartCompletion::Superseded);
+        }
+        if let Some(observation) = observation.as_ref() {
+            self.record_native_exec_observation(subject, member, observation)?;
         }
         self.signal_changed();
         Ok(start_jobs::StartCompletion::Applied(None))
@@ -11052,12 +11084,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
+        self.record_native_exec_observation(subject, member, observation)?;
         let mut fields = member_fields(
             member,
             &observation.status,
             observation.incarnation_id.as_deref(),
             adopted,
         );
+        if subject.kind == "exec"
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && let Some(operation) = self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+        {
+            fields.insert("start_operation".into(), Value::from(operation));
+        }
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }
@@ -12678,6 +12717,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                             self.store
                                 .set_step_state(&view.subject, "failed", Some(&reason))?;
                         return Ok(changed);
+                    }
+                    if !self.resource_step_has_lane(view)?
+                        && self.expire_native_dispatch_budget(view, step.spec.timeout_ms
+                            .unwrap_or(step_execution_phases::DEFAULT_DISPATCH_BUDGET_MS))?
+                    {
+                        return Ok(true);
                     }
                     if self.step_timed_out(view, &step)? {
                         // A worker's step that runs out of time is a fault for that worker to
@@ -16108,11 +16153,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                 declared_agents.insert(agent.to_owned());
             }
         }
+        // Enroll only newly materialized work (or retries of an already enrolled attempt).
+        // Existing declarations without phase evidence belong to an in-flight legacy attempt:
+        // adopting a new daemon must not retroactively arm new timeout/stall policies for it.
+        let existing = self.native_step_execs(view)?;
+        let phases = self.store.claims_for(&view.subject, Some("step.execution-phase"))?;
+        let tracked_retry = phases.iter().any(|claim|
+            claim.body["fields"]["phase"] == "dispatched"
+                && claim.body["fields"]["attempt"].as_u64().is_some_and(|attempt| attempt < u64::from(view.attempt)));
+        if existing.is_empty() || tracked_retry {
+            for desired in intent.subjects.values().filter(|desired| desired.kind == "exec") {
+                self.record_step_exec_phase(view, desired, "dispatched", now_ms(), None, None)?;
+            }
+        }
         let response = self.store.apply_internal_with_declared_agents(
             &intent,
             &format!("materialize:{}:{}", view.subject, view.attempt),
             &declared_agents,
         )?;
+        // The dispatch phase precedes desired-state publication, so an executor cannot admit
+        // a new tracked payload before its attempt's enrollment evidence is replicated.
         // A newly declared exec starts when this run's evaluation ends, not in a later pass.
         self.declared_execs
             .lock()
@@ -17183,6 +17243,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.arm_step_deadline(&handle, &view.subject, (u128::from(timeout) - elapsed).max(1) as u64);
             }
             return Ok(false);
+        }
+        if let Some(timed_out) = self.native_step_timed_out(view, timeout)? {
+            return Ok(timed_out);
         }
         let elapsed = view.execution_elapsed_ms;
         if elapsed >= timeout as u128 {
