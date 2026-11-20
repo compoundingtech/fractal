@@ -96,7 +96,9 @@ pub(super) fn find(home: Option<&Path>, id: &str, fresh: bool) -> Result<Option<
     // Complete-ID indexed lookup is independent of history size and list pages.
     if fresh {
         let live_process = if let Some(ExternalConversation::Readable(session)) = live {
-            files.push(SessionMetadata {
+            // Revisions include the path: preserve the process-opened representative
+            // when strict resolution collapses aliases of the same physical file.
+            files.insert(0, SessionMetadata {
                 driver: session.driver, native_id: session.native_id, transcript: session.transcript,
                 codex_home: session.codex_home, cwd: session.cwd, title: session.title,
                 started_at_unix_ms: session.started_at_unix_ms,
@@ -366,7 +368,22 @@ mod tests {
         let mut ready = [0; 5];
         harness.0.stdout.as_mut().unwrap().read_exact(&mut ready).unwrap();
         assert_eq!(&ready, b"ready");
+        let live = discover_fresh(Some(home.path()), false).unwrap().sessions.into_iter()
+            .find(|session| session.id == id).unwrap();
+        historical_files(home.path()).unwrap();
+        {
+            // Force the history order that previously replaced the live revision.
+            let mut inventories = HISTORY.0.lock().unwrap();
+            let inventory = inventories.get_mut(home.path()).unwrap();
+            let index = Arc::make_mut(inventory.index.as_mut().unwrap());
+            let files = index.get_mut(&id).unwrap();
+            files.sort_by_key(|file| file.transcript != hardlink);
+            assert_eq!(files[0].transcript, hardlink);
+            assert_ne!(files[0].revision, live.revision);
+        }
         let found = find_fresh(Some(home.path()), &id).unwrap().unwrap();
+        assert_eq!(found.revision, live.revision);
+        assert_eq!(found.transcript, live.transcript);
         assert_eq!(found.process.unwrap().pid, harness.0.id());
         fs::copy(&transcript, project.join("copy.jsonl")).unwrap();
         {
