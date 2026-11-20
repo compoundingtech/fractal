@@ -831,7 +831,7 @@ impl SeatsStore for Store {
             if cut == through {
                 return Ok(true);
             }
-            Ok(match self.changed_agent_resources(cut, through, cards)? {
+            Ok(match self.changed_agent_resources(cut, through, cards.iter())? {
                 AgentResourcesChange::Delta(delta) => {
                     delta.subjects.is_empty() && !delta.queues && !delta.membership
                 }
