@@ -43,6 +43,7 @@ pub struct FractalRuntime {
     pub actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
     pub(super) card_actuals: Mutex<HashMap<(String, bool), Arc<card_actual::Reduction>>>,
     pub observer_actuals: Arc<observer_actuals::Actuals>,
+    pub(super) mail_objective_inputs: Arc<observer_mail_inputs::Inputs>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
     pub placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
@@ -275,7 +276,10 @@ impl FractalRuntime {
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
-        Some(self.observer_actuals.clone())
+        Some(Arc::new(observer_mail_inputs::Observer {
+            actuals: self.observer_actuals.clone(),
+            mail: self.mail_objective_inputs.clone(),
+        }))
     }
     fn admit_writer_tx(
         &self,
@@ -686,6 +690,7 @@ impl Runtime for FractalRuntime {
             self.presented_agents.forget();
         }
         self.forget_reductions();
+        self.mail_objective_inputs.invalidate();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
