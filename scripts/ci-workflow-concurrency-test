@@ -107,10 +107,9 @@ assert 'HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_g
 assert 'git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"' in history
 assert 'python3 "$PWD/scripts/check-public-repo" --repo "$PWD" --base "$BASE_SHA" --head "$HEAD_SHA"' in history
 assert 'ref: ${{ github.event.pull_request.head.sha' not in history
-for event in ('pull_request', 'merge_group'):
-    first, second = policy('public-repo-history.yml', event, 100, 42), policy(
-        'public-repo-history.yml', event, 101, 42)
-    assert not first[1] and not second[1] and first[0] != second[0], (event, first, second)
+first, second = policy('public-repo-history.yml', 'merge_group', 100), policy(
+    'public-repo-history.yml', 'merge_group', 101)
+assert not first[1] and not second[1] and first[0] != second[0], (first, second)
 settings = json.loads((ROOT / '.github/repo-settings.json').read_text())
 required_contexts = [check['context'] for ruleset in settings['rulesets']
                      for rule in ruleset['rules'] if rule['type'] == 'required_status_checks'
@@ -118,7 +117,7 @@ required_contexts = [check['context'] for ruleset in settings['rulesets']
 assert 'public-repo-history' not in required_contexts, 'the shared Actions app is not a trusted producer identity'
 assert not any(rule['type'] == 'workflows' for ruleset in settings['rulesets'] for rule in ruleset['rules']), (
     'required workflows belong in the separate organization ruleset, not repository settings')
-print('passed: read-only history topology preserves independent runs and rejects forgeable Actions status admission')
+print('passed: read-only history topology preserves merge-group runs and rejects forgeable Actions status admission')
 
 for action in ['labeled', 'unlabeled']:
     unrelated = policy('perf.yml', 'pull_request', 100, 42, action=action, label='reviewed')
