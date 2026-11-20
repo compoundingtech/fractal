@@ -1130,7 +1130,7 @@ fn prove(
             for mut diagnostic in diagnostics {
                 diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
                 diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
-                eprintln!("st3: checkpoint reader mismatch {diagnostic}");
+                eprintln!("fractal: checkpoint reader mismatch {diagnostic}");
             }
         }
     }

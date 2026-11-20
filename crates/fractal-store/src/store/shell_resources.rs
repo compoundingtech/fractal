@@ -73,6 +73,11 @@ pub struct Execution {
     pub submission_digest: Option<String>,
     #[serde(default)]
     pub refusal_code: Option<resource_membership::RefusalCode>,
+    #[serde(default)]
+    pub learning_decision: Option<resource_profile_learner::RecordOutcome>,
+    /// Frozen host admission evidence, retained after membership retirement and in receipts.
+    #[serde(default)]
+    pub admission_decision: Option<resource_membership::AdmissionDecision>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -93,33 +98,133 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS shell_resource_request_cancellation_time_v1
         ON shell_resource_request_cancellations_v1(cancelled_at);")?;
     scrub_historical_environments(connection)?;
+    resource_profile_learner::create_schema(connection)?;
     Ok(())
 }
 
 /// Keep the completion marker separate from the scrub: a crash or busy checkpoint
 /// before physical erasure must repeat the rewrite on the next open.
+///
+/// The work is bounded by this table and the free list, not the whole store. A full VACUUM
+/// at open took over 51 minutes on a 57 GB member and needed the store's size again in free
+/// disk, with the daemon unable to serve meanwhile:
+/// - Pages freed before secure_delete was on may still hold old bytes on the free list. A
+///   store with incremental auto-vacuum (every store created since, or converted) first gives
+///   the whole free list back to the filesystem, so nothing below reuses those pages.
+/// - The table is copied with every environment emptied, into fresh pages, and the old copy
+///   dropped under secure_delete, which zeroes each page it frees: rows, overflow pages and
+///   free space. Those zeroed pages go back to the filesystem too.
+/// - Other stores consume their old free list with page-sized zero rows before the copy,
+///   then drop that scratch table under secure_delete. No startup path runs VACUUM.
+///
+/// What this can't reach, and a full VACUUM can: bytes in pages that other tables reused
+/// before secure_delete was on, in the unused part of those pages.
 fn scrub_historical_environments(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3c3043b9f6fc owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "PRAGMA secure_delete=ON;
-        CREATE TABLE IF NOT EXISTS shell_environment_scrub_v1 (complete INTEGER PRIMARY KEY CHECK(complete=1));")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb88f17cedac9 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_environment_scrub_v1 (complete INTEGER PRIMARY KEY CHECK(complete=1));")?;
     let complete: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0))?;
     if complete { return Ok(()); }
+    let previous: i64 = connection.query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
+    connection.pragma_update(None, "secure_delete", 1)?;
+    let scrub = scrub_pending_environments(connection);
+    // Restore OFF, ON or FAST before propagating any scrub error.
+    let restored = connection.pragma_update(None, "secure_delete", previous);
+    scrub?;
+    restored?;
+    Ok(())
+}
+
+fn scrub_pending_environments(connection: &Connection) -> Result<()> {
+    // 2 is INCREMENTAL.
+    let incremental = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))? == 2;
+    if incremental {
+        give_back_free_list(connection)?;
+    } else {
+        erase_free_list(connection)?;
+    }
     // Historical JSON bodies remain unbounded; scrubbing preserves their other fields.
-    connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h9abbf1dff207 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", [])?;
+    // One transaction, rolled back on any error, so a failed rebuild leaves the table as it was.
+    let rebuild = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    rebuild.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fe95fd4aec7 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_resources_scrub_v1;
+        CREATE TABLE shell_resources_scrub_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL);
+        INSERT INTO shell_resources_scrub_v1(id, host, state, body)
+            SELECT id, host, state, json_set(body,'$.command.environment',json('{}')) FROM shell_resources_v1;
+        DROP TABLE shell_resources_v1;
+        ALTER TABLE shell_resources_scrub_v1 RENAME TO shell_resources_v1;
+        CREATE INDEX shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    rebuild.commit()?;
     checkpoint_shell_scrub(connection)?;
-    // Physical reclamation still processes the whole database, not bounded units.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h017f6a53ca41 owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ "VACUUM")?;
+    if incremental {
+        give_back_free_list(connection)?;
+    }
     checkpoint_shell_scrub(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-haceef5fded64 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_scrub_v1(complete) VALUES(1)", [])?;
     Ok(())
 }
 
+/// Every free page back to the filesystem. Each row the pragma steps gives one back, so it
+/// runs to its end.
+fn give_back_free_list(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA incremental_vacuum")?;
+    let mut steps = statement.query([])?;
+    while steps.next()?.is_some() {}
+    Ok(())
+}
+
+/// Overwrite pages freed before secure_delete was enabled, before the table copy can
+/// reuse them. One near-page-sized row needs at least one leaf page; allocating the
+/// initial free-page count therefore consumes the entire old free list. B-tree
+/// bookkeeping can grow the file slightly, but never copies the rest of the store.
+/// A crash leaves only zero rows; the next attempt drops them securely and repeats.
+fn erase_free_list(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4929ecffa855 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "DROP TABLE IF EXISTS shell_environment_free_scrub_v1;
+        CREATE TABLE shell_environment_free_scrub_v1 (body BLOB NOT NULL);")?;
+    let free: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let mut remaining = free;
+    while remaining > 0 {
+        let batch = remaining.min(128);
+        let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut insert = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hac7744f65d12 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_free_scrub_v1(body) VALUES(zeroblob(?1))")?;
+            for _ in 0..batch {
+                insert.execute(/* sqlite-large-value: allow-for-now lv-ha3413afc70ae owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ [page_size - 100])?;
+            }
+        }
+        transaction.commit()?;
+        checkpoint_shell_scrub(connection)?;
+        remaining -= batch;
+    }
+    let left: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    anyhow::ensure!(left == 0, "shell environment scrub did not overwrite the free list");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7eba39ebc70f owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE shell_environment_free_scrub_v1;")?;
+    checkpoint_shell_scrub(connection)?;
+    Ok(())
+}
+
+/// How often the scrub tries its checkpoint before it refuses to open the store, and how long
+/// each try waits for readers: about 30 s in all, so a reader that a replication worker or a
+/// CLI holds at startup ends first, rather than the daemon restarting over and over.
+const CHECKPOINT_TRIES: u32 = 5;
+const CHECKPOINT_WAIT: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(20) } else { std::time::Duration::from_secs(6) };
+
 fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
-    let busy: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    // TRUNCATE waits for readers as long as the busy timeout; give each try its own wait.
+    let previous: u64 = connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+    connection.busy_timeout(CHECKPOINT_WAIT)?;
+    let mut busy = 1;
+    for _ in 0..CHECKPOINT_TRIES {
+        busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))?;
+        if busy == 0 {
+            break;
+        }
+    }
+    connection.busy_timeout(std::time::Duration::from_millis(previous))?;
     anyhow::ensure!(busy == 0, "shell environment scrub checkpoint busy; refusing to open store");
     Ok(())
 }
+
 pub fn submission_digest(command: &Command) -> Result<String> {
     use sha2::Digest as _;
     // Ambient environment values are transport-only, never replay identity or audit data.
@@ -214,7 +319,8 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
-            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
+            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
+            learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
@@ -318,9 +424,20 @@ impl Store {
         next.command.environment.clear();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
+        // Admission evidence comes from the host membership, never mutable execution input.
+        // Once copied, it remains frozen even after retirement or later host observations.
+        next.admission_decision.clone_from(&previous.admission_decision);
+        if next.admission_decision.is_none() {
+            let decision: Option<String> = transaction.query_row(
+                "SELECT json_extract(body,'$.admissionDecision') FROM resource_memberships_v1 WHERE id=?1 AND host=?2",
+                rusqlite::params![next.command.lane.id, next.command.lane.host], |row| row.get(0),
+            ).optional()?.flatten();
+            next.admission_decision = decision.map(|body| serde_json::from_str(&body)).transpose()?;
+        }
         if next.root_exec_id.is_empty() { next.root_exec_id.clone_from(&next.command.id); }
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") && next.command.parent.is_none() {
             next.receipt_subject = Some(resource_exec_receipts::subject(&self.origin, &next));
+            next.learning_decision = resource_profile_learner::evidence::record_execution(&transaction, &next)?;
         }
         if next == previous { return Ok(false); }
         next.revision += 1;
@@ -398,7 +515,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadResult {
     pub head_start: Option<String>,
@@ -409,6 +526,8 @@ pub struct PayloadResult {
     pub exit_signal: Option<i32>,
     pub wall_duration_ms: u64,
     pub memory_peak_bytes: Option<u64>,
+    #[serde(default, flatten)]
+    pub evidence: resource_profile_learner::evidence::Evidence,
 }
 
 #[cfg(test)]
@@ -431,21 +550,21 @@ mod tests {
     fn future_resource_class_rows_remain_readable_but_cannot_be_submitted() {
         let store = Store::open_memory("host-a").unwrap();
         let mut future = store.submit_shell_resource(command("future"), 1).unwrap();
-        future.command.lane.class = RequestClass::Unknown("recovery".into());
+        future.command.lane.class = RequestClass::Unknown("future-class".into());
         future.refusal_code = Some(resource_membership::RefusalCode::RecoveryNotAllowed);
         store.update_shell_resource(&future).unwrap();
         store.submit_shell_resource(command("current"), 2).unwrap();
         let rows = store.shell_resources("host-a", false).unwrap();
         assert_eq!(rows.len(), 2);
         let future = rows.iter().find(|row| row.command.id == "future").unwrap();
-        assert_eq!(future.command.lane.class, RequestClass::Unknown("recovery".into()));
-        assert_eq!(serde_json::to_value(future).unwrap()["command"]["lane"]["class"], "recovery");
+        assert_eq!(future.command.lane.class, RequestClass::Unknown("future-class".into()));
+        assert_eq!(serde_json::to_value(future).unwrap()["command"]["lane"]["class"], "future-class");
         assert_eq!(store.shell_resource("future").unwrap().command.lane.class, future.command.lane.class);
         assert_eq!(future.refusal_code, Some(resource_membership::RefusalCode::RecoveryNotAllowed));
-        assert!(store.update_shell_resource(future).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.update_shell_resource(future).unwrap_err().to_string().contains("unsupported resource class future-class"));
         let mut request = command("unsupported");
         request.lane.class = future.command.lane.class.clone();
-        assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.submit_shell_resource(request, 3).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(store.shell_resource_if_exists("unsupported").unwrap().is_none());
     }
 
@@ -459,12 +578,12 @@ mod tests {
         request.lane.owner.run = "person/operator".into();
         request.request_id = Some(key.to_string());
         let mut execution = store.submit_shell_resource(request, 1).unwrap();
-        execution.command.lane.class = RequestClass::Unknown("recovery".into());
+        execution.command.lane.class = RequestClass::Unknown("future-class".into());
         store.update_shell_resource(&execution).unwrap();
         let before = store.shell_resource(&id).unwrap();
-        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource(&id).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
-        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class recovery"));
+        assert!(store.cancel_shell_resource_by_request(&scope, key, 2).unwrap_err().to_string().contains("unsupported resource class future-class"));
         assert!(!store.shell_resource(&id).unwrap().cancel);
         let after = store.shell_resource(&id).unwrap();
         assert_eq!(after, before);
@@ -508,7 +627,8 @@ mod tests {
             &fractal_runtime::Launch::Argv(vec!["/bin/sh".into(), "-c".into(),
                 "test \"$SECRET\" = shell-environment-security-regression-sentinel && test \"$ST3_START_OPERATION\" = \"$SECRET\"".into()]),
             directory.path(), &environment,
-            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None, require_enforced: false },
+            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None,
+                class: RequestClass::Check, require_enforced: false },
             &|| Ok(())).unwrap();
         assert!(generation.start_operation.is_none());
         let exited = runtime.wait_for_exit("secret", &generation.generation_id).unwrap();
@@ -548,6 +668,7 @@ mod tests {
             execution.result = Some(PayloadResult {
                 head_start: None, head_end: None, clean_start: None, clean_end: None,
                 exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
+                evidence: Default::default(),
             });
             store.update_shell_resource(&execution).unwrap();
         }
@@ -566,8 +687,102 @@ mod tests {
         assert_eq!(execution.exit_code, Some(37));
         assert!(store.take_shell_environment("history").is_none());
         assert_no_environment_bytes(&path);
+        let expected: i64 = Connection::open_in_memory().unwrap()
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0)).unwrap();
         let secure: i64 = store.connection.write().query_row("PRAGMA secure_delete", [], |row| row.get(0)).unwrap();
-        assert_eq!(secure, 1);
+        assert_eq!(secure, expected);
+    }
+
+    #[test]
+    fn historical_scrub_restores_all_secure_delete_modes_and_preserves_completed_skip() {
+        for mode in [0, 1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("store.db");
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+            create_schema(&connection).unwrap();
+            connection.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
+            connection.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
+                [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
+            connection.pragma_update(None, "secure_delete", mode).unwrap();
+            scrub_historical_environments(&connection).unwrap();
+            assert_eq!(connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), mode);
+            assert_no_environment_bytes(&path);
+            // A completed marker must bypass all scrub work and preserve each setting.
+            connection.execute_batch("CREATE TRIGGER no_repeat BEFORE UPDATE ON shell_resources_v1
+                BEGIN SELECT RAISE(ABORT,'unexpected repeated scrub'); END;").unwrap();
+            scrub_historical_environments(&connection).unwrap();
+            assert_eq!(connection.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), mode);
+        }
+    }
+
+    /// A store whose free list holds a secret from before secure_delete, as an old member's
+    /// does: `auto_vacuum` is the store's mode, and the scrub must leave no byte of it.
+    fn scrub_erases_a_freed_secret(auto_vacuum: &str) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.submit_shell_resource(command("history"), 10).unwrap();
+        }
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(&format!("PRAGMA auto_vacuum={auto_vacuum}; VACUUM; PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=0; PRAGMA secure_delete=OFF; DELETE FROM shell_environment_scrub_v1;")).unwrap();
+        legacy.execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment.SECRET',?1)",
+            [ENV_SENTINEL.repeat(256)]).unwrap();
+        // Rewriting the row again frees the pages that held the secret, without zeroing them.
+        legacy.execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", []).unwrap();
+        legacy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let pages: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        let free_before: u64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+        assert!(free_before > 0);
+        // SQLite implements VACUUM using ATTACH; deny it for the entire scrub.
+        legacy.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(context.action, rusqlite::hooks::AuthAction::Attach { .. }) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        }));
+        scrub_historical_environments(&legacy).unwrap();
+        assert_no_environment_bytes(&path);
+        let pages_after: u64 = legacy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        assert!(pages_after <= pages + free_before + 16, "scrub grew beyond its free-list budget");
+        if auto_vacuum == "INCREMENTAL" {
+            let free: i64 = legacy.query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap();
+            assert_eq!(free, 0, "the free list that held the secret is gone");
+        }
+    }
+
+    #[test]
+    fn historical_scrub_gives_back_a_free_list_that_held_a_secret() {
+        scrub_erases_a_freed_secret("INCREMENTAL");
+    }
+
+    #[test]
+    fn historical_scrub_without_incremental_vacuum_erases_without_vacuum() {
+        scrub_erases_a_freed_secret("NONE");
+    }
+
+    #[test]
+    fn a_reader_that_ends_while_the_scrub_retries_lets_it_finish() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+        create_schema(&writer).unwrap();
+        writer.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT * FROM shell_resources_v1;").unwrap();
+        // The reader ends after the first try, before the scrub runs out of them.
+        let ending = std::thread::spawn(move || {
+            std::thread::sleep(CHECKPOINT_WAIT / 2);
+            reader.execute_batch("ROLLBACK").unwrap();
+        });
+        scrub_historical_environments(&writer).unwrap();
+        ending.join().unwrap();
+        let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();
+        assert!(complete);
     }
 
     #[test]
@@ -582,11 +797,14 @@ mod tests {
         reader.execute_batch("BEGIN; SELECT * FROM shell_resources_v1;").unwrap();
         writer.execute("INSERT INTO shell_resources_v1 VALUES('old','host-a','waiting',?1)",
             [json!({"command":{"environment":{"SECRET":ENV_SENTINEL}}}).to_string()]).unwrap();
+        writer.pragma_update(None, "secure_delete", 2).unwrap();
         assert!(scrub_historical_environments(&writer).is_err());
+        assert_eq!(writer.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();
         assert!(!complete);
         reader.execute_batch("ROLLBACK").unwrap();
         scrub_historical_environments(&writer).unwrap();
+        assert_eq!(writer.query_row("PRAGMA secure_delete", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         assert_no_environment_bytes(&path);
     }
 
@@ -685,6 +903,7 @@ mod tests {
         terminal.result = Some(PayloadResult {
             head_start: None, head_end: None, clean_start: None, clean_end: None,
             exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None,
+            evidence: Default::default(),
         });
         store.update_shell_resource(&terminal).unwrap();
         let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();

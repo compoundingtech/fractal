@@ -7971,10 +7971,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"owned_set_native_roots":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission-escalation-v1": 1,
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
+                    "resource_recovery_observations": 1,
                     "idle_residency": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 2,
@@ -8373,6 +8374,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ));
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
+            ));
+            let admission_notify = notify.clone();
+            let admission_events = event_notify.clone();
+            let admission_state_dir = config.state_dir.clone();
+            tokio::spawn(fractal_daemon::maintenance::run_replication_admission(
+                Arc::downgrade(&store),
+                move || {
+                    admission_notify.notify_one();
+                    admission_events.send_modify(|generation| *generation = generation.saturating_add(1));
+                    let _ = fs::write(
+                        admission_state_dir.join("replication.wake"),
+                        format!("{}\n", uuid::Uuid::now_v7()),
+                    );
+                },
             ));
             stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
             stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
@@ -16827,14 +16842,14 @@ fn shell_word(value: &str) -> String {
     }
 }
 
-/// A send's result. The human form prints the message alone on stdout, as for a new message,
-/// and says on stderr when the message had already been sent.
+/// A send's result. Stdout always names the message; stderr confirms a successful retry without
+/// suggesting that its body was dropped.
 fn print_message_receipt(receipt: &MessageSendReceipt, json_output: bool) -> Result<()> {
     if json_output {
         return print_value(receipt, true);
     }
     if receipt.already_sent {
-        stderr_message("st", format_args!("{} was already sent{} (idempotency key {}); nothing new was sent", receipt.message.subject,
+        stderr_message("st", format_args!("{} was sent{} (confirmed on retry; idempotency key {})", receipt.message.subject,
         receipt
             .sent_at
             .as_deref()
@@ -22241,6 +22256,22 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                         if judged >= SIGNATURE_BACKLOG_REPORTED || drain_started.elapsed() >= Duration::from_secs(5) {
                             stderr_message("fractal", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
                         }
+                    }
+                    // Earlier releases kept a judging row for every settled verdict. Drop them a
+                    // short page at a time; the hourly pass gives the freed pages back.
+                    let prune_started = std::time::Instant::now();
+                    let (mut pruned, mut longest) = (0, Duration::ZERO);
+                    loop {
+                        let page_started = std::time::Instant::now();
+                        let page = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_judging_prune", || worker.prune_settled_signature_judgments())?;
+                        let page_elapsed = page_started.elapsed();
+                        longest = longest.max(page_elapsed);
+                        pruned += page.deleted;
+                        if page.finished || page.examined == 0 { break; }
+                        std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    if pruned != 0 {
+                        stderr_message("fractal", format_args!("settled signature judgments pruned: {pruned} rows in {:.0}s, longest page {} ms", prune_started.elapsed().as_secs_f64(), longest.as_millis()));
                     }
                     return Ok(None);
                 }

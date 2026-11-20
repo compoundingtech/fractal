@@ -72,7 +72,7 @@
     "claude-channel",
     "fixtures/objective-native-rows.json",
     "scripts/ci-test-paths.rs",
-    "slo/dotfiles-merge-latency.kdl"
+    "slo"
    ]
   },
   "fractal-api-mailbox": {

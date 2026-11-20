@@ -23,6 +23,9 @@ mod procfs;
 mod pty;
 mod seat_placement;
 mod resource_profile;
+pub mod resource_pressure;
+pub mod resource_class;
+pub mod resource_readiness;
 pub use resource_profile::{
     ResourceLearningCoverage, ResourceProfileEstimate, ResourceProfileSamples, ResourceProfileSeed, validate_profile_key,
 };

@@ -136,6 +136,17 @@ fn validate_endpoint(scope: &Scope) -> Result<(), Error> {
 
 fn durable_directory(path: &std::path::Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+    // Check the opened directory, not path metadata that could name a different inode.
+    let directory = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path)?;
+    let metadata = directory.metadata()?;
+    // SAFETY: geteuid has no preconditions; mirror the journal file ownership check.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "journal directory belongs to another user"));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        directory.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
+    directory.sync_all()?;
     // Include existing ancestors: a prior failed sync may have left a visible but
     // non-durable directory. Reopening after failure must repair that barrier too.
     for ancestor in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
@@ -194,7 +205,7 @@ mod tests {
             lost(wire)
         }).await.unwrap();
         assert_eq!(sent, 1);
-        assert_eq!(store.edits.status, Status::UnknownDelivery);
+        assert_eq!(store.edits.status(), Status::UnknownDelivery);
         let (mut store, effects) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
         assert_eq!(effects, vec![Effect::PersistPending]);
         store.execute(effects, scope, "person/test", |wire| {
@@ -215,7 +226,7 @@ mod tests {
         let path = root.path().join("pending.json");
         let (mut store, effects) = staged(path.clone(), false);
         store.execute(effects, scope, "person/test", lost).await.unwrap();
-        assert_eq!(store.edits.status, Status::UnknownDelivery);
+        assert_eq!(store.edits.status(), Status::UnknownDelivery);
         let (mut restored, effects) = Store::restore(path, &scope()).unwrap().unwrap();
         let exact = restored.edits.request().cloned().unwrap();
         let mut sends = 0;
@@ -233,7 +244,7 @@ mod tests {
             }
         }).await.unwrap();
         assert_eq!(sends, 1);
-        assert_eq!(restored.edits.status, Status::UnknownDelivery);
+        assert_eq!(restored.edits.status(), Status::UnknownDelivery);
         assert_eq!(restored.edits.request(), Some(&exact));
         assert!(restored.edits.refusal.is_none());
         assert!(restored.edits.reduce(Event::Retry).is_empty());
@@ -267,7 +278,7 @@ mod tests {
         let effects = store.edits.reduce(Event::Refused(id(2), fractal_sidebar::edits::Refusal::Unauthorized));
         store.execute(effects, scope, "person/test", |_| async { panic!("refused request resent") }).await.unwrap();
         let (mut restored, effects) = Store::restore(path, &scope()).unwrap().unwrap();
-        assert_eq!(restored.edits.status, Status::PartiallyApplied);
+        assert_eq!(restored.edits.status(), Status::PartiallyApplied);
         restored.execute(effects, scope, "person/test", |_| async { panic!("partial request resent") }).await.unwrap();
     }
     #[tokio::test]
@@ -303,7 +314,7 @@ mod tests {
                 match field { 0 => selected.owner.push('x'), 1 => selected.container.push('x'), 2 => selected.endpoint.push('x'), 3 => selected.host.push('x'), _ => selected.projection.push('x') }
                 assert!(matches!(store.execute(vec![effect], || selected.clone(), "person/test", |_| async { panic!("obsolete send") }).await, Err(Error::ScopeMismatch)));
                 assert_eq!(fs::read(&path).unwrap(), original);
-                assert_eq!(store.edits.status, Status::AwaitingPersistence);
+                assert_eq!(store.edits.status(), Status::AwaitingPersistence);
             }
         }
         // Re-read the selection after await, before executing the acknowledgement's effects.
@@ -329,6 +340,45 @@ mod tests {
             let (restored, _) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
             assert_eq!(restored.edits.request(), Some(&exact)); lost(wire)
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn sidebar_store_tightens_existing_directory_before_sending() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("journals");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        let (mut store, effects) = staged(parent.join("pending.json"), false);
+        store.execute(effects, scope, "person/test", |wire| {
+            assert_eq!(fs::metadata(&parent).unwrap().permissions().mode() & 0o777, 0o700);
+            lost(wire)
+        }).await.unwrap();
+    }
+    #[test]
+    fn sidebar_store_refuses_foreign_directory_before_changing_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        // Non-root can inspect the root-owned filesystem root; root can create a foreign fixture.
+        // SAFETY: geteuid has no preconditions.
+        let foreign = if unsafe { libc::geteuid() } == 0 {
+            let path = root.path().join("foreign");
+            fs::create_dir(&path).unwrap();
+            std::os::unix::fs::chown(&path, Some(1), None).unwrap();
+            path
+        } else { PathBuf::from("/") };
+        let before = fs::metadata(&foreign).unwrap();
+        assert_eq!(durable_directory(&foreign).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let after = fs::metadata(&foreign).unwrap();
+        assert_eq!((after.uid(), after.mode()), (before.uid(), before.mode()));
+    }
+    #[test]
+    fn sidebar_store_refuses_symlink_directory_without_changing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let link = root.path().join("link");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(durable_directory(&link).is_err());
+        assert_eq!(fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o755);
     }
     #[test]
     fn sidebar_store_filename_is_stable_across_toolchains() {
