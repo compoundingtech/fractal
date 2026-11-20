@@ -7,10 +7,16 @@
 //! A reader takes a row's bytes from the row, or from the blob file once they moved
 //! ([`bytes!`], [`Store::blob_bytes`]). A blob of zero bytes keeps its own.
 //!
-//! The blob file is attached to every connection to the store as `blob_file`. It only ever
-//! holds copies of rows the store has, so nothing in it is orphaned. The bytes of a blob are
-//! also in the envelope that brought it, so moving them changes nothing a peer sees; blobs left
-//! the projection digest with this change, since an emptied row would read differently.
+//! The blob file is attached to every connection to the store as `blob_file`. It holds only
+//! copies of the store's rows: the live store deletes a `blobs` row only in the one-time staging
+//! of uploads (`separate_staged_blobs`), which runs at a store's first open with that build, long
+//! before any byte can move, and the deletes a checkpoint proof makes run on a copy of the store
+//! with a copy of its blob file ([`copy_beside`]). The bytes of a blob are also in the envelope that brought it, so moving them
+//! changes nothing a peer sees; blobs left the projection digest with this change, since an
+//! emptied row would read differently.
+//!
+//! A copy of the store needs its blob file beside it: a copy made without one reads every moved
+//! blob as missing.
 //!
 //! An older build reads the `blobs` table alone and would serve an emptied row as zero bytes.
 //! So the first emptying moves the store to [`STORAGE_VERSION`], which an older build refuses to
@@ -95,6 +101,29 @@ pub fn attach_reader(connection: &Connection, database: &Path) -> Result<()> {
         connection.execute(/* sqlite-large-value: allow-for-now lv-hb2d3b2648e1d owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ':memory:' AS blob_file", [])?;
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hedea69cc751c owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ BLOB_FILE_TABLE)?;
+    Ok(())
+}
+
+/// Copy the blob file of the store at `database` beside `copy`, a copy of the store just made,
+/// so the copy reads every byte the store does. The blob file gains a row's bytes before the
+/// store lets the row's own go, so a blob file copied after the store covers every row the store
+/// copy holds empty.
+pub fn copy_beside(database: &Path, shared_memory: bool, copy: &Path) -> Result<()> {
+    let target = location(copy);
+    match std::fs::remove_file(&target) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    // `VACUUM INTO` needs a connection that may write the copy; readers are query-only.
+    let flags = if shared_memory {
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let connection = Connection::open_with_flags(database, flags)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    attach_reader(&connection, database)?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h1145b31da060 owner=smallclaims::store::blob_file TODO=trace-statement-and-value-representation */ "VACUUM blob_file INTO ?1", [&target])?;
     Ok(())
 }
 

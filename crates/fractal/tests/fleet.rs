@@ -9978,15 +9978,15 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
 
     // The release refuses the moved store instead of serving empty bytes.
     n1.stop();
-    let refused = std::process::Command::new(&old)
-        .args(["up", "--web-listen", "off"])
-        .envs(n1.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+    // Through the node's own command, so the release runs on this node's isolated state.
+    n1.binary = old.clone();
+    let mut refused = n1
+        .command(&["up", "--web-listen", "off"])
         .stdin(Stdio::null())
         .stdout(fs::File::create(n1.root.join("refused.log")).unwrap())
         .stderr(fs::File::create(n1.root.join("refused.stderr.log")).unwrap())
         .spawn()
         .unwrap();
-    let mut refused = refused;
     let deadline = Instant::now() + Duration::from_secs(90);
     let status = loop {
         if let Some(status) = refused.try_wait().unwrap() {
@@ -10005,6 +10005,7 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
 
     // Restore the bytes with this build, then the release opens the store and reads the same.
     let store = n1.state_dir().join("claims.sqlite3");
+    n1.binary = PathBuf::from(st3());
     let restored = n1.st_ok(&["store", "restore-blob-bytes", "--store", store.to_str().unwrap()]);
     assert!(restored.contains("restored"), "{restored}");
     n1.binary = old;

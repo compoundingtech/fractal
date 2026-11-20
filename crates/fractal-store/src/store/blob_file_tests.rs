@@ -166,3 +166,42 @@ fn the_blob_file_sits_beside_the_store() {
         "file:st3-x-blobs?mode=memory&cache=shared"
     );
 }
+
+#[test]
+fn a_copy_of_the_store_carries_the_moved_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
+    let body = b"bytes a store copy must keep".repeat(40);
+    let hash = document(&store, "doc/example/copied", &body);
+    assert_eq!(move_all(&store, start_window(&store) + WINDOW_MS).0, 1);
+    let copy = dir.path().join("copy.sqlite3");
+    store.copy_store_to(&copy).unwrap();
+    assert!(dir.path().join("copy.blobs.sqlite3").exists(), "the blob file is copied beside the store copy");
+    drop(store);
+    let copied = Store::open(&copy, "node").unwrap();
+    assert_eq!(row(&copied, &hash).0, 0, "the copy holds the emptied row");
+    assert_eq!(copied.get_document("doc/example/copied", &hash).unwrap().as_deref(), Some(&body[..]));
+}
+
+#[test]
+fn a_crash_after_the_copy_and_before_the_emptying_finishes_on_the_next_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
+    let body = b"copied, not yet emptied".repeat(30);
+    let hash = document(&store, "doc/example/half", &body);
+    let later = start_window(&store) + WINDOW_MS;
+    // The first hold committed its copy; the process died before the second.
+    store
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h10c52f5e6fca owner=fractal_store::store::blob_file_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO blob_file.blobs(hash, bytes, size) SELECT hash, bytes, size FROM main.blobs WHERE hash=?1",
+            [&hash],
+        )
+        .unwrap();
+    assert_eq!(row(&store, &hash).0, body.len() as i64, "the row still holds its own bytes");
+    assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
+    assert_eq!(move_all(&store, later), (1, body.len() as u64));
+    assert_eq!(row(&store, &hash).0, 0);
+    assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
+}
