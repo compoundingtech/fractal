@@ -288,8 +288,10 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
                 panic!("expected exactly one completed helper start: {succeeded:?}");
             };
             assert!(succeeded.body["fields"]["operation"].is_string());
-            let observed = reconciler.store.latest_observation(
-                &subject.subject, "runtime.observed",
+            // Completion publishes a native claim. The mixed latest_observation accessor
+            // also considers legacy local observations from the settled fixture.
+            let observed = reconciler.store.latest_claim(
+                &subject.subject, Some("runtime.observed"),
             ).unwrap().unwrap();
             assert_eq!(observed.body["fields"]["adopted"], true);
             assert!(observed.body["fields"]["incarnation_id"].is_string());
