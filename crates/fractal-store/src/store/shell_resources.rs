@@ -496,6 +496,17 @@ impl Store {
         Ok(owner)
     }
 
+    /// Match native run, step and attempt ownership, not process environment labels.
+    pub fn shell_resource_owner_cancelled(&self, owner: &resource_membership::Owner) -> Result<bool> {
+        let Some(step) = self.step_run(&owner.step)? else { return Ok(false); };
+        if step.run != owner.run || owner.attempt > step.attempt { return Ok(false); }
+        if owner.attempt < step.attempt || matches!(step.status.as_str(), "failed" | "cancelled") {
+            return Ok(true);
+        }
+        Ok(self.mission_run(&owner.run)?.is_some_and(|run|
+            run.phase.starts_with("cleanup-") || run.phase == "terminal"))
+    }
+
     /// Recheck the real invocation/attempt before admission and physical payload release.
     pub fn shell_resource_owner_live(&self, owner: &resource_membership::Owner) -> Result<()> {
         if let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) {
