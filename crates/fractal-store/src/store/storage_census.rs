@@ -53,16 +53,29 @@ impl State {
     }
 }
 
+const TEMP_DEFINITIONS: &[(&str, &str, &str)] = &[
+    ("storage_local_appends", "table", /* sqlite-large-value: allow-for-now lv-h953c31b89164 owner=fractal_store::store::storage_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_local_appends (
+        kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
+    ) WITHOUT ROWID"),
+    ("storage_local_append", "trigger", /* sqlite-large-value: allow-for-now lv-h657b0fc4466b owner=fractal_store::store::storage_census TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER storage_local_append AFTER INSERT ON main.local_observations BEGIN
+        INSERT INTO storage_local_appends VALUES (NEW.kind, 1, length(CAST(NEW.body AS BLOB)))
+        ON CONFLICT(kind) DO UPDATE SET claims=claims+1, body_bytes=body_bytes+excluded.body_bytes;
+    END"),
+];
+
+pub(super) fn temporary_object_matches(name: &str, kind: &str, sql: &str) -> bool {
+    smallclaims::store::append_census::temporary_object_matches(name, kind, sql)
+        || TEMP_DEFINITIONS.iter().any(|(expected_name, expected_kind, expected)| {
+            name == *expected_name && kind == *expected_kind
+                && sql.split_ascii_whitespace().eq(expected.split_ascii_whitespace().filter(|word| *word != "TEMP"))
+        })
+}
+
 pub(super) fn install(connection: &rusqlite::Connection) -> anyhow::Result<()> {
-    connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h435fccc8730a owner=fractal_store::store::storage_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_local_appends (
-             kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
-         ) WITHOUT ROWID;
-         CREATE TEMP TRIGGER storage_local_append AFTER INSERT ON main.local_observations BEGIN
-             INSERT INTO storage_local_appends VALUES (NEW.kind, 1, length(CAST(NEW.body AS BLOB)))
-             ON CONFLICT(kind) DO UPDATE SET claims=claims+1, body_bytes=body_bytes+excluded.body_bytes;
-         END;"
-    )?;
+    smallclaims::store::append_census::install(connection)?;
+    for (_, _, definition) in TEMP_DEFINITIONS {
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbd464ba6ba9c owner=fractal_store::store::storage_census TODO=trace-statement-and-value-representation */ definition)?;
+    }
     Ok(())
 }
 
@@ -79,6 +92,34 @@ pub fn append_counters(store: &super::Store) -> anyhow::Result<Vec<smallclaims::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn census_catalog_is_exact_and_does_not_disable_native_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::super::Store::open(&directory.path().join("census.sqlite3"), "census-fence").unwrap();
+        let connection = store.connection.write();
+        let mut statement = connection.prepare("SELECT name,type,sql FROM temp.sqlite_schema WHERE name LIKE 'storage_%'").unwrap();
+        let definitions = statement.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(definitions.len(), 5);
+        for (name, kind, sql) in definitions {
+            assert!(temporary_object_matches(&name, &kind, &sql), "{name}: {sql}");
+            assert!(!temporary_object_matches(&name, &kind, &format!("{sql} invalid")));
+            assert!(!temporary_object_matches(&name, "index", &sql));
+        }
+        drop(statement);
+        drop(connection);
+        let fence = super::super::resource_preparation::Fence::new(&store);
+        let prepared = fence.prepare_with_actuals(&store, |_, _| ());
+        assert!(prepared.value.is_some());
+        store.connection.write().execute_batch(
+            "DROP TRIGGER temp.storage_local_append;
+             CREATE TEMP TRIGGER storage_local_append AFTER INSERT ON main.local_observations
+             BEGIN DELETE FROM local_observations; END;"
+        ).unwrap();
+        assert!(fence.prepare_with_actuals(&store, |_, _| ()).value.is_none());
+    }
 
     #[test]
     fn storage_census_pins_are_unavailable_until_trim_then_sampled_without_new_searches() {

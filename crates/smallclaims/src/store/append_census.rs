@@ -10,42 +10,51 @@ pub struct AppendCounter {
     pub body_bytes: u64,
 }
 
-pub(super) fn install(connection: &Connection) -> anyhow::Result<()> {
+/// Exact native TEMP catalog definitions, shared with conservative schema guards.
+pub const TEMP_DEFINITIONS: &[(&str, &str, &str)] = &[
+    ("storage_append_baseline", "table", /* sqlite-large-value: allow-for-now lv-hec65543aaed4 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_baseline (
+        kind TEXT, writer TEXT, claims INTEGER, bytes INTEGER,
+        PRIMARY KEY(kind, writer)
+    ) WITHOUT ROWID"),
+    ("storage_append_counters", "view", /* sqlite-large-value: allow-for-now lv-h4bf64c3b4a0a owner=smallclaims::store::append_census TODO=prepare-body-and-predecessor-values */ "CREATE TEMP VIEW storage_append_counters AS
+        SELECT c.kind, sum(c.claims-coalesce(b.claims,0)) AS claims,
+               sum(c.bytes-coalesce(b.bytes,0)) AS body_bytes
+        FROM main.claims_stored c LEFT JOIN storage_append_baseline b
+          ON c.kind=b.kind AND c.writer=b.writer GROUP BY c.kind"),
+    ("storage_append_counters", "table", /* sqlite-large-value: allow-for-now lv-ha285d3710064 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_counters (
+        kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
+    ) WITHOUT ROWID"),
+    ("storage_append", "trigger", /* sqlite-large-value: allow-for-now lv-hfd1e30b2f267 owner=smallclaims::store::append_census TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER storage_append AFTER INSERT ON main.claims BEGIN
+        INSERT INTO storage_append_counters VALUES
+            (NEW.kind, 1, length(CAST(NEW.body AS BLOB)))
+        ON CONFLICT(kind) DO UPDATE SET
+            claims=claims+1, body_bytes=body_bytes+excluded.body_bytes;
+    END"),
+    ("storage_census_start", "table", /* sqlite-large-value: allow-for-now lv-h3193bd88a22e owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_census_start(unix_ms INTEGER NOT NULL)"),
+];
+
+/// Match definitions, not names: altered tables, triggers and shadowing still fail closed.
+pub fn temporary_object_matches(name: &str, kind: &str, sql: &str) -> bool {
+    TEMP_DEFINITIONS.iter().any(|(expected_name, expected_kind, expected)| {
+        name == *expected_name && kind == *expected_kind
+            && sql.split_ascii_whitespace().eq(expected.split_ascii_whitespace().filter(|word| *word != "TEMP"))
+    })
+}
+
+/// Opt-in for daemon-owned stores; generic core stores retain their native TEMP contract.
+pub fn install(connection: &Connection) -> anyhow::Result<()> {
     let existing: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_stored')", [], |row| row.get(0),
     )?;
-    if existing {
-        // Reuse the graph's existing write-time metrics; only copy their tiny baseline, not
-        // claim history. This avoids adding a second counter write to every graph append.
-        connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hf81b16e35691 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_baseline (
-                 kind TEXT, writer TEXT, claims INTEGER, bytes INTEGER,
-                 PRIMARY KEY(kind, writer)
-             ) WITHOUT ROWID;
-             INSERT INTO storage_append_baseline SELECT kind, writer, claims, bytes FROM main.claims_stored;
-             CREATE TEMP VIEW storage_append_counters AS
-             SELECT c.kind, sum(c.claims-coalesce(b.claims,0)) AS claims,
-                    sum(c.bytes-coalesce(b.bytes,0)) AS body_bytes
-             FROM main.claims_stored c LEFT JOIN storage_append_baseline b
-               ON c.kind=b.kind AND c.writer=b.writer
-             GROUP BY c.kind;"
-        )?;
-    } else {
-        // The messages runtime has no exporter counters. Keep its counters connection-local,
-        // with the same transactional body-byte accounting as the graph's claims_stored.
-        connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hdb019a72e227 owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_append_counters (
-                 kind TEXT PRIMARY KEY, claims INTEGER NOT NULL, body_bytes INTEGER NOT NULL
-             ) WITHOUT ROWID;
-             CREATE TEMP TRIGGER storage_append AFTER INSERT ON main.claims BEGIN
-                 INSERT INTO storage_append_counters VALUES
-                     (NEW.kind, 1, length(CAST(NEW.body AS BLOB)))
-                 ON CONFLICT(kind) DO UPDATE SET
-                     claims=claims+1, body_bytes=body_bytes+excluded.body_bytes;
-             END;"
-        )?;
+    let definitions = if existing { &TEMP_DEFINITIONS[..2] } else { &TEMP_DEFINITIONS[2..4] };
+    for (_, _, definition) in definitions {
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he61fbde70b57 owner=smallclaims::store::append_census TODO=trace-statement-and-value-representation */ definition)?;
     }
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8d638151f55e owner=smallclaims::store::append_census TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE storage_census_start(unix_ms INTEGER NOT NULL);")?;
+    if existing {
+        // Tiny write-time metrics baseline only, never retained claim bodies.
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h11a6ddcb182b owner=smallclaims::store::append_census TODO=prepare-body-and-predecessor-values */ "INSERT INTO storage_append_baseline SELECT kind, writer, claims, bytes FROM main.claims_stored;")?;
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd0852e86be9d owner=smallclaims::store::append_census TODO=trace-statement-and-value-representation */ TEMP_DEFINITIONS[4].2)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-hae824bbd6681 owner=smallclaims::store::append_census TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO storage_census_start VALUES (?1)", [super::now_ms() as i64])?;
     Ok(())
 }
