@@ -1860,7 +1860,7 @@ mission "cancel-driver" state="ready" {
   goal "Stop a cancelled step's own driver."
   step "work" {
     agentless
-    exec "worker" { command "sleep 60"; restart "never"; shutdown-timeout "0ms" }
+    exec "worker" { command "sleep 60"; restart "never"; shutdown-timeout "1ms" }
     gate "wait" { document "doc/release" }
   }
 }"#, "cancel-driver-source");
@@ -1887,6 +1887,10 @@ mission "cancel-driver" state="ready" {
             .find(|subject| subject.kind == "stop").unwrap();
         let requests = store.observations_for(&desired.subject, "runtime.action.requested").unwrap();
         assert!(requests.iter().any(|request| request.body["fields"]["action"] == "terminate"));
+        // Match the existing stop deadline test: allow the positive shutdown
+        // budget to expire, then reconcile kill separately from exit observation.
+        std::thread::sleep(Duration::from_millis(2));
+        reconciler.reconcile_once().unwrap();
         assert!(runtime.kills.lock().unwrap().contains(&member.runtime_id));
         runtime.execs.lock().unwrap().get_mut(&member.runtime_id).unwrap().status = "exited".into();
         for _ in 0..8 { reconciler.reconcile_once().unwrap(); }
