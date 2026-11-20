@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep observer actuals property-test publication order deterministic by disabling automatic deferred preparation only on their file-backed fixtures, including reopen; native fence and deliberate concurrent invalidation assertions remain unchanged.",
+  "summary": "Keep observer actuals property-test publication order deterministic by scoping the existing deferred-maintenance test control across fixture creation, replication admission, reads, and reopen; native fence and deliberate concurrent invalidation assertions remain unchanged.",
   "replay": { "status": "none", "detail": "Test fixture change only; production deferred preparation is unchanged." },
   "schema": { "status": "none", "detail": "No schema or persistent data changes." },
   "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade changes." },
