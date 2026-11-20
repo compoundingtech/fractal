@@ -1299,8 +1299,13 @@ mod standing_responses_tests {
                 ('carry','selected','new','step-run.carried',
                  '{\"fields\":{\"attempt\":2,\"source_step_run\":\"old\",\"source_attempt\":1}}','1'),
                 ('answer','selected','old','work.person-done',
-                 '{\"fields\":{\"attempt\":1,\"summary\":\"kept\"}}','2');
+                 '{\"fields\":{\"attempt\":1,\"summary\":\"kept\"}}','2'),
+                ('boundary','selected','zz-boundary','step-run.carried','{\"fields\":{}}','3');
         ").unwrap();
+        // Seed a key above the measured subjects in both populations. Without it,
+        // the small fixture ends its index range at EOF, while the grown fixture
+        // executes one extra IdxGT to reject the next subject. Compare the same
+        // range-boundary path, retaining exact VM equality rather than a tolerance.
         let sql = canonical_sql(RESPONSES_SQL);
         let measure = || {
             let mut query = connection.prepare(&sql).unwrap();
