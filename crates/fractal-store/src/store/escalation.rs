@@ -9,10 +9,12 @@ pub struct EscalationEpisode {
 
 // The triggers skip a pending row that exists with NOT EXISTS, not OR IGNORE: an UPSERT's
 // ON CONFLICT overrides the conflict policy of the triggers it fires, so a position upsert
-// (record_position_tx) raised the UNIQUE error. The v1 triggers that relied on it are dropped.
+// (record_position_tx) raised the UNIQUE error. Open drops the v1 triggers that relied on it.
+// An older build recreates its v1 triggers beside these; each v2 trigger stays inert while its
+// v1 counterpart exists, so that build behaves exactly as it did alone, whatever the firing order.
 // One row per clock-bearing receipt, ordered by the shared canonical key. Inserting an
 // out-of-order status changes only its own transition bit and the next status's bit.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1528e725b8ce owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5283ae23ff28 owner=fractal_store::store::escalation TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_escalation_clocks_v1 (
  store_index INTEGER PRIMARY KEY, subject TEXT NOT NULL, ordering BLOB NOT NULL,
  claim_id TEXT NOT NULL, state TEXT, at TEXT NOT NULL, pause_until TEXT,
@@ -35,24 +37,29 @@ CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v2 AFTER INSERT ON claims
 WHEN (NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
  AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress') BEGIN
  INSERT INTO local_escalation_pending_v1 SELECT NEW.store_index
- WHERE NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index); END;
+ WHERE NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index)
+ AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='local_escalation_insert_v1'); END;
 CREATE TRIGGER IF NOT EXISTS local_escalation_change_v2 AFTER UPDATE ON claims BEGIN
  INSERT INTO local_escalation_pending_v1 SELECT NEW.store_index
  WHERE (EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
  OR ((NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
  AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress')))
- AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index); END;
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=NEW.store_index)
+ AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='local_escalation_change_v1'); END;
 CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v2 AFTER DELETE ON claims BEGIN
  INSERT INTO local_escalation_pending_v1 SELECT OLD.store_index
  WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
- AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=OLD.store_index); END;
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 WHERE store_index=OLD.store_index)
+ AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='local_escalation_delete_v1'); END;
 CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v2 AFTER INSERT ON claim_positions BEGIN
  INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
- AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index); END;
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index)
+ AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='local_escalation_position_insert_v1'); END;
 CREATE TRIGGER IF NOT EXISTS local_escalation_position_v2 AFTER UPDATE ON claim_positions
 WHEN OLD.position<>NEW.position BEGIN
  INSERT INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id
- AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index); END;
+ AND NOT EXISTS(SELECT 1 FROM local_escalation_pending_v1 p WHERE p.store_index=claims.store_index)
+ AND NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='local_escalation_position_v1'); END;
 ";
 
 pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
@@ -244,6 +251,111 @@ mod tests {
 
     fn entry(tx: &Transaction<'_>) -> String {
         tx.query_row(ENTRY, ["step-run/test"], |row| row.get(0)).unwrap()
+    }
+
+
+    /// The v1 triggers as #6733 shipped them, which an older build recreates on open.
+    const V1_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS local_escalation_insert_v1 AFTER INSERT ON claims
+WHEN (NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
+ AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress') BEGIN
+ INSERT OR IGNORE INTO local_escalation_pending_v1 VALUES(NEW.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_change_v1 AFTER UPDATE ON claims BEGIN
+ INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT NEW.store_index
+ WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index)
+ OR ((NEW.subject LIKE 'step-run/%' OR NEW.subject LIKE 'mission-run/%')
+ AND (json_type(NEW.body,'$.fields.status')='text' OR NEW.kind='work.progress')); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_delete_v1 AFTER DELETE ON claims BEGIN
+ INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT OLD.store_index
+ WHERE EXISTS(SELECT 1 FROM local_escalation_clocks_v1 WHERE store_index=OLD.store_index); END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_insert_v1 AFTER INSERT ON claim_positions BEGIN
+ INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;
+CREATE TRIGGER IF NOT EXISTS local_escalation_position_v1 AFTER UPDATE ON claim_positions
+WHEN OLD.position<>NEW.position BEGIN
+ INSERT OR IGNORE INTO local_escalation_pending_v1 SELECT store_index FROM claims WHERE id=NEW.claim_id; END;";
+
+    const UPSERT: &str = "INSERT INTO claim_positions(claim_id, position) VALUES (?1, ?2)
+        ON CONFLICT(claim_id) DO UPDATE SET position=MIN(position, excluded.position)";
+
+    /// Each write an escalation trigger sees, run against `db` from the same start: a step-run
+    /// claim, with or without a pending row, then the write. Returns whether each write
+    /// succeeded and the pending rows it left.
+    fn outcomes(make: impl Fn() -> Connection) -> Vec<(bool, Vec<i64>)> {
+        let writes: [(&str, bool); 8] = [
+            ("INSERT INTO claim_positions VALUES('claim-2',1)", false),
+            ("INSERT INTO claim_positions VALUES('claim-2',1)", true),
+            ("UPDATE claim_positions SET position=0 WHERE claim_id='claim-1'", true),
+            ("UPDATE claims SET actor='other' WHERE store_index=1", true),
+            ("DELETE FROM claims WHERE store_index=1", true),
+            ("upsert claim-2", true),
+            ("upsert claim-1", false),
+            ("upsert claim-1", true),
+        ];
+        writes.iter().map(|(write, pending)| {
+            let mut db = make();
+            let tx = db.transaction().unwrap();
+            insert(&tx, 1, 1, "ready", false);
+            tx.execute("INSERT INTO claims VALUES(2,'claim-2','batch','step-run/test','step-run.state',
+                'writer',NULL,?1,'[]','2')", [json!({"fields":{"status":"running"}}).to_string()]).unwrap();
+            flush(&tx).unwrap();
+            tx.execute("INSERT INTO claim_positions VALUES('claim-1',5)", []).unwrap();
+            tx.execute("DELETE FROM local_escalation_pending_v1", []).unwrap();
+            if *pending {
+                tx.execute("INSERT INTO local_escalation_pending_v1 VALUES(1),(2)", []).unwrap();
+            }
+            let ok = match write.strip_prefix("upsert ") {
+                Some(claim) => tx.execute(UPSERT, params![claim, 1]),
+                None => tx.execute(write, []),
+            }.is_ok();
+            let pending = tx.prepare("SELECT store_index FROM local_escalation_pending_v1 ORDER BY 1").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<Vec<i64>>>().unwrap();
+            (ok, pending)
+        }).collect()
+    }
+
+    #[test]
+    fn position_upserts_of_a_pending_claim_succeed() {
+        let pending: [&[i64]; 8] = [&[2], &[1, 2], &[1, 2], &[1, 2], &[1, 2], &[1, 2], &[1], &[1, 2]];
+        assert_eq!(outcomes(database), pending.map(|rows| (true, rows.to_vec())));
+    }
+
+    #[test]
+    fn an_older_build_beside_the_v2_triggers_behaves_as_it_did_alone() {
+        let alone = outcomes(|| {
+            let db = database();
+            for name in ["insert", "change", "delete", "position_insert", "position"] {
+                db.execute_batch(&format!("DROP TRIGGER local_escalation_{name}_v2")).unwrap();
+            }
+            db.execute_batch(V1_TRIGGERS).unwrap();
+            db
+        });
+        // The old build's own fault stays what it was, and nothing else fails.
+        assert_eq!(alone.iter().map(|(ok, _)| *ok).collect::<Vec<_>>(),
+            [true, true, true, true, true, true, true, false]);
+        // v1 created after v2, as a rollback does, and before it, so firing order cannot matter.
+        assert_eq!(outcomes(|| { let db = database(); db.execute_batch(V1_TRIGGERS).unwrap(); db }), alone);
+        assert_eq!(outcomes(|| {
+            let db = database();
+            let v2: Vec<String> = db.prepare("SELECT sql FROM sqlite_schema WHERE type='trigger'
+                AND name LIKE 'local_escalation_%_v2' ORDER BY name").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            for name in ["insert", "change", "delete", "position_insert", "position"] {
+                db.execute_batch(&format!("DROP TRIGGER local_escalation_{name}_v2")).unwrap();
+            }
+            db.execute_batch(V1_TRIGGERS).unwrap();
+            for sql in v2 { db.execute_batch(&sql).unwrap(); }
+            db
+        }), alone);
+        // Opening this build again drops v1: every write succeeds and leaves the same pending
+        // rows as on a store that never saw v1.
+        assert_eq!(outcomes(|| {
+            let mut db = database();
+            db.execute_batch(V1_TRIGGERS).unwrap();
+            let tx = db.transaction().unwrap();
+            open(&tx).unwrap();
+            tx.commit().unwrap();
+            db
+        }), outcomes(database));
     }
 
     #[test]
