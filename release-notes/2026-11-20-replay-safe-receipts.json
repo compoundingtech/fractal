@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No downtime. Measured on a copy of the member: 99.95% of its replay-safe receipts went in 2,230 writer transactions, p50 8.7 ms, p99 31 ms, max 45 ms. The freed pages went back at 128 per write: p50 8.1 ms, p99 31 ms, max 47 ms. No write reached 100 ms."
+    "detail": "No downtime. Measured on copies of the member, in three runs that gave the same results: 99.95% of its replay-safe receipts went, in 2,231 writer transactions. In the steady pass, writes ran p50 8.5 ms, p99 29 ms, and under 100 ms every time; on a copy that had already been opened once, the longest was 45 ms. On each freshly copied store, the first transaction took up to 303 ms of wall time (loan #0, 291 ms in the run that named it). That time includes waiting for the writer while the store finished its open-time work, about 5 minutes on a fresh copy, and reading cold pages, and it did not recur. The freed pages went back at 128 per write: p99 23 to 31 ms, max 47 ms."
   },
   "manual": {
     "status": "none",
