@@ -13,7 +13,7 @@ use fractal_client::{
     AvailabilityPresence, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange, AvailabilityStatusSource, Client,
     ClientError, DirectiveNote, DirectiveNoteSet, ErrorCode, PersonAvailability,
 };
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use std::collections::VecDeque;
 use std::fmt::Display;
 

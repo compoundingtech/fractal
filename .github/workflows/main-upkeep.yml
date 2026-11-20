@@ -2022,7 +2022,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-linux-gate:
     name: post-merge evidence-gate-linux-gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2092,7 +2092,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-linux-clippy:
     name: post-merge evidence-gate-linux-clippy
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2162,7 +2162,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-linux-fleet-compat:
     name: post-merge evidence-gate-linux-fleet-compat
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2232,7 +2232,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-typescript-client:
     name: post-merge evidence-gate-typescript-client
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2302,7 +2302,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-genie-freshness:
     name: post-merge evidence-gate-genie-freshness
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2372,7 +2372,7 @@ jobs:
     needs: [main-checks]
   proof-evidence-gate-ci-script-tests:
     name: post-merge evidence-gate-ci-script-tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2443,7 +2443,7 @@ jobs:
   proof-evidence-gate-fractal-web:
     name: post-merge evidence-gate-fractal-web
     needs: [main-checks, proof-fractal-web-changes]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2513,7 +2513,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
   proof-evidence-gate-rust-tests:
     name: post-merge evidence-gate-rust-tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     continue-on-error: true
     permissions:
@@ -2583,7 +2583,7 @@ jobs:
     needs: [main-checks]
   proof-upgrade-impact:
     name: post-merge upgrade-impact
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -2626,11 +2626,11 @@ jobs:
           if [ -n "$IMPACT_PR_NUMBER" ]; then
             impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
             python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
-          elif [ -n "$IMPACT_BASE_SHA" ]; then
+            elif [ -n "$IMPACT_BASE_SHA" ]; then
             python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA"
-          else
+            else
             echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
-          fi
+            fi
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -2645,7 +2645,7 @@ jobs:
       CI_CACHE_DEV_SHELL: genie
     needs: [main-checks, proof-pick-runner, proof-evidence-gate-genie-freshness]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     steps:
@@ -3077,7 +3077,7 @@ jobs:
     needs:
       [main-checks, proof-pick-runner, proof-genie-freshness, proof-evidence-gate-typescript-client]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.proof-genie-freshness.result == 'success') ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
@@ -3122,7 +3122,7 @@ jobs:
         id: lockfiles
         run: |
           lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
-          printf 'hash=%s\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"
+            printf 'hash=%s\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"
         if: needs.proof-evidence-gate-typescript-client.outputs.skip != 'true' && needs.proof-evidence-gate-typescript-client.outputs.refuse != 'true'
       - name: Cache the locked TypeScript and Effect toolchain
         id: typescript-cache
@@ -5372,7 +5372,7 @@ jobs:
       - proof-evidence-gate-linux-clippy
       - proof-evidence-gate-linux-fleet-compat
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     steps:
       - name: "evidence refused: sign it with scripts/st-test --all --push origin"
@@ -5389,18 +5389,18 @@ jobs:
           STAGE_SKIPS: "${{ (needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') }} false ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-linux-clippy.outputs.skip == 'true' }} ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-linux-fleet-compat.outputs.skip == 'true' }} ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true' }}"
         run: |
           set -eu
-          set -- $RESULTS
-          [ "$#" = 6 ] || { echo "incomplete base-stage results"; exit 1; }
-          if [ "$EVENT" = merge_group ]; then
+            set -- $RESULTS
+            [ "$#" = 6 ] || { echo "incomplete base-stage results"; exit 1; }
+            if [ "$EVENT" = merge_group ]; then
             set -- $MERGE_RESULTS
             [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
             RESULTS="$RESULTS $MERGE_RESULTS"
-          else
+            else
             [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
-          fi
-          echo "stage results: $RESULTS (evidence skip: ${GATE_SKIP:-none})"
-          position=0
-          for result in $RESULTS; do
+            fi
+            echo "stage results: $RESULTS (evidence skip: ${GATE_SKIP:-none})"
+            position=0
+            for result in $RESULTS; do
             position=$((position + 1))
             [ "$result" = success ] && continue
             # A stage an evidence gate skipped reports `skipped`: accepted only when a gate the stages read decided to skip,
@@ -5411,17 +5411,17 @@ jobs:
               case "$position" in 1|3|4|5|6|7|8) continue ;; esac
             fi
             exit 1
-          done
+            done
       - name: Require ci-script-tests to pass
         env:
           SCRIPT_TESTS_RESULT: ${{ needs.proof-ci-script-tests.result }}
           SCRIPT_TESTS_SKIPPED_BY_GATE: ${{ needs.proof-evidence-gate-ci-script-tests.outputs.skip }}
         run: |
           set -eu
-          echo "ci-script-tests: $SCRIPT_TESTS_RESULT (evidence skip: ${SCRIPT_TESTS_SKIPPED_BY_GATE:-none})"
-          [ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
-          [ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
-          exit 1
+            echo "ci-script-tests: $SCRIPT_TESTS_RESULT (evidence skip: ${SCRIPT_TESTS_SKIPPED_BY_GATE:-none})"
+            [ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
+            [ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
+            exit 1
       - name: Require fixture-only HM activation proof to pass
         env:
           HM_RESULT: ${{ needs.proof-hm-module-eval.result }}
@@ -5520,8 +5520,8 @@ jobs:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
-          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+            git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+            git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
       - name: May this job use the signing key?
         id: guard
         continue-on-error: true
@@ -5534,17 +5534,17 @@ jobs:
           EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
         run: |
           set -o pipefail
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+            python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
       - name: Sign the linux-gate note
         id: sign
         if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-          python3 "$helper" once linux-gate
-          python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
-          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \
+            python3 "$helper" once linux-gate
+            python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
+            home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+            HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \
             --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
@@ -5560,11 +5560,11 @@ jobs:
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-          grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
-          python3 "$helper" once fractal-web
-          python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
-          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \
+            grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
+            python3 "$helper" once fractal-web
+            python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
+            home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+            HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \
             --aggregate "$RUNNER_TEMP/fractal-web-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/fractal-web"
@@ -5583,19 +5583,19 @@ jobs:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-          key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
-          key_path=.st/evidence-keys
-          if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
-          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
-          python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
+            key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+            key_path=.st/evidence-keys
+            if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+            git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
+            python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
             --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
         if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
-          [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
-          python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
+            [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+            python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
             --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" --optional "fractal-web" --remote origin
       - name: Remove the key
         if: always()
@@ -5670,8 +5670,8 @@ jobs:
         continue-on-error: true
         run: |
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
-          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+            git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+            git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
       - name: Collect the test shards' JUnit reports
         if: ${{ steps.base.outcome == 'success' }}
         continue-on-error: true
@@ -5685,14 +5685,14 @@ jobs:
         continue-on-error: true
         run: |
           [ -f "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" ] || { echo "no ci-rust-test-notes at the base commit; nothing is signed"; exit 1; }
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"
+            python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"
       - name: May this job use the signing key?
         id: guard
         if: ${{ steps.plan.outcome == 'success' }}
         continue-on-error: true
         run: |
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard
+            python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard
       - name: Write the signer configuration and key
         id: configure
         if: ${{ steps.guard.outcome == 'success' }}
@@ -5701,26 +5701,26 @@ jobs:
           EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
         run: |
           set -o pipefail
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+            python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
       - name: Sign the per-crate rust-tests notes
         id: sign
         if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" once rust-tests
-          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"
+            home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+            HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"
       - name: Publish the notes that verify
         if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           [ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
-          # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-          key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
-          key_path=.st/evidence-keys
-          if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
-          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
-          python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \
+            # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+            key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+            key_path=.st/evidence-keys
+            if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+            git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
+            python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \
             --checks rust-tests --limit 400 --remote origin
       - name: Remove the key
         if: always()
@@ -5734,7 +5734,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   proof-fractal-web-changes:
     name: post-merge fractal-web-changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 3
     permissions:
       contents: read
@@ -6436,7 +6436,7 @@ jobs:
         proof-evidence-gate-fractal-web,
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ci1-priority"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 3
     permissions:
       contents: read
@@ -6513,6 +6513,10 @@ jobs:
         with:
           pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
           path: "${{ runner.temp }}/kit-play-receipts"
+      - uses: actions/setup-node@v4
+        if: runner.environment == 'self-hosted' && needs.proof-fractal-web-changes.outputs.relevant == 'true' && needs.proof-evidence-gate-fractal-web.outputs.skip != 'true'
+        with:
+          node-version: 24.18.0
       - name: Publish web lane costs as a public check annotation
         continue-on-error: true
         if: "!cancelled() && needs.proof-fractal-web-changes.outputs.relevant == 'true' && needs.proof-evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'"

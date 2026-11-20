@@ -3558,8 +3558,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("profile_key", string()),
             ("profile_estimate", object()),
             ("disk_path", string()),
+            ("admissionDecision", object()),
+            ("learningDecision", object()),
+            ("preRetirementPopulated", boolean()),
+            ("learningCoverage", enumeration(&["full", "client-only", "unknown"])),
+            ("memoryEvents", object()),
+            ("ioStat", array()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            ("class", required_enum(&["recovery", "landing", "check", "agent"])),
             ("owner", required_object()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("state", required_enum(&["completed", "refused", "cancelled"])),
@@ -4637,6 +4643,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("message_id", string()),
             ("session_id", string()),
             ("selector_scope", string()),
             ("ownership_sequence", integer()),
@@ -5674,7 +5681,7 @@ mod tests {
             current.claims.remove(kind).unwrap();
         }
         current.subjects.remove("effect").unwrap();
-        for field in ["producer_version", "invocation_id"] {
+        for field in ["producer_version", "invocation_id", "message_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
         current.claims.remove("mission-run.retry-linked").unwrap();

@@ -146,8 +146,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Sessions read every harness observation (11.5x full-scan steps).
-    ("GET /v1/sessions", 17.5),
 ];
 
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
@@ -1290,6 +1288,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.to_string())
     }),
     get("GET /v1/doctor", "/v1/doctor"),
+    get("GET /v1/storage/status", "/v1/storage/status"),
     get("GET /v1/repair", "/v1/repair"),
     get("GET /v1/replication/status", "/v1/replication/status"),
     get("GET /v1/replication/records", "/v1/replication/records"),
@@ -1526,7 +1525,9 @@ const PROBES: &[Probe] = &[
     // Native physical authority is absent from generated stores. Exercise the real fenced
     // persistence path, including a fresh incarnation and non-replayed frontier each time.
     direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
-        let agent = &fixture.subjects.seats[0];
+        // Reserve the third seat for frontier incarnations; seat zero remains the
+        // running driver used by subsequent harness-event and native-question probes.
+        let agent = &fixture.subjects.seats[2];
         let incarnation = format!("cost-mail-frontier-{attempt}");
         for (kind, fields) in [
             ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),

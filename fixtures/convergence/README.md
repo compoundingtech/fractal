@@ -564,12 +564,12 @@ reader; widening the evidence reader does not widen admission authority.
 The prior seed characterizations remain historical. Exact per-seed trim equality,
 mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
 
-`claims-v42.json` adds the optional bounded `usage.limits.observed` source frontiers,
+`claims-v41.json` adds the optional bounded `usage.limits.observed` source frontiers,
 reset-period observations and explicit unsupported account gaps to the combined
-current registry. Published v40 and #6609's v41 remain frozen; versions 1 through
-41 are preserved. Generate v42 with
-`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
-The current simulation loader and audit report select v42. Existing producers may
+current registry. Versions 1 through 40 remain frozen; main's published v40
+admission corpus is unchanged. Generate v41 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`.
+The current simulation loader and audit report select v41. Existing producers may
 omit the new optional fields, but omission cannot assert source completeness.
 The existing usage draw deliberately exercises that legacy-compatible shape;
 authenticated source chains, reordered replay, native owner bindings and period

@@ -82,12 +82,25 @@ export default githubWorkflow(scopeLinuxNixSandbox({
             ': "${CACHIX_AUTH_TOKEN:?Configure the repository-scoped FRACTAL_CACHIX_AUTH_TOKEN write secret}"',
             'output=$(readlink -f "$RUNNER_TEMP/fractal-native")',
             '"$(cat "$RUNNER_TEMP/cachix-path")/bin/cachix" push "$CACHE_NAME" "$output"',
-            // Authenticate only this explicit remote-store proof; never configure daemon-wide credentials.
+            // Authenticate only explicit private-cache queries; never configure daemon-wide credentials.
             'umask 077',
             'cache_netrc=$(mktemp "$RUNNER_TEMP/fractal-cache-netrc.XXXXXX")',
             'trap \'rm -f -- "$cache_netrc"\' EXIT',
             'printf "machine %s.cachix.org\\nlogin token\\npassword %s\\n" "$CACHE_NAME" "$CACHIX_AUTH_TOKEN" > "$cache_netrc"',
-            'nix --option netrc-file "$cache_netrc" path-info --store "https://$CACHE_NAME.cachix.org" --recursive --json "$output" > "$RUNNER_TEMP/fractal-native-closure.json"',
+            // The producer output must be in the owned cache, not merely an upstream cache.
+            'nix --option netrc-file "$cache_netrc" path-info --store "https://$CACHE_NAME.cachix.org" "$output" > /dev/null',
+            // Cachix omits upstream paths. Prove every local closure member remotely, without local-store fallback.
+            'nix path-info --recursive "$output" > "$RUNNER_TEMP/fractal-native-closure.paths"',
+            'mapfile -t closure < "$RUNNER_TEMP/fractal-native-closure.paths"',
+            'nix path-info --json "${closure[@]}" > "$RUNNER_TEMP/fractal-native-closure.json"',
+            // --print-invalid partitions a whole batch; path-info aborts before printing partial results.
+            'nix-store --store https://cache.nixos.org --check-validity --print-invalid "${closure[@]}" > "$RUNNER_TEMP/fractal-native-upstream-missing.paths"',
+            'mapfile -t remainder < "$RUNNER_TEMP/fractal-native-upstream-missing.paths"',
+            ': > "$RUNNER_TEMP/fractal-native-missing.paths"',
+            'if (( ${#remainder[@]} )); then',
+            '  nix-store --option netrc-file "$cache_netrc" --store "https://$CACHE_NAME.cachix.org" --check-validity --print-invalid "${remainder[@]}" > "$RUNNER_TEMP/fractal-native-missing.paths"',
+            'fi',
+            '[[ ! -s "$RUNNER_TEMP/fractal-native-missing.paths" ]] || { echo "::error::Closure paths missing from both caches"; cat "$RUNNER_TEMP/fractal-native-missing.paths" >&2; exit 1; }',
             'printf "source=%s\\noutput=%s\\ncache=https://%s.cachix.org\\n" "$PUBLISH_SHA" "$output" "$CACHE_NAME" > "$RUNNER_TEMP/fractal-native-publication.txt"',
             'cat "$RUNNER_TEMP/fractal-native-publication.txt" >> "$GITHUB_STEP_SUMMARY"',
           ].join('\n')

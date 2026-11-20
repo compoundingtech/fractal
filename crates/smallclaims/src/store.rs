@@ -44,6 +44,7 @@ mod projection_gate;
 pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
+pub mod append_census;
 pub mod prepared_envelope;
 mod replica_record;
 mod wire_archive;
@@ -1337,6 +1338,14 @@ impl Store {
         connection.install_runtime_finalizer(move |transaction| {
             finalizing_runtime.before_commit(transaction)
         })?;
+        // Temporary WAL and shared-memory fixtures opt in explicitly for deterministic tests.
+        // Ordinary disk stores resume persisted work without replication or a checkpoint.
+        let auto_schedule = !shared_memory;
+        #[cfg(any(test, feature = "test-support"))]
+        let auto_schedule = auto_schedule && readers.temporary_directory().is_none();
+        if auto_schedule {
+            Self::install_deferred_drain(&connection, runtime.clone());
+        }
         Ok(Self {
             connection,
             admitted: None,
@@ -2108,7 +2117,7 @@ pub struct ReplicationAdmission {
     pub valid: usize,
     pub unknown: usize,
     pub invalid: usize,
-    /// Envelopes held as `unsigned` or `fenced` by the fleet membership rules.
+    /// Envelopes waiting for fleet membership or retryable runtime admission backpressure.
     pub held: usize,
     pub changed: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
@@ -2166,9 +2175,11 @@ pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, a
     };
     let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
+    // Keep the optional upper bound seekable, especially for descending one-row history
+    // lookups. Store indexes are SQLite signed integers; NULL includes their full domain.
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND store_index<=COALESCE(?2 - 1, 9223372036854775807)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
@@ -2557,7 +2568,7 @@ const SHARD_BOUNDS_GENERATION_TRIGGERS: &str = /* sqlite-large-value: allow-for-
 /// Upper bound on signature requests or answers in one exchange.
 pub const REPLICATION_SIGNATURE_LIMIT: usize = 512;
 
-/// One kind of envelope that `st3 doctor` reports: admitted before this node knew better.
+/// One kind of envelope that `fractal doctor` reports: admitted before this node knew better.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetAdmissionResidue {
     pub writer: String,
@@ -3138,7 +3149,7 @@ impl Store {
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;
-    /// `st3 doctor` reports them. It reads every validated envelope, 2.6 million on a 56 GB
+    /// `fractal doctor` reports them. It reads every validated envelope, 2.6 million on a 56 GB
     /// store, so the daemon runs it off the request path: in pages of [`RESIDUE_PAGE`]
     /// envelopes, each its own short read snapshot, so it never holds the WAL back for long.
     pub fn fleet_admission_residue(&self) -> Result<Vec<FleetAdmissionResidue>> {
@@ -3290,6 +3301,58 @@ mod sequence_page_tests {
             assert_eq!(seen, rows, "page {page}");
             assert!(reads <= 2 * rows.len() + 1, "page {page}: {reads} reads");
         }
+    }
+}
+
+#[cfg(test)]
+mod replication_admission_wake_tests {
+    use super::*;
+
+    #[test]
+    fn generation_is_visible_only_after_commit_and_survives_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("wake.sqlite");
+        let mut writer = Connection::open(&path)?;
+        writer.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+        let reader = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 1);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&writer)?, 0);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 0);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES('replication_admission_wake_generation','1')",
+            [],
+        )?;
+        transaction.commit()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+
+        let transaction = writer.transaction()?;
+        transaction.execute(
+            "UPDATE meta SET value='2' WHERE key='replication_admission_wake_generation'",
+            [],
+        )?;
+        assert_eq!(Store::replication_admission_wake_generation(&transaction)?, 2);
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        transaction.rollback()?;
+        assert_eq!(Store::replication_admission_wake_generation(&reader)?, 1);
+        drop(reader);
+        drop(writer);
+        let reopened = Connection::open(&path)?;
+        assert_eq!(Store::replication_admission_wake_generation(&reopened)?, 1);
+        Ok(())
     }
 }
 
@@ -7349,7 +7412,7 @@ impl Store {
             // The seal has committed: a failed hand-off must not fail it. The next ordinary pass
             // judges whatever it left, and the job wakes if that pass leaves work.
             self.verdicts_due.store(true, Ordering::Release);
-            eprintln!("st3: sealed claims were not handed to the signature job: {error:#}");
+            eprintln!("fractal: sealed claims were not handed to the signature job: {error:#}");
         }
         Ok(())
     }
@@ -8471,6 +8534,10 @@ impl Store {
         if let Some(generation) = generation {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
+        // Admission has returned every writer loan and released its admission mutex. Queue
+        // paced deferred preparation without waiting for new arrivals to stop. This also
+        // opts memory stores into maintenance when an explicit admission requests it.
+        self.rebuild_deferred_paced()?;
         Ok(admission)
     }
 
@@ -8669,11 +8736,13 @@ impl Store {
                         (AdmissionAuthority::Source, _) => None,
                     }};
                     outcome.verify += started.elapsed();
-                    if let Some(reason) = hold {
-                        hold_replica_envelope(&pass, envelope, reason)?;
+                    if hold.is_some() || prepared.admission_deferred(&pass)? {
+                        if let Some(reason) = hold {
+                            hold_replica_envelope(&pass, envelope, reason)?;
+                        }
                         // A historical degraded receipt selected by a schema retry must remain
-                        // discoverable after that retry's marker completes. Waiting for verified
-                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        // discoverable after that retry's marker completes. Waiting for authority
+                        // or runtime catch-up uses the ordinary pending lifecycle.
                         if retry_subject_references {
                             pass.execute(
                                 /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
@@ -8783,15 +8852,21 @@ impl Store {
     /// replay the whole graph after every exchange. It projects at most once per interval
     /// instead, and again as soon as it has caught up. `None` means it deferred.
     pub fn project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
-        let since = (now_ms() as u64).saturating_sub(
-            self.last_replication_projection_unix_ms
-                .load(Ordering::Acquire),
-        );
-        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
+        if self.replication_projection_throttle_remaining().is_some() {
             self.defer_replication_projection();
             return Ok(None);
         }
         self.project_replication_backlog().map(Some)
+    }
+
+    /// Time until a catch-up projection may run again, without bypassing its throttle.
+    pub fn replication_projection_throttle_remaining(&self) -> Option<std::time::Duration> {
+        let since = (now_ms() as u64).saturating_sub(
+            self.last_replication_projection_unix_ms.load(Ordering::Acquire),
+        );
+        let interval = replication_settle_intervals_ms().0;
+        (since < interval && self.replication_catching_up())
+            .then(|| std::time::Duration::from_millis(interval - since))
     }
 
     /// Whether admitted replicated claims wait for a deferred projection.
@@ -8822,6 +8897,20 @@ impl Store {
             snapshot.legacy_graph_digest.clone(),
             snapshot.projection_digests.clone(),
         ))
+    }
+
+    /// Durable notification generation for runtime holds made eligible for admission again.
+    /// Read through the caller's connection so commit observers see exactly the committed
+    /// transaction; stores predating the first notification have generation zero.
+    pub fn replication_admission_wake_generation(connection: &Connection) -> Result<u64> {
+        Ok(connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_admission_wake_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {

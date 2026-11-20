@@ -264,6 +264,7 @@ fn parse_mission(
             "stalled-after",
             "report-stalls",
             "report-completed",
+            "target-at",
         ],
     )?;
     let id = first_string(node)?;
@@ -289,6 +290,8 @@ fn parse_mission(
         ));
     }
     let (report_to, stalled_after_ms, report_completed, report_stalls) = parse_run_report(node, &id)?;
+    let target_at = property_string(node, "target-at")?
+        .map(|value| crate::model::mission_target_instant(&value)).transpose()?;
     let revisions_human_only = parse_revision_protection(node)?;
     let revision_reviewer = parse_revision_reviewer(node, revisions_human_only)?;
     let revision_cutover = match property_string(node, "revision-cutover")?.as_deref() {
@@ -345,9 +348,31 @@ fn parse_mission(
     let mut system = false;
     let mut capacity = None;
     let mut authority = None;
+    let mut milestones: Vec<crate::model::MissionMilestone> = Vec::new();
+    let mut milestone_ids = BTreeSet::new();
     for child in children.nodes() {
         match child.name().value() {
             "declared-priority" | "declared-lane" | "declared-budgets" => {}
+            "milestone" => {
+                reject_type(child)?;
+                ensure_only_properties(child, &["at"])?;
+                let milestone_id = one_string(child)?;
+                validate_id(&milestone_id, "milestone")?;
+                if !milestone_ids.insert(milestone_id.clone()) {
+                    return Err(FractalError::new("duplicate-milestone", format!("mission `{id}` repeats milestone `{milestone_id}`")));
+                }
+                let at = property_string(child, "at")?.ok_or_else(||
+                    FractalError::new("invalid-milestone", "milestone needs an at instant"))?;
+                let at = crate::model::mission_target_instant(&at)?;
+                // Canonical fixed-width UTC milliseconds compare in chronological order.
+                if milestones.last().is_some_and(|previous| at <= previous.at) {
+                    return Err(FractalError::new("invalid-milestone-order", "milestones must have strictly increasing instants"));
+                }
+                milestones.push(crate::model::MissionMilestone {
+                    id: milestone_id,
+                    at,
+                });
+            }
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -627,6 +652,8 @@ fn parse_mission(
         inputs,
         max_active_runs,
         timeout_ms,
+        target_at,
+        milestones,
         report_to,
         stalled_after_ms,
         report_stalls,
@@ -1454,10 +1481,11 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
     };
     let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "recovery" => fractal_runtime::RequestClass::Recovery,
         "landing" => fractal_runtime::RequestClass::Landing,
         "check" => fractal_runtime::RequestClass::Check,
         "agent" => fractal_runtime::RequestClass::Agent,
-        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be recovery, landing, check or agent")),
     };
     let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
         (None, None) => None,
@@ -3457,6 +3485,18 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recovery_lane_class_parses_as_a_host_profile_request() {
+        let document: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="recovery" profile="disk.reclaim""#.parse().unwrap();
+        let lane = super::parse_resource_lane(&document.nodes()[0]).unwrap();
+        assert_eq!(lane.class, fractal_runtime::RequestClass::Recovery);
+        assert_eq!(lane.profile.as_deref(), Some("disk.reclaim"));
+        let invalid: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="unknown" profile="disk.reclaim""#.parse().unwrap();
+        assert!(super::parse_resource_lane(&invalid.nodes()[0]).is_err());
+    }
+
+    #[test]
     fn whole_input_subjects_use_the_input_id_grammar() {
         for name in [
             "vrs-review",
@@ -3686,6 +3726,76 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+    #[test]
+    fn mission_dates_normalize_round_trip_and_participate_in_revision() {
+        let source = r#"mission "dates" state="ready" target-at="2026-11-04T13:00:00+01:00" {
+            goal "Dates are metadata only.";
+            milestone "review" at="2026-11-04T13:00:00+01:00";
+            milestone "release" at="2026-11-05T12:00:00.001Z";
+            step "work" { agentless; }
+        }"#;
+        let parse = |text: &str| super::parse_missions(&text.parse().unwrap(), "node")
+            .unwrap().remove("dates").unwrap();
+        let mission = parse(source);
+        assert_eq!(mission.target_at.as_deref(), Some("2026-11-04T12:00:00.000Z"));
+        assert_eq!(mission.milestones[0].at, "2026-11-04T12:00:00.000Z");
+        assert_eq!(mission.milestones[1].at, "2026-11-05T12:00:00.001Z");
+        assert!(mission.timeout_ms.is_none());
+        let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
+        let roundtrip = parse(&rendered.text);
+        assert_eq!(mission, roundtrip);
+        assert_eq!(mission.revision, parse(&source.replace("13:00:00+01:00", "12:00:00Z")).revision);
+        for (from, to) in [
+            ("target-at=\"2026-11-04T13:00:00+01:00\"", "target-at=\"2026-11-06T12:00:00Z\""),
+            ("milestone \"review\"", "milestone \"approval\""),
+            ("2026-11-05T12:00:00.001Z", "2026-11-05T12:00:00.002Z"),
+        ] {
+            assert_ne!(mission.revision, parse(&source.replace(from, to)).revision);
+        }
+        let plain = parse(r#"mission "dates" state="ready" { goal "Dates are metadata only."; step "work" { agentless; } }"#);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("target_at").is_none());
+        assert!(json.get("milestones").is_none());
+    }
+
+    #[test]
+    fn mission_dates_reject_invalid_instants_and_milestone_shapes() {
+        for at in [
+            "2026-11-04", "2026-02-30T00:00:00Z", "2027-02-29T00:00:00Z",
+            "2026-11-04T24:00:00Z", "2026-11-04T00:00:00", "2026-11-04T00:00:00-00:00",
+            "2026-11-04T00:00:60Z", "2026-11-04T00:00:00.0000Z", "2026-11-04T00:00:00.1234Z",
+            "2026-11-04T00:00:00+24:00", "2026-11-04T00:00:00+01:60",
+            "2026-11-04t00:00:00z", "2026-11-04 00:00:00Z",
+        ] {
+            for (property, child) in [
+                (format!(r#"target-at="{at}""#), String::new()),
+                (String::new(), format!(r#"milestone "review" at="{at}";"#)),
+            ] {
+                let source = format!(r#"mission "dates" state="ready" {property} {{ goal "Soft dates."; {child} step "work" {{ agentless; }} }}"#);
+                assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err(), "{at}");
+            }
+        }
+        for child in [
+            r#"milestone "review";"#,
+            r#"milestone "" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "review" "extra" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z" { goal "no"; };"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z" unexpected=#true;"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z"; milestone "review" at="2026-11-05T12:00:00Z";"#,
+            r#"milestone "a" at="2026-11-04T13:00:00+01:00"; milestone "b" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "a" at="2026-11-05T00:00:00Z"; milestone "b" at="2026-11-04T00:00:00Z";"#,
+        ] {
+            let source = format!(r#"mission "dates" state="ready" {{ goal "Soft dates."; {child} step "work" {{ agentless; }} }}"#);
+            assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err(), "{child}");
+        }
+        let source = r#"mission "dates" state="ready" {
+            goal "Order instants, not offset text.";
+            milestone "first" at="2026-11-04T23:30:00-02:00";
+            milestone "second" at="2026-11-05T02:00:00Z";
+            step "work" { agentless; }
+        }"#;
+        assert!(super::parse_missions(&source.parse().unwrap(), "node").is_ok());
     }
 }
 

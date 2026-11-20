@@ -27,6 +27,7 @@ pub mod resource_membership;
 pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+pub mod resource_profile_learner;
 #[cfg(test)]
 mod resource_profile_policy_tests;
 mod device_renewal;
@@ -307,6 +308,7 @@ pub mod claim_pages;
 pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
+pub mod storage_census;
 pub mod database_archive_size;
 pub mod answers_check;
 pub mod local_trim_fault;
@@ -325,6 +327,9 @@ pub mod wake_demand;
 pub mod message_marks;
 pub mod mail_input_acceptance;
 pub mod mail_delivery_source;
+pub mod mail_retirement;
+#[cfg(test)]
+mod mail_retirement_tests;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -1911,6 +1916,8 @@ pub struct SubjectCache {
 }
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
+/// Dependency invalidation is cheaper to discard than to read an unbounded claim backlog.
+const SUBJECT_CACHE_DELTA_ROWS: usize = 4096;
 
 /// One subject's reduction, read at snapshot `read_at`, so it holds from there on. The claims
 /// mode is part of the answer: a summary reduction and a full one are cached side by side.
@@ -2498,6 +2505,7 @@ pub struct Store {
     pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
     /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
     pub fleet_residue_wanted: tokio::sync::Notify,
+    pub storage_census: storage_census::State,
 }
 
 /// How often the daemon audits the operation projection against the claim log and counts the
@@ -3009,6 +3017,7 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -3019,6 +3028,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
@@ -3044,6 +3054,7 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -3053,6 +3064,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
@@ -3084,10 +3096,12 @@ impl Store {
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
             shell_environments: Default::default(),
             resource_observations: Default::default(),
             launch_admission: Default::default(),
@@ -5055,6 +5069,13 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<ObservationTrim> {
+        self.storage_census.start();
+        let mut pin_sample = storage_census::PinSample {
+            sampled_at_unix_ms: 0,
+            retention_cutoff_unix_ms: older_than_unix_ms,
+            protected_observations: 0,
+            oldest_pin: None,
+        };
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
@@ -5077,12 +5098,12 @@ impl Store {
                 let connection = self.readers.get();
                 let mut statement = connection.prepare_cached(
                     "SELECT id, observed_at_unix_ms,
-                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
-                            AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                          AND newer.id>old.id)
+                            CASE WHEN kind IN ('agent.launcher-bound', 'agent.helper-launched')
+                               OR EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                               OR old.id IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            THEN 1 WHEN EXISTS (SELECT 1 FROM local_observations AS newer
+                                    WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                      AND newer.id>old.id) THEN 2 ELSE 0 END
                      FROM local_observations AS old
                      WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
                      ORDER BY observed_at_unix_ms, id
@@ -5091,11 +5112,23 @@ impl Store {
                 let rows = statement
                     .query_map(
                         params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, u8>(2)?)),
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                self.storage_census.scanned(rows.len());
+                for (id, at, state) in &rows {
+                    if *state == 1 {
+                        pin_sample.protected_observations += 1;
+                        if pin_sample.oldest_pin.is_none() {
+                            pin_sample.oldest_pin = Some(storage_census::Pin {
+                                local_id: *id, observed_at_unix_ms: *at,
+                            });
+                        }
+                    }
+                }
                 let last = rows.last().map(|(id, at, _)| (*at, *id));
-                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                let due: Vec<i64> = rows.iter().filter(|(_, _, state)| *state == 2)
+                    .map(|(id, _, _)| *id).collect();
                 (due, rows.len() as i64, last)
             };
             #[cfg(test)]
@@ -5122,6 +5155,7 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
             }
             match last {
                 Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
@@ -5174,11 +5208,14 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
+        pin_sample.sampled_at_unix_ms = now_ms();
+        self.storage_census.completed(pin_sample);
         Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
@@ -5723,7 +5760,18 @@ impl Store {
             let conflicts = connection
                 .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h021ae8b69609 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
-            if conflicts != cache.conflicts {
+            let populated = !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
+                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
+                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty();
+            // Probe only the store-index B-tree, before reading any claim bodies. Clearing
+            // these rebuildable entries does no eager reductions: a roster page rebuilds
+            // only its selected subjects, even if every subsequent interval overflows too.
+            let overflow = populated && connection.prepare_cached(
+                "SELECT count(*) FROM (SELECT 1 FROM claims WHERE store_index>?1
+                 AND store_index<=?2 LIMIT ?3)",
+            )?.query_row(params![cache.through, store_index, SUBJECT_CACHE_DELTA_ROWS + 1],
+                |row| row.get::<_, usize>(0))? > SUBJECT_CACHE_DELTA_ROWS;
+            if conflicts != cache.conflicts || overflow {
                 cache.views.clear();
                 cache.serving_views.clear();
                 cache.statuses.clear();
@@ -5732,9 +5780,7 @@ impl Store {
                 cache.card_statuses.clear();
                 cache.serving_card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
-                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
-                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
+            } else if populated {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
