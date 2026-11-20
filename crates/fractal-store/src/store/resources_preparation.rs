@@ -399,13 +399,19 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h2fc800fafc8e owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h41cb6e85569e owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
         DELETE FROM local_resource_preparation_deferred;
         DELETE FROM local_resource_preparation_stale;
         DELETE FROM local_resource_preparation_rebuild;
+        INSERT INTO meta(key,value)
+        SELECT 'replication_admission_wake_generation','1'
+        WHERE EXISTS(SELECT 1 FROM meta
+            WHERE key>='preparation_restarts/' AND key<'preparation_restarts0'
+            AND CAST(value AS INTEGER)>=4)
+        ON CONFLICT(key) DO UPDATE SET value=CAST(meta.value AS INTEGER)+1;
         DELETE FROM meta WHERE key>='preparation_restarts/' AND key<'preparation_restarts0';
         INSERT INTO local_resource_preparation_dirty(subject)
         SELECT DISTINCT subject FROM claims
@@ -741,6 +747,16 @@ fn step_deferred(transaction: &Transaction<'_>, subject: &str, deadline: std::ti
 /// The subject's preparation is rebuilt from every claim present: no deferral waits on it, and no
 /// stage of an earlier walk is still valid.
 fn end_deferral(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    // Publish the retry signal atomically with the caught-up fold. Commit observers only
+    // notify; admission runs later, after this writer loan is returned.
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hfd8d45400ff8 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO meta(key,value)
+         SELECT 'replication_admission_wake_generation','1'
+         WHERE EXISTS(SELECT 1 FROM meta WHERE key='preparation_restarts/' || ?1
+                      AND CAST(value AS INTEGER)>=4)
+         ON CONFLICT(key) DO UPDATE SET value=CAST(meta.value AS INTEGER)+1",
+        [subject],
+    )?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h4de9c4537b6c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hccdb0d69eb62 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_stale WHERE subject=?1", [subject])?;
