@@ -23,6 +23,9 @@ const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 /// diff source: chunked assembly rebuilds selected cards at the new cut instead.
 pub const AGENT_ROSTER_DELTA_ROWS: usize = 4096;
 
+pub static AGENT_ROSTER_SUBJECT_PAGE_SQL: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{RANGE_SUBJECTS} LIMIT ?4"));
+
 fn record_roster_counts(changed: usize, covered: usize, refolded: usize) {
     crate::otel::roster_attribute("st.roster.changed", changed as i64);
     crate::otel::roster_attribute("st.roster.covered", covered as i64);
@@ -740,9 +743,12 @@ impl SeatsStore for Store {
             return Ok((changed > bound).then(|| "cards changed".to_owned()));
         }
         let connection = self.readers.get();
-        let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0a36171e464 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
-            .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+        let names = connection.prepare_cached(&AGENT_ROSTER_SUBJECT_PAGE_SQL)?
+            .query_map(params![index, "agent/", "agent0", bound + 1], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if names.len() > bound {
+            return Ok(Some("membership requires assembly".to_owned()));
+        }
         let names = if history { names } else {
             self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };

@@ -617,3 +617,72 @@ fn roster_expired_snapshot_releases_reader_and_preserves_complete_publication() 
         }
     }
 }
+
+#[test]
+fn roster_short_attempts_resume_membership_and_reconcile_interleaved_changes() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    for history in [false, true] {
+        let (_root, state) = fixture();
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        refresh_agent_roster(store, history).unwrap();
+        let previous = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        for n in 0..(AGENT_ROSTER_WARM_CHUNK * 2 + 1) {
+            roster_resilience_runtime(store, &format!("agent/resume-{n:04}"), "old");
+        }
+        let mut completed = false;
+        let mut failures = 0;
+        for attempt in 0..32 {
+            let clock_store = Arc::clone(store);
+            let pinned = AtomicBool::new(false);
+            let snapshots = AtomicU64::new(0);
+            let start = Instant::now();
+            // Spend one second only when a pinned snapshot has been released. Every
+            // attempt can finish a page but cannot finish the whole roster. No sleeps.
+            let budget = smallclaims::read_budget::ReadBudget::with_clock_for_test(
+                "roster/resume-test", Duration::from_secs(2), Arc::new(move || {
+                    if clock_store.readers.has_pinned_reader() {
+                        pinned.store(true, Ordering::SeqCst);
+                    } else if pinned.swap(false, Ordering::SeqCst) {
+                        snapshots.fetch_add(1, Ordering::SeqCst);
+                    }
+                    start + Duration::from_secs(snapshots.load(Ordering::SeqCst))
+                }),
+            );
+            let result = smallclaims::read_budget::with(Some(budget), || refresh_agent_roster(store, history));
+            assert!(!store.readers.has_pinned_reader());
+            if result.is_ok() {
+                assert!(attempt > 0, "one short attempt cannot scan this roster");
+                completed = true;
+                break;
+            }
+            failures += 1;
+            let retained = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            assert_eq!(retained.0, previous.0);
+            assert!(Arc::ptr_eq(&retained.1, &previous.1));
+            if attempt == 0 {
+                // Changes behind and ahead of the saved subject cursor. A paged claim
+                // backlog also exceeds the fast-path delta ceiling between attempts.
+                roster_resilience_runtime(store, "agent/aaa-behind-cursor", "new");
+                roster_resilience_runtime(store, "agent/zzz-ahead-of-cursor", "new");
+                roster_resilience_runtime(store, "agent/resume-0000", "changed");
+                for n in 0..=crate::store::seats::AGENT_ROSTER_DELTA_ROWS {
+                    unrelated(store, &format!("resume-backlog-{n}"));
+                }
+            }
+        }
+        assert!(completed, "saved pages must converge despite repeated wall expiry");
+        assert!(failures >= 2, "exercise expiry at several assembly phases");
+        let (cut, cards, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        assert_eq!(cut, store.index().unwrap());
+        let mut expected = store.read_snapshot(|index| {
+            let mut rows = client_agent_resources_uncached(store, history, index)?;
+            add_agent_todos(store, &mut rows, index)?;
+            Ok(rows)
+        }).unwrap();
+        expected.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+        assert_eq!(*cards, expected);
+        assert!(store.agent_resources_largest_fold_for_test() <= AGENT_ROSTER_WARM_CHUNK);
+    }
+}
