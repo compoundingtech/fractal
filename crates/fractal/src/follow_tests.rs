@@ -8,6 +8,10 @@ const RUN: &str = "mission-run/example/follow-fixture";
 const RUN_PATH: &str = "/v1/mission-runs/mission-run%2Fexample%2Ffollow-fixture";
 const TREE_PATH: &str = "/v1/mission-runs/tree?root=mission-run%2Fexample%2Ffollow-fixture&limit=50";
 
+const SOURCE_PATH: &str =
+    "/v1/claims?subject=mission%2Fexample%2Ffollow-fixture%40fixture&kind=mission.provenance&order=asc&limit=1";
+const CREATED_PATH: &str =
+    "/v1/claims?subject=mission-run%2Fexample%2Ffollow-fixture&kind=mission-run.created&order=asc&limit=1";
 struct FollowOutput {
     result: Result<()>,
     stdout: Vec<u8>,
@@ -449,6 +453,8 @@ async fn mission_timeout(interrupt_tree: bool) {
     let mut script = vec![
         (RUN_PATH.into(), Reply::Value(before.clone())),
         (TREE_PATH.into(), Reply::Value(tree(before, None))),
+        (SOURCE_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
+        (CREATED_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
         (mission_events_path(10), Reply::Value(mission_event_page(11, "step-run.state"))),
     ];
     if interrupt_tree {
@@ -486,10 +492,10 @@ async fn mission_timeout(interrupt_tree: bool) {
         ]
     );
     assert_eq!(
-        output.requests[2].1 - output.requests[1].1,
+        output.requests[4].1 - output.requests[1].1,
         Duration::ZERO
     );
-    let failed = if interrupt_tree { 4 } else { 3 };
+    let failed = if interrupt_tree { 6 } else { 5 };
     let delay = output.requests[failed + 1].1 - output.requests[failed].1 - Duration::from_secs(15);
     assert!((Duration::from_secs(5)..=Duration::from_secs(15)).contains(&delay));
     assert_eq!(
@@ -512,6 +518,8 @@ async fn mission_follow_honors_page_limit_and_refreshes_when_lookahead_appears()
         vec![
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (tree_path.clone(), Reply::Value(tree(running.clone(), None))),
+            (SOURCE_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
+            (CREATED_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
             (mission_events_path(10), Reply::Value(mission_event_page(11, "mission-run.created"))),
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (tree_path.clone(), Reply::Value(tree(running, Some("page-child-020")))),
@@ -653,6 +661,8 @@ async fn mission_follow_waits_for_lifecycle_events_without_snapshot_polling() {
         vec![
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (TREE_PATH.into(), Reply::Value(tree(running, None))),
+            (SOURCE_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
+            (CREATED_PATH.into(), Reply::Value(json!({"claims": [], "next_cursor": null}))),
             (
                 mission_events_path(10),
                 Reply::Delayed(json!({"items":[],"next_after":null}), Duration::from_secs(30)),
@@ -670,9 +680,10 @@ async fn mission_follow_waits_for_lifecycle_events_without_snapshot_polling() {
         ],
     ).await;
     assert!(output.result.is_ok(), "{}", stderr(&output));
-    assert_eq!(output.requests.len(), 7);
-    assert_eq!(output.requests[3].1 - output.requests[2].1, Duration::from_secs(30));
-    assert_eq!(output.requests[5].1 - output.requests[4].1, Duration::from_secs(7));
+    // Exact-revision attribution is read once, including when metadata is absent.
+    assert_eq!(output.requests.len(), 9);
+    assert_eq!(output.requests[5].1 - output.requests[4].1, Duration::from_secs(30));
+    assert_eq!(output.requests[7].1 - output.requests[6].1, Duration::from_secs(7));
 }
 
 #[tokio::test(start_paused = true)]
