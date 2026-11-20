@@ -447,9 +447,9 @@ fn restart_replay_preserves_real_native_binding_children_including_renamed_subtr
     append_delta(&store,LATE,latest);
     let owner=r#"version 2
 agent "node.ops" { command "true"; handles-faults }
-objective "spend" {
-  about "Unrenamed spend"
-  indicator "native" { objective "spend"; }
+objective "spend/coverage" {
+  about "Unrenamed spend coverage"
+  indicator "native" { objective "spend/coverage"; }
   on-breach "fault" owner="agent/node.ops" condition="spend-budget-missed"
 }
 objective "example/spend" {
