@@ -48,6 +48,11 @@
 //! mission. Each attempt uses its own stable key, so every measured request writes a new run
 //! rather than measuring idempotent replay; source preparation is outside the counted region.
 //!
+//! GitHub capture probes admit fresh root/successor grants and stop fresh writers on every
+//! sample. Source declarations, capture history and predecessor fences are prepared outside
+//! the counted request; replay measures one populated continuation at fixed page size while
+//! its retained capture sequence grows with the generated scale.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
@@ -63,6 +68,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
 use fractal_daemon::HarnessQuestionsStore;
+use fractal_daemon::DeliveryStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -212,6 +218,18 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
     ),
     (
+        "GET /v1/internal/resources/by-request/{request_id}",
+        "requires an owner-scoped host-local submission identity, absent from generated claim-history cost stores; api::resources::tests::request_lookup_submit_retry_conflict_and_terminal_lookup_share_authenticated_scope covers authenticated lookup and terminal replay; local request-row and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/by-request/{request_id}/cancel",
+        "writes an owner-scoped host-local cancellation tombstone even before submission, outside generated claim-history cost stores; api::resources::tests::absent_request_cancel_returns_confirmed_owner_scoped_tombstone covers nonlaunch confirmation and owner isolation; retained tombstone growth is not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}/member-scope",
+        "requires a live enforced native member cgroup and authenticated execution, absent from generated cost stores; api::resources::tests::nested_member_scope_keeps_current_generation_separate_from_verified_root covers generation/root separation; live kernel placement and host-local membership growth are not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
@@ -227,7 +245,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/fleet/admission-residue",
         "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
-    ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/observations", "requires a current paired session; validates at most 32 minute samples and atomically appends durable source-bound summaries plus operation receipts; paired transport, exact retry/reopen, replication and native-row producer proof in api/client_observations.rs; ingestion cost is not measured by this unpaired route probe"),
     ("POST /v1/client/pairings/renewals/stage", "explicit operator replacement staging; bounded source lookup and one append, no history-growing scan; covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/pending", "explicit key-bound pending lookup; capped current-stage scan and bounded challenge append, covered by device renewal route tests"),
     ("POST /v1/client/pairings/renewals/complete", "explicit one-use replacement completion; transactionally rechecks source, stage and consumption before one grant, covered by device renewal route tests"),
@@ -417,6 +435,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
     ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
+    ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
+    ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -593,6 +613,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
+    ("POST /v1/slo", "verifies signed source authority and durably admits a claim reference; signed admission/replay and spoof refusal are covered by roll_completion_tests; maintained SLO row SQL independence is measured below"),
+    ("POST /v1/slo/observe", "collects actual host profile/readiness evidence and signs it, outside graph-only costs; covered by roll_observer and signed source regressions"),
+    ("GET /v1/slo/roll-intent", "prepares canonical native creation-envelope proof and authenticates pinned resource signatures; immediate proof, forged origin, missing input and deadline-derived clock regressions are covered by roll_source; maintained objective row SQL independence is measured below"),
     ("POST /v1/intent/apply", "applies a planned mission"),
     ("POST /v1/missions/{id}/retire", "retires a mission"),
     ("POST /v1/mission-runs/{run}/revision", "revises a run"),
@@ -737,6 +760,36 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/plugins/github/capture/v1/replay",
+        "/v1/plugins/github/capture/v1/replay?source={capture_source}&cursor={capture_cursor}&limit=1",
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/root",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/root",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE,
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/successor",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/successor",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE, "epoch": 2, "predecessor_grant": fixture.items["capture_grant"],
+            "fencing_receipt": fixture.items["capture_fence"],
+            "final_predecessor_commit": fixture.items["capture_frontier"],
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/fence",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/fence",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "authority_grant": fixture.items["capture_grant"],
+        }),
+    ),
     get(
         "GET /v1/mission-runs/continuity/startup-preview",
         "/v1/mission-runs/continuity/startup-preview",
@@ -1189,6 +1242,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/", "/v1/messages/?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
@@ -1236,6 +1290,7 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.to_string())
     }),
     get("GET /v1/doctor", "/v1/doctor"),
+    get("GET /v1/storage/status", "/v1/storage/status"),
     get("GET /v1/repair", "/v1/repair"),
     get("GET /v1/replication/status", "/v1/replication/status"),
     get("GET /v1/replication/records", "/v1/replication/records"),
@@ -1313,6 +1368,7 @@ const PROBES: &[Probe] = &[
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
     get("GET /v1/hosts/holds", "/v1/hosts/holds"),
+    get("GET /v1/hosts/launch-freeze", "/v1/hosts/launch-freeze"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -1328,6 +1384,15 @@ const PROBES: &[Probe] = &[
     post("POST /v1/messages", "/v1/messages", |fixture, attempt| {
         json!({
             "idempotency_key": format!("cost-message-{attempt}"),
+            "from": fixture.subjects.seats[0],
+            "to": fixture.subjects.seats[1],
+            "title": "An invented status note",
+            "content": "The invented build finished; the invented review can start.",
+        })
+    }),
+    post("POST /v1/messages/", "/v1/messages/", |fixture, attempt| {
+        json!({
+            "idempotency_key": format!("cost-message-slash-{attempt}"),
             "from": fixture.subjects.seats[0],
             "to": fixture.subjects.seats[1],
             "title": "An invented status note",
@@ -1459,6 +1524,29 @@ const PROBES: &[Probe] = &[
             })
         },
     ),
+    // Native physical authority is absent from generated stores. Exercise the real fenced
+    // persistence path, including a fresh incarnation and non-replayed frontier each time.
+    direct("POST /v1/mailbox/acceptance-frontier", |store, fixture, attempt| {
+        let agent = &fixture.subjects.seats[0];
+        let incarnation = format!("cost-mail-frontier-{attempt}");
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"cost-frontier","incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":incarnation})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: agent.clone(), kind: kind.into(), actor: Some(agent.clone()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).map_err(|error| error.message)?;
+        }
+        let fence = store.bind_mailbox(&fractal_daemon::client::Fence::new(agent, &incarnation, "delivery"))
+            .map_err(|error| error.message)?;
+        let through = u64::try_from(smallclaims::store::now_ms()).unwrap();
+        let (record, written) = store.record_mail_acceptance_frontier(&fence, through)
+            .map_err(|error| error.message)?;
+        assert!(written, "measure an advancing source frontier, not a replay");
+        Ok(serde_json::to_value(record).unwrap())
+    }),
     // The route binds its caller to a live seat process, which a test has none of.
     direct("POST /v1/harness-events", |store, fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -2569,6 +2657,107 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
 }
 
+/// Exercise the production one-loan requeue and public cold verdict read, not a
+/// copied SELECT. The signed result stays beyond the first page; synthetic edges
+/// grow retained history while every measured page still contains 1024 distinct IDs.
+#[test]
+fn cold_dependency_reads_and_invalidation_pages_are_history_bounded() {
+    use smallclaims::principal::Verdict;
+    for mixed in [false, true] {
+        let mut measurements = Vec::new();
+        for retained in [4096, 40_960] {
+            let store = smallclaims::store::Store::open_memory(
+                "cost-node", Arc::new(smallclaims::store::runtime::Plain),
+            ).unwrap();
+            store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            let claim = store.append_claim(&smallclaims::claim::ClaimInput {
+                subject: "note/cost-dependencies".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), json!("signed cold dependency cost fixture"))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            store.replication_snapshot().unwrap();
+            store.judge_claims(true).unwrap();
+            assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
+            {
+                let mut connection = store.connection.write();
+                assert!(connection.query_row(
+                    "SELECT complete=1 AND dirty=0 AND blocked=0 AND last_signature='' AND roots_digest='' FROM claim_signature_judging WHERE claim_id=?1",
+                    [&claim.id], |row| row.get::<_, bool>(0),
+                ).unwrap());
+                let tx = connection.transaction().unwrap();
+                tx.execute_batch(
+                    "INSERT INTO claim_verdict_dependency_keys(link) SELECT DISTINCT link FROM claim_verdict_links;
+                     INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id)
+                     SELECT k.id,l.claim_id FROM claim_verdict_links l JOIN claim_verdict_dependency_keys k ON k.link=l.link;
+                     DELETE FROM claim_verdict_links;",
+                ).unwrap();
+                let root: i64 = tx.query_row("SELECT id FROM claim_verdict_dependency_keys WHERE link='root'", [], |row| row.get(0)).unwrap();
+                for i in 0..retained {
+                    let id = format!("!dependency-cost/{i:08}");
+                    assert!(id < claim.id);
+                    tx.execute("INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id) VALUES (?1,?2)", rusqlite::params![root, id]).unwrap();
+                    // Unrelated dictionary/edge history tests the reverse claim index too.
+                    let link = format!("key:person/example|synthetic-{i:08}");
+                    tx.execute("INSERT INTO claim_verdict_dependency_keys(link) VALUES (?1)", [&link]).unwrap();
+                    tx.execute("INSERT INTO claim_verdict_dependency_edges(dependency_id,claim_id) VALUES (last_insert_rowid(),?1)", [&id]).unwrap();
+                }
+                if mixed {
+                    tx.execute_batch(
+                        "INSERT INTO claim_verdict_links(link,claim_id)
+                         SELECT k.link,e.claim_id FROM claim_verdict_dependency_edges e
+                         JOIN claim_verdict_dependency_keys k ON k.id=e.dependency_id;",
+                    ).unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let mut reads = Vec::new();
+            let mut pages = Vec::new();
+            for _ in 0..4 {
+                {
+                    let connection = store.connection.write();
+                    connection.execute_batch(
+                        "DELETE FROM claim_verdict_queue;
+                         INSERT INTO meta(key,value) VALUES ('claim_candidate_requeue:root','')
+                         ON CONFLICT(key) DO UPDATE SET value='';",
+                    ).unwrap();
+                }
+                let scope = work::SqliteWorkScope::start();
+                let read = store.claim_verdict(&claim.id).unwrap();
+                reads.push(scope.finish());
+                assert!(matches!(read, Verdict::Held(_)), "cold compact-only result must be held before its page");
+                let scope = work::SqliteWorkScope::start();
+                store.judge_claim_page_for_test(false).unwrap();
+                pages.push(scope.finish());
+                let connection = store.readers.get();
+                let cursor: String = connection.query_row(
+                    "SELECT value FROM meta WHERE key='claim_candidate_requeue:root'", [], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(cursor, "!dependency-cost/00001023", "duplicate edges must not shorten the distinct-ID page");
+                assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)", [&claim.id], |row| row.get::<_, bool>(0)).unwrap());
+                assert!(matches!(store.claim_verdict(&claim.id).unwrap(), Verdict::Held(_)));
+            }
+            measurements.push((
+                reads.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap(),
+                pages.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap(),
+            ));
+        }
+        let (small, large) = (measurements[0], measurements[1]);
+        println!("cold dependencies 4096 -> 40960 retained edges (mixed={mixed}): reads {:?} -> {:?}; 1024-ID invalidation pages {:?} -> {:?}", small.0, large.0, small.1, large.1);
+        for (label, small, large) in [("cold read", small.0, large.0), ("invalidation page", small.1, large.1)] {
+            assert!(small.statements > 0, "{label} SQL work must be traced");
+            assert!(large.vm_steps <= small.vm_steps + SLACK, "{label} scanned retained dependency history: {small:?} -> {large:?}");
+            assert!(large.fullscan_steps <= small.fullscan_steps + 8, "{label} full-scanned retained dependency history: {small:?} -> {large:?}");
+            assert_eq!(large.sorts, 0, "{label} must use indexed order, not sort retained history");
+            assert_eq!(large.autoindex_rows, 0, "{label} must use persistent dependency indexes");
+            assert!(large.statements <= small.statements + 2, "{label} statement count grew with history");
+        }
+    }
+}
+
 /// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
 /// Repeated observations grow the durable log, not the projected credit inventory.
 #[test]
@@ -2615,7 +2804,7 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
             let mut samples = Vec::new();
             for _ in 0..4 {
                 let scope = work::SqliteWorkScope::start();
-                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
                 let spent = scope.finish();
                 if configured {
                     let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
@@ -2646,6 +2835,57 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
             "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
         assert!(large.fullscan_steps <= small.fullscan_steps + 8,
             "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
+}
+
+/// The roll source maintains signed graph receipt references; SLO reads must not scan history.
+#[test]
+fn slo_roll_source_reads_do_no_sql_independently_of_receipt_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open_memory("cost-node").unwrap();
+    fractal_daemon::roll_completion::install(&store, root.path()).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key)).unwrap();
+    let source = r#"version 2
+agent "roll-authority" {
+  command "true"
+  host "cost-node"
+  resource "roll-authority" subject="resource/fleet/roll-completion" reason="Measure signed roll sources"
+}
+"#;
+    let intent = fractal_daemon::parse_intent(source, "cost-node").unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    store.ensure_principal_key("agent/roll-authority").unwrap();
+    let target = json!({
+        "dotfiles_revision": "1111111111111111111111111111111111111111",
+        "daemon_revision": "3333333333333333333333333333333333333333",
+    });
+    for index in 0..1000 {
+        let receipt = json!({
+            "version": 1, "kind": "roll-declared", "roll_id": format!("roll-{index}"),
+            "declared_at_ms": 1000, "targets": {"host-a": target},
+        });
+        let claim = store.append_claim(&ClaimInput {
+            subject: format!("resource/fleet/roll-completion/roll-{index}/declaration"),
+            kind: "resource.observed".into(), actor: Some("agent/roll-authority".into()),
+            fields: serde_json::from_value(json!({"kind":"custom.fractal.fleet-roll-receipt","state":"declared","facts":receipt})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
+        fractal_daemon::roll_completion::ingest(&store,
+            fractal_daemon::roll_completion::SignedReceipt { claim_id: claim.id }, 1000).unwrap();
+        if matches!(index, 99 | 999) {
+            let scope = work::SqliteWorkScope::start();
+            let row = fractal_daemon::roll_completion::row(&store, 2000);
+            let spent = scope.finish();
+            assert_eq!(row["measurement"]["accepted_declarations"], index + 1);
+            assert_eq!(spent.statements, 0, "native source reads must not query SQLite");
+            assert_eq!(spent.vm_steps, 0);
+        }
     }
 }
 
@@ -3199,6 +3439,106 @@ async fn missing_service_probe_is_fatal_before_cost_aggregation() {
     required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
 }
 
+fn capture_source(fixture: &Fixture) -> Value {
+    json!({"host": "github.com", "id": fixture.items["capture_source"], "generation": 1})
+}
+
+/// Trusted-local operator requests must not carry a client session or bound agent.
+async fn capture_request(app: &Router, method: &str, path: &str, body: Option<&Value>) -> Value {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let bytes = body.map(|body| serde_json::to_vec(body).unwrap()).unwrap_or_default();
+    let response = app.clone().oneshot(Request::builder().method(method).uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(bytes)).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+    assert!(status.is_success(), "capture probe {method} {path}: {status}: {}", String::from_utf8_lossy(&bytes));
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    envelope.get("value").expect("capture response must use the daemon envelope").clone()
+}
+
+async fn prepare_capture_probe(
+    app: &Router, store: &Store, fixture: &mut Fixture, route: &str, attempt: usize, scale: f64,
+) {
+    use fractal_schema::github_capture::{
+        self as capture, CaptureCommit, FactImage, FactReference, MergeFact, ObservedFact, Source,
+    };
+
+    let operation = if route.starts_with("GET ") { "replay" } else { route.rsplit('/').next().unwrap() };
+    let id = format!("cost-{operation}-{attempt}");
+    let subject = format!("github-source/{id}");
+    fixture.items.insert("capture_source", id.clone());
+    let source: Source = serde_json::from_value(capture_source(fixture)).unwrap();
+    let declare = |grant: Option<&str>| {
+        let authority = grant.map(|grant| format!("authority-grant \"{grant}\";")).unwrap_or_default();
+        let kdl = format!("version 2\ngithub-source \"{id}\" {{ host \"github.com\"; generation 1; \
+            {authority} repository \"example/public\"; enabled #false; checkpoint-every-ms 60000; replicate-private #false; }}");
+        let intent = fractal_daemon::parse_intent(&kdl, NODE).unwrap();
+        store.apply_internal(&intent, &format!("cost-{id}-{}", grant.unwrap_or("disabled"))).unwrap();
+    };
+    declare(None);
+    if operation == "root" { return; }
+
+    let base = format!("/v1/plugins/github/capture/v1/sources/{id}");
+    let root = capture_request(app, "POST", &format!("{base}/authority/root"), Some(&json!({
+        "actor": "person/bench-operator", "source": source, "member": NODE,
+    }))).await;
+    let grant = root["id"].as_str().unwrap().to_owned();
+    declare(Some(&grant));
+    fixture.items.insert("capture_grant", grant.clone());
+    let append = |subject: String, kind: &str, record: Value| {
+        store.append_claim(&ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // Grow retained replay history, not the measured page. Authority samples need only one
+    // real capture to exercise the stopped-frontier dependency rather than an empty source.
+    let count = if operation == "replay" { ((1000.0 * scale) as u64).max(3) } else { 1 };
+    let mut frontier = None;
+    for sequence in 1..=count {
+        let fact = ObservedFact {
+            version: capture::VERSION, source: source.clone(), observed_at_ms: sequence,
+            supersedes: None,
+            fact: FactImage::Merge(MergeFact {
+                pull_request_id: format!("pr-{sequence}"), repository_id: "example/public".into(),
+                merged_at_ms: sequence,
+            }),
+        };
+        let fact_claim = append(fact.subject().unwrap(), capture::FACT_KIND, serde_json::to_value(&fact).unwrap());
+        let commit = CaptureCommit {
+            version: capture::VERSION, source: source.clone(), epoch: 1,
+            authority_grant: grant.clone(), sequence, predecessor: frontier,
+            facts: vec![FactReference { claim_id: fact_claim.id, digest: fact.digest().unwrap() }],
+            checkpoint: None, coverage: Vec::new(), observed_at_ms: sequence,
+        };
+        frontier = Some(append(commit.subject().unwrap(), capture::COMMIT_KIND, serde_json::to_value(&commit).unwrap()).id);
+    }
+    fixture.items.insert("capture_frontier", frontier.unwrap());
+    // Finish bounded projection catch-up outside the sample, then retain a finite
+    // continuation after sequence one so measured replay also checks its pinned frontier.
+    let path = format!("/v1/plugins/github/capture/v1/replay?source={id}&limit=1");
+    loop {
+        let first = capture_request(app, "GET", &path, None).await;
+        if first["state"] == "projection-pending" { continue; }
+        assert_eq!(first["state"], "ready");
+        assert_eq!(first["page"]["through_sequence"], count);
+        assert_eq!(first["page"]["records"][0]["commit"]["sequence"], 1);
+        fixture.items.insert("capture_cursor", first["page"]["cursor"].as_str().unwrap().into());
+        break;
+    }
+    if operation == "successor" {
+        let receipt = capture_request(app, "POST", &format!("{base}/fence"), Some(&json!({
+            "actor": "person/bench-operator", "source": source, "authority_grant": grant,
+        }))).await;
+        assert_eq!(receipt["subject"], subject);
+        fixture.items.insert("capture_fence", receipt["id"].as_str().unwrap().into());
+    }
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3420,6 +3760,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
     };
+    std::fs::create_dir_all(&state.state_dir).unwrap();
+    fractal_daemon::roll_completion::install(&store, &state.state_dir).unwrap();
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),
     ));
@@ -3429,6 +3771,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let service_claim = seed_service_probe(&store);
     let mut service_state = state.clone();
     service_state.owning_person = Some("person/bench-operator".into());
+    let capture_router = fractal_daemon::api::router(service_state.clone());
     let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -3765,6 +4108,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            if probe.route.contains("/plugins/github/capture/v1/") {
+                prepare_capture_probe(&capture_router, &store, &mut fixture, probe.route, attempt, scale).await;
+            }
             if probe.route == "POST /v1/mission-runs/continuity/recover" {
                 let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
                 fixture.items.insert("continuity_hash", preview["preview_hash"].as_str().unwrap().into());
@@ -3821,6 +4167,40 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.route.contains("/plugins/github/capture/v1/") {
+                let path = fixture.fill(probe.path, attempt);
+                let body = probe.body.map(|body| body(&fixture, attempt));
+                let method = probe.route.split_once(' ').unwrap().0;
+                counted(|| async {
+                    let value = capture_request(&capture_router, method, &path, body.as_ref()).await;
+                    if probe.body.is_none() {
+                        assert_eq!(value["state"], "ready");
+                        assert_eq!(value["page"]["frontier"], fixture.items["capture_frontier"]);
+                        assert_eq!(value["page"]["records"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["records"][0]["commit"]["sequence"], 2);
+                        assert_eq!(value["page"]["records"][0]["facts"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["coverage"], Value::Null);
+                        assert_eq!(value["page"]["snapshot_complete"], false);
+                    } else {
+                        let record = &value["body"]["fields"]["record"];
+                        assert_eq!(record["source"], capture_source(&fixture));
+                        if probe.route.ends_with("/fence") {
+                            assert_eq!(record["authority_grant"], fixture.items["capture_grant"]);
+                            assert_eq!(record["final_commit"], fixture.items["capture_frontier"]);
+                            assert_eq!(value["kind"], fractal_schema::github_capture::FENCED_KIND);
+                        } else {
+                            assert_eq!(record["epoch"], if probe.route.ends_with("/root") { 1 } else { 2 });
+                            assert_eq!(record["member"], NODE);
+                            if probe.route.ends_with("/successor") {
+                                assert_eq!(record["predecessor_grant"], fixture.items["capture_grant"]);
+                                assert_eq!(record["fencing_receipt"], fixture.items["capture_fence"]);
+                                assert_eq!(record["final_predecessor_commit"], fixture.items["capture_frontier"]);
+                            }
+                            assert_eq!(value["kind"], fractal_schema::github_capture::AUTHORITY_KIND);
+                        }
+                    }
+                    Ok(value)
+                }).await
             } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
                 let path = fixture.fill(probe.path,attempt);
                 counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await

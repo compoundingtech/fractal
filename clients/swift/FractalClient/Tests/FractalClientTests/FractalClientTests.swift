@@ -676,6 +676,8 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(agent.runtimeIDs, ["runtime/release-agent"])
         XCTAssertEqual(agent.workspace, "/srv/example/release")
         XCTAssertEqual(agent.checkout?.branch, "release")
+        XCTAssertEqual(agent.suspension?.cause, "idle")
+        XCTAssertEqual(agent.suspension?.mode, "git")
         guard case .runtime(let runtime) = try resource("runtime/release-agent") else { return XCTFail("runtime discriminator lost") }
         XCTAssertEqual(runtime.ownerHostID, "host/host-a")
         XCTAssertEqual(runtime.incarnationID, "runtime-9:2026-09-20T11:06:30Z")

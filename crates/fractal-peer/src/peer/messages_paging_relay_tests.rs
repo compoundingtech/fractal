@@ -19,6 +19,7 @@ enum OldMessages {
 struct Owner {
     auth: FleetAuth,
     received: Arc<Mutex<Vec<Value>>>,
+    inspections: Arc<Mutex<usize>>,
     capabilities: Arc<Mutex<Value>>,
     capability_bytes: Arc<Mutex<Option<Vec<u8>>>>,
 }
@@ -58,6 +59,7 @@ async fn inspect(State(owner): State<Owner>, headers: HeaderMap, body: Bytes) ->
     assert!(body.is_empty());
     assert!(!headers.contains_key("x-st3-features"));
     owner.auth.verify(&headers, "GET", CLIENT_READ_PATH, &body, Some("gateway-node"), None).unwrap();
+    *owner.inspections.lock() += 1;
     if let Some(bytes) = owner.capability_bytes.lock().clone() {
         return signed_bytes(&owner, &body, bytes);
     }
@@ -95,6 +97,7 @@ async fn fixture(advertised: bool) -> (tempfile::TempDir, ClientRelay, Owner, to
     }).unwrap().unwrap();
     let owner = Owner {
         auth: relay.auth.clone(), received: Arc::default(),
+        inspections: Arc::default(),
         capabilities: Arc::new(Mutex::new(serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
             {"id":"session-detail-child-id","version":1,"state":"granted"}
@@ -140,10 +143,86 @@ async fn post_only_old_owner_never_receives_a_v2_field_and_legacy_still_works() 
 
 #[tokio::test]
 async fn advertised_owner_receives_v2_only_after_authenticated_inspection() {
-    let (_root, relay, owner, server) = fixture(true).await;
+    let (root, mut relay, owner, server) = fixture(true).await;
+    relay.fabric = Some(Fabric::new(root.path().join("unused-fabric")));
     let page = relay.read("host/owner-node", &request(true)).await.unwrap();
     assert_eq!(page["cut"]["state"], "complete");
     assert_eq!(owner.received.lock().len(), 1);
+    assert_eq!(*owner.inspections.lock(), 1, "HTTP retains its authenticated capability gate");
+    server.abort();
+}
+
+fn fabric_route(root: &std::path::Path, relay: &mut ClientRelay, fail: bool) -> std::path::PathBuf {
+    let address = relay.peers[0].url.strip_prefix("http://").unwrap();
+    let program = root.join("fabric");
+    let reply = if fail {
+        "exit 1".to_owned()
+    } else {
+        format!("printf '%s\\n' '{{\"address\":\"{address}\"}}'")
+    };
+    fs::write(&program, format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\n{reply}\n"
+    )).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    relay.fabric = Some(Fabric::new(program));
+    relay.peers[0].url = "fabric://owner-node/fleet-fixture".into();
+    root.join("fabric.calls")
+}
+
+#[tokio::test]
+async fn fabric_attempt_dials_once_but_inspects_authority_on_every_read_and_forward() {
+    let (root, mut relay, owner, server) = fixture(true).await;
+    let calls = fabric_route(root.path(), &mut relay, false);
+    relay.read("host/owner-node", &request(true)).await.unwrap();
+    assert_eq!(*owner.inspections.lock(), 1);
+    assert_eq!(owner.received.lock().len(), 1);
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 1);
+
+    let mut forwarded = request(true);
+    forwarded.relay = Some(ClientReadRoute {
+        target: "host/owner-node".into(), path: vec!["first-gateway".into()], hops_left: 3,
+    });
+    // A successful earlier inspection must not cache a grant for the next attempt.
+    let granted = owner.capabilities.lock().clone();
+    *owner.capabilities.lock() = serde_json::json!({"capabilities":[]});
+    let error = relay.forward(&forwarded).await.unwrap_err();
+    assert_eq!(error.downcast_ref::<ClientReadRejected>().unwrap().code, "unsupported-capability");
+    assert_eq!(*owner.inspections.lock(), 2);
+    assert_eq!(owner.received.lock().len(), 1, "a refused gate sends no operation");
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 2);
+
+    *owner.capabilities.lock() = granted;
+    relay.forward(&forwarded).await.unwrap();
+    assert_eq!(*owner.inspections.lock(), 3);
+    assert_eq!(owner.received.lock().len(), 2);
+    assert_eq!(fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(), vec![
+        "dial owner-node fleet-fixture --tcp 127.0.0.1:0 --json"; 3
+    ]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn fabric_legacy_operation_dials_once_without_capability_inspection() {
+    let (root, mut relay, owner, server) = fixture(false).await;
+    let calls = fabric_route(root.path(), &mut relay, false);
+    relay.read("host/owner-node", &request(false)).await.unwrap();
+    assert_eq!(*owner.inspections.lock(), 0);
+    assert_eq!(owner.received.lock().len(), 1);
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn fabric_dial_failure_never_inspects_or_posts_to_the_owner() {
+    let (root, mut relay, owner, server) = fixture(true).await;
+    let calls = fabric_route(root.path(), &mut relay, true);
+    let error = relay.read("host/owner-node", &request(true)).await.unwrap_err();
+    let rejected = error.downcast_ref::<ClientReadRejected>().unwrap();
+    assert_eq!(rejected.code, "remote-unavailable");
+    assert_eq!(rejected.reason(), Some("dial-failed"));
+    assert_eq!(*owner.inspections.lock(), 0);
+    assert!(owner.received.lock().is_empty());
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
     server.abort();
 }
 

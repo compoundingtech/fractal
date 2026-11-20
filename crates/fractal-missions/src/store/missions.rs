@@ -1710,6 +1710,8 @@ pub trait MissionsStore {
     fn run_generations(&self, run: &str) -> Result<Vec<RunGenerationView>>;
     fn run_generation(&self, generation: &str) -> Result<Option<RunGenerationView>>;
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>>;
+    /// Descendant owners, using the same traversal as durable cancellation.
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>>;
     fn revision_proposal_for_run(&self, run: &str) -> Result<Option<RevisionProposalView>>;
     fn revision_proposal(&self, proposal: &str) -> Result<Option<RevisionProposalView>>;
     fn create_revision_proposal(
@@ -3331,6 +3333,21 @@ impl MissionsStore for Store {
         Ok(run_generation_view_tx(&connection, generation).optional()?)
     }
 
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>> {
+        let generation = generation_id_from_subject(generation);
+        let connection = self.readers.get();
+        // Cancellation changes these owners even when their synthetic subscription
+        // parent is not a step. Register those same reads for incremental cleanup.
+        Ok(descendant_mission_run_ids_tx(&connection, generation)?
+            .into_iter()
+            .map(|id| {
+                let subject = format!("mission-run/{id}");
+                smallclaims::touched::note_read(|| subject.clone());
+                subject
+            })
+            .collect())
+    }
+
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>> {
         let generation = generation_id_from_subject(generation);
         let connection = self.readers.get();
@@ -4646,7 +4663,7 @@ impl MissionsStore for Store {
         }
         let predecessors =
             mission_definition_token_tx(transaction, mission_id).map_err(internal)?;
-        let body = serde_json::to_value(&retired).map_err(internal)?;
+        let body = fractal_store::store::mission_publication_body(&retired).map_err(internal)?;
         let claim = if matches!(gate, owned_sets::Gate::Force(_)) {
             fractal_store::store::append_source_forced_receipt_claim_tx(
                 transaction,
@@ -7482,7 +7499,17 @@ impl MissionsStore for Store {
                 let previous_object = previous.as_ref().and_then(Value::as_object);
                 let current_object = facts.as_object()
                     .expect("prepared resource facts are an object");
-                if !should_record {
+                // Unavailable-node state belongs to observer continuity, not resource facts.
+                // Persist both additions and recoveries even when the facts were already known.
+                let tombstones = |cursor: Option<&str>| {
+                    cursor.and_then(|cursor| serde_json::from_str::<Value>(cursor).ok())
+                        .and_then(|mut cursor| cursor.get_mut("tombstones").map(Value::take))
+                        .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+                };
+                let previous_cursor = fractal_store::store::resources::claimed_observer_cursor_at(transaction, observer)
+                    .map_err(internal)?;
+                let tombstones_changed = tombstones(previous_cursor.as_deref()) != tombstones(cursor);
+                if !should_record && !tombstones_changed {
                     return Ok(Some((ResourceObservationOutcome {
                         baseline,
                         changed_fields,
@@ -7514,7 +7541,7 @@ impl MissionsStore for Store {
                     )
                     .map_err(internal)?;
                 }
-                if changed || attempt.is_some() {
+                if changed || attempt.is_some() || tombstones_changed {
                     let observer_predecessors = latest_claim_id_tx(transaction, observer)
                         .map_err(internal)?
                         .into_iter()
@@ -7522,8 +7549,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
-                        // For a repository observer, only how far it has read: its version maps
-                        // stay in the polling member's GitHub plugin database.
+                        // Repository cursors carry read position and unavailable identities;
+                        // version maps stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });

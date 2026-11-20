@@ -98,8 +98,9 @@ pub fn open(
     let file = format!("{plugin}.sqlite3");
     let path = directory.join(&file);
     let open_at = |path: &Path| -> Result<Connection> {
-        let connection =
+        let mut connection =
             Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        smallclaims::sqlite::observe(&mut connection);
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&connection)?;

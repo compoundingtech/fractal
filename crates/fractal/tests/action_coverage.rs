@@ -28,6 +28,100 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_native_roll_receipts_and_intent_proof_survive_restart() {
+    use fractal_daemon::roll_completion::{self, Receipt};
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    daemon.store().bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
+    daemon.store().pin_fleet_anchor(key.public()).unwrap();
+    daemon.store().set_member_key(Some(key.clone())).unwrap();
+    daemon.store().admit_fleet_anchor("7c9e6679-7425-40de-944b-e07fc1f90ae7", key.public(), "listening").unwrap();
+    daemon.apply(&format!(r#"version 2
+agent "example/roll-authority" {{
+    command "true"
+    host "{NODE}"
+    resource "roll-authority" subject="resource/fleet/roll-completion" reason="Declare rolls"
+}}
+mission "fleet/roll/cli-proof" state="ready" timeout="20m" {{
+    input "main" kind="resource"
+    goal "Resolve a signed pinned native rollout intent."
+}}
+"#), "native-roll-cli");
+    daemon.store().ensure_principal_key("agent/example/roll-authority").unwrap();
+    roll_completion::install(daemon.store(), daemon.root.path()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let receipt = Receipt::SourceEnabled {
+        version: 1,
+        producer: "agent/example/roll-authority".into(),
+        enabled_at_ms: now.as_millis().try_into().unwrap(),
+        mission_prefix: "fleet/roll/".into(),
+        resource_input: "main".into(),
+        revision_fact: "head".into(),
+        roll_id_prefix: "dotfiles/".into(),
+    };
+    let source = daemon.store().append_claim(&ClaimInput {
+        subject: "resource/fleet/roll-completion/sources/agent/example/roll-authority/enabled".into(),
+        kind: "resource.observed".into(),
+        actor: Some("agent/example/roll-authority".into()),
+        fields: BTreeMap::from([
+            ("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
+            ("state".into(), json!("observed")),
+            ("facts".into(), serde_json::to_value(receipt).unwrap()),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    daemon.store().seal_local_batches().unwrap();
+    daemon.store().judge_claims(true).unwrap();
+    // CLI identity is not receipt authority: a person can submit the already signed
+    // agent claim, but neither a missing claim nor --as can manufacture that proof.
+    assert!(!daemon.cli(PERSON, &["slo", "ingest-roll", "claim/missing"]).await.status.success());
+    let admitted = cli_value(daemon.cli(PERSON, &["slo", "ingest-roll", &source.id]).await);
+    assert_eq!(admitted["changed"], true);
+    let revision = "a".repeat(40);
+    let resource = daemon.store().append_claim(&ClaimInput {
+        subject: "resource/cli-roll-main".into(), kind: "resource.observed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("kind".into(), json!("custom.fractal.roll-source-test")),
+            ("state".into(), json!("ready")),
+            ("facts".into(), json!({"head": revision})),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let run = daemon.store().create_mission_run(&MissionRunRequest {
+        mission: "fleet/roll/cli-proof".into(), revision: None,
+        workspace: daemon.root.path().to_string_lossy().into_owned(),
+        requester: Some("agent/example/roll-authority".into()), mode: Some("run".into()),
+        inputs: BTreeMap::from([("main".into(), format!("{}@{}", resource.subject, resource.id))]),
+        idempotency_key: "cli-roll-intent".into(),
+    }).unwrap();
+    assert!(!daemon.cli(PERSON, &["slo", "roll-intent", "mission-run/missing"]).await.status.success());
+    let context = cli_value(daemon.cli(PERSON, &["slo", "roll-intent", &run.subject]).await);
+    assert_eq!(context["roll_id"], format!("dotfiles/{revision}"));
+    assert_eq!(context["dotfiles_revision"], revision);
+    assert_eq!(context["resource_claim_id"], resource.id);
+    let creation = daemon.store().claims_for(&run.subject, Some("mission-run.created")).unwrap();
+    assert_eq!(creation.len(), 1);
+    assert_eq!(context["declared_at_ms"], u64::try_from(creation[0].accepted_at_unix_ms).unwrap());
+    for command in [
+        vec!["slo", "ingest-roll", source.id.as_str(), "--as", PERSON],
+        vec!["slo", "roll-intent", run.subject.as_str(), "--as", PERSON],
+    ] {
+        let output = daemon.cli(PERSON, &command).await;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--as"));
+    }
+    daemon.restart().await;
+    daemon.store().set_member_key(Some(key)).unwrap();
+    roll_completion::install(daemon.store(), daemon.root.path()).unwrap();
+    assert_eq!(cli_value(daemon.cli(PERSON, &["slo", "ingest-roll", &source.id]).await)["changed"], false);
+    assert_eq!(cli_value(daemon.cli(PERSON, &["slo", "roll-intent", &run.subject]).await), context);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_continuity_previews_and_hash_bound_recovery_survive_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -123,6 +217,49 @@ async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
     ]).await);
     assert!(released["released_at_unix_ms"].is_number());
     assert!(cli_value(daemon.cli(PERSON, &["hosts", "ls"]).await).as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_launch_freeze_sets_shows_and_clears_owned_barriers() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let server = daemon.server.take().unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    std::fs::remove_file(daemon.socket()).unwrap();
+    daemon.state.owning_person = Some(PERSON.into());
+    daemon.serve().await;
+    let initial = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert!(initial["freeze"].is_null());
+    let placed = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "set", "--id", "daemon-replacement",
+        "--reason", "Replace daemon", "--duration-ms", "60000", "--wait-ms", "0",
+        "--as", PERSON,
+    ]).await);
+    assert_eq!(placed["id"], "daemon-replacement");
+    assert_eq!(placed["owner"], PERSON);
+    assert_eq!(placed["reason"], "Replace daemon");
+    assert!(placed["expires_at_unix_ms"].is_u64());
+    let shown = cli_value(daemon.cli(PERSON, &["hosts", "launch-freeze", "show"]).await);
+    assert_eq!(shown["freeze"], placed);
+    assert_eq!(shown["deferred"], json!([]));
+    for (id, actor) in [("wrong-id", PERSON), ("daemon-replacement", "person/other")] {
+        assert!(!daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "clear", "--id", id, "--as", actor,
+        ]).await.status.success());
+        assert_eq!(cli_value(daemon.cli(PERSON, &[
+            "hosts", "launch-freeze", "show",
+        ]).await)["freeze"], placed);
+    }
+    let cleared = cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "clear", "--id", "daemon-replacement", "--as", PERSON,
+    ]).await);
+    assert_eq!(cleared["cleared"], true);
+    assert!(cli_value(daemon.cli(PERSON, &[
+        "hosts", "launch-freeze", "show",
+    ]).await)["freeze"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

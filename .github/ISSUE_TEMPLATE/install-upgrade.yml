@@ -30,7 +30,7 @@ body:
     id: sources
     attributes:
       label: Exact sources and upgrade interval
-      description: Include st --version --json, responding daemon machine_version from doctor (or unavailable), BUILD.json source, and previous/target release for an upgrade. Include harness version if relevant.
+      description: Include fractal --version --json, responding daemon machine_version from doctor (or unavailable), BUILD.json source, and previous/target release for an upgrade. Include harness version if relevant.
       render: text
     validations:
       required: true
@@ -45,7 +45,7 @@ body:
     id: diagnostics
     attributes:
       label: Sanitized diagnostics and timing
-      description: Include reviewed st doctor --json and st service status excerpts. For an unavailable daemon, include startup phase, elapsed time and a bounded log error instead. For replication, include reviewed status and signature/projection checks. Remove sensitive data before posting.
+      description: Include reviewed fractal doctor --json and fractal service status excerpts. For an unavailable daemon, include startup phase, elapsed time and a bounded log error instead. For replication, include reviewed status and signature/projection checks. Remove sensitive data before posting.
       render: text
     validations:
       required: true

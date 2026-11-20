@@ -1,4 +1,4 @@
-//! st3 claims graph, API, reconciliation, and CLI support.
+//! Fractal claims graph, API, reconciliation, and CLI support.
 
 pub use fractal_kernel::cli_output;
 // cli_output exports these macros at its crate root; this crate exported them at its own.
@@ -35,7 +35,7 @@ pub use fractal_kernel::config;
 pub use fractal_kernel::conversation_search;
 pub use fractal_api_mailbox::creation;
 pub use fractal_reconcile::repositories;
-/// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
+/// Answers the hooks a Fractal seat's harness runs: `fractal driver-hook NAME`.
 pub use fractal_api_mailbox::delivery_hold;
 pub use fractal_reconcile::delivery_presence;
 pub mod driver_hook;
@@ -47,7 +47,7 @@ pub use fractal_kernel::fabric_gateway;
 pub use fractal_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub use fractal_store::silent;
-/// `st missions check`: run a mission file's exec gates once, now, the way a run would.
+/// `fractal missions check`: run a mission file's exec gates once, now, the way a run would.
 pub use fractal_api_mailbox::gate_check;
 pub use fractal_kernel::gate_kinds;
 pub use fractal_kernel::gate_report;
@@ -77,6 +77,13 @@ pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 pub use fractal_api_mailbox::readiness_slo;
+pub use fractal_api_mailbox::roll_completion;
+pub use fractal_api_mailbox::roll_completion_watch;
+
+#[test]
+fn rollout_watcher_is_exposed_through_daemon_facade() {
+    let _: fn(&std::sync::Arc<crate::store::Store>) = crate::roll_completion_watch::start;
+}
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -99,6 +106,7 @@ pub(crate) use fractal_kernel::publication;
 pub use fractal_telemetry::recorder;
 /// Imports local command receipts into durable resource observations.
 pub use fractal_store::recorder_receipts;
+pub use fractal_store::gate_admission_receipts;
 pub use fractal_telemetry::recorder_report;
 /// Finds references a publication or the graph names that do not resolve.
 /// Attaches a local terminal to a terminal another fleet host owns.
@@ -135,7 +143,7 @@ mod reconcile_tests;
 mod store_tests;
 #[cfg(test)]
 mod telemetry_tests;
-/// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
+/// Attaches a local terminal to another fleet host's PTY session over Fabric, without Fractal daemons.
 pub mod terminal_fabric;
 pub use fractal_kernel::terminal_binding;
 pub use fractal_kernel::program_journal;

@@ -2185,6 +2185,10 @@ struct SloArgs {
 enum SloCommand {
     /// List every objective and budget: target, current value, window and what is left.
     Ls,
+    /// Admit one existing signed graph roll receipt claim.
+    IngestRoll { claim_id: String },
+    /// Resolve immutable native creation time and pinned revision for one enrolled roll intent.
+    RollIntent { run_subject: String },
     /// Explain one objective or budget in plain words.
     Explain {
         /// An id from `fractal slo ls`, or the start of one.
@@ -2261,6 +2265,30 @@ const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
     "terminal.read",
 ];
 
+/// CLI mirror of the daemon's person-pairing ceiling; the daemon revalidates the grant.
+const PERSON_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
+    "read.glasses",
+    "control.glasses",
+    "read.arrangements",
+    "control.arrangements",
+    "terminal.read",
+    "control.attention",
+    "control.launches",
+];
+
+fn parse_person_pairing_scope(value: &str) -> std::result::Result<String, String> {
+    if PERSON_PAIRING_SCOPES.contains(&value) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("person pairing scope `{value}` is not one of the limited pairing scopes: {}", PERSON_PAIRING_SCOPES.join(", ")))
+    }
+}
+
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
 /// Hard maximum grant lifetime.
@@ -2295,6 +2323,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// One exact person-device scope from the limited pairing ceiling; repeat for each scope.
+        /// Nothing is granted implicitly. Use --scope instead for assistant grants.
+        #[arg(long = "person-scope", value_name = "SCOPE", value_parser = parse_person_pairing_scope, conflicts_with_all = ["read_only", "full_control", "assistant"])]
+        person_scopes: Vec<String>,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
@@ -2574,13 +2606,16 @@ enum TraceCommand {
 #[derive(Args)]
 struct DoctorArgs {
     /// Inspect local source-build tools instead of daemon health; does not compile or contact GitHub.
-    #[arg(long, conflicts_with = "performance")]
+    #[arg(long, conflicts_with_all = ["performance", "storage"])]
     developer: bool,
     #[arg(long)]
     strict: bool,
     /// Show only the slowest requests and queries over the last five minutes.
     #[arg(long)]
     performance: bool,
+    /// Show cached storage write/trim counters and metadata-only SQLite file sizes.
+    #[arg(long, conflicts_with_all = ["developer", "performance"])]
+    storage: bool,
 }
 
 #[derive(Subcommand)]
@@ -2743,6 +2778,11 @@ enum BackupCommand {
 
 #[derive(Subcommand)]
 enum ReplicationCommand {
+    /// Build both 30-day and 14-day wire archive candidates from an explicit offline copy.
+    ///
+    /// Analysis only: never activates a candidate or contacts the daemon. Candidate stores
+    /// are incomplete for default hot readers and must not be used by a daemon or deployment.
+    ArchiveCandidates(replication_cli::ArchiveCandidatesArgs),
     /// Show fleet receipt, validation, projection, and peer health.
     Status,
     /// Estimate a local graph replay; --confirm runs it while holding the daemon writer.
@@ -5726,6 +5766,16 @@ fn cli_main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Membership inspection is offline: no telemetry runtime, identity lookup or daemon client.
+    if let Command::Resources { command: resources_cli::ResourcesCommand::InMember { owner_uid } } = &cli.command {
+        return match resources_cli::in_member(*owner_uid, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                stderr_message("fractal", format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
         return match run_validate(args, cli.json) {
@@ -6327,6 +6377,12 @@ async fn run(cli: Cli) -> Result<()> {
     } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
+    // Archive construction uses only explicit offline paths, before config or client discovery.
+    if let Command::Replication {
+        command: ReplicationCommand::ArchiveCandidates(args),
+    } = cli.command {
+        return replication_cli::run_archive_candidates(args).await;
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = fractal_daemon::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
@@ -6603,7 +6659,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
-        Command::Resources { command } => resources_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::Resources { command } => {
+            let client = if let Some(actor) = command.actor() {
+                execution_client(&endpoint, actor.to_owned())?
+            } else { client };
+            resources_cli::run(&client, config.person.as_deref(), command, cli.json).await
+        },
         Command::ResourcePayload { .. } => unreachable!("resource payload is dispatched before daemon connection"),
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
@@ -6723,11 +6784,14 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
+        Command::Hosts { command: hosts_cli::HostsCommand::LaunchFreeze {
+            command: hosts_cli::LaunchFreezeCommand::Set { actor, .. }
+                | hosts_cli::LaunchFreezeCommand::Clear { actor, .. },
+        } } => actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
-        Command::Resources { command: resources_cli::ResourcesCommand::Hold { actor, .. }
-            | resources_cli::ResourcesCommand::Release { actor, .. } } => actor.as_deref(),
+        Command::Resources { command } => command.actor(),
         Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
@@ -7771,6 +7835,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     })?);
     fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
         .context("opening native SLO accounting before serving requests")?;
+    fractal_daemon::roll_completion::install(&store, &config.state_dir)
+        .context("opening immutable native roll receipts before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -7786,6 +7852,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    store.storage_census.checkpoint_enabled.set(config.checkpoint.enabled)
+        .map_err(|_| anyhow::anyhow!("storage checkpoint census already configured"))?;
     if let Some(claims) = config.trim.daily_claims {
         store.trim_locally_at_most(claims);
     }
@@ -7813,6 +7881,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         )?))?;
     }
     store.use_key_directory(&keys)?;
+    fractal_daemon::roll_completion_watch::start(&store);
     // The messages shard sits beside the graph's database and takes its fleet from the graph.
     // A shard that cannot open leaves messaging on graph claims: the daemon then does not
     // advertise it, so no peer sends it stream items.
@@ -7904,7 +7973,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
-                    "shell_resource_exec": 1,
+                    "resource_profile_keys": 1,
+                    "idle_residency": 1,
+                    "per_run_missions": 1,
+                    "shell_resource_exec": 2,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -8027,6 +8099,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    reconciler.set_idle_residency(config.reconcile.idle_residency()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
@@ -8078,10 +8151,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     {
         let store = store.clone();
+        let state_dir = config.state_dir.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let mut rows = fractal_daemon::api::slo_rows(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -8100,6 +8175,18 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
     )));
+    if let Some(dir) = std::env::var_os("FRACTAL_GATE_ADMISSION_SPOOL").map(PathBuf::from) {
+        let store = store.clone();
+        let notify = notify.clone();
+        let event_notify = event_notify.clone();
+        tokio::spawn(async move {
+            if let Err(error) = fractal_daemon::gate_admission_receipts::run(
+                store, dir, notify, event_notify,
+            ).await {
+                eprintln!("gate admission receipt source stopped: {error:#}");
+            }
+        });
+    }
     fractal_daemon::slo_history::set_ui_url(config.observations.otlp.as_ref().and_then(|otlp| otlp.ui_url.clone()));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?;
@@ -8222,6 +8309,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     .map(|fault| (store.clone(), fault.reviewer.clone())),
             ));
             let activation_store = store.clone();
+            use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+            activation_store.checkpoint_worker_phase(if config.checkpoint.enabled || config.trim.local {
+                CheckpointPhase::Activation
+            } else {
+                CheckpointPhase::Disabled
+            });
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
             let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
@@ -8249,10 +8342,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
+                        activation_store.checkpoint_worker_error(format!("{error:#}"));
                         stderr_message("st", format_args!("replication history activation failed: {error:#}"));
                         return;
                     }
                     Err(error) => {
+                        activation_store.checkpoint_worker_error(error.to_string());
                         stderr_message("st", format_args!("replication history activation stopped: {error}"));
                         return;
                     }
@@ -8888,6 +8983,7 @@ async fn start_mission_run(
         &run_id,
         mission_id,
         &mission.revision,
+        mission_start_follows_head(args.revision.as_deref(), &health),
         &workspace,
         &requester,
         &inputs,
@@ -8940,6 +9036,15 @@ async fn start_mission_run(
         print!("{}", cli_help::mission_next_steps(&started));
     }
     follow_mission_run(client, started, response.store_index, json_output, 50).await
+}
+
+fn mission_start_follows_head(revision: Option<&str>, health: &Value) -> bool {
+    // Older daemons reject the authored follow-head child. Preserve their exact-revision
+    // declaration during rolling upgrades, even though they will record it as pinned.
+    revision.is_none()
+        && health["capabilities"]["mission_run_follow_head"]
+            .as_u64()
+            .is_some_and(|version| version >= 1)
 }
 
 fn mission_start_run_id(mission_id: &str, requested: Option<&str>) -> String {
@@ -9091,7 +9196,7 @@ fn started_revision_note(
 async fn follow_mission_run(
     client: &Client,
     run: MissionRunView,
-    _cursor: u64,
+    cursor: u64,
     json_output: bool,
     limit: usize,
 ) -> Result<()> {
@@ -9102,13 +9207,15 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+        client, run, cursor, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
     ).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow_mission_run_to(
     client: &Client,
     mut run: MissionRunView,
+    mut cursor: u64,
     json_output: bool,
     interactive: bool,
     limit: usize,
@@ -9118,6 +9225,7 @@ async fn follow_mission_run_to(
     let client = client.clone().with_follow_retry();
     let client = &client;
     let mut prior = String::new();
+    let mut event_feed = LocalEventFeed::default();
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9172,7 +9280,29 @@ async fn follow_mission_run_to(
         if cli_output::closed() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // The tree can gain children beyond the rendered page, so follow lifecycle
+        // events globally rather than filtering to the currently visible subjects.
+        // Empty long-poll responses and unrelated graph activity do not reread it.
+        loop {
+            let page = event_feed
+                .read(
+                    client,
+                    &format!("after={cursor}&wait=true&timeout_ms=30000"),
+                )
+                .await?;
+            if let Some(scanned) = page.next_after {
+                cursor = cursor.max(scanned);
+            }
+            if page.items.iter().any(|event| {
+                event.kind.starts_with("mission-run.") || event.kind.starts_with("step-run.")
+            }) {
+                break;
+            }
+            client.follow_recovered();
+            if cli_output::closed() {
+                return Ok(());
+            }
+        }
         run = client
             .get(&format!(
                 "/v1/mission-runs/{}",
@@ -9210,6 +9340,7 @@ fn mission_run_intent(
     run_id: &str,
     mission_id: &str,
     revision: &str,
+    follow_head: bool,
     workspace: &Path,
     requester: &str,
     inputs: &BTreeMap<String, String>,
@@ -9224,6 +9355,9 @@ fn mission_run_intent(
     let exact_mission = format!("mission/{mission_id}@{revision}");
     body.nodes_mut()
         .push(kdl_node("mission", [exact_mission.as_str()]));
+    if follow_head {
+        body.nodes_mut().push(kdl_node("follow-head", ["true"]));
+    }
     body.nodes_mut().push(kdl_node(
         "workspace",
         [workspace.to_string_lossy().as_ref()],
@@ -10363,6 +10497,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            person_scopes,
             fabric_gateway,
             gateway,
             assistant: None,
@@ -10382,23 +10517,29 @@ async fn run_devices(
                     );
                 }
             }
-            let response = client
-                .pairing_begin_person(&PersonPairingBegin {
-                    api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name,
-                    person_id: person.clone(),
-                    full_control: full_control.then_some(true),
-                    scopes: read_only.then(|| {
+            let request = PersonPairingBegin {
+                api_version: CLIENT_V0_API_VERSION.into(),
+                device_name,
+                person_id: person.clone(),
+                full_control: full_control.then_some(true),
+                scopes: if person_scopes.is_empty() {
+                    read_only.then(|| {
                         READ_ONLY_PAIRING_SCOPES
                             .iter()
                             .map(|scope| (*scope).to_owned())
                             .collect()
-                    }),
-                    fabric_gateway: fabric_gateway.then_some(true),
-                })
-                .await?;
+                    })
+                } else {
+                    Some(person_scopes)
+                },
+                fabric_gateway: fabric_gateway.then_some(true),
+            };
+            let response = client.pairing_begin_person(&request).await?;
             print_client_value(&response, json_output)?;
             if !json_output {
+                if let Some(scopes) = &request.scopes {
+                    println!("Requested scopes: {}", scopes.join(", "));
+                }
                 if let Some(fingerprint) = &response.value.person_root_fingerprint {
                     println!(
                         "Person-root fingerprint: {fingerprint}\nCopy this separately from the pairing code to the new device's fingerprint field or --fingerprint option."
@@ -10715,6 +10856,7 @@ async fn run_devices_complete(
             },
             path.display()
         );
+        println!("Granted scopes: {}", device.session.scopes.join(", "));
     }
     Ok(())
 }
@@ -11557,9 +11699,21 @@ async fn run_series(client: &Client, args: SeriesArgs, json_output: bool) -> Res
 }
 
 async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    if let Some(SloCommand::RollIntent { run_subject }) = &args.command {
+        let result: Value = client.get(&format!("/v1/slo/roll-intent?run={}", urlencoding::encode(run_subject))).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if let Some(SloCommand::IngestRoll { claim_id }) = &args.command {
+        let result: Value = client.post("/v1/slo", &serde_json::json!({"claim_id": claim_id})).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let report: Value = client.get("/v1/slo").await?;
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     match args.command.unwrap_or(SloCommand::Ls) {
+        SloCommand::IngestRoll { .. } => unreachable!("ingestion returns before reading rows"),
+        SloCommand::RollIntent { .. } => unreachable!("intent lookup returns before reading rows"),
         SloCommand::Ls => {
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -13194,6 +13348,11 @@ async fn run_doctor(
         return Ok(());
     }
     let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
+    if args.storage {
+        let report: Value =
+            doctor_request(client, "/v1/storage/status", readiness.as_ref(), json_output).await?;
+        return print_value(&report, true);
+    }
 
     if args.performance {
         let mut report: Value =
@@ -13823,6 +13982,9 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
                  checkpoint tries again\n",
             );
         }
+    }
+    if let Some(blocking) = status.blocking_summary() {
+        output.push_str(&format!("  blocking    {blocking}\n"));
     }
     output
 }
@@ -15427,6 +15589,18 @@ fn render_client_agent(
             let _ = writeln!(output, "SOURCE OFFLINE {} · override recorded", handoff.overridden_sources.join(", "));
         }
     }
+    if let Some(residency) = &agent.residency {
+        let _ = writeln!(output, "RESIDENCY    {}", residency.policy);
+        if let Some(since) = &residency.eligible_since {
+            let _ = writeln!(output, "  ELIGIBLE   {since}");
+        }
+        if let Some(due) = &residency.due_at {
+            let _ = writeln!(output, "  DUE        {due}");
+        }
+        if let Some(reason) = &residency.refusal_reason {
+            let _ = writeln!(output, "  REFUSAL    {reason}");
+        }
+    }
     if let Some(suspension) = &agent.suspension {
         let session = match (&suspension.harness, &suspension.native_session_id) {
             (Some(harness), Some(session)) => format!(" · {harness} session {session}"),
@@ -15440,8 +15614,10 @@ fn render_client_agent(
         };
         let _ = writeln!(
             output,
-            "SUSPENSION   {} {}{session}{failure}",
-            suspension.action, suspension.phase
+            "SUSPENSION   {} {} · {} · {}{session}{failure}",
+            suspension.action, suspension.phase,
+            suspension.cause.as_deref().unwrap_or("manual"),
+            suspension.mode.as_deref().unwrap_or("git"),
         );
     }
     if let Some(rollout) = &agent.rollout {
@@ -18069,6 +18245,11 @@ impl ObservationClient<'_> {
         let mut claim = claim.clone();
         bind_observation_account(&mut claim, account.as_deref());
         if let Some((runtime, sequence, dir, _)) = self.event {
+            // Diagnostics are retained graph facts, not local observation slots. Preserve
+            // their episode key; /harness-events replaces keys with its observation slot.
+            if claim.kind == "harness.diagnostic" {
+                return self.client.post(path, &claim).await;
+            }
             let slot = format!(
                 "{}:{}",
                 claim.kind,
@@ -18084,11 +18265,6 @@ impl ObservationClient<'_> {
                 &slot,
                 &serde_json::to_value(&claim)?,
             )?)?;
-            // Diagnostics are retained graph facts, not local observation slots. Preserve
-            // their episode key; /harness-events replaces keys with its observation slot.
-            if claim.kind == "harness.diagnostic" {
-                return self.client.post(path, &claim).await;
-            }
             self.client
                 .post(
                     "/v1/harness-events",
@@ -18232,6 +18408,33 @@ async fn publish_harness_activity(
         observed.since_ms,
         &fields,
     ))?));
+    let channel_ready = observed.channel_ready.or_else(|| matches!(
+        observed.state,
+        fractal_drivers::harness_state::Activity::Unknown | fractal_drivers::harness_state::Activity::Ended,
+    ).then_some(false));
+    if driver == "omp"
+        && let (Some(incarnation), Some(ready)) = (incarnation, channel_ready)
+    {
+        // Extensible diagnostics are reader-first: older readers retain these facts without
+        // rejecting the native activity claim. No suspension action consumes this proof yet.
+        let episode = match client.event {
+            Some((runtime, sequence, _, _)) => format!("{runtime}:{sequence}"),
+            None => format!("{}:{}:{}", observed.evidence_incarnation.as_deref().unwrap_or(""),
+                observed.ownership_sequence.unwrap_or(0), observed.transition_sequence.unwrap_or(0)),
+        };
+        let _: ClaimRecord = client.client.post("/v1/claims", &ClaimInput {
+            subject: subject.into(), kind: "harness.diagnostic".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::from(if ready { "omp-channel-ready" } else { "omp-channel-unready" })),
+                ("driver".into(), Value::from("omp")),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("reason".into(), Value::from(if ready { "native channel handshake confirmed" } else { "native channel handshake unconfirmed" })),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("native-channel:{subject}:{incarnation}:{episode}:{ready}:{fingerprint}")),
+        }).await?;
+    }
     if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
     }
@@ -18581,6 +18784,7 @@ fn pi_family_message_frame(
     message: &fractal_daemon::model::MessageView,
     body: &str,
     identity: &str,
+    incarnation: &str,
     attachments: &[fractal_drivers::ding::AttachmentNotice],
 ) -> Value {
     json!({
@@ -18603,6 +18807,7 @@ fn pi_family_message_frame(
             "messageId": message.subject,
             "threadId": message.in_reply_to.clone().unwrap_or_else(|| message.subject.clone()),
             "identity": identity,
+            "inputIncarnation": incarnation,
         },
     })
 }
@@ -18616,6 +18821,31 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        if frame["type"] == "delivered"
+            && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                == Some(state.incarnation.as_str())
+            && let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            && let Some(timestamp) = frame["acceptedAtUnixMs"].as_u64()
+            && let Some(dir) = &state.pending.input_source_dir
+        {
+            let first = fractal_drivers::native_channel::record_input_acceptance(
+                dir, message, timestamp)?;
+            state.pending.input_acceptances.entry(message.to_owned()).or_insert(first);
+        }
+        if frame["type"] == "ready" && frame["inputAcceptanceClock"] == true {
+            state.pending.input_source_ready = true;
+        }
+        if let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
+            && let Some(dir) = &state.pending.input_source_dir
+            && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
+                .is_none_or(|incarnation| incarnation == state.incarnation)
+        {
+            if frame["type"] == "delivered" && frame["acceptedAtUnixMs"].as_u64().is_none() {
+                fractal_drivers::native_channel::record_input_attempt(dir, message, None)?;
+            } else if frame["type"] == "failed" {
+                fractal_drivers::native_channel::resolve_input_attempt(dir, message)?;
+            }
+        }
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivery_ready" | "delivered" | "read" | "failed" | "todo" => true,
@@ -18763,6 +18993,14 @@ struct PiChannelResume {
 }
 
 impl PiChannelResume {
+    fn record_input_attempt(&self, message: &str) -> Result<()> {
+        let dir = self.pending.input_source_dir.as_deref()
+            .context("native input source has no durable journal")?;
+        fractal_drivers::native_channel::record_input_attempt(
+            dir, message, Some(u64::try_from(current_unix_ms()?)?),
+        )
+    }
+
     fn record_pending_todo(&mut self) -> Result<()> {
         if let Some(fields) = &self.todo_pending
             && let Some(dir) = &self.todo_outbox
@@ -18939,6 +19177,9 @@ struct PiFamilyReports {
     #[serde(default)]
     reason: Option<String>,
     acknowledgements: BTreeSet<String>,
+    /// Durable native clocks, independent of delivered/read acknowledgement.
+    #[serde(default)]
+    input_acceptances: BTreeMap<String, u64>,
     #[serde(default)]
     reads: BTreeSet<String>,
     #[serde(default)]
@@ -18946,6 +19187,10 @@ struct PiFamilyReports {
     /// The native session the harness reported, with its transcript, until the daemon has it.
     #[serde(default)]
     native_session: Option<(String, Option<String>)>,
+    #[serde(default)]
+    input_source_dir: Option<PathBuf>,
+    #[serde(default)]
+    input_source_ready: bool,
 }
 
 impl PiFamilyReports {
@@ -18957,6 +19202,7 @@ impl PiFamilyReports {
         incarnation: &str,
         session: &str,
     ) -> Result<()> {
+        let source_cut = u64::try_from(current_unix_ms()?)?;
         if let Some((status, sequence)) = self.state.clone() {
             let _: ClaimRecord = client
                 .post(
@@ -19004,6 +19250,25 @@ impl PiFamilyReports {
                 )
                 .await?;
             self.state = None;
+        }
+        while let Some((message, timestamp)) = self.input_acceptances.first_key_value()
+            .map(|(message, timestamp)| (message.clone(), *timestamp))
+        {
+            if let Some(fence) = &self.fence {
+                mailbox_input_acceptance(client, fence, &message, timestamp).await?;
+                if let Some(dir) = &self.input_source_dir {
+                    fractal_drivers::native_channel::resolve_input_attempt(dir, &message)?;
+                }
+            }
+            self.input_acceptances.remove(&message);
+        }
+        let frontier = if self.input_source_ready {
+            if let Some(dir) = &self.input_source_dir {
+                fractal_drivers::native_channel::recipient_input_acceptance_frontier(dir, source_cut)?
+            } else { None }
+        } else { None };
+        if let (Some(fence), Some(through)) = (&self.fence, frontier) {
+            mailbox_input_acceptance_frontier(client, fence, through).await?;
         }
         while let Some(message) = self.acknowledgements.first().cloned() {
             match &self.fence {
@@ -20735,25 +21000,32 @@ impl NativeMailbox {
         if !self.replayed {
             return Ok(());
         }
-        let consumed = match receipts {
+        let source_cut = u64::try_from(current_unix_ms()?)?;
+        let sealed_source = !matches!(&receipts, NativeDeliveryReceipts::ClaudeChannel { .. });
+        let evidence = match receipts {
             NativeDeliveryReceipts::Codex {
                 state_dir,
                 identity,
                 runtime_id,
-            } => fractal_drivers::codex_app_server::consumed_delivery_filenames(
+            } => fractal_drivers::codex_app_server::delivery_receipts(
                 state_dir, identity, runtime_id,
             )?,
             NativeDeliveryReceipts::OpenCode {
                 session_dir,
                 identity,
                 runtime_id,
-            } => fractal_drivers::opencode_session::consumed_delivery_paths(
+            } => fractal_drivers::opencode_session::delivery_receipts(
                 session_dir,
                 identity,
                 runtime_id,
             )?,
-            _ => BTreeSet::new(),
+            _ => fractal_drivers::delivery_ledger::ReceiptSnapshot::default(),
         };
+        let frontier = evidence.input_acceptance_frontier(&self.fence.incarnation, source_cut);
+        let evidence = evidence.entries;
+        let consumed: BTreeSet<_> = evidence.iter()
+            .filter(|entry| entry.phase == fractal_drivers::delivery_ledger::Phase::Consumed)
+            .map(|entry| entry.filename.clone()).collect();
         let active: BTreeSet<_> = self
             .messages
             .iter()
@@ -20762,11 +21034,20 @@ impl NativeMailbox {
             .collect();
         self.queued.retain(|key, _| active.contains(key));
         let mut first_error = None;
+        for entry in &evidence {
+            for acceptance in &entry.input_acceptances {
+                if acceptance.incarnation == self.fence.incarnation {
+                    mailbox_input_acceptance(client, &self.fence,
+                        &entry.filename, acceptance.accepted_at_unix_ms).await?;
+                }
+            }
+        }
         for view in &self.messages {
             if !active.contains(&view.subject) {
                 continue;
             }
             let result: Result<()> = async {
+                // Native acceptance is drained independently of generic mailbox status above.
                 if consumed.contains(&view.subject) {
                     if view.status != "delivered" {
                         mailbox_receipt(client, &self.fence, &view.subject, "delivered").await?;
@@ -20814,6 +21095,9 @@ impl NativeMailbox {
         fractal_drivers::push_mailbox::replace_active(agent_dir, queued, active);
         if let Some(error) = first_error {
             return Err(error);
+        }
+        if sealed_source && let Some(through) = frontier {
+            mailbox_input_acceptance_frontier(client, &self.fence, through).await?;
         }
         Ok(())
     }
@@ -20871,6 +21155,32 @@ async fn mailbox_receipt(
     lifecycle: &str,
 ) -> Result<()> {
     mailbox_receipt_claim(client, fence, message, lifecycle).await?;
+    Ok(())
+}
+
+/// Publish only a clock captured at the native input boundary, never from generic lifecycle.
+async fn mailbox_input_acceptance(
+    client: &Client,
+    fence: &fractal_daemon::mailbox::Fence,
+    message: &str,
+    accepted_at_unix_ms: u64,
+) -> Result<()> {
+    let mut receipt = serde_json::to_value(fence)?;
+    receipt["message"] = json!(message);
+    receipt["lifecycle"] = json!("accepted");
+    receipt["input_acceptance"] = json!({"accepted_at_unix_ms": accepted_at_unix_ms});
+    let _: ClaimRecord = client.post("/v1/mailbox/receipts", &receipt).await?;
+    Ok(())
+}
+
+async fn mailbox_input_acceptance_frontier(
+    client: &Client,
+    fence: &fractal_daemon::mailbox::Fence,
+    observed_through_unix_ms: u64,
+) -> Result<()> {
+    let mut receipt = serde_json::to_value(fence)?;
+    receipt["observed_through_unix_ms"] = json!(observed_through_unix_ms);
+    let _: Value = client.post("/v1/mailbox/acceptance-frontier", &receipt).await?;
     Ok(())
 }
 
@@ -21374,6 +21684,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                reconciler.set_idle_residency(reconcile.idle_residency().expect("validated idle residency"));
                 reconciler.set_default_stall_reports(reconcile.default_stall_reports);
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
@@ -21904,8 +22215,8 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if state()?.done() {
-                    let complete = state()?;
+                let complete = state()?;
+                if complete.done() && !complete.references_pending {
                     if !initial.done() { stderr_message("fractal", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();
@@ -22526,6 +22837,13 @@ async fn sample_database_size(store: &Arc<Store>) {
         Ok(Err(error)) => stderr_message("fractal", format_args!("database size sample failed: {error:#}")),
         Err(error) => stderr_message("fractal", format_args!("database size sample stopped: {error}")),
     }
+    let archive_store = store.clone();
+    match archive_store.connection.write_workers().spawn_blocking(move ||
+        fractal_daemon::task_cpu::blocking("observations.database_archive_size", ||
+            archive_store.record_database_archive_size(now_ms()))).await {
+        Ok(size) => fractal_daemon::slo::note_database_archive_size(&size),
+        Err(error) => stderr_message("fractal", format_args!("archive size sample stopped: {error}")),
+    }
 }
 
 /// Ten to fifteen minutes: past the reconnects after a start, and spread so members restarted by
@@ -22654,6 +22972,8 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
 /// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+    use smallclaims::store::checkpoint_agreement::CheckpointPhase;
+    store.checkpoint_worker_phase(CheckpointPhase::ScratchCleanup);
     // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
     // proof or a cleanup error stays visible and prevents a later proof from consuming space.
     let sweep_store = store.clone();

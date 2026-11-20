@@ -5887,6 +5887,11 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         amber.st_json(&["agents", "show", seat])["value"]["harness_state"] == "idle"
     })
     .await;
+    let before_mail: Value = amber.client()
+        .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+    let previous_observation = before_mail["claims"].as_array().unwrap().iter()
+        .find(|claim| claim["kind"] == "harness.observed")
+        .expect("the idle source has a native observation")["id"].clone();
     amber.st_ok(&[
         "conversations",
         "send",
@@ -5902,6 +5907,21 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         fs::read_to_string(&receipts)
             .unwrap_or_default()
             .contains("Remember the copper orchard")
+    })
+    .await;
+    // A provider receipt precedes its turn-end observation. Require a new quiet report for
+    // this incarnation, not the pre-message idle report, before attempting a strict suspend.
+    wait_until("source reports quiet after reading the first message", 60, || async {
+        let incarnation = amber.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
+        let page: Value = amber.client()
+            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+        page["claims"].as_array().into_iter().flatten()
+            .find(|claim| claim["kind"] == "harness.observed")
+            .is_some_and(|claim| {
+                let fields = claim["body"].get("fields").unwrap_or(&claim["body"]);
+                claim["id"] != previous_observation && incarnation.is_string()
+                    && fields["incarnation_id"] == incarnation && fields["quiescent"] == true
+            })
     })
     .await;
     let suspended = amber.st_json(&[

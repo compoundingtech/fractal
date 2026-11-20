@@ -90,27 +90,34 @@ export class Observations {
   private feedLive = false;
   private since = 0;
   private loaded = false;
+  private loading: Promise<void> | null = null;
+  private reporting: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly storage: Storage, private readonly clock: Clock, private readonly context: () => Context) {}
 
   /** Restore what an earlier run kept. Safe to call once, early; samples before it are kept too. */
-  async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const raw = await this.storage.read();
-      const saved = raw ? JSON.parse(raw) as Saved : null;
-      if (saved && saved.bins === 2 && Array.isArray(saved.closed)) {
-        // Minutes an earlier run left open are over by now unless this very minute; the rest join the closed ones.
-        for (const interval of (saved.minutes ?? []).filter(valid)) this.add(interval);
-        for (const interval of saved.closed.filter(valid)) this.close(interval);
-        this.closed.sort((x, y) => x.start - y.start);
-        if (saved.batch && Array.isArray(saved.batch.intervals) && typeof saved.batch.report_id === 'string' && !this.batch) {
-          this.batch = { report_id: saved.batch.report_id, intervals: saved.batch.intervals.filter(valid) };
-        }
-        this.sweep();
+  load(): Promise<void> {
+    if (this.loaded) return Promise.resolve();
+    if (this.loading) return this.loading;
+    this.loading = this.restore().finally(() => { this.loading = null; });
+    return this.loading;
+  }
+
+  private async restore(): Promise<void> {
+    // A failed read is not an empty store: do not overwrite data we could not read.
+    const raw = await this.storage.read();
+    let saved: Saved | null = null;
+    try { saved = raw ? JSON.parse(raw) as Saved : null; } catch { /* damaged JSON is not authoritative */ }
+    if (saved && saved.bins === 2 && Array.isArray(saved.closed)) {
+      for (const interval of (saved.minutes ?? []).filter(valid)) this.add(interval);
+      for (const interval of saved.closed.filter(valid)) this.close(interval);
+      this.closed.sort((x, y) => x.start - y.start);
+      if (saved.batch && Array.isArray(saved.batch.intervals) && typeof saved.batch.report_id === 'string' && !this.batch) {
+        this.batch = { report_id: saved.batch.report_id, intervals: saved.batch.intervals.filter(valid) };
       }
-    } catch { /* a damaged record is dropped; measuring goes on */ }
+    }
+    this.loaded = true;
+    this.sweep();
   }
 
   /** Add a restored not-yet-closed minute, summing into one this run already started in the same minute. */
@@ -208,11 +215,9 @@ export class Observations {
     const floor = this.clock.now() - KEEP_MS;
     this.closed = this.closed.filter(interval => interval.start + MINUTE_MS > floor);
     if (this.closed.length > MAX_KEPT_INTERVALS) this.closed = this.closed.slice(-MAX_KEPT_INTERVALS);
-    if (this.batch) {
-      this.batch.intervals = this.batch.intervals.filter(interval => interval.start + MINUTE_MS > floor);
-      if (!this.batch.intervals.length) this.batch = null;
-    }
-    if (moved) void this.persist();
+    // Once assigned an ID a batch is immutable, even when retention expires.
+    if (this.batch?.intervals.some(interval => interval.start + MINUTE_MS <= floor)) this.batch = null;
+    if (moved) void this.serialize(() => this.persist()).catch(() => { /* retained in memory for the next save */ });
     // Something is waiting to be told: whoever reports hears it now, with no timer of ours.
     if (this.closed.length || this.batch) this.ready?.();
   }
@@ -223,31 +228,38 @@ export class Observations {
    * intervals and kept, with its ID, until a member accepts it, so every retry sends identical bytes.
    * The minute still open is not in it.
    */
-  nextReport(): Batch | null {
-    this.advanceShare();
-    this.sweep();
-    if (!this.batch) {
-      if (!this.closed.length) return null;
-      // As many closed minutes as fit the member's sample limit, at least one.
-      let samples = 0, take = 0;
-      for (const interval of this.closed) {
-        const count = Object.keys(interval.series).length + Object.keys(interval.shares).length;
-        if (take > 0 && samples + count > MAX_SAMPLES_PER_REPORT) break;
-        samples += count;
-        if (++take >= MAX_INTERVALS_PER_REPORT) break;
+  nextReport(): Promise<Batch | null> {
+    return this.serialize(async () => {
+      await this.load();
+      this.advanceShare();
+      this.sweep();
+      if (!this.batch) {
+        if (!this.closed.length) return null;
+        // As many closed minutes as fit the member's sample limit, at least one.
+        let samples = 0, take = 0;
+        for (const interval of this.closed) {
+          const count = Object.keys(interval.series).length + Object.keys(interval.shares).length;
+          if (take > 0 && samples + count > MAX_SAMPLES_PER_REPORT) break;
+          samples += count;
+          if (++take >= MAX_INTERVALS_PER_REPORT) break;
+        }
+        const intervals = this.closed.splice(0, take);
+        this.batch = { report_id: this.clock.id(), intervals };
       }
-      const intervals = this.closed.splice(0, take);
-      this.batch = { report_id: this.clock.id(), intervals };
-      void this.persist();
-    }
-    return { report_id: this.batch.report_id, intervals: this.batch.intervals.map(wire) };
+      // Never expose an uploadable report until its exact ID and payload are durable.
+      await this.persist();
+      return { report_id: this.batch.report_id, intervals: this.batch.intervals.map(wire) };
+    });
   }
 
   /** A member accepted the report: its intervals are done. */
-  accepted(reportId: string): void {
-    if (this.batch?.report_id !== reportId) return;
-    this.batch = null;
-    void this.persist();
+  accepted(reportId: string): Promise<void> {
+    return this.serialize(async () => {
+      await this.load();
+      if (this.batch?.report_id !== reportId) return;
+      await this.persist(true);
+      this.batch = null;
+    });
   }
 
   /**
@@ -255,24 +267,32 @@ export class Observations {
    * intervals are dropped. Kept, the identical batch would be refused at every report and nothing this
    * phone measures would ever reach the member.
    */
-  refused(reportId: string): void { this.accepted(reportId); }
+  refused(reportId: string): Promise<void> { return this.accepted(reportId); }
 
   /** Keep everything, the minute still open included, for the app going to the background. */
-  async flush(): Promise<void> {
-    this.advanceShare();
-    this.sweep();
-    await this.persist();
+  flush(): Promise<void> {
+    return this.serialize(async () => {
+      await this.load();
+      this.advanceShare();
+      this.sweep();
+      await this.persist();
+    });
   }
 
   /** Closed intervals not yet accepted, and the minute in progress. */
   get waiting(): number { return this.closed.length + (this.batch?.intervals.length ?? 0); }
 
-  private persisting: Promise<void> = Promise.resolve();
-  private persist(): Promise<void> {
-    const saved: Saved = { bins: 2, closed: this.closed, minutes: [...this.minutes.values()], ...(this.batch ? { batch: this.batch } : {}) };
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.reporting.then(operation);
+    this.reporting = result.catch(() => {});
+    return result;
+  }
+
+  private async persist(omitBatch = false): Promise<void> {
+    await this.load();
+    const saved: Saved = { bins: 2, closed: this.closed, minutes: [...this.minutes.values()], ...(!omitBatch && this.batch ? { batch: this.batch } : {}) };
     const encoded = JSON.stringify(saved);
-    this.persisting = this.persisting.then(() => this.storage.write(encoded)).catch(() => {});
-    return this.persisting;
+    await this.storage.write(encoded);
   }
 }
 

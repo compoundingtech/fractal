@@ -1,6 +1,7 @@
 //! The execution host alone mutates its durable holds; transport identity owns each hold.
 use super::*;
 use crate::store::host_holds::{HostHold, PlaceHostHold, RecoverHostHold, ReleaseHostHold};
+use crate::RuntimeStartsStore as _;
 
 fn owner(state: &AppState, bound: Option<&BoundActor>) -> Result<String, ApiError> {
     bound.map(|actor| actor.actor().to_owned()).or_else(|| state.owning_person.clone())
@@ -38,6 +39,62 @@ pub async fn recover(State(state): State<AppState>, bound: Option<BoundActor>, J
     let hold = blocking_store(move || Ok(store.recover_host_hold(&operator, &operator, &request)?)).await?;
     signal_changed(&state);
     Ok(Json(hold))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FreezeRequest {
+    pub actor: String,
+    pub id: String,
+    pub reason: String,
+    pub duration_ms: u64,
+    #[serde(default = "default_freeze_wait")]
+    pub wait_ms: u64,
+}
+
+fn default_freeze_wait() -> u64 {
+    crate::store::launch_freeze::DEFAULT_WAIT_MS
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearFreezeRequest {
+    pub actor: String,
+    pub id: String,
+}
+
+pub async fn launch_freeze(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || {
+        let freeze = store.launch_freeze()?;
+        let deferred = store.pending_runtime_starts()?.into_iter()
+            .filter(|operation| !operation.dispatched && !operation.finished && operation.revoked_by.is_none())
+            .map(|operation| json!({"id": operation.id, "subject": operation.subject}))
+            .collect::<Vec<_>>();
+        Ok(json!({"freeze": freeze, "deferred": deferred}))
+    }).await.map(Json)
+}
+
+pub async fn set_launch_freeze(State(state): State<AppState>, bound: Option<BoundActor>, Json(request): Json<FreezeRequest>) -> Result<Json<Value>, ApiError> {
+    let actor = owner(&state, bound.as_ref())?;
+    if actor != request.actor {
+        return Err(ApiError::bad(FractalError::new("launch-freeze-owner", "payload actor does not match authenticated owner")));
+    }
+    let store = state.store.clone();
+    let result = blocking_action(move || store.set_launch_freeze(&actor, &request.id, &request.reason, request.duration_ms, request.wait_ms)).await;
+    signal_changed(&state);
+    Ok(Json(json!(result?)))
+}
+
+pub async fn clear_launch_freeze(State(state): State<AppState>, bound: Option<BoundActor>, Json(request): Json<ClearFreezeRequest>) -> Result<Json<Value>, ApiError> {
+    let actor = owner(&state, bound.as_ref())?;
+    if actor != request.actor {
+        return Err(ApiError::bad(FractalError::new("launch-freeze-owner", "payload actor does not match authenticated owner")));
+    }
+    let store = state.store.clone();
+    blocking_store(move || Ok(store.clear_launch_freeze(&actor, &request.id)?)).await?;
+    signal_changed(&state);
+    Ok(Json(json!({"cleared": true})))
 }
 
 #[cfg(test)]
@@ -139,5 +196,49 @@ mod tests {
             std::future::Future::poll(wake.as_mut(), context).is_ready())).await);
         assert!(client_attention_resources(&state.store, Some("person/operator"), false).unwrap()
             .iter().all(|row| row["attention_kind"] != "host-hold"));
+    }
+
+    #[tokio::test]
+    async fn launch_freeze_api_authenticates_owner_reports_state_and_clears() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(root.path());
+        state.owning_person = Some("person/operator".into());
+        let request = || FreezeRequest {
+            actor: "person/operator".into(), id: "activation".into(),
+            reason: "replace daemon".into(), duration_ms: 60_000, wait_ms: 0,
+        };
+        let refused = set_launch_freeze(State(state.clone()),
+            Some(BoundActor::Agent("agent/worker".into())), Json(request())).await.unwrap_err();
+        assert_eq!(refused.code, "launch-freeze-owner");
+        let Json(placed) = set_launch_freeze(State(state.clone()), None, Json(request())).await.unwrap();
+        assert_eq!(placed["id"], "activation");
+        let Json(shown) = launch_freeze(State(state.clone())).await.unwrap();
+        assert_eq!(shown["freeze"]["owner"], "person/operator");
+        assert_eq!(shown["freeze"]["reason"], "replace daemon");
+        assert!(shown["freeze"]["expires_at_unix_ms"].as_u64().is_some());
+        assert_eq!(shown["deferred"], json!([]));
+        let Json(cleared) = clear_launch_freeze(State(state.clone()), None, Json(ClearFreezeRequest {
+            actor: "person/operator".into(), id: "activation".into(),
+        })).await.unwrap();
+        assert_eq!(cleared["cleared"], true);
+        assert!(state.store.admit_launch().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn launch_freeze_api_timeout_is_typed_unarmed_and_wakes_the_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(root.path());
+        state.owning_person = Some("person/operator".into());
+        let _permit = state.store.admit_launch().unwrap().unwrap();
+        let refused = set_launch_freeze(State(state.clone()), None, Json(FreezeRequest {
+            actor: "person/operator".into(), id: "activation".into(), reason: "replace daemon".into(),
+            duration_ms: 60_000, wait_ms: 0,
+        })).await.unwrap_err();
+        assert_eq!(refused.code, "launch-freeze-timeout");
+        assert!(state.store.launch_freeze().unwrap().is_none());
+        let wake = state.notify.notified();
+        tokio::pin!(wake);
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(wake.as_mut(), context).is_ready())).await);
     }
 }

@@ -89,8 +89,8 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
 };
+use fractal_conversation_ui::text::{Line, Span};
 use screens::{Drafts, Item, ListState, Listing};
 use fractal_conversation_ui::pane::order;
 use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
@@ -615,6 +615,7 @@ pub struct Ui {
     terminal_body: Cell<Option<Rect>>,
     /// Leader+d gives the agent details the keys; Escape/Tab returns to passthrough.
     terminal_details_focused: Cell<bool>,
+    details_expanded: HashMap<String, (Option<String>, Option<String>)>,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -699,10 +700,6 @@ fn open_in_browser(url: &str) -> bool {
     }
 }
 
-/// Whether `c` can be part of a written-out web address.
-fn is_address_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
-}
 
 impl Ui {
     /// Inspect the rendered viewport, without interpreting a loading/header line as content.
@@ -997,6 +994,7 @@ impl Ui {
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
             terminal_details_focused: Cell::new(false),
+            details_expanded: HashMap::new(),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -1448,136 +1446,12 @@ impl Ui {
         self.tab() == 1 && self.selected_id().as_deref() == Some(agent)
     }
 
-    /// Make the links drawn in `area` clickable: addresses written out, and markdown links by
-    /// the text they were drawn with. An address the renderer wrapped at the edge is one link on
-    /// every row it covers, so a click on any part of it opens or copies all of it.
-    fn links(&self, buf: &Buffer, area: Rect) {
-        let chars = |y: u16| -> Vec<(u16, char)> {
-            (area.x..area.x + area.width)
-                .map(|x| (x, buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
-                .collect()
-        };
-        for y in area.y..area.y + area.height {
-            let cells = (area.x..area.x + area.width)
-                .map(|x| (x, &buf[(x, y)]))
-                .collect::<Vec<_>>();
-            let row = cells
-                .iter()
-                .map(|(_, cell)| cell.symbol().chars().next().unwrap_or(' '))
-                .collect::<Vec<_>>();
-            let text = row.iter().collect::<String>();
-            // Written-out addresses.
-            let mut from = 0;
-            while let Some(offset) = text[from..].find("http") {
-                let start = from + offset;
-                let tail = &text[start..];
-                if !(tail.starts_with("https://") || tail.starts_with("http://")) {
-                    from = start + 4;
-                    continue;
-                }
-                let token = tail.split(char::is_whitespace).next().unwrap_or("");
-                let column = text[..start].chars().count();
-                // Each part of the address: where it sits on its row, and how wide it is.
-                let mut parts = Vec::new();
-                let mut url = token.to_owned();
-                if let Some((x, _)) = cells.get(column) {
-                    parts.push((*x, y, token.chars().count()));
-                }
-                // An address that runs to the right edge goes on at the start of the next row.
-                let mut reaches_edge = token.len() == tail.trim_end().len()
-                    && column + token.chars().count() >= usize::from(area.width).saturating_sub(3);
-                let mut next = y + 1;
-                while reaches_edge && next < area.y + area.height {
-                    let below = chars(next);
-                    let indent = below.iter().take_while(|(_, c)| *c == ' ').count();
-                    let more = below[indent..]
-                        .iter()
-                        .take_while(|(_, c)| !c.is_whitespace())
-                        .collect::<Vec<_>>();
-                    if indent > 4
-                        || more.is_empty()
-                        || more.iter().any(|(_, c)| !is_address_char(*c))
-                    {
-                        break;
-                    }
-                    url.extend(more.iter().map(|(_, c)| *c));
-                    parts.push((below[indent].0, next, more.len()));
-                    reaches_edge = indent + more.len() >= below.len().saturating_sub(3)
-                        && below[indent + more.len()..].iter().all(|(_, c)| *c == ' ');
-                    next += 1;
-                }
-                let trimmed = url
-                    .trim_end_matches(['.', ',', ')', ']', ';', ':', '"', '\'', '>'])
-                    .to_owned();
-                // The last part loses whatever trailing punctuation the address lost.
-                let cut = url.chars().count() - trimmed.chars().count();
-                if let Some(last) = parts.last_mut() {
-                    last.2 = last.2.saturating_sub(cut);
-                }
-                for (x, row_y, width) in parts {
-                    if width > 0 {
-                        self.hit(
-                            Rect {
-                                x,
-                                y: row_y,
-                                width: width as u16,
-                                height: 1,
-                            },
-                            Hit::Link(trimmed.clone()),
-                        );
-                    }
-                }
-                from = start + token.len().max(1);
-            }
-            // Document references written out, `doc/NAME` or `doc/NAME@HASH`: in a message, a
-            // mission or a document, each opens that document.
-            for link in fractal_ui_model::documents::document_links(&text) {
-                let mut from = 0;
-                while let Some(offset) = text[from..].find(&link.reference) {
-                    let start = from + offset;
-                    from = start + link.reference.len();
-                    if documents::inside_word(&text[..start], &text[from..]) {
-                        continue;
-                    }
-                    if let Some((x, _)) = cells.get(text[..start].chars().count()) {
-                        self.hit(
-                            Rect {
-                                x: *x,
-                                y,
-                                width: link.reference.chars().count() as u16,
-                                height: 1,
-                            },
-                            Hit::Link(link.reference.clone()),
-                        );
-                    }
-                }
-            }
-            // Markdown links: underlined runs whose text names a link.
-            let mut index = 0;
-            while index < cells.len() {
-                if !cells[index].1.modifier.contains(Modifier::UNDERLINED) {
-                    index += 1;
-                    continue;
-                }
-                let start = index;
-                while index < cells.len() && cells[index].1.modifier.contains(Modifier::UNDERLINED)
-                {
-                    index += 1;
-                }
-                let words = row[start..index].iter().collect::<String>();
-                if let Some(url) = fractal_conversation_ui::text::link_for(&words) {
-                    self.hit(
-                        Rect {
-                            x: cells[start].0,
-                            y,
-                            width: (index - start) as u16,
-                            height: 1,
-                        },
-                        Hit::Link(url),
-                    );
-                }
-            }
-        }
+    /// Draw semantic spans and register the exact visible part of each link. Targets come from
+    /// the text model, never reconstructed from decorated, clipped or wrapped screen cells.
+    fn draw_line(&self, buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, width: u16) {
+        text::draw_line(buf, x, y, line, width, |rect, url| {
+            self.hit(rect, Hit::Link(url.to_owned()));
+        });
     }
 
     /// One attachment's thumbnail, encoded on first sight and kept.
@@ -2316,12 +2190,7 @@ impl Ui {
                 Style::default().fg(theme::SURFACE0).bg(theme::MANTLE),
             );
             for (index, line) in listing.legend.iter().enumerate() {
-                buf.set_line(
-                    area.x + 1,
-                    y + 1 + index as u16,
-                    line,
-                    area.width.saturating_sub(1),
-                );
+                self.draw_line(buf, area.x + 1, y + 1 + index as u16, line, area.width.saturating_sub(1));
             }
         }
         match &listing.state {
@@ -2357,7 +2226,7 @@ impl Ui {
                     None,
                 );
                 for (index, line) in lines.iter().enumerate().take(list.height as usize) {
-                    buf.set_line(list.x + 1, list.y + 1 + index as u16, line, width as u16);
+                    self.draw_line(buf, list.x + 1, list.y + 1 + index as u16, line, width as u16);
                 }
                 return;
             }
@@ -2493,7 +2362,7 @@ impl Ui {
                     .set_symbol("▌")
                     .set_style(Style::default().fg(theme::ACCENT).bg(theme::ROW_SELECTED));
             }
-            buf.set_line(list.x + 1, y, line, list.width.saturating_sub(1));
+            self.draw_line(buf, list.x + 1, y, line, list.width.saturating_sub(1));
             if let Some(index) = index {
                 self.hit(row, hit(*index));
                 if let Some(subject) = listing.ids.get(*index) {
@@ -2986,11 +2855,11 @@ impl Ui {
         self.pane(buf, &key, body, doc, true);
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
-            buf.set_line(area.x, y, &row.line, area.width);
+            self.draw_line(buf, area.x, y, &row.line, area.width);
             if let Some((column, edge)) = &row.edge
                 && *column < area.width
             {
-                buf.set_span(area.x + column, y, edge, area.width - column);
+                buf.set_stringn(area.x + column, y, edge.content.as_ref(), (area.width - column) as usize, edge.style);
             }
             for (column, width, hit) in &row.hits {
                 self.hit(
@@ -3071,12 +2940,7 @@ impl Ui {
                 let label = self.freshness(&agent.id);
                 let width = text::width(&label.content) as u16;
                 if width + 4 < area.width {
-                    buf.set_line(
-                        area.x + area.width - width - 2,
-                        y,
-                        &Line::from(vec![label]),
-                        width,
-                    );
+                    self.draw_line(buf, area.x + area.width - width - 2, y, &Line::from(vec![label]), width);
                 }
             }
             for (index, attachment) in thumbnails.iter().enumerate() {
@@ -3102,7 +2966,7 @@ impl Ui {
                 if row >= bottom {
                     break;
                 }
-                buf.set_line(area.x, row, line, area.width);
+                self.draw_line(buf, area.x, row, line, area.width);
             }
             self.hit(
                 Rect {
@@ -3251,21 +3115,8 @@ impl Ui {
         }
         let lines = Rc::new(doc.lines);
         for (offset, line) in lines.iter().skip(top).take(height).enumerate() {
-            buf.set_line(
-                area.x,
-                area.y + offset as u16,
-                line,
-                area.width.saturating_sub(1),
-            );
+            self.draw_line(buf, area.x, area.y + offset as u16, line, area.width.saturating_sub(1));
         }
-        self.links(
-            buf,
-            Rect {
-                height: (total.saturating_sub(top)).min(height) as u16,
-                width: area.width.saturating_sub(1),
-                ..area
-            },
-        );
         for target in &doc.targets {
             if target.line >= top && target.line < top + height {
                 let rect = Rect {
@@ -3407,11 +3258,10 @@ impl Ui {
         self.hit(area, Hit::Escape);
         self.cover(area);
         buf.set_style(rect, Style::default().bg(theme::MANTLE));
-        for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
-            buf.set_line(rect.x, rect.y + offset as u16, line, rect.width);
-        }
         self.hit(rect, Hit::Peek(subject.to_owned()));
-        self.links(buf, rect);
+        for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
+            self.draw_line(buf, rect.x, rect.y + offset as u16, line, rect.width);
+        }
         for target in &doc.targets {
             if (target.line as u16) < height {
                 self.hit(
@@ -3447,7 +3297,9 @@ impl Ui {
                 .set_symbol("│")
                 .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
         }
-        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
+        let expanded = self.details_expanded.get(&agent.id)
+            .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step);
+        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner(), expanded);
         if fixed_width.is_some() {
             let focused = self.terminal_details_focused.get()
                 && self.focused_pane() == Some(Pane::Terminal(agent.id.clone()));
@@ -3485,7 +3337,7 @@ impl Ui {
                     area.width.saturating_sub(1),
                     1,
                 );
-                buf.set_line(button.x, button.y, &doc.lines[0], button.width);
+                self.draw_line(buf, button.x, button.y, &doc.lines[0], button.width);
                 let target = &doc.targets[0];
                 self.hit(
                     Rect { width: target.width.min(button.width), ..button },
@@ -3543,7 +3395,7 @@ impl Ui {
                 ),
                 Span::styled(format!("   {status}"), theme::dim()),
             ]);
-            buf.set_line(area.x, area.y, &header, area.width);
+            self.draw_line(buf, area.x, area.y, &header, area.width);
             self.hit(Rect { height: 1, ..area }, Hit::Detach);
             // What waits on the person is on top of the terminal, never hidden by it.
             let band = self.terminal_alert_band(buf, area, agent);
@@ -3631,7 +3483,7 @@ impl Ui {
         let rows = area.height.saturating_sub(2) as usize;
         let skip = terminal_rows_skipped(view.lines.len(), rows, view.cursor);
         for (offset, line) in view.lines.iter().skip(skip).take(rows).enumerate() {
-            buf.set_line(area.x, area.y + 2 + offset as u16, line, area.width);
+            self.draw_line(buf, area.x, area.y + 2 + offset as u16, line, area.width);
         }
         // The cursor is drawn as an inverted cell where the screen says it is.
         if let Some((row, column)) = view.cursor
@@ -3664,7 +3516,7 @@ impl Ui {
                 Rect { y, height: 1, ..area },
                 Style::default().bg(theme::SURFACE0),
             );
-            buf.set_line(area.x, y, &row.line, area.width);
+            self.draw_line(buf, area.x, y, &row.line, area.width);
             for (column, width, hit) in &row.hits {
                 self.hit(
                     Rect {
@@ -4050,6 +3902,7 @@ impl Ui {
                 ),
                 ("ctrl+↑ ctrl+↓", "focus the previous or next tool"),
                 ("ctrl+enter", "expand/collapse the focused tool; read its full content"),
+                ("enter in details", "expand/collapse the current step's text (or click more/less)"),
                 ("ctrl+u", "load/hide focused tool images inline (outside a draft)"),
                 (
                     "ctrl+p",
@@ -4136,7 +3989,7 @@ impl Ui {
         };
         buf.set_style(rect, Style::default().bg(theme::MANTLE));
         for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
-            buf.set_line(rect.x, rect.y + offset as u16, line, rect.width);
+            self.draw_line(buf, rect.x, rect.y + offset as u16, line, rect.width);
         }
         self.hit(area, Hit::Help);
     }
@@ -4585,6 +4438,19 @@ impl Ui {
             }
         }
     }
+    fn toggle_details_preview(&mut self, id: &str) {
+        let Some(agent) = self.world.agents.items().iter().find(|agent| agent.id == id) else {
+            return;
+        };
+        if self.details_expanded.get(id)
+            .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step)
+        {
+            self.details_expanded.remove(id);
+        } else {
+            self.details_expanded.insert(id.to_owned(), (agent.mission.clone(), agent.step.clone()));
+        }
+    }
+
 
     fn focus_terminal_details(&mut self, focused: bool) {
         self.terminal_details_focused.set(focused);
@@ -4741,6 +4607,11 @@ impl Ui {
                         KeyCode::Down => self.scroll_pane(pane.as_ref().unwrap(), 1),
                         KeyCode::PageUp => self.scroll_pane(pane.as_ref().unwrap(), -10),
                         KeyCode::PageDown => self.scroll_pane(pane.as_ref().unwrap(), 10),
+                        KeyCode::Enter if key.modifiers.is_empty() && key.kind == KeyEventKind::Press => {
+                            if let Some(Pane::Terminal(agent)) = self.focused_pane() {
+                                self.toggle_details_preview(&agent);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -6947,6 +6818,7 @@ impl Ui {
                 self.glasses.sidebar.focused = true;
             }
             Hit::Actions(agent) => self.popover = Some(format!("actions:{agent}")),
+            Hit::DetailsPreview(agent) => self.toggle_details_preview(&agent),
             Hit::Key(key)
                 if self
                     .popover
@@ -8317,6 +8189,68 @@ mod tests {
             )),
             "the whole answer is sent"
         );
+    }
+
+    #[test]
+    fn details_preview_bounds_prose_and_resets_for_a_new_step() {
+        let mut world = demo::test_world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        let id = agents[0].id.clone();
+        agents[0].mission = Some("mission/example/preview".into());
+        agents[0].step = Some("implement".into());
+        agents[0].details.progress = None;
+        agents[0].details.goal = Some(
+            "Read the current step before starting implementation. Keep the surrounding \
+             context visible while reviewing the goal. A bounded preview leaves room \
+             for queued work and runtime information. Expand this description to read \
+             every requirement, then collapse it when finished. The final requirement \
+             is to preserve scrolling for the entire expanded description. END_OF_GOAL".into(),
+        );
+        let mut ui = Ui::new(world);
+        let render = |ui: &Ui| {
+            let agent = ui.world.agents.items().iter().find(|agent| agent.id == id).unwrap();
+            let expanded = ui.details_expanded.get(&id)
+                .is_some_and(|(mission, step)| mission == &agent.mission && step == &agent.step);
+            screens::agent_details(&ui.world, agent, 60, "·", expanded)
+        };
+        let collapsed = render(&ui);
+        let shown = collapsed.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("… more (Enter)"), "{shown}");
+        let start = collapsed.lines.iter().position(|line| line.to_string().starts_with("Read the current")).unwrap();
+        let hint = collapsed.lines.iter().position(|line| line.to_string() == "… more (Enter)").unwrap();
+        assert_eq!(hint - start, 4, "preview is bounded by wrapped lines");
+        assert_eq!(collapsed.lines[hint].spans[0].style, theme::dim());
+        assert!(!shown.contains("END_OF_GOAL"), "{shown}");
+        assert!(shown.contains("runs as"), "{shown}");
+        assert!(collapsed.targets.iter().any(|target| target.hit == Hit::DetailsPreview(id.clone())));
+        ui.click(Hit::DetailsPreview(id.clone()));
+        let expanded = render(&ui);
+        let full = expanded.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(full.contains("END_OF_GOAL"), "{full}");
+        assert!(full.contains("less (Enter)"), "{full}");
+        println!("EXPANDED (60 columns)\n{full}\nDEFAULT PREVIEW (60 columns)\n{shown}");
+        ui.click(Hit::DetailsPreview(id.clone()));
+        assert_eq!(render(&ui).lines, collapsed.lines);
+        ui.toggle_details_preview(&id);
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        agents[0].step = Some("review".into());
+        assert!(render(&ui).lines.iter().any(|line| line.to_string() == "… more (Enter)"));
+    }
+
+    #[test]
+    fn details_preview_leaves_short_text_unchanged() {
+        let mut world = demo::test_world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        agents[0].mission = Some("mission/example/preview".into());
+        agents[0].step = Some("implement".into());
+        agents[0].details.progress = Some("A short status.".into());
+        agents[0].details.goal = Some("A short goal.".into());
+        let agent = &world.agents.items()[0];
+        let collapsed = screens::agent_details(&world, agent, 60, "·", false);
+        let expanded = screens::agent_details(&world, agent, 60, "·", true);
+        assert_eq!(collapsed.lines, expanded.lines);
+        assert!(!collapsed.targets.iter().any(|target| matches!(target.hit, Hit::DetailsPreview(_))));
+        assert!(collapsed.lines.iter().any(|line| line.to_string() == "A short goal."));
     }
 
     #[test]

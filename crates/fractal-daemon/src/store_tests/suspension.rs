@@ -115,3 +115,47 @@ fn a_move_survives_a_crash_after_placement_and_a_later_label_change() {
         "restoring"
     );
 }
+
+#[test]
+fn suspension_optional_metadata_survives_replication_and_reopen() {
+    for (cause, mode) in [(None, None), (Some("idle"), Some("in-place")), (Some("future-cause"), Some("future-mode"))] {
+        let source = Store::open_memory("source").unwrap();
+        let append = |fields: Value, key: Option<String>| {
+            source.append_claim(&ClaimInput {
+                subject: "agent/sample".into(),
+                kind: if key.is_some() { "runtime.action.succeeded" } else { "runtime.action.requested" }.into(),
+                actor: Some("person/test".into()), fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: key,
+            }).unwrap()
+        };
+        let mut fields = json!({"action":"suspend"});
+        if let Some(cause) = cause { fields["cause"] = json!(cause); }
+        let request = append(fields.clone(), None);
+        let mut snapshot = json!({"action":"suspend", "native_session_id":"native"});
+        if let Some(mode) = mode { snapshot["mode"] = json!(mode); }
+        append(snapshot, Some(suspend_snapshot_key(&request.id)));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("suspension.sqlite3");
+        let replica = Store::open(&path, "replica").unwrap();
+        let mut registry = fractal_schema::registry().clone();
+        registry.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause");
+        registry.claims.get_mut("runtime.action.succeeded").unwrap().fields.remove("mode");
+        replica.set_claim_registry(registry);
+        replica.bind_fleet(TEST_FLEET).unwrap();
+        replica.receive_replication_exchange(&source.origin, TEST_FLEET,
+            &exchange_from(&source, &ReplicationInventory::default())).unwrap();
+        let admission = replica.validate_replication_backlog().unwrap();
+        assert_eq!(admission.unknown, if cause.is_some() { 2 } else { 0 });
+        replica.project_replication_backlog().unwrap();
+        drop(replica);
+        let reopened = Store::open(&path, "replica").unwrap();
+        reopened.validate_replication_backlog().unwrap();
+        reopened.project_replication_backlog().unwrap();
+        let stored = reopened.claim_by_id(&request.id).unwrap().unwrap();
+        assert_eq!(stored.body["fields"], fields);
+        let state = suspend_state(&reopened, &stored, None).unwrap();
+        assert_eq!(state.cause(), cause.unwrap_or("manual"));
+        assert_eq!(state.mode(), mode.unwrap_or("git"));
+        assert_eq!(state.native_session_id.as_deref(), Some("native"));
+    }
+}

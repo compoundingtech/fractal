@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Capture bounded GitHub lifecycle history in fenced durable claims",
+  "replay": {"status": "changed", "detail": "Admitted source-sequenced capture commits publish bounded normalized fact references; staging is invisible. Versioned non-client-v0 replay cursors bind finite coverage snapshots to source, generation, grant and scope."},
+  "schema": {"status": "changed", "detail": "Adds internal github.fact.observed, github.capture.committed, github.capture.authority and github.capture.fenced kinds and explicit source and effective-dated scope contracts. Operational mirror content remains disposable."},
+  "rules": {"status": "changed", "detail": "A selected fenced authority acquires lifecycle evidence through existing repository observers and shared HTTP budget. Declared repositories retain their committed node identity across rename or transfer. Known gaps in admitted commit sequences remain projection-pending. Capture failure is reported independently and never blocks operational PR observations or live watches."},
+  "compatibility": {"status": "changed", "detail": "Configured plugin pull reads use canonical normalized claims with operational mirror supplements and report incomplete projection explicitly. Authority admission and fencing are trusted-local owning-person operations outside client-v0."},
+  "downtime": {"status": "none", "detail": "Installing this change enables no source. Disposable capture indexes rebuild incrementally from durable claims."},
+  "manual": {"status": "changed", "detail": "Activation requires an admitted authority grant, source selection, effective-dated scope, repository observers, private-replication admission and credential routing. Source declarations create neither observers nor grants. Fence the old authority before selecting a successor."},
+  "recovery": {"status": "changed", "detail": "Retain durable claims and backups. Failed publication leaves staged facts invisible. Fence acquisition before rolling back to a binary without the capture contract."}
+}

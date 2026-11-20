@@ -17,6 +17,40 @@ wait. A client uses the fenced client-v0 actions `agent.suspend` and `agent.resu
 fenced on the running incarnation and the selected declaration; resume is fenced on the
 declaration.
 
+The suspension block in `agents show` includes its cause (`manual` or `idle`) and snapshot mode
+(`git` or `in-place`). Missing metadata in historical records means `manual` and `git`; unfamiliar
+values stay visible rather than being reclassified. Ordinary manual suspend still requires a
+Git snapshot; no daemon automatically writes idle suspensions in this prerequisite.
+
+An explicit suspend of an already idle-suspended seat converts the hold to manual, preserving
+the original suspend operation, snapshot and native session. Repeating the same request is
+idempotent even after the seat resumes: replay returns the conversion receipt, never a new
+suspend. A manual hold must not be automatically woken. This is a reader-first prerequisite
+for [idle residency](https://github.com/compoundingtech/fractal/pull/6720), not its activation.
+
+## Idle residency
+
+`agents show` includes a residency block with the effective policy, the beginning of
+continuous eligibility, its exact due time, or the current refusal reason. The member policy
+is `[reconcile] idle_suspend_after = "off"` by default; a duration enables automatic
+suspension after the signed fleet reader barrier is satisfied. `idle_resume_concurrency`
+defaults to `2` and must be positive. Both settings reload with the other daemon policies.
+
+An agent may declare `idle-suspend "never"` to opt out or `idle-suspend "member"` to inherit
+the member policy. Editing this metadata does not restart a running seat. Only OMP supports
+idle residency; other drivers report `driver-unsupported`. Eligibility requires a confirmed
+native channel and a quiet harness, no claimed work, and no running subagents. Unknown
+observations end eligibility. Repeated quiet reports and received mail do not restart the
+eligible epoch; neither `last_activity_at` nor silent-mail activity is an idle clock.
+
+The epoch is no earlier than the daemon's local policy enable time. On restart, loading enabled
+config starts that time again, so every seat waits a full threshold after a daemon roll rather
+than becoming due together from old quiet evidence. Editing an already enabled threshold keeps
+the activation time; turning it off and on starts a new one.
+
+The existing per-seat wake evaluation schedules exactly `eligible_since + idle_suspend_after`.
+There is no seat scan timer and reaching that deadline does not stop a process in this release.
+
 ## When a seat can suspend
 
 Suspend first checks the declaration's native session arguments. An authored selector such as
@@ -50,6 +84,41 @@ written what a resume reads. Suspend captures a Git snapshot commit, records the
 stops the runtime, and freezes portable transcript files after the process ends. It leaves the seat `suspended`. A suspended seat
 stays declared. Its restart policy does not restart it, `fractal agents restart` refuses it, and mail
 sent to it waits until it resumes.
+
+Manual and idle operations with non-Git workspaces capture `in-place`. Idle-cause OMP
+operations also use this mode for `workspace-unborn`, `workspace-not-root`, or
+`workspace-submodule-unsupported`. The workspace stays untouched on its source host;
+only the session is preserved, not a portable copy of arbitrary workspace files.
+The snapshot receipt records the mode before stopping; after the stop fence, the owner freezes
+the native transcript without a Git bundle. Same-host resume validates the frozen transcript's
+digest, native session header and absolute workspace path, then checks that the original native
+binding still contains those bytes. It launches the original authoritative transcript, so later
+ordinary restarts retain post-resume turns rather than selecting a stale inventory copy.
+Missing or mismatched content fails rather than selecting a fresh conversation. Retrying after
+a daemon restart reuses the captured mode and original native inventory.
+The host-local manifest records `workspace_kind` as `git` or `non-git`. Resume refuses
+with `workspace-kind-mismatch` if an in-place workspace changed kind while suspended.
+Missing kind metadata defaults to `git` for portable snapshots. Historical in-place
+snapshots and empty capture markers convert to the tagged `legacy-unknown` kind:
+they retain the previous resume checks without claiming historical kind equality.
+Their resume evidence records `legacy-unknown-kind`. This preserves both non-Git
+and unborn-Git historical sessions; only known kinds enforce the new equality guard.
+Same-host Git resume checks the captured workspace HEAD evidence before comparing
+the live kind. A historical native-only suspension with no workspace capture retains
+its previous resume behavior; a missing/defaulted mode is not itself Git evidence.
+Existing but unreadable or malformed workspace evidence still fails validation.
+Older daemons with in-place support ignore the additive kind field and can preserve the
+session, but do not enforce the kind-change guard. Use an updated daemon to resume.
+Daemons without in-place support cannot restore the missing Git bundle; they refuse
+instead of reconstructing the workspace or starting a fresh session.
+
+Git snapshot receipts omit the mode field: absence already means `git`, preserving ordinary
+manual suspension interoperability with older members.
+
+An in-place suspension is pinned to its source host: `resume --host` elsewhere refuses with
+`snapshot-in-place` before changing placement. Converting the suspension to manual retains
+this restriction. All active members must have the cause/mode readers before idle writers
+are enabled; this change does not enable them.
 
 An incarnation-bearing report is accepted only while the latest runtime observation records
 that incarnation as running. The writer checks this authority before replaying or deduplicating
@@ -187,7 +256,8 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 
 | refusal | meaning |
 | --- | --- |
-| `workspace-not-git`, `workspace-unborn`, `workspace-not-root` | suspend needs a committed Git working tree rooted at the workspace |
+| `workspace-unborn`, `workspace-not-root` | manual Git suspend needs a committed working tree rooted at the workspace; non-Git workspaces suspend in place |
+| `workspace-kind-mismatch` | an in-place workspace with recorded kind changed between Git and non-Git |
 | `workspace-path-mismatch` | the declaration, archive, or native transcript records a different cwd |
 | `workspace-occupied`, `transcript-occupied` | the target already contains files that would be overwritten |
 | `snapshot-harness-unsupported` | this harness has no portable export adapter yet |
@@ -201,12 +271,17 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
   single-host resume support; cross-host requests refuse until their storage adapters are built.
 - Suspend requires an absolute Git workspace path, a commit, and the working tree root.
   Workspaces containing submodules refuse with `workspace-submodule-unsupported`.
+  [Idle residency](idle-residency.md#snapshot-modes-idle-r09-idle-r10) specifies an in-place
+  mode for such workspaces; it is not implemented yet.
 - Archives are host-local and capped at 256 MiB, including Git history. Ignored files and
   host-owned credentials and environment are not transported.
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
-- Mail does not wake a suspended seat. Only `fractal agents resume` does.
+- Mail never wakes a manual suspension. Only `fractal agents resume` does.
+  [Idle residency](idle-residency.md) uses cause `idle` and wakes through bounded
+  owner admission, strict same-session resume and an incarnation-bound channel-ready
+  barrier. Policy off stops new automatic suspends without disabling these wakes.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 

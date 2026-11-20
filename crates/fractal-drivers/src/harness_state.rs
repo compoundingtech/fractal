@@ -165,6 +165,9 @@ struct Record {
     ask: Ask,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     background_jobs: Option<u64>,
+    /// Positive channel handshake proof; old records prove neither readiness nor its absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel_ready: Option<bool>,
     /// Why the harness ended, as text. A seat's end reason shows it as the diagnostic of a
     /// `harness-exited` end, and a resume that ended with one fails as `harness-refused` unless
     /// the driver stopped its provider.
@@ -221,6 +224,7 @@ pub struct Observation {
     pub input_buffer: InputBuffer,
     pub ask: Ask,
     pub background_jobs: Option<u64>,
+    pub channel_ready: Option<bool>,
     pub provider_auth: Option<bool>,
     pub reason: Option<String>,
     pub exit: Option<String>,
@@ -234,6 +238,7 @@ impl Observation {
             input_buffer,
             ask: Ask::None,
             background_jobs: None,
+            channel_ready: None,
             provider_auth: None,
             reason: None,
             exit: None,
@@ -471,6 +476,7 @@ impl Writer {
                     && current.input_buffer == observation.input_buffer
                     && current.ask == observation.ask
                     && current.background_jobs == observation.background_jobs
+                    && current.channel_ready == observation.channel_ready
                     && current.reason == observation.reason
                     && current.exit == observation.exit
             });
@@ -513,6 +519,7 @@ impl Writer {
             input_buffer: observation.input_buffer,
             ask: observation.ask,
             background_jobs: observation.background_jobs,
+            channel_ready: observation.channel_ready,
             provider_auth,
             provider_auth_sequence,
             reason: observation.reason,
@@ -589,6 +596,7 @@ pub struct Observed {
     pub input_buffer: InputBuffer,
     pub ask: Ask,
     pub background_jobs: Option<u64>,
+    pub channel_ready: Option<bool>,
     pub harness: Option<String>,
     pub since_ms: Option<u64>,
     /// When the owning driver last refreshed this evidence.
@@ -615,6 +623,7 @@ impl Observed {
             input_buffer: InputBuffer::Unknown,
             ask: Ask::Unknown,
             background_jobs: None,
+            channel_ready: None,
             harness,
             since_ms: None,
             observed_at_ms: None,
@@ -720,6 +729,7 @@ pub fn read_raw_at(
         input_buffer: record.input_buffer,
         ask: record.ask,
         background_jobs: record.background_jobs,
+        channel_ready: record.channel_ready,
         harness,
         since_ms: Some(record.since_ms),
         observed_at_ms: Some(record.written_at_ms),
@@ -1083,6 +1093,7 @@ fn claim_locked(writer: &Writer, token: &str) -> anyhow::Result<u64> {
         input_buffer: InputBuffer::Unknown,
         ask: Ask::None,
         background_jobs: None,
+        channel_ready: None,
         provider_auth: None,
         provider_auth_sequence: 0,
         reason: Some("superseded".to_string()),
@@ -1112,7 +1123,7 @@ fn claim_locked(writer: &Writer, token: &str) -> anyhow::Result<u64> {
         && let Err(error) = crate::harness_context::remove(agent_dir)
     {
         tracing::warn!(
-            "st harness-state: clearing the harness-context record for {} failed: {error}",
+            "fractal harness-state: clearing the harness-context record for {} failed: {error}",
             agent_dir.display()
         );
     }
@@ -1141,7 +1152,7 @@ fn persist_floor(record_path: &Path, seq: u64) {
         crate::fsatomic::Durability::Rename,
     ) {
         tracing::warn!(
-            "st harness-state: writing the sequence floor {} failed: {error}",
+            "fractal harness-state: writing the sequence floor {} failed: {error}",
             floor_path.display()
         );
     }
@@ -1541,6 +1552,7 @@ mod tests {
                 input_buffer: InputBuffer::Unknown,
                 ask: Ask::None,
                 background_jobs: None,
+                channel_ready: None,
                 provider_auth: None,
                 provider_auth_sequence: 0,
                 reason: None,
@@ -1750,6 +1762,7 @@ mod tests {
             input_buffer: InputBuffer::Unknown,
             ask: Ask::None,
             background_jobs: None,
+            channel_ready: None,
             provider_auth: None,
             provider_auth_sequence: 0,
             reason: None,

@@ -493,6 +493,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
         left: Default::default(),
         machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
         verification_attempt: None,
+        worker: None,
     };
     let output = render_checkpoint_status(&status);
     assert!(output.contains("last daemon start (advertised build)"));
@@ -506,6 +507,17 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
     })).unwrap());
     assert!(status.pending.as_ref().unwrap().terms.is_none());
     assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
+    let output = render_checkpoint_status(&status);
+    assert!(output.contains("alder phase=seal (no seal)"));
+    assert!(output.contains("birch phase=seal (no seal)"));
+    status.pending = None;
+    status.worker = Some(serde_json::from_value(serde_json::json!({
+        "phase": "apply_stable", "updated_at_unix_ms": 0, "error": "trim commit failed"
+    })).unwrap());
+    assert!(render_checkpoint_status(&status).contains("phase=ApplyStable failed: trim commit failed"));
+    status.worker = None;
+    status.halted = true;
+    assert!(render_checkpoint_status(&status).contains("phase=trim (halted"));
 }
 
 #[test]
@@ -610,6 +622,66 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
+}
+
+
+#[test]
+fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume {
+        incarnation: "runtime-a".into(),
+        pending: PiFamilyReports {
+            input_source_dir: Some(root.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut observer = None;
+    // Historical delivered/read frames have no native clock, so cannot become certificates.
+    accept_managed_channel_frame(&mut state, &mut observer,
+        r#"{"type":"delivered","meta":{"messageId":"message/example"}}"#, "agent/example").unwrap();
+    assert!(state.pending.input_acceptances.is_empty());
+    for timestamp in [123, 999] {
+        let frame = json!({"type":"delivered","meta":{"messageId":"message/example","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":timestamp}).to_string();
+        accept_managed_channel_frame(&mut state, &mut observer, &frame, "agent/example").unwrap();
+    }
+    let stale = json!({"type":"delivered","meta":{"messageId":"message/old","inputIncarnation":"runtime-b"},
+        "acceptedAtUnixMs":100}).to_string();
+    accept_managed_channel_frame(&mut state, &mut observer, &stale, "agent/example").unwrap();
+    assert!(!state.pending.input_acceptances.contains_key("message/old"));
+    assert_eq!(state.pending.input_acceptances["message/example"], 123);
+    let recovered = fractal_drivers::native_channel::input_acceptances(root.path()).unwrap();
+    assert_eq!(recovered["message/example"], 123);
+    let resumed: PiChannelResume =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[tokio::test]
+async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::native_channel::record_input_attempt(
+        root.path(), "message/example", Some(100)).unwrap();
+    fractal_drivers::native_channel::record_input_acceptance(
+        root.path(), "message/example", 123).unwrap();
+    let fence = fractal_daemon::mailbox::Fence::new("agent/example", "runtime-a", "delivery");
+    let mut reports = PiFamilyReports {
+        fence: Some(fence),
+        input_source_dir: Some(root.path().into()),
+        input_source_ready: true,
+        input_acceptances: fractal_drivers::native_channel::input_acceptances(root.path()).unwrap(),
+        acknowledgements: BTreeSet::from(["message/example".into()]),
+        ..Default::default()
+    };
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(reports.publish(&client, "agent/example", "pi", "runtime-a", "native").await.is_err());
+    assert_eq!(reports.input_acceptances["message/example"], 123);
+    assert!(reports.acknowledgements.contains("message/example"),
+        "read/delivered cannot prune native proof before the acceptance POST is acknowledged");
+    let restored: PiFamilyReports =
+        serde_json::from_value(serde_json::to_value(reports).unwrap()).unwrap();
+    assert_eq!(restored.input_acceptances["message/example"], 123);
 }
 
 #[test]
@@ -1884,7 +1956,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         status_from: None,
         attachments: Vec::new(),
     };
-    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(omp["deliverAs"], "steer");
     assert_eq!(
         omp["content"],
@@ -2468,8 +2540,9 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                     runtime_id: "worker",
                 }
             };
-            // Replay requires no backward staging or invented consumption receipt.
-            mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
+            // Replay requires no backward staging or invented consumption receipt. The
+            // absent daemon cannot ACK a completeness frontier, but queued mail still replays.
+            assert!(mailbox.pump(&client, &agent_dir, receipts).await.is_err());
             let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),
@@ -2800,6 +2873,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",
@@ -2808,6 +2904,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
         "end_reason": end_reason
     }))
     .unwrap()
+}
+
+#[test]
+fn agent_card_residency_is_optional_and_names_policy_epoch_deadline_and_refusal() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("RESIDENCY"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "member".into(),
+        eligible_since: Some("2026-11-18T10:00:00Z".into()),
+        due_at: Some("2026-11-18T10:30:00Z".into()),
+        refusal_reason: None,
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    member\n"));
+    assert!(rendered.contains("  ELIGIBLE   2026-11-18T10:00:00Z\n"));
+    assert!(rendered.contains("  DUE        2026-11-18T10:30:00Z\n"));
+    assert!(!rendered.contains("  REFUSAL"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "off".into(),
+        eligible_since: None,
+        due_at: None,
+        refusal_reason: Some("policy-off".into()),
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    off\n  REFUSAL    policy-off\n"));
+    assert!(!rendered.contains("  DUE"));
 }
 
 #[test]
@@ -5497,6 +5619,7 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                 &run_id,
                 mission,
                 &"a".repeat(64),
+                false,
                 Path::new("/work/demo"),
                 "agent/operator",
                 &BTreeMap::new(),
@@ -5512,6 +5635,67 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                     .contains_key(&format!("mission-run/{mission}/2026-10-07"))
             );
             assert!(!intent.mission_runs.contains_key("mission-run/2026-10-07"));
+        }
+    }
+}
+
+#[test]
+fn mission_start_preserves_explicit_revision_pin_intent() {
+    let revision = "a".repeat(64);
+    for follow_head in [false, true] {
+        let kdl = mission_run_intent(
+            "release/demo/pin-intent",
+            "release/demo",
+            &revision,
+            follow_head,
+            Path::new("/work/demo"),
+            "person/operator",
+            &BTreeMap::new(),
+            "run",
+            None,
+            None,
+            false,
+        );
+        let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+        let creation = intent.mission_runs["mission-run/release/demo/pin-intent"]
+            .creation.as_ref().unwrap();
+        assert_eq!(creation.revision, revision);
+        assert_eq!(creation.follow_head, follow_head);
+    }
+}
+
+#[test]
+fn mission_start_keeps_exact_declarations_for_older_daemons() {
+    let revision = "a".repeat(64);
+    for (health, supported) in [
+        (json!({}), false),
+        (json!({"capabilities": {}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 0}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 1}}), true),
+    ] {
+        for explicit_revision in [None, Some(revision.as_str())] {
+            let follow_head = mission_start_follows_head(explicit_revision, &health);
+            assert_eq!(follow_head, supported && explicit_revision.is_none());
+            let kdl = mission_run_intent(
+                "release/demo/skew",
+                "release/demo",
+                &revision,
+                follow_head,
+                Path::new("/work/demo"),
+                "person/operator",
+                &BTreeMap::new(),
+                "run",
+                None,
+                None,
+                false,
+            );
+            assert!(kdl.contains(&format!("mission \"mission/release/demo@{revision}\"")), "{kdl}");
+            assert_eq!(kdl.contains("follow-head"), follow_head, "{kdl}");
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+            let creation = intent.mission_runs["mission-run/release/demo/skew"]
+                .creation.as_ref().unwrap();
+            assert_eq!(creation.revision, revision);
+            assert_eq!(creation.follow_head, follow_head);
         }
     }
 }
@@ -5608,6 +5792,7 @@ fn mission_start_after_names_the_run_to_wait_for() {
         "release/demo/2",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5657,6 +5842,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/3",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5690,6 +5876,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/4",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -7673,6 +7860,72 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
         .is_err(),
         "read-only and full-control pairing must be mutually exclusive"
     );
+}
+
+#[test]
+fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
+    let base = ["fractal", "devices", "--as", "person/alex", "pair", "tag-reader"];
+    let scopes = [
+        "--person-scope", "read.projections",
+        "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain(scopes)).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { person_scopes, .. }), ..
+    }) = cli.command else {
+        panic!("expected a person pairing command")
+    };
+    assert_eq!(person_scopes, ["read.projections", "read.glasses", "read.arrangements"]);
+    for conflict in ["--read-only", "--full-control", "--assistant"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn person_scope_pairing_sends_exact_request_and_preserves_daemon_error() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send(body).unwrap();
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+                    "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                    "request_id": "request/pairing-test", "code": "validation",
+                    "message": "daemon scope validation detail", "retryable": false, "details": {}
+                })))
+            }
+        }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("pairing.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let endpoint = Endpoint::Unix(socket);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cli = Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/alex", "pair", "tag-reader",
+        "--person-scope", "read.projections", "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ]).unwrap();
+    let Command::Devices(args) = cli.command else { panic!("expected devices") };
+    let error = run_devices(endpoint, &Config::default(), args, true).await.unwrap_err();
+    assert!(error.to_string().contains("daemon scope validation detail"), "{error}");
+    let request: PersonPairingBegin = serde_json::from_value(received.await.unwrap()).unwrap();
+    assert_eq!(request.device_name, "tag-reader");
+    assert_eq!(request.person_id, "person/alex");
+    assert_eq!(request.scopes.unwrap(), ["read.projections", "read.glasses", "read.arrangements"]);
+    assert_eq!(request.full_control, None);
+    assert_eq!(request.fabric_gateway, None);
+    server.abort();
 }
 
 #[test]

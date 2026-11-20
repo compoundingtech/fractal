@@ -76,7 +76,7 @@ pub fn start_attention_list(state: &AppState) {
                 // A pairing completed or revoked since the last pass changes which windows a
                 // session may hold; their windows reread to recheck it, as before.
                 if let Err(error) = reader.recheck_pairings() {
-                    eprintln!("st3: pairing recheck for published views failed: {error:#}");
+                    eprintln!("fractal: pairing recheck for published views failed: {error:#}");
                 }
                 let mut results = Vec::new();
                 let waiting = |results: &mut Vec<_>, starting: bool| {
@@ -137,7 +137,7 @@ pub fn start_attention_list(state: &AppState) {
                     }
                     for (view, result) in results {
                         if let Err(error) = &result {
-                            eprintln!("st3: {view} view refresh failed: {error:#}");
+                            eprintln!("fractal: {view} view refresh failed: {error:#}");
                         }
                         store.note_view_refreshed(view, result.is_ok());
                     }
@@ -147,7 +147,7 @@ pub fn start_attention_list(state: &AppState) {
                     if prompts_changed {
                         watching(&prompts).keep_changed();
                     }
-                    eprintln!("st3: published view refresh stopped: {error}");
+                    eprintln!("fractal: published view refresh stopped: {error}");
                     for view in crate::store::attention_list::PUBLISHED_VIEWS {
                         store.note_view_refreshed(view, false);
                     }
@@ -183,12 +183,12 @@ pub fn start_attention_list(state: &AppState) {
                     Ok(None) => {}
                     Ok(Some(result)) => {
                         if let Err(error) = &result {
-                            eprintln!("st3: summary view refresh failed: {error:#}");
+                            eprintln!("fractal: summary view refresh failed: {error:#}");
                         }
                         store.note_view_refreshed("summary", result.is_ok());
                     }
                     Err(error) => {
-                        eprintln!("st3: summary view refresh stopped: {error}");
+                        eprintln!("fractal: summary view refresh stopped: {error}");
                         store.note_view_refreshed("summary", false);
                     }
                 }
@@ -505,7 +505,7 @@ fn present_rows(
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("st3: WARN attention cannot read the path of {step}: {error:#}")
+                eprintln!("fractal: WARN attention cannot read the path of {step}: {error:#}")
             }
         }
     }
@@ -525,7 +525,7 @@ fn present_rows(
                         Ok(Some(revision)) => presentation["revision"] = revision,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} names no revision changes: {error:#}",
+                            "fractal: WARN attention {} names no revision changes: {error:#}",
                             row["id"]
                         ),
                     }
@@ -538,7 +538,7 @@ fn present_rows(
                         Ok(Some(launch)) => presentation["launch"] = launch,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} has no launch preview: {error:#}",
+                            "fractal: WARN attention {} has no launch preview: {error:#}",
                             row["id"]
                         ),
                     }
@@ -546,7 +546,7 @@ fn present_rows(
                 row["presentation"] = presentation;
             }
             Err(error) => eprintln!(
-                "st3: WARN attention {} has no presentation: {error}",
+                "fractal: WARN attention {} has no presentation: {error}",
                 row["id"]
             ),
         }
@@ -663,6 +663,67 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_backlog_preserves_complete_attention_and_still_finds_relevant_claims() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = Clock;
+        smallclaims::store::set_thread_clock(Some(client_now_ms()));
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let first = store.newest_attention_list().1.unwrap();
+        // More than the delta limit of permanently unread lease-renewal claims.
+        // Do not force a fleet fold or hide the relevant claim after the backlog.
+        for number in 0..10_001 {
+            store.append_claim(&ClaimInput {
+                subject: format!("step-run/noise-{number}/step"),
+                kind: "work.renewed".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        assert_eq!(index - first.cut, 10_001, "exercise the raw-span guard boundary");
+        assert!(
+            store.attention_future_since(first.cut, index, 0).unwrap().is_some(),
+            "the future helper must count post-filter claims, not the 10001-index span",
+        );
+        assert_eq!(
+            store.attention_list_delta(&first, index, client_now_ms()).unwrap(),
+            AttentionDelta::Unchanged(None),
+        );
+        assert!(matches!(
+            store.attention_list_delta(&first, index, 0).unwrap(),
+            AttentionDelta::Unchanged(Some(_)),
+        ), "even unread future claims retain the next-evaluation fence");
+        refresh_attention_list(&store).unwrap();
+        let published = store.newest_attention_list().1.unwrap();
+        assert_eq!(published.cut, index);
+        assert!(Arc::ptr_eq(&first.rows, &published.rows));
+
+        store.append_claim(&ClaimInput {
+            subject: "custom/test/relevant".into(),
+            kind: "custom.test.changed".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            store.attention_list_delta(&first, store.index().unwrap(), client_now_ms()).unwrap(),
+            AttentionDelta::Refold("custom.test.changed".into()),
+        );
+    }
 
     #[test]
     fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {

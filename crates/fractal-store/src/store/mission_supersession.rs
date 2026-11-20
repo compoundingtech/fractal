@@ -218,7 +218,9 @@ impl Store {
                     continue;
                 }
                 transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h880ef8d03231 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ "SAVEPOINT mission_supersession_source").map_err(internal)?;
-                let result = self.create_superseding_mission_run_tx(transaction, &source, &publication, Some(&revision))
+                // This is head intent, unlike an explicitly authorized revision cutover.
+                // The writer transaction keeps the selected head stable through admission.
+                let result = self.create_superseding_mission_run_tx(transaction, &source, &publication, None)
                     .and_then(|replacement| {
                         cancel_mission_run_tx(transaction, &self.origin, &source.subject,
                             &format!("superseded by {} at revision {revision}", replacement.subject),
@@ -797,6 +799,9 @@ pub(super) fn automatic_supersession_policy(
     connection: &Connection,
     source: &MissionRunView,
 ) -> Result<Option<MissionSpec>, FractalError> {
+    if missions::mission_run_revision_pinned(connection, source)? {
+        return Ok(None);
+    }
     let pinned = missions::mission_spec_at(connection, &source.mission, Some(&source.revision))
         .map_err(internal)?
         .ok_or_else(|| FractalError::new("missing-mission-revision",

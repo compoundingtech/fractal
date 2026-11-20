@@ -20,9 +20,15 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod idle_residency;
+mod residency_evidence;
+pub mod launch_freeze;
 pub mod resource_membership;
+pub mod resource_admission_objectives;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
+#[cfg(test)]
+mod resource_profile_policy_tests;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -141,6 +147,7 @@ pub mod seat_status;
 pub mod stop_deferral;
 pub mod stopping_seat;
 pub mod card_fold;
+mod card_actual;
 #[cfg(test)]
 pub mod card_fold_tests;
 #[cfg(test)]
@@ -255,8 +262,10 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+mod github_capture_config;
 pub mod objective_series;
 pub mod runtime_starts;
+pub mod runtime_cleanup;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
 pub mod turn_invocations;
@@ -291,6 +300,7 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 mod run_fence;
+pub mod observation_minutes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rebuild_observer;
 pub mod revision_seats;
@@ -299,6 +309,8 @@ pub mod claim_pages;
 pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
+pub mod storage_census;
+pub mod database_archive_size;
 pub mod answers_check;
 pub mod local_trim_fault;
 pub mod projection_divergence;
@@ -312,7 +324,10 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod wake_demand;
 pub mod message_marks;
+pub mod mail_input_acceptance;
+pub mod mail_delivery_source;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
@@ -841,7 +856,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfecc739717ae owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -851,6 +866,13 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Phone admission seeks one stable source/report; evaluation seeks only the retained hour.
+CREATE INDEX IF NOT EXISTS claims_observation_report_index
+ON claims(json_extract(body,'$.fields.source'), json_extract(body,'$.fields.report_id'))
+WHERE kind='custom.client.observation-minute';
+CREATE INDEX IF NOT EXISTS claims_observation_minute_time_index
+ON claims(CAST(json_extract(body,'$.fields.start_ms') AS INTEGER), subject)
+WHERE kind='custom.client.observation-minute';
 -- Shared action-key admission must seek one actor/key, never scan retained resolutions.
 CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
 ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
@@ -875,6 +897,15 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_idle_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
+CREATE INDEX IF NOT EXISTS claims_suspension_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume');
+CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
+ON claims(subject, json_extract(body, '$.fields.request_key'))
+WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
 -- Last activity is the greatest numeric acceptance time, independent of local arrival.
 CREATE INDEX IF NOT EXISTS claims_actor_activity_time_index
 ON claims(actor, length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
@@ -900,6 +931,10 @@ WHERE kind='harness.timeline'
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
+-- Retained ownership, including operator-authored and carried work, at client snapshots.
+CREATE INDEX IF NOT EXISTS claims_residency_claimant_index
+ON claims(json_extract(body, '$.fields.claimant'), store_index, subject)
+WHERE kind IN ('work.claimed', 'work.progress', 'work.renewed', 'step-run.carried');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
@@ -1172,6 +1207,9 @@ WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(body, '$.fields.owner_run'))
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
+WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_person_ask_origin_index
+ON claims(json_extract(body, '$.fields.origin_step'), json_extract(body, '$.fields.origin_attempt'), subject)
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_recipient_index
 ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
@@ -2370,42 +2408,54 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 
 /// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
+/// CPU eligibility evidence: source incarnation, quiet state and source observation timestamp.
+pub type LocalHarnessEvidence = (Option<String>, bool, Option<u64>);
+
 /// What one minute's check of this member's seats carries into the next (`local_seats_busy`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalSeats {
-    /// Each seat's newest harness observation: the incarnation it names and whether it was quiet.
-    pub harness: BTreeMap<String, (Option<String>, bool)>,
+    /// Each seat's newest harness incarnation, quiet state and source observation timestamp.
+    pub harness: BTreeMap<String, LocalHarnessEvidence>,
     /// Each seat this member observed a runtime for: whether it is live, and its incarnation.
     pub runtimes: BTreeMap<String, (bool, Option<String>)>,
 }
 
 impl LocalSeats {
-    /// Fold one runtime observation's fields; true when it says the seat is live, which in a
-    /// checked span is a start or a seat still running.
+    /// Fold one runtime observation's fields; true only for a start/new incarnation, not a
+    /// heartbeat from an already-live session. Productive activity comes from the harness.
     fn fold_runtime(&mut self, subject: String, fields: &str) -> Result<bool> {
         let fields: Value = serde_json::from_str(fields)?;
         let status = fields["status"].as_str();
         let live = !matches!(status, Some("absent" | "exited" | "vanished" | "stopped"));
         let runtime = self.runtimes.entry(subject).or_default();
+        let changed = fields.get("incarnation_id").is_some_and(|incarnation| incarnation.as_str() != runtime.1.as_deref());
+        let started = live && (!runtime.0 || changed);
         runtime.0 = live;
         match fields.get("incarnation_id") {
-            Some(Value::String(incarnation)) => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(incarnation)) if changed => runtime.1 = Some(incarnation.clone()),
+            Some(Value::String(_)) => {}
             Some(_) => runtime.1 = None,
             None => {}
         }
-        Ok(live)
+        Ok(started)
     }
 
     /// Whether, as folded so far, a seat is working or not known not to be.
-    fn busy(&self) -> bool {
+    fn busy(&self, at_ms: u64) -> bool {
         let live = self.runtimes.iter().any(|(subject, (live, incarnation))| {
             *live
-                && !self.harness.get(subject).is_some_and(|(observed, quiet)| {
+                && !self.harness.get(subject).is_some_and(|(observed, quiet, source_at)| {
                     *quiet && incarnation.is_some() && observed == incarnation
+                        && source_at.is_some_and(|source_at| {
+                            u128::from(at_ms.saturating_sub(source_at))
+                                < fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis()
+                                && u128::from(source_at.saturating_sub(at_ms))
+                                    <= fractal_drivers::harness_state::HARNESS_STATE_FUTURE_SKEW.as_millis()
+                        })
                 })
         });
         let quiet = |subject: &String| self.runtimes.get(subject).is_some_and(|(live, _)| !live);
-        live || self.harness.iter().any(|(subject, (_, q))| !q && !quiet(subject))
+        live || self.harness.iter().any(|(subject, (_, q, _))| !q && !quiet(subject))
     }
 }
 
@@ -2422,6 +2472,8 @@ const TRIM_SCAN_PAGE: i64 = 5_000;
 pub struct Store {
     /// Identity of this open, including same-process reopen or restore.
     membership_lifetime: uuid::Uuid,
+    /// Live shell launch values never enter durable executions or claims.
+    shell_environments: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2430,6 +2482,7 @@ pub struct Store {
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
+    launch_admission: Arc<launch_freeze::Admission>,
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
@@ -2449,6 +2502,7 @@ pub struct Store {
     pub last_fleet_residue: Mutex<Option<(Option<i64>, FleetResidueRecord)>>,
     /// Wakes the daemon's residue count when doctor finds membership moved since the last one.
     pub fleet_residue_wanted: tokio::sync::Notify,
+    pub storage_census: storage_census::State,
 }
 
 /// How often the daemon audits the operation projection against the claim log and counts the
@@ -2908,6 +2962,34 @@ impl Store {
         self.fractal.ivm_views.clone()
     }
 
+    /// Initialize the canonical native source lifetime for producers without shadow views.
+    /// This installs no view, certifies no projection, and preserves existing source
+    /// epochs, event retention and unavailable-state fences.
+    pub fn initialize_native_source_lifecycle(&self) -> Result<()> {
+        static EMPTY: std::sync::LazyLock<smallclaims::ivm::Views> =
+            std::sync::LazyLock::new(|| smallclaims::ivm::Views::new(Vec::new())
+                .expect("empty native source registry is valid"));
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        EMPTY.create_schema(&transaction)?;
+        let cut = match smallclaims::ivm::source_cut(&transaction)? {
+            Some(cut) => cut,
+            None => smallclaims::ivm::SourceCut {
+                epoch: 1, admitted: current_index_tx(&transaction)?, projected: 0, local_generation: 0,
+            },
+        };
+        EMPTY.initialize_empty(&transaction, cut)?;
+        let installed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ivm_event_state')",
+            [], |row| row.get(0),
+        )?;
+        if !installed {
+            smallclaims::ivm::events::install(&transaction, 4096)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open(path, origin, fractal.clone())?;
@@ -2927,9 +3009,12 @@ impl Store {
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2941,7 +3026,10 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2959,9 +3047,12 @@ impl Store {
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2972,7 +3063,10 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2996,15 +3090,21 @@ impl Store {
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
+        storage_census::install(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
+            storage_census: Default::default(),
+            shell_environments: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -4186,7 +4286,7 @@ impl Store {
                     run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
-                    let mut body = serde_json::to_value(mission).map_err(internal)?;
+                    let mut body = mission_publication_body(mission).map_err(internal)?;
                     if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
                     if let Some(provenance) = intent.mission_provenance.get(&mission.id)
                         && let Some(claim) = mission_provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
@@ -4973,6 +5073,13 @@ impl Store {
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<ObservationTrim> {
+        self.storage_census.start();
+        let mut pin_sample = storage_census::PinSample {
+            sampled_at_unix_ms: 0,
+            retention_cutoff_unix_ms: older_than_unix_ms,
+            protected_observations: 0,
+            oldest_pin: None,
+        };
         self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
@@ -4995,12 +5102,12 @@ impl Store {
                 let connection = self.readers.get();
                 let mut statement = connection.prepare_cached(
                     "SELECT id, observed_at_unix_ms,
-                            kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
-                            AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
-                            AND old.id NOT IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
-                            AND EXISTS (SELECT 1 FROM local_observations AS newer
-                                        WHERE newer.subject=old.subject AND newer.kind=old.kind
-                                          AND newer.id>old.id)
+                            CASE WHEN kind IN ('agent.launcher-bound', 'agent.helper-launched')
+                               OR EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                               OR old.id IN (SELECT pending_local_id FROM local_latest_slots WHERE pending_local_id IS NOT NULL)
+                            THEN 1 WHEN EXISTS (SELECT 1 FROM local_observations AS newer
+                                    WHERE newer.subject=old.subject AND newer.kind=old.kind
+                                      AND newer.id>old.id) THEN 2 ELSE 0 END
                      FROM local_observations AS old
                      WHERE observed_at_unix_ms < ?1 AND (observed_at_unix_ms, id) > (?2, ?3)
                      ORDER BY observed_at_unix_ms, id
@@ -5009,11 +5116,23 @@ impl Store {
                 let rows = statement
                     .query_map(
                         params![older_than_unix_ms.min(i64::MAX as u128) as i64, after.0, after.1, TRIM_SCAN_PAGE],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, u8>(2)?)),
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                self.storage_census.scanned(rows.len());
+                for (id, at, state) in &rows {
+                    if *state == 1 {
+                        pin_sample.protected_observations += 1;
+                        if pin_sample.oldest_pin.is_none() {
+                            pin_sample.oldest_pin = Some(storage_census::Pin {
+                                local_id: *id, observed_at_unix_ms: *at,
+                            });
+                        }
+                    }
+                }
                 let last = rows.last().map(|(id, at, _)| (*at, *id));
-                let due: Vec<i64> = rows.iter().filter(|(_, _, due)| *due).map(|(id, _, _)| *id).collect();
+                let due: Vec<i64> = rows.iter().filter(|(_, _, state)| *state == 2)
+                    .map(|(id, _, _)| *id).collect();
                 (due, rows.len() as i64, last)
             };
             #[cfg(test)]
@@ -5040,6 +5159,7 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
             }
             match last {
                 Some(last) if scanned == TRIM_SCAN_PAGE => after = last,
@@ -5092,11 +5212,14 @@ impl Store {
                 drop(connection);
                 longest_writer_hold = longest_writer_hold.max(started.elapsed());
                 deleted += removed;
+                self.storage_census.deleted(removed);
                 if (removed as i64) < chunk {
                     break;
                 }
             }
         }
+        pin_sample.sampled_at_unix_ms = now_ms();
+        self.storage_census.completed(pin_sample);
         Ok(ObservationTrim { deleted, longest_writer_hold })
     }
 
@@ -5134,6 +5257,20 @@ impl Store {
             (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
             (graph, _) => Ok(graph),
         }
+    }
+
+    /// Conversion requests remain replayable after their suspension lineage stops holding a seat.
+    pub fn suspension_manual_request(&self, subject: &str, key: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection.query_row(
+            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
+                    predecessors, accepted_at_unix_ms
+             FROM claims INDEXED BY claims_suspend_manual_request_index
+             WHERE subject=?1 AND json_extract(body,'$.fields.request_key')=?2
+               AND kind='runtime.action.succeeded'
+               AND json_extract(body,'$.fields.operation_status')='manual'",
+            params![subject, key], claim_from_row,
+        ).optional()?)
     }
 
     /// Native occupants of an operation key, including divergent replicated requests.
@@ -6423,6 +6560,64 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    const HOSTED_SUBJECTS_SQL: &str =
+        "SELECT subject, member FROM desired
+         WHERE subject IN (SELECT value FROM json_each(?1)) AND member IS NOT NULL";
+
+    /// Requested subjects whose current member is readable by this build and belongs to
+    /// `host`. Do not read declaration bodies: freshness authorization needs only membership.
+    pub fn hosted_subjects(&self, subjects: &[&str], host: &str) -> Result<BTreeSet<String>> {
+        if subjects.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        for subject in subjects {
+            smallclaims::touched::note_read(|| (*subject).to_owned());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h88521c22b258 owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::HOSTED_SUBJECTS_SQL)?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut hosted = BTreeSet::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row, including unreadable or forward-version members.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                hosted.insert(subject);
+            }
+        }
+        Ok(hosted)
+    }
+
+    /// Declared agents with a readable member on `host`, in subject order. Seek the
+    /// existing host index and decode only matching members, never declaration bodies.
+    pub fn hosted_agents(&self, host: &str) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject, member FROM desired INDEXED BY desired_agent_host_index
+             WHERE kind='agent' AND json_extract(member, '$.host')=?1 ORDER BY subject",
+        )?;
+        let rows = statement.query_map([host], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut agents = Vec::new();
+        for row in rows {
+            let (subject, member) = row?;
+            // Match desired_from_row: future or malformed members are unavailable.
+            if serde_json::from_str::<crate::model::MemberSpec>(&member)
+                .ok()
+                .is_some_and(|member| member.host == host)
+            {
+                agents.push(subject);
+            }
+        }
+        Ok(agents)
+    }
+
     /// The current desired declaration of `subject` and the actor its claim records. A
     /// declaration from before claims recorded their writer, or the daemon's own, has none.
     pub fn desired_subject_with_writer(
@@ -7463,9 +7658,9 @@ impl Store {
     /// - This member's runtime observations, the `runtime.observed` claims its reconciler
     ///   authors. A seat whose newest one is not `absent`, `exited`, `vanished` or `stopped` is
     ///   live here, and is busy unless its newest harness observation names the same incarnation
-    ///   and is quiet. So a live seat with no harness observation, as when harness observations
-    ///   stop reaching the store, is never quiet. A seat that starts inside the span is busy; a
-    ///   seat this member ended no longer counts its last harness state.
+    ///   and is quiet with fresh source evidence under the harness stale/future-skew bounds.
+    ///   A live seat whose harness publisher stops is never confirmed quiet after that evidence expires.
+    ///   A seat this member ended no longer counts its last harness state.
     ///
     /// Returns that, and both sources as of `until_ms` for the next check.
     pub fn local_seats_busy(
@@ -7474,11 +7669,11 @@ impl Store {
         until_ms: u64,
         carried: Option<LocalSeats>,
     ) -> Result<(bool, LocalSeats)> {
-        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, (Option<String>, bool))> {
+        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, LocalHarnessEvidence)> {
             let state: Option<String> = row.get(1)?;
             let jobs: Option<i64> = row.get(2)?;
             let quiet = matches!(state.as_deref(), Some("ready" | "idle" | "blocked" | "ended"));
-            Ok((row.get(0)?, (row.get(3)?, quiet && jobs.unwrap_or(0) <= 0)))
+            Ok((row.get(0)?, (row.get(3)?, quiet && jobs.unwrap_or(0) <= 0, row.get(4)?)))
         }
         fn runtime(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
             Ok((row.get(0)?, row.get(1)?))
@@ -7495,7 +7690,8 @@ impl Store {
                             "SELECT seats.subject,
                                 COALESCE(json_extract(o.body, '$.fields.state'), json_extract(o.body, '$.state')),
                                 json_extract(o.body, '$.fields.background_jobs'),
-                                json_extract(o.body, '$.fields.incarnation_id')
+                                json_extract(o.body, '$.fields.incarnation_id'),
+                                json_extract(o.body, '$.fields.observed_at_ms')
                              FROM (SELECT DISTINCT subject FROM local_observations
                                    WHERE kind='harness.observed') AS seats
                              JOIN local_observations AS o ON o.id=(
@@ -7527,21 +7723,24 @@ impl Store {
                 seats
             }
         };
-        let mut busy = seats.busy();
+        let mut busy = seats.busy(from_ms);
         let within = connection
             .prepare_cached(
                 "SELECT subject,
                     COALESCE(json_extract(body, '$.fields.state'), json_extract(body, '$.state')),
                     json_extract(body, '$.fields.background_jobs'),
-                    json_extract(body, '$.fields.incarnation_id')
+                    json_extract(body, '$.fields.incarnation_id'),
+                    json_extract(body, '$.fields.observed_at_ms'),
+                    observed_at_unix_ms
                  FROM local_observations
                  WHERE observed_at_unix_ms>=?1 AND observed_at_unix_ms<?2 AND kind='harness.observed'
-                 ORDER BY id",
+                 ORDER BY observed_at_unix_ms, id",
             )?
-            .query_map(params![from, until], harness)?
+            .query_map(params![from, until], |row| Ok((harness(row)?, row.get::<_, u64>(5)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (subject, observed) in within {
-            busy |= !observed.1;
+        for ((subject, observed), admitted_at) in within {
+            // A fresh replacement cannot erase an expired-evidence gap earlier in the minute.
+            busy |= seats.busy(admitted_at) || !observed.1;
             seats.harness.insert(subject, observed);
         }
         let (from_text, until_text) = (from.to_string(), until.to_string());
@@ -7558,7 +7757,7 @@ impl Store {
         for (subject, fields) in started {
             busy |= seats.fold_runtime(subject, &fields)?;
         }
-        busy |= seats.busy();
+        busy |= seats.busy(until_ms);
         Ok((busy, seats))
     }
 
@@ -8116,6 +8315,7 @@ fn create_declared_mission_run_tx(
             .map_err(internal)?;
     }
     let mut body = json!({
+        "revision_pinned": !creation.follow_head,
         "fields": {
             "status": "running",
             "admission_publication": admission_publication,
@@ -9643,6 +9843,9 @@ fn validate_claim_cardinality(
 ) -> Result<(), FractalError> {
     let duplicate = match cardinality {
         fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition => false,
+        fractal_schema::Cardinality::Once if kind == observation_minutes::KIND => {
+            observation_minutes::admitted_minute_exists(transaction, subject)?
+        }
         fractal_schema::Cardinality::Once => transaction
             .query_row(
                 "SELECT 1 FROM claims WHERE subject=?1 AND kind=?2 LIMIT 1",
@@ -11273,7 +11476,7 @@ pub fn desired_lineage_from_tx(
 }
 
 /// `desired_lineage_from_tx` over the claims accepted at or before `at`.
-fn desired_lineage_from_at_tx(
+pub(crate) fn desired_lineage_from_at_tx(
     connection: &Connection,
     mut current: String,
     equivalent: fn(&Value, &Value) -> bool,
@@ -12181,6 +12384,10 @@ fn replicated_work_validation_fields<'a>(
     if kind == "mission.published"
         && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
     {
+        let scoped = crate::mission::declares_per_run_missions(&mission);
+        if scoped != (body.pointer("/fields/per_run_missions").and_then(Value::as_u64) == Some(1)) {
+            return Err(anyhow::anyhow!("per-run-missions-marker: mission publication must carry its derived per_run_missions=1 marker"));
+        }
         mission_capacity::validate_mission(transaction, origin, &mission).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
@@ -12407,6 +12614,17 @@ fn normalize_local_projection_timestamps_tx(
     Ok(())
 }
 
+/// Keep the historical raw mission body for projectors, and persist explicit schema fields
+/// for scoped outputs so older admission code sees (and refuses) the new marker.
+pub fn mission_publication_body(mission: &MissionSpec) -> Result<Value> {
+    let mut body = serde_json::to_value(mission)?;
+    if crate::mission::declares_per_run_missions(mission) {
+        let fields = schema_fields_for_body("mission.published", &body)?;
+        body["fields"] = serde_json::to_value(fields)?;
+    }
+    Ok(body)
+}
+
 pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, Value>> {
     if let Some(fields) = body.get("fields").and_then(Value::as_object) {
         return Ok(fields
@@ -12429,11 +12647,17 @@ pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<Strin
     }
     if kind == "mission.published" {
         let mission: MissionSpec = serde_json::from_value(body.clone())?;
-        return Ok(BTreeMap::from([
+        let mut fields = BTreeMap::from([
             ("revision".into(), Value::String(mission.revision.clone())),
             ("state".into(), serde_json::to_value(&mission.state)?),
             ("body".into(), body.clone()),
-        ]));
+        ]);
+        // This closed-schema marker prevents old replicas from selecting the revision
+        // and treating its run template as a shared literal mission identity.
+        if crate::mission::declares_per_run_missions(&mission) {
+            fields.insert("per_run_missions".into(), Value::from(1));
+        }
+        return Ok(fields);
     }
     Ok(body
         .as_object()
@@ -17858,6 +18082,12 @@ fn rebuild_base_aggregate_tx(
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE subject=?1)", [subject], |row| row.get(0),
+        ).map_err(internal)?;
+        if !retained {
+            runtime_cleanup::forget_subject(transaction, subject).map_err(internal)?;
+        }
     }
     Ok(())
 }
@@ -22410,7 +22640,7 @@ pub fn step_execution_timing_at(
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
     Ok(fold_step_timing(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22425,7 +22655,7 @@ pub fn step_execution_clock_at(
     currently_active: bool,
 ) -> rusqlite::Result<StepTiming> {
     Ok(fold_step_clock(
-        &step_timing_events(connection, subject)?,
+        &shared_step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
         currently_active,
@@ -22442,6 +22672,15 @@ pub fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
+    Ok(shared_step_timing_events(connection, subject)?.as_ref().clone())
+}
+
+/// Borrow the immutable history for clock folds without cloning its JSON bodies. Only the
+/// history is reused: attempt, snapshot time, and active state are folded on every read.
+fn shared_step_timing_events(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<Arc<Vec<(String, Value, u128)>>> {
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
     // A committed read of a database file keys the events on the newest index and the count of
@@ -22469,7 +22708,7 @@ pub fn step_timing_events(
             .filter(|(kept, _)| *kept == key)
             .map(|(_, events)| events.clone())
     {
-        return Ok(events.as_ref().clone());
+        return Ok(events);
     }
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha579e98adb61 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
@@ -22488,7 +22727,7 @@ pub fn step_timing_events(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
-    let events = events
+    let events = Arc::new(events
         .into_iter()
         .map(|(kind, body, accepted)| {
             (
@@ -22497,13 +22736,13 @@ pub fn step_timing_events(
                 accepted.parse::<u128>().unwrap_or(0),
             )
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>());
     if let (Some(file), Some(key)) = (file, key) {
         let mut kept = STEP_TIMING_EVENTS.lock().unwrap_or_else(PoisonError::into_inner);
         if kept.len() >= ACTUAL_CACHE_LIMIT && !kept.contains_key(&file) {
             kept.clear();
         }
-        kept.insert(file, (key, Arc::new(events.clone())));
+        kept.insert(file, (key, Arc::clone(&events)));
     }
     Ok(events)
 }
@@ -22850,8 +23089,8 @@ pub fn apply_effective_step_state_with_owner(
         run_phase,
         current_generation,
         generation_status,
-        root_status,
-        root_phase,
+        _root_status,
+        _root_phase,
     )) = owner
     else {
         return Ok(());
@@ -22874,13 +23113,13 @@ pub fn apply_effective_step_state_with_owner(
             }
         }
     }
+    // Cancellation is a durable owner/generation transition, not a presentation
+    // inference from the root. The shared descendant traversal performs that transition.
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
         || run_phase == "terminal"
         || is_terminal_generation_state(&generation_status)
         || generation_id != current_generation
-        || is_terminal_run_state(&root_status)
-        || root_phase == "terminal"
     {
         if !matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
             view.status = "cancelled".into();
@@ -23087,8 +23326,17 @@ pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
+    // A root owns subscription deliveries by root identity, even though their
+    // synthetic parent subjects have no step_runs row. Keep generation-scoped
+    // ordinary child traversal for non-root runs and revision retirement.
     let mut statement = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h2f4e2cad1b68 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+        /* sqlite-large-value: allow-for-now lv-hd5e2a1b1feaa owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+           SELECT child.id
+           FROM run_generations generation
+           JOIN mission_runs root ON root.id=generation.run_id AND root.root_run_id=root.id
+           JOIN mission_runs child ON child.root_run_id=root.id AND child.id<>root.id
+           WHERE generation.id=?1
+           UNION
            SELECT child.id
            FROM mission_runs child
            JOIN step_runs parent_step ON parent_step.subject=child.parent_step_run
@@ -24564,6 +24812,9 @@ pub struct ClaimCommitContext<'a> {
     pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Suspension/launch frontier read with an admitted mailbox staged/delivered decision.
+    /// Revalidate under the receipt writer lock so quiescing cannot race intake.
+    pub mailbox_intake_frontier: Option<u64>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
     /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
@@ -24619,6 +24870,9 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        if input.kind == observation_minutes::KIND {
+            return Err(FractalError::new("claim-write-forbidden", "phone minutes require authenticated observation admission"));
+        }
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
@@ -24744,6 +24998,15 @@ pub fn append_claim_with_commit_context(
             let fence = normalized_fence.as_deref();
             let settled_receipt = if let Some(fence) = fence {
                 check_mailbox_fence(transaction, fence, &graph.origin)?;
+                if let Some(frontier) = context.mailbox_intake_frontier
+                    && matches!(input.kind.as_str(), "message.staged" | "message.delivered")
+                    && crate::suspension::mailbox_intake_index(transaction, &fence.subject).map_err(internal)? != frontier
+                {
+                    return Err(FractalError::new(
+                        "seat-suspension-changed",
+                        "the seat's suspension or launch changed before delivery was recorded",
+                    ));
+                }
                 let index = transaction.query_row(
                     "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),

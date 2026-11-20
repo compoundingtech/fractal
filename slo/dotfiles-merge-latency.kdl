@@ -1,0 +1,31 @@
+version 2
+
+// Apply explicitly; this policy does not activate an observer or mutate a merge queue.
+// Only independently evidenced, exact-head Route-A GO completions qualify.
+objective "landing/merge-latency/dotfiles/p50" {
+  about "At least 50% of independently approved dotfiles merges complete within 600 seconds of GO"
+  indicator "ratio" {
+    subject-prefix "custom/landing/dotfiles/merged/"
+    event "custom.landing.dotfiles-merged" at="mergedAt"
+    value "durationSeconds" bad-above=600
+    only "goSource" "route-a-exact-head"
+  }
+  budget allowance=0.5 horizon="30d" min-coverage=1 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}
+
+objective "landing/merge-latency/dotfiles/p95" {
+  about "At least 95% of independently approved dotfiles merges complete within 1800 seconds of GO"
+  indicator "ratio" {
+    subject-prefix "custom/landing/dotfiles/merged/"
+    event "custom.landing.dotfiles-merged" at="mergedAt"
+    value "durationSeconds" bad-above=1800
+    only "goSource" "route-a-exact-head"
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=1 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+}

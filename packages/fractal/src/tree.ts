@@ -86,12 +86,13 @@ const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   schedule: 'A schedule file must declare a mission with a schedule',
 }
 
-/** A fleet declares claim indicators named `NAMESPACE/NAME`; built-in telemetry is reserved. */
+/** Fleet declarations use namespaced claim, source-backed or native-binding objectives. */
 const declaredObjective = (id: string) =>
-  `A declared objective is an interval, count, ratio, gauge or native binding named NAMESPACE/NAME; objective/${id} is not`
+  `A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/${id} is not`
 
 const declarable = (kind: unknown): boolean =>
-  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' || kind === 'native'
+  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' ||
+  kind === 'native' || kind === 'github-merged-count' || kind === 'github-ready-to-merged'
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>
   typeof value === 'object' && value !== null && '_tag' in value && value._tag === 'SubjectRef'
@@ -350,6 +351,8 @@ const programDeclaration = Effect.fnUntraced(function* ({
     state: 'ready',
     reportTo: intent.reportTo,
     goal: intent.goal,
+    ...(intent.resources === undefined ? {} : { resources: intent.resources }),
+    ...(intent.docs === undefined ? {} : { docs: intent.docs }),
     ...('budget' in intent ? { budget: intent.budget } : {}),
     ...('declaredPriority' in intent ? { declaredPriority: intent.declaredPriority } : {}),
     ...('declaredLane' in intent ? { declaredLane: intent.declaredLane } : {}),

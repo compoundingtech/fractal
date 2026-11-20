@@ -10,7 +10,7 @@ mission "factory/land-program" report-to="agent/factory" state="ready" timeout="
     write "resource/factory/*"
   }
   step "program" timeout="2h" {
-    program "/bundles/a63d3923f28021503b71f523794043632617b6c5d1a64f6b34482a6e00f9fd6b.mjs" sha256="a63d3923f28021503b71f523794043632617b6c5d1a64f6b34482a6e00f9fd6b" stalled-after="10m"
+    program "/bundles/3085810aa23e3657560e8a00aa022046b388c869ee3445c028b7581fd263cdfc.mjs" sha256="3085810aa23e3657560e8a00aa022046b388c869ee3445c028b7581fd263cdfc" stalled-after="10m"
     retry {
       attempts 4
       delays "2m" "10m" "30m"

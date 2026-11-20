@@ -59,4 +59,4 @@ if printf '%s\n' "$short_spaced" | \
   echo 'short manual samples incorrectly passed the quiet-window gate' >&2
   exit 1
 fi
-printf 'st3 idle soak report tests passed\n'
+printf 'Fractal idle soak report tests passed\n'

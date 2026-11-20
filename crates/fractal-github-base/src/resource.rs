@@ -41,6 +41,8 @@ pub struct ObservationRequest {
     /// Where a `github.repository` observation with `main_performance_failures` records each
     /// recent completed Workspace CI run, once. Without one, no CI run is read.
     pub workflow_runs: Option<Arc<dyn WorkflowRunLedger>>,
+    /// Claim-backed history acquisition, independent of operational collection fields.
+    pub github_capture: Option<Arc<dyn crate::github_capture::GitHubCaptureLedger>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -937,7 +939,7 @@ async fn github_listing_at_field(
 
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
-async fn github_graphql_with_cache_eligibility(
+pub(crate) async fn github_graphql_with_cache_eligibility(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,
@@ -945,7 +947,23 @@ async fn github_graphql_with_cache_eligibility(
     variables: Value,
 ) -> Result<(Value, bool)> {
     let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
-    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
+    github_poll::read(key, async {
+        let (data, _, cacheable) = github_graphql_read(client, api_base, token, query, variables, false).await?;
+        Ok((data, cacheable))
+    }).await
+}
+
+/// Resolve observer identities, accepting only NOT_FOUND errors at null nodes of this batch.
+async fn github_graphql_nodes(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &GithubAuth,
+    query: &str,
+    ids: &[&String],
+) -> Result<(Value, Vec<String>, bool)> {
+    let variables = json!({"ids": ids});
+    let key = format!("GraphQL nodes {} {api_base} {query} {variables}", token.cache_principal());
+    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables, true)).await
 }
 
 async fn github_graphql_read(
@@ -954,7 +972,8 @@ async fn github_graphql_read(
     token: &GithubAuth,
     query: &str,
     variables: Value,
-) -> Result<(Value, bool)> {
+    resolve_nodes: bool,
+) -> Result<(Value, Vec<String>, bool)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
@@ -964,6 +983,7 @@ async fn github_graphql_read(
     let cacheable = crate::github_http::read_response_cacheable(&response);
     let headers = response.headers().clone();
     let body = response.json::<Value>().await?;
+    let mut not_found = Vec::new();
     if let Some(errors) = body
         .get("errors")
         .and_then(Value::as_array)
@@ -982,26 +1002,44 @@ async fn github_graphql_read(
                 status: 200,
             });
         }
-        let details = errors.iter().map(|error| {
-            let message = error.get("message").and_then(Value::as_str).unwrap_or("an unnamed error");
-            let kind = error.get("type").and_then(Value::as_str);
-            let path = error.get("path").and_then(Value::as_array).map(|segments|
-                segments.iter().map(|segment| segment.as_str().map_or_else(|| segment.to_string(), str::to_owned))
-                    .collect::<Vec<_>>().join("."));
-            match (kind, path) {
-                (Some(kind), Some(path)) => format!("{message} ({kind} at {path})"),
-                (Some(kind), None) => format!("{message} ({kind})"),
-                (None, Some(path)) => format!("{message} (at {path})"),
-                (None, None) => message.to_owned(),
+        let all_missing_nodes = resolve_nodes && errors.iter().all(|error| {
+            if error.get("type").and_then(Value::as_str) != Some("NOT_FOUND") {
+                return false;
             }
-        }).collect::<Vec<_>>().join("; ");
-        bail!("GitHub GraphQL refused the query: {details}");
+            let Some(path) = error.get("path").and_then(Value::as_array) else { return false; };
+            if path.len() != 2 || path[0] != "nodes" { return false; }
+            let Some(index) = path[1].as_u64().and_then(|index| usize::try_from(index).ok()) else { return false; };
+            let Some(id) = variables.get("ids").and_then(Value::as_array)
+                .and_then(|ids| ids.get(index)).and_then(Value::as_str) else { return false; };
+            if body.pointer("/data/nodes").and_then(Value::as_array)
+                .and_then(|nodes| nodes.get(index)) != Some(&Value::Null) {
+                return false;
+            }
+            not_found.push(id.to_owned());
+            true
+        });
+        if !all_missing_nodes {
+            let details = errors.iter().map(|error| {
+                let message = error.get("message").and_then(Value::as_str).unwrap_or("an unnamed error");
+                let kind = error.get("type").and_then(Value::as_str);
+                let path = error.get("path").and_then(Value::as_array).map(|segments|
+                    segments.iter().map(|segment| segment.as_str().map_or_else(|| segment.to_string(), str::to_owned))
+                        .collect::<Vec<_>>().join("."));
+                match (kind, path) {
+                    (Some(kind), Some(path)) => format!("{message} ({kind} at {path})"),
+                    (Some(kind), None) => format!("{message} ({kind})"),
+                    (None, Some(path)) => format!("{message} (at {path})"),
+                    (None, None) => message.to_owned(),
+                }
+            }).collect::<Vec<_>>().join("; ");
+            bail!("GitHub GraphQL refused the query: {details}");
+        }
     }
     let data = body.get("data")
         .filter(|data| !data.is_null())
         .cloned()
         .context("the GitHub GraphQL response has no data")?;
-    Ok((data, cacheable))
+    Ok((data, not_found, cacheable))
 }
 
 pub use crate::github_http::GITHUB_AUTH_REMEDY;
@@ -1302,6 +1340,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_resolution_only_accepts_not_found_at_a_requested_null_node() {
+        let missing = json!({"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Could not resolve node"});
+        for errors in [
+            json!([{"type": "FORBIDDEN", "path": ["nodes", 0]}]),
+            json!([{"type": "FORBIDDEN"}]),
+            json!([{"type": "UNAUTHORIZED"}]),
+            json!([missing.clone(), {"type": "FORBIDDEN", "path": ["nodes", 1]}]),
+            json!([{"type": "NOT_FOUND"}]),
+            json!([{"type": "NOT_FOUND", "path": ["repository"]}]),
+            json!([{"type": "NOT_FOUND", "path": ["nodes", 2]}]),
+            json!([{"type": "NOT_FOUND", "path": ["nodes", 0, "id"]}]),
+            json!([{"type": "NOT_FOUND", "path": ["nodes", "0"]}]),
+            json!([{"type": "NOT_FOUND", "path": ["nodes", 1]}]),
+            json!([missing.clone(), {"type": "RATE_LIMITED"}]),
+        ] {
+            let body = json!({"data": {"nodes": [null, {"id": "I_live"}]}, "errors": errors});
+            let fixture = crate::github_http::app_read::tests::server(move |_, _, _| {
+                (reqwest::StatusCode::OK, body.clone())
+            }).await;
+            let ids = ["I_gone".to_owned(), "I_live".to_owned()];
+            let error = github_graphql_nodes(&reqwest::Client::new(), &fixture.base,
+                &GithubAuth::test("fixture-pat"), "query($ids:[ID!]!){nodes(ids:$ids){id}}",
+                &[&ids[0], &ids[1]]).await.unwrap_err();
+            if errors.as_array().unwrap().iter().any(|error| error["type"] == "RATE_LIMITED") {
+                assert!(error.downcast_ref::<ProviderRateLimit>().is_some(), "{error}");
+            } else {
+                assert!(error.to_string().contains("GitHub GraphQL refused"), "{error}");
+            }
+        }
+        // The ordinary query API still rejects partial NOT_FOUND responses.
+        let fixture = crate::github_http::app_read::tests::server(move |_, _, _| {
+            (reqwest::StatusCode::OK, json!({"data": {"nodes": [null]}, "errors": [missing]}))
+        }).await;
+        assert!(github_graphql_with_cache_eligibility(&reqwest::Client::new(), &fixture.base,
+            &GithubAuth::test("fixture-pat"), "query($ids:[ID!]!){nodes(ids:$ids){id}}",
+            json!({"ids": ["I_gone"]})).await.is_err());
+    }
+
+    #[tokio::test]
     async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {
         use crate::github_http::app_read::{select, tests::{install, server}};
         let root = tempfile::tempdir().unwrap();
@@ -1499,6 +1576,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1546,6 +1624,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1623,6 +1702,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1647,6 +1727,7 @@ mod tests {
                 refresh: false,
                 webhook_covered: false,
                 workflow_runs: None,
+                github_capture: None,
             })
             .await
             .unwrap();
@@ -1703,6 +1784,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1738,7 +1820,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None, github_capture:None };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1833,6 +1915,7 @@ mod tests {
                     refresh: false,
                     webhook_covered: false,
                     workflow_runs: None,
+                    github_capture: None,
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),

@@ -27,6 +27,8 @@ pub struct SignatureMigration {
     pub started_at_unix_ms: u128,
     pub advanced_at_unix_ms: u128,
     pub completed_work: u64,
+    /// Storage compaction is independent of authorization-model readiness.
+    pub references_pending: bool,
 }
 
 /// A person's (or the fleet fault agent's) word that the local defect behind a persisted
@@ -99,6 +101,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
         }
     }
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hdffe34d55f09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ PRINCIPAL_SCHEMA)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h175963f1dc4a owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ dependencies::SCHEMA)?;
     // Compatibility with the earlier unpublished candidate-schema revision.
     let has_model: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='serving_legacy')", [], |row| row.get(0))?;
     if !has_model {
@@ -123,12 +126,13 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
         transaction
             .execute_batch(/* sqlite-large-value: allow-for-now lv-h0b6c2706008f owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE claim_signature_migration ADD COLUMN legacy_fault TEXT;")?;
     }
+    references::initialize_schema(&transaction)?;
     initialize_selection(&transaction)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a3a869aa34 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET started_at_unix_ms=?1,advanced_at_unix_ms=?1 WHERE id=1 AND started_at_unix_ms=0",[i64::try_from(now_ms())?])?;
-    // Previously released builds accept only versions through 19. Commit the incompatibility marker
-    // with the renamed relations, before any later runtime-schema work can fail.
+    // Reader-first rollout keeps the default v20 format. Never downgrade the marker
+    // of an explicitly activated reference/dependency store while installing readers.
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != CURRENT_SCHEMA_VERSION {
+    if version < CURRENT_SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }
     transaction.commit()?;
@@ -159,11 +163,13 @@ pub(crate) fn initialize_selection(connection: &Connection) -> Result<()> {
 }
 
 fn state(connection: &Connection) -> Result<SignatureMigration> {
-    let report=connection.prepare_cached("SELECT phase,cursor,legacy_through,envelopes_through,fault,envelope_row,claim_offset,serving_legacy,started_at_unix_ms,advanced_at_unix_ms,completed_work,legacy_fault FROM claim_signature_migration WHERE id=1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hce707025d424 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ [], |row| Ok(SignatureMigration {
+    let mut report=connection.prepare_cached("SELECT phase,cursor,legacy_through,envelopes_through,fault,envelope_row,claim_offset,serving_legacy,started_at_unix_ms,advanced_at_unix_ms,completed_work,legacy_fault FROM claim_signature_migration WHERE id=1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4a79cf8dc161 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ [], |row| Ok(SignatureMigration {
             phase: row.get(0)?, cursor: row.get(1)?, legacy_through: row.get(2)?,
             envelopes_through: row.get(3)?, fault: row.get(4)?, processed: 0, envelope_row:row.get(5)?,claim_offset:row.get(6)?,serving_legacy:row.get(7)?, started_at_unix_ms:row.get::<_,u64>(8)? as u128, advanced_at_unix_ms:row.get::<_,u64>(9)? as u128, completed_work:row.get(10)?,legacy_fault:row.get(11)?,
+            references_pending: false,
         }))?;
+    report.references_pending = references::pending(connection)?;
     anyhow::ensure!(
         matches!(
             report.phase.as_str(),
@@ -287,6 +293,16 @@ impl Store {
     }
     fn advance_signature_migration_inner(&self) -> Result<SignatureMigration> {
         let captured = self.signature_migration()?;
+        if captured.done() && captured.references_pending && captured.fault.is_none() {
+            let mut connection = self.connection.write_background();
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let count = references::advance_page(&tx)?;
+            note_work(&tx, count)?;
+            let mut report = state(&tx)?;
+            report.processed = count;
+            tx.commit()?;
+            return Ok(report);
+        }
         if captured.done() || captured.phase == "judging" || captured.fault.is_some() {
             return Ok(captured);
         }
@@ -310,8 +326,9 @@ impl Store {
                 "claim_signatures"
             };
             let rows=self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h35d80536dc09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ &format!("SELECT rowid,claim_id,signature FROM {table} WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT ?3"))?
-                .query_map(params![captured.cursor,captured.legacy_through,LEGACY_PAGE as i64],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            for (rowid, claim_id, text) in rows {
+                .query_map(params![captured.cursor,captured.legacy_through,LEGACY_PAGE as i64],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,SqlValue>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for (rowid, claim_id, value) in rows {
+                let text = references::resolve(&self.readers.get(), &claim_id, value)?;
                 match serde_json::from_str::<ClaimSignature>(&text) {
                     Ok(signature) => candidates.push((claim_id.clone(), signature, None)),
                     Err(error) => {

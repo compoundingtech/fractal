@@ -118,7 +118,7 @@ CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_run
 }
 
 thread_local! {
-    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64)>> = const { std::cell::RefCell::new(None) };
+    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64,u64)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

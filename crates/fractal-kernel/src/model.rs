@@ -513,6 +513,31 @@ pub fn declared_agent_lifecycle(desired: Option<&Value>) -> Option<AgentLifecycl
     AgentLifecycle::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
 }
 
+/// Authored idle-suspend participation, independent of the seat's launch contract.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentIdleSuspend {
+    Never,
+    Member,
+}
+
+impl AgentIdleSuspend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "never" => Some(Self::Never),
+            "member" => Some(Self::Member),
+            _ => None,
+        }
+    }
+}
+
+/// Absence and `member` inherit the current host policy; `never` opts this seat out.
+pub fn declared_idle_suspend(desired: Option<&Value>) -> Option<AgentIdleSuspend> {
+    let child = desired?.get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("idle-suspend"))?;
+    AgentIdleSuspend::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
+}
+
 /// Presentation is independent of the durable seat identity.
 pub fn effective_agent_name<'a>(subject: &'a str, desired: Option<&'a Value>) -> &'a str {
     desired.and_then(|desired| {
@@ -918,6 +943,10 @@ pub struct StepSpec {
 pub struct ResourceLaneSpec {
     pub name: String,
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
     pub max_members: u32,
     pub capacity: Option<fractal_runtime::Capacity>,
     pub coverage: ResourceLaneCoverage,
@@ -1381,6 +1410,9 @@ pub struct NamedCancellation {
 pub struct MissionRunCreation {
     pub mission: String,
     pub revision: String,
+    /// The exact revision was resolved for admission, not explicitly pinned by the caller.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow_head: bool,
     pub workspace: String,
     pub requester: String,
     #[serde(default)]

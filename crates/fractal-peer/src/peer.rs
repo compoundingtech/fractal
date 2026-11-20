@@ -828,39 +828,8 @@ impl ClientRelay {
         peer: &PeerConfig,
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
-        let required = match &request.request {
-            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
-            ClientReadOperation::Timeline { session_id, .. }
-            | ClientReadOperation::ConversationContent { session_id, .. }
-            | ClientReadOperation::ConversationChanges { session_id, .. }
-                if session_id.starts_with("session/external-child-") =>
-            {
-                Some(("session-detail-child-id", 1))
-            }
-            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
-            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
-            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
-            _ => None,
-        };
-        if let Some((id, version)) = required {
-            let capabilities = self.send_http(peer, request, true).await?;
-            if !capabilities["capabilities"].as_array().is_some_and(|items| {
-                items.iter().any(|item| item["id"] == id
-                    && item["version"] == version && item["state"] == "granted")
-            }) {
-                return Err(client_read_unsupported(&request.request).into());
-            }
-        }
-        self.send_http(peer, request, false).await
-    }
-
-    async fn send_http(
-        &self,
-        peer: &PeerConfig,
-        request: &ClientReadRequest,
-        inspect_capabilities: bool,
-    ) -> Result<serde_json::Value> {
-        let name = peer.name.as_str();
+        // Resolve the transport once for this attempt. Capability inspection and the
+        // operation use the same tunnel, but each still has its own signed exchange.
         let url = match parse_route(&peer.url).context("invalid peer client route")? {
             Route::Http(url) => url,
             Route::Fabric { node, protocol } => {
@@ -881,6 +850,40 @@ impl ClientRelay {
                 format!("http://{address}")
             }
         };
+        let required = match &request.request {
+            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
+            ClientReadOperation::Timeline { session_id, .. }
+            | ClientReadOperation::ConversationContent { session_id, .. }
+            | ClientReadOperation::ConversationChanges { session_id, .. }
+                if session_id.starts_with("session/external-child-") =>
+            {
+                Some(("session-detail-child-id", 1))
+            }
+            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
+            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
+            _ => None,
+        };
+        if let Some((id, version)) = required {
+            let capabilities = self.send_http(peer, &url, request, true).await?;
+            if !capabilities["capabilities"].as_array().is_some_and(|items| {
+                items.iter().any(|item| item["id"] == id
+                    && item["version"] == version && item["state"] == "granted")
+            }) {
+                return Err(client_read_unsupported(&request.request).into());
+            }
+        }
+        self.send_http(peer, &url, request, false).await
+    }
+
+    async fn send_http(
+        &self,
+        peer: &PeerConfig,
+        url: &str,
+        request: &ClientReadRequest,
+        inspect_capabilities: bool,
+    ) -> Result<serde_json::Value> {
+        let name = peer.name.as_str();
         // A relayed read may pass through more nodes, each waiting a little less than the last.
         let timeout = CLIENT_READ_TIMEOUT
             + request.request.wait()
@@ -1937,6 +1940,7 @@ impl Backend for MainBackend {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
         carrier: smallclaims::replication::ReplicationCarrier,
+        authenticated_member_key: Option<&str>,
     ) -> Result<ReplicationReceiveResponse> {
         let started = std::time::Instant::now();
         self.client
@@ -1948,6 +1952,7 @@ impl Backend for MainBackend {
                     exchange: exchange.clone(),
                     round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
                     carrier,
+                    authenticated_member_key: authenticated_member_key.map(str::to_owned),
                 },
             )
             .await.map_err(|error| Self::exchange_error(

@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn agent_review_resolver_unknown() {
         let store = Store::open_memory("example").unwrap();
-        for reviewer in [REVIEWER, "agent/example/st-run-value-reviewer"] {
+        for reviewer in [REVIEWER, "agent/example/fractal-run-value-reviewer"] {
             let error =
                 resolve_reviewer(&empty_scope(), &store.connection.write(), reviewer).unwrap_err();
             assert_eq!(error.code, "reviewer-unknown");
