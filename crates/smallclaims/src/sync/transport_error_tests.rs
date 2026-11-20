@@ -155,7 +155,7 @@ async fn fresh_connection_retry_is_once_and_does_not_retry_received_headers_or_o
     for (path, response) in [
         (EXCHANGE_PATH, None),
         (EXCHANGE_PATH, Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".as_slice())),
-        (CHECKPOINT_PATH, None),
+        (crate::sync::ANSWERS_PATH, None),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

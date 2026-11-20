@@ -286,6 +286,9 @@ fn store_candidate_tx(
     if update_legacy {
         legacy::store_claim_signature_tx(connection, claim_id, signature)?;
     }
+    // A compacted claim's facade becomes a candidate again first, so an exact duplicate
+    // compares equal and a different second candidate is judged beside it.
+    compaction::expand_tx(connection, claim_id)?;
     let text = serde_json::to_string(signature)?;
     let (added, reference) = references::insert_candidate(
         connection, claim_id, &text, &signature.key, &signature.nonce,
@@ -342,12 +345,20 @@ fn store_candidate_tx(
 }
 
 fn signature_candidates(connection: &Connection, claim_id: &str) -> Result<Vec<ClaimSignature>> {
-    connection
+    let candidates = connection
         .prepare_cached(
             "SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 ORDER BY signature",
         )?
         .query_map([claim_id], |row| row.get::<_, String>(0))?
         .map(|text| Ok(serde_json::from_str(&text?)?))
+        .collect::<Result<Vec<_>>>()?;
+    if !candidates.is_empty() {
+        return Ok(candidates);
+    }
+    // A compacted claim's facade is its single candidate.
+    compaction::facade(connection, claim_id)?
+        .map(|text| Ok(serde_json::from_str(&text)?))
+        .into_iter()
         .collect()
 }
 
@@ -361,6 +372,7 @@ fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
     )
 }
 
+mod compaction;
 mod dependencies;
 mod judging;
 mod legacy;
@@ -716,7 +728,8 @@ impl Facts for StoreFacts<'_> {
             .prepare_cached(
                 "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind=?2
                    AND json_extract(claims.body, '$.fields.key')=?3
-                   AND EXISTS(SELECT 1 FROM claim_signature_candidates WHERE claim_id=claims.id)",
+                   AND (EXISTS(SELECT 1 FROM claim_signature_candidates WHERE claim_id=claims.id)
+                        OR EXISTS(SELECT 1 FROM claim_signatures WHERE claim_id=claims.id))",
             )
             .and_then(|mut statement| {
                 statement
@@ -983,6 +996,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     for table in [
         "claim_signatures",
         "claim_signature_candidates",
+        // A compacted claim (version 26) has no candidate row whose trigger would drop it.
+        "claim_signature_counts",
         "claim_signature_nonce_uses",
         "claim_signature_judging",
         "claim_verdicts",
@@ -2045,10 +2060,11 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h645d37687e9f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
+                /* sqlite-large-value: allow-for-now lv-hc2baa97461fe owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
                  DELETE FROM claim_verdict_dependency_edges; DELETE FROM claim_verdict_dependency_keys;
                  DELETE FROM claim_verdict_queue;
-                 INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;",
+                 INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;
+                 INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT claim_id FROM claim_signatures;",
             )?;
             transaction.execute(
                 /* sqlite-large-value: allow-for-now lv-h4e5e7d6674c0 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1 OR (key>=?2 AND key<?3)",

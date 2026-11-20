@@ -421,13 +421,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/shard/{shard}/wake",
         "drains the messages shard backlog; the shard stays empty until the stream writer",
     ),
-    // Checkpoints: the trim is measured directly, per deleted row.
-    (
-        "POST /v1/checkpoint/plan",
-        "plans a checkpoint over the whole sealed set, by design",
-    ),
-    ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
-    ("POST /v1/checkpoint/resume", "checkpoint agreement"),
+    // The trim is measured directly, per deleted row.
+    ("POST /v1/checkpoint/resume", "a person's word after a trim stopped: one state row"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
@@ -435,14 +430,6 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
     ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
-    (
-        "POST /v1/internal/replication/checkpoint",
-        "pages a trimmed checkpoint's manifest",
-    ),
-    (
-        "POST /v1/internal/replication/checkpoint-adopt",
-        "adopts a peer's checkpoint",
-    ),
     (
         "POST /v1/internal/replication/answers",
         "answers from a cache filled off the request path; filling it reads every claim, once a day by design",
@@ -1296,7 +1283,6 @@ const PROBES: &[Probe] = &[
         "GET /v1/replication/records/{*record}",
         "/v1/replication/records/{record}",
     ),
-    get("GET /v1/checkpoint/status", "/v1/checkpoint/status"),
     get(
         "GET /v1/internal/fleet/membership",
         "/v1/internal/fleet/membership",
@@ -1637,11 +1623,6 @@ const PROBES: &[Probe] = &[
                 "round_trip_ms": 5,
             })
         },
-    ),
-    post(
-        "POST /v1/internal/replication/checkpoint-need",
-        "/v1/internal/replication/checkpoint-need",
-        |_, _| json!({}),
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
@@ -5028,7 +5009,6 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
             &plan.drop_digest,
             &plan.envelopes,
             &plan.claims,
-            false,
             &mut actions,
         );
         let spent = work::total() - before;

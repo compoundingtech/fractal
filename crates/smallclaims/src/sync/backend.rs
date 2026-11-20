@@ -1,5 +1,5 @@
-//! What the sync worker asks of the store it keeps in step: export and receive exchanges, serve
-//! and adopt checkpoints, publish endpoints, redeem invites, and read membership.
+//! What the sync worker asks of the store it keeps in step: export and receive exchanges,
+//! publish endpoints, redeem invites, and read membership.
 
 use std::borrow::Borrow;
 use std::future::Future;
@@ -17,10 +17,7 @@ use crate::replication::{
     ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
     ReplicationReceiveResponse,
 };
-use crate::store::{
-    CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest, FleetRedemption, Store,
-};
+use crate::store::{FleetRedemption, Store};
 
 /// The store the worker syncs, as the worker reaches it. Every call may cross a process
 /// boundary, so each takes and returns plain values.
@@ -72,20 +69,6 @@ pub trait Backend: Clone + Send + Sync + 'static {
         carrier: crate::replication::ReplicationCarrier,
         authenticated_member_key: Option<&str>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
-
-    fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> impl Future<Output = Result<CheckpointManifestPage>> + Send;
-
-    fn checkpoint_need(
-        &self,
-    ) -> impl Future<Output = Result<Option<CheckpointManifestNeed>>> + Send;
-
-    fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> impl Future<Output = Result<Vec<CheckpointAction>>> + Send;
 
     fn publish_endpoints(
         &self,
@@ -263,26 +246,6 @@ where
             })
         }))
         .await?
-    }
-
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        self.store().checkpoint_manifest_page(request)
-    }
-
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        self.store().checkpoint_manifest_need()
-    }
-
-    async fn adopt_checkpoint(
-        &self,
-        manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>> {
-        self.store()
-            .adopt_checkpoint(manifest)
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
     }
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {

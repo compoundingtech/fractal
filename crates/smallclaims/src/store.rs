@@ -18,7 +18,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, param
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use uuid::Uuid;
 
 use crate::claim::{
     ClaimInput, ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
@@ -70,8 +69,6 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
-mod known_writers_tests;
-#[cfg(test)]
 mod fleet_residue_page_tests;
 #[cfg(test)]
 mod claims_in_order_tests;
@@ -88,6 +85,8 @@ pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
 mod binary_payloads;
+pub mod record_bytes;
+pub mod member_signatures;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
@@ -97,13 +96,10 @@ mod saved_inventory_tests;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
 pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
-#[cfg(feature = "test-support")]
-pub use checkpoint_space::checkpoint_test_fixture_headroom;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
-pub mod checkpoint_accounting;
 pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
@@ -132,23 +128,18 @@ pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 pub use canonical::{CANONICAL_ORDER, CANONICAL_ORDER_DESC, canonical_sql};
 pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
-    CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
-    CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
-    verify_checkpoint_manifest,
+    CheckpointManifestPage, CheckpointManifestRequest, ClaimTombstone, DropCount, DropPlan,
+    EnvelopeKey, EnvelopeTombstone, SealedSet, check_checkpoint_manifest, checkpoint_cut,
+    checkpoint_name, drop_digest, newest_due_cut,
 };
 pub use checkpoint_agreement::write_time;
 #[cfg(feature = "test-support")]
 pub use checkpoint_agreement::checkpoint_test_identity;
 pub use checkpoint_agreement::{
-    CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED,
-    CHECKPOINT_VERIFIED, Certificate, CheckpointAction, CheckpointClaim, CheckpointContext,
-    CheckpointExcuseRequest, CheckpointResumeRequest, CheckpointStatusView, PendingCheckpointView,
-    SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
-    first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
+    CheckpointAction, CheckpointContext, CheckpointResumeRequest, TrimStatusView, checkpoint_build,
 };
 pub use checkpoint_trim::{
-    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
     local_trim_capture_kinds,
 };
 
@@ -970,10 +961,6 @@ pub struct Store {
     pub trim_wal: Mutex<checkpoint_trim::TrimWal>,
     /// When the daemon's WAL recycle restarts a WAL that keeps growing; only tests change it.
     pub wal_escalation: Mutex<wal_escalation::WalEscalation>,
-    /// The last seal-identity digest, and the capture epoch it holds for; see
-    /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
-    pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
-    pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
     pub(crate) checkpoint_worker: Mutex<Option<checkpoint_agreement::CheckpointWorker>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
@@ -1149,7 +1136,7 @@ impl Store {
         let origin = origin.into();
         let uri = PathBuf::from(format!(
             "file:st3-{}?mode=memory&cache=shared",
-            Uuid::now_v7().simple()
+            uuid::Uuid::now_v7().simple()
         ));
         let mut connection = Connection::open_with_flags(
             &uri,
@@ -1221,6 +1208,9 @@ impl Store {
         repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd91f85b95b89 owner=smallclaims::store TODO=trace-statement-and-value-representation */ member_signatures::SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
@@ -1353,7 +1343,6 @@ impl Store {
         Ok(Self {
             connection,
             admitted: None,
-            checkpoint_verify_latest: Default::default(),
             checkpoint_worker: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
@@ -1407,7 +1396,6 @@ impl Store {
             trim_row_cost_micros: AtomicU64::new(0),
             trim_wal: Mutex::new(checkpoint_trim::TRIM_WAL),
             wal_escalation: Mutex::new(wal_escalation::WAL_ESCALATION),
-            sealed_identity_memo: Mutex::new(None),
             runtime,
         })
     }
@@ -3096,15 +3084,19 @@ impl Store {
         };
         let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
-            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
-             FROM replica_records AS records
-             JOIN replica_envelopes AS envelopes
-               USING (writer, sequence, envelope_hash)
+            // The claim's own batch names its envelopes, whether or not its valid record is
+            // stored (`record_bytes`); a claim with a record in any other state, such as one a
+            // repair replaced, is not an accepted copy.
+            /* sqlite-large-value: allow-for-now lv-h920ade08c738 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!("SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+             FROM claims
+             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              JOIN replica_envelope_signatures AS signatures
-               USING (writer, sequence, envelope_hash)
-             WHERE records.claim_id=?1 AND records.state='valid'
+               ON signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
+                  AND signatures.envelope_hash=envelopes.envelope_hash
+             WHERE claims.id=?1 AND NOT {}
                AND envelopes.receipt_state='validated'
-               AND records.writer=?2 AND signatures.member_key=?3",
+               AND envelopes.writer=?2 AND signatures.member_key=?3",
+                record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
             Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
@@ -6814,6 +6806,30 @@ impl Store {
         idempotency::next_expiry(&self.readers.get())
     }
 
+    /// When the replay-safe pass next has a receipt to expire, for `window_ms`.
+    pub fn next_replay_safe_expiry(&self, window_ms: i64) -> Result<Option<i64>> {
+        idempotency::next_replay_safe_expiry(&self.readers.get(), window_ms)
+    }
+
+    /// Remove one chunk of replay-safe receipts older than `window_ms`, with the clock limit of
+    /// `cleanup_idempotency`. The runtime says which must still wait for the ordinary retention.
+    pub fn cleanup_replay_safe_idempotency(&self, now_unix_ms: i64, window_ms: i64) -> Result<idempotency::Cleanup> {
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(clock_limit) = idempotency::clock_limit(&transaction)? else {
+            return Ok(idempotency::Cleanup::default());
+        };
+        let cleaned = idempotency::cleanup_replay_safe_tx(
+            &transaction,
+            now_unix_ms.min(clock_limit),
+            window_ms,
+            idempotency::CLEANUP_CHUNK,
+            |connection, response| self.runtime.replay_safe_response_pinned(connection, response),
+        )?;
+        transaction.commit()?;
+        Ok(cleaned)
+    }
+
     pub fn idempotency_clock_limit(&self) -> Result<Option<i64>> {
         idempotency::clock_limit(&self.readers.get())
     }
@@ -7785,7 +7801,9 @@ impl Store {
                     Vec::new()
                 },
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 claim_range_query: None,
             },
             envelopes: Vec::new(),
@@ -7793,6 +7811,7 @@ impl Store {
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
             claim_ranges: Some(self.claim_range_summary()?),
+            claim_member_signatures: Vec::new(),
         })
     }
 
@@ -7916,7 +7935,9 @@ impl Store {
                     envelopes: listed,
                     buckets: buckets.to_vec(),
                     accepts: Some(replication_accepts()),
-                    checkpoint: self.trimmed_checkpoint()?,
+                    // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                     claim_range_query: None,
                 },
                 envelopes,
@@ -7924,6 +7945,7 @@ impl Store {
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
                 claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
+                claim_member_signatures: Vec::new(),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -7967,7 +7989,9 @@ impl Store {
             projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
-                checkpoint: self.trimmed_checkpoint()?,
+                // Members agree on no checkpoint, so none is advertised (an older
+                // peer then adopts nothing).
+                checkpoint: None,
                 ..if same {
                     ReplicationInventory {
                         digest: inventory.digest.clone(),
@@ -7980,6 +8004,9 @@ impl Store {
                     inventory.public()
                 }
             },
+            // About 200 bytes for each claim of an envelope sent: bounded by the envelope limit
+            // (`replication_page_limit`), and small beside the envelopes' own payloads.
+            claim_member_signatures: self.claim_member_signatures_for_envelopes(&missing)?,
             envelopes: match archive {
                 Some(archive) => self.replica_envelopes_with_archive(missing, archive)?,
                 None => self.replica_envelopes(missing)?,
@@ -8458,6 +8485,11 @@ impl Store {
             progress.compare_graphs(equal, now);
         }
         drop(sync);
+        // The writers' signatures of the claims the exchange carries, kept once they verify
+        // (`member_signatures`); a failure here costs only signatures a later exchange brings.
+        if let Err(error) = self.receive_claim_member_signatures(relay, &input.claim_member_signatures) {
+            eprintln!("st3: claim signatures from {relay} not kept: {error:#}");
+        }
         Ok(ReplicationReceipt {
             received,
             duplicate,
@@ -10171,12 +10203,11 @@ impl Store {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
-    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
-    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
-    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
-    /// on the other members until a person excuses this one. While it is on, the retired ledger
-    /// is the authority for what this member deleted (`retired`).
+    /// Whether this member trims: `[trim] local`, on by default in the daemon's config and off
+    /// until set on a store a test or tool opens. Every member trims on its own, with no
+    /// agreement with any other; off, it trims nothing, and a trim it had already committed
+    /// waits. While it is on, the retired ledger is the authority for what this member deleted
+    /// (`retired`).
     pub fn trim_locally(&self, on: bool) -> Result<()> {
         self.trim_local.store(on, Ordering::Relaxed);
         self.settle_retired_authority()
@@ -10186,7 +10217,7 @@ impl Store {
         self.trim_local.load(Ordering::Relaxed)
     }
 
-    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// The most claims a member deletes in one day, `[trim] daily_claims`. A
     /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
     /// next cut begins, so a large backlog drains over several days rather than in one long trim.
     pub fn trim_locally_at_most(&self, claims: u64) {
@@ -10749,6 +10780,7 @@ impl Store {
         }
         Ok(ReplicationStatus {
             configured,
+            claim_signatures_refused: self.claim_member_signatures_refused()?,
             fleet_id: fleet_id.map(str::to_owned),
             health: self.replication_health(configured)?,
             authority_digest: snapshot.authority_digest.clone(),

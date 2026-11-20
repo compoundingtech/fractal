@@ -95,8 +95,6 @@ pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64
 /// real member giving back 9% of its file, chunks of 512 held the writer up to 225 ms and chunks of
 /// 256 up to 106 ms; chunks of 128 held it at most 79 ms (p99 53 ms).
 pub const FREE_PAGE_CHUNK: u64 = 128;
-// The literal in `release_free_pages` spells this chunk.
-const _: () = assert!(FREE_PAGE_CHUNK == 128);
 
 pub(crate) use smallclaims::store::durability::committing_without_fsync;
 
@@ -105,6 +103,12 @@ impl Store {
     /// return how many went. Only a store with incremental auto-vacuum can: a fresh one, or one
     /// converted by a VACUUM. Any other store's file never shrinks, so this gives back nothing.
     pub fn release_free_pages(&self) -> Result<u64> {
+        self.release_free_pages_in(FREE_PAGE_CHUNK)
+    }
+
+    /// [`Self::release_free_pages`] with at most `chunk` pages in the write, for a pass that
+    /// gives back many pages in a row and keeps each writer hold short.
+    pub fn release_free_pages_in(&self, chunk: u64) -> Result<u64> {
         let connection = self.connection.write_background();
         let free = || -> Result<u64> {
             Ok(connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?)
@@ -115,9 +119,9 @@ impl Store {
         if mode != 2 || before == 0 {
             return Ok(0);
         }
-        // FREE_PAGE_CHUNK pages. Each step gives back one, so the pragma runs to its end.
+        // `chunk` pages. Each step gives back one, so the pragma runs to its end.
         committing_without_fsync(&connection, || {
-            let mut statement = connection.prepare("PRAGMA incremental_vacuum(128)")?;
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h03a56f82053f owner=fractal_store::store::database_size TODO=trace-statement-and-value-representation */ &format!("PRAGMA incremental_vacuum({chunk})"))?;
             let mut steps = statement.query([])?;
             while steps.next()?.is_some() {}
             Ok(())
