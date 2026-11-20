@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The one-time scrub of historical shell environments no longer rewrites the whole store on a member's first start after upgrading. It copies the shell resources table with every environment emptied, drops the old copy under secure_delete, and gives the free list back to the filesystem. A store without incremental auto-vacuum still runs the full VACUUM when it has free pages.",
+  "replay": {
+    "status": "none",
+    "detail": "Claims, replication and projections are untouched."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "shell_resources_v1 and its index shell_resources_host_v1 are rebuilt once, through a temporary shell_resources_scrub_v1 renamed into place in the same transaction. Columns, index and rows are unchanged, except that every environment is emptied, as #6747 already did."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Same guarantee as #6747: no environment bytes in the database file or the WAL after the scrub. Not reached, where a VACUUM would reach: the unused part of pages that other tables reused before secure_delete was on."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The completion marker is the one #6747 writes, so a store that already finished the scrub skips it, and a previous release reads the rebuilt table as before."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "A member's first open after upgrading costs the table copy plus giving back its free list, instead of a VACUUM of the whole store. On a copy of a real 57 GB member: the scrub with #6747 was still running after 51 minutes (46 GB WAL); with this change an open that runs the scrub took 3.2 s, and the first open after upgrading, with every other pending migration, took 178 s."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The completion marker is written last, after the second checkpoint. A crash or busy checkpoint before then repeats the scrub on the next open, as before."
+  }
+}
