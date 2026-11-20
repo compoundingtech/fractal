@@ -1813,6 +1813,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "darwin_fixture".into(), capacity: None, require_enforced: false,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let result = runtime.spawn_in_darwin_slot_authorized(
             "requested-slot", &crate::Launch::Shell("touch must-not-run".into()),
