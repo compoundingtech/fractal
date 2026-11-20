@@ -78,7 +78,13 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
         if workflow.name == 'nix.yml' and 'name: Build the exact consumer package' in block:
             assert 'runs-on: ubuntu-latest' in block, 'the publisher must not occupy the persistent verification pool'
             assert "github.ref == 'refs/heads/main'" in block and "github.event_name == 'push'" in block
-            assert '?rev=$GITHUB_SHA&shallow=1#packages.x86_64-linux.fractal' in block
+            assert '?rev=$PUBLISH_SHA&shallow=1#packages.x86_64-linux.fractal' in block
+            assert 'group: "nix-publish-${{ inputs.sha || github.sha }}"' in block
+            assert 'cancel-in-progress: false' in block
+            assert 'ref: ${{ inputs.sha || github.sha }}' in block and 'fetch-depth: 1' in block
+            assert 'git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main' in block
+            assert 'git merge-base --is-ancestor "$PUBLISH_SHA" origin/main' in block
+            assert '[[ "$(git rev-parse HEAD)" == "$PUBLISH_SHA" ]]' in block
             proof = next((line for line in block.splitlines() if 'path-info' in line and 'fractal-native-closure.json' in line), '')
             assert all(part in proof for part in (
                 'nix ', 'path-info', '--store "https://$CACHE_NAME.cachix.org"',
