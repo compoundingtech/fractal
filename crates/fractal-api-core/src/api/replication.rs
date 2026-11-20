@@ -16,6 +16,7 @@ pub async fn replication_status(
     blocking_store(move || {
         let mut status = store.replication_status_sealed(configured, fleet.as_deref(), &peers)?;
         status.removed = crate::fleet::file::RemovalNotice::load(&state_dir);
+        status.stream_fallbacks = Some(crate::store::message_routing::fallbacks(&store));
         Ok(status)
     })
     .await
@@ -327,6 +328,7 @@ pub async fn replication_receive(
     let metrics = smallclaims::receive_metrics::RequestMetrics::new(correlation_id.clone());
     let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
     let counters = metrics.snapshot();
+    use smallclaims::receive_metrics::Finalizer;
     let outcome = match &result {
         Err(error) if matches!(error.code.as_str(), "database-busy" | "database-locked") => "contended",
         Err(error) => error.code.as_str(),
@@ -338,6 +340,16 @@ pub async fn replication_receive(
         peer = %peer,
         envelopes_offered,
         envelopes_admitted = counters.envelopes_admitted,
+        envelopes_prepared = counters.envelopes_prepared,
+        envelope_claims = counters.envelope_claims,
+        envelope_payload_bytes = counters.envelope_payload_bytes,
+        envelope_claims_bytes = ?counters.envelope_sizes,
+        envelope_sizes_omitted = counters.envelope_sizes_omitted,
+        finalizer_resources_ms = counters.finalizer_time[Finalizer::Resources as usize].as_secs_f64() * 1000.0,
+        finalizer_custom_ms = counters.finalizer_time[Finalizer::Custom as usize].as_secs_f64() * 1000.0,
+        finalizer_completion_ms = counters.finalizer_time[Finalizer::Completion as usize].as_secs_f64() * 1000.0,
+        finalizer_run_eta_ms = counters.finalizer_time[Finalizer::RunEta as usize].as_secs_f64() * 1000.0,
+        finalizer_client_messages_ms = counters.finalizer_time[Finalizer::ClientMessages as usize].as_secs_f64() * 1000.0,
         admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
         project_ms = counters.project_time.as_secs_f64() * 1000.0,
         receipt_ingest = ?counters.phases[smallclaims::receive_metrics::Stage::ReceiptIngest as usize],

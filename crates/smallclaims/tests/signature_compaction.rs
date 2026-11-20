@@ -1,4 +1,4 @@
-//! Storage version 24 readers: a compacted claim keeps its facade, count, verdict, nonce use and
+//! Storage version 26 readers: a compacted claim keeps its facade, count, verdict, nonce use and
 //! dependency links, without candidate or source rows. Readers take the facade as its single
 //! candidate, so verdicts, serving, revocation, delegation and requeue read as before, and a new
 //! candidate expands it first. The writer compacts a claim as it settles and pages through the
@@ -83,7 +83,7 @@ fn attach(store: &Store, claim: &ClaimRecord, signature: &ClaimSignature) {
     store_claim_signature_tx(&connection, &claim.id, signature).unwrap();
 }
 
-/// Run the version 24 writer to its end: judging compacts each claim as it settles, and the
+/// Run the version 26 writer to its end: judging compacts each claim as it settles, and the
 /// paced pass the rest. Returns how many claims are compacted.
 fn compact(store: &Store) -> i64 {
     drain(store);
@@ -286,16 +286,16 @@ fn a_new_candidate_expands_a_compacted_claim_first() {
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
 }
 
-/// A store the writer fenced at 24, rolled back to this reader release: the fence must not turn
+/// A store the writer fenced at 26, rolled back to this reader release: the fence must not turn
 /// on the version 21 reference writer, whose conversion needs every facade's candidate row.
 #[test]
-fn a_store_fenced_at_24_keeps_the_reference_writer_off() {
+fn a_store_fenced_at_26_keeps_the_reference_writer_off() {
     let (_directory, store, _anchor) = studio();
     note(&store, None, "a node note");
     seal(&store);
     drain(&store);
     assert!(compact(&store) > 0);
-    store.connection.write().pragma_update(None, "user_version", 24).unwrap();
+    store.connection.write().pragma_update(None, "user_version", 26).unwrap();
     let before = verdicts(&store);
 
     let later = note(&store, Some("person/ada"), "written after the rollback");
@@ -332,7 +332,7 @@ fn writer_flag(store: &Store) -> Option<String> {
         .ok()
 }
 
-/// Leave every compacted claim as a release before version 24 kept it: its facade as its one
+/// Leave every compacted claim as a release before version 26 kept it: its facade as its one
 /// candidate, carried by the node, and the store at version 20 without the writer's flag.
 fn whole(store: &Store) -> i64 {
     let connection = store.connection.write();
@@ -380,7 +380,7 @@ fn the_writer_compacts_each_claim_as_it_settles_and_fences_the_store() {
     let signed = count(&store, "SELECT COUNT(*) FROM claim_signatures");
     assert_eq!(compacted(&store), signed, "judging compacts each claim as it settles");
     assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_signature_sources"), 0);
-    assert_eq!(user_version(&store), 24);
+    assert_eq!(user_version(&store), 26);
     assert_eq!(writer_flag(&store).as_deref(), Some("1"));
     for claim in &claims {
         assert_eq!(verdict(&store, claim), Verdict::Verified);
@@ -407,7 +407,7 @@ fn the_paced_pass_compacts_what_an_earlier_release_kept_whole() {
     assert!(pages >= 3, "{signed} claims take several short loans, not one ({pages})");
     assert_eq!(total as i64, signed);
     assert_eq!(compacted(&store), signed);
-    assert_eq!(user_version(&store), 24);
+    assert_eq!(user_version(&store), 26);
     assert_eq!(verdicts(&store), before);
     assert!(store.recheck_claim_verdicts().unwrap().is_empty());
     drain(&store);

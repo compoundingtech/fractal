@@ -1,4 +1,4 @@
-//! Reader side of storage version 24: a compacted claim keeps its facade as its only candidate.
+//! Reader side of storage version 26: a compacted claim keeps its facade as its only candidate.
 //!
 //! A settled claim with one candidate keeps its `claim_signatures` facade (inline text), its
 //! `claim_signature_counts` row (candidates = 1), its verdict, nonce use and dependency links,
@@ -9,13 +9,13 @@
 //!
 //! The writer compacts a claim when its verdict settles and, a short page at a time, every
 //! settled claim an earlier release kept whole. It turns on by its own meta flag and fences the
-//! store at version 24 in the transaction that compacts its first claim; a build that reads only
+//! store at version 26 in the transaction that compacts its first claim; a build that reads only
 //! up to 23 then refuses the store instead of misreading it.
 use super::*;
 
 /// The reader fence of compacted claims. It also carries version 23's meaning.
-pub const COMPACTION_STORAGE_VERSION: u32 = 24;
-// A build that fences a store at 24 must open it again.
+pub const COMPACTION_STORAGE_VERSION: u32 = 26;
+// A build that fences a store at 26 must open it again.
 const _: () = assert!(crate::store::MAX_SUPPORTED_SCHEMA_VERSION >= COMPACTION_STORAGE_VERSION);
 /// The compaction writer's own switch (`user_version` is a reader fence only).
 pub const COMPACTION_WRITER_FLAG: &str = "claim_signature_compaction_writer";
@@ -43,14 +43,14 @@ const SETTLED_FROM: &str = "FROM claim_signature_candidates d
    JOIN claim_verdicts v USING(claim_id)
    JOIN claim_signatures s USING(claim_id)";
 
-/// Whether this store compacts: fenced at 24 or later with the writer's flag set.
+/// Whether this store compacts: fenced at 26 or later with the writer's flag set.
 pub(super) fn enabled(connection: &Connection) -> Result<bool> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     Ok(version >= COMPACTION_STORAGE_VERSION
         && super::super::fleet_meta(connection, COMPACTION_WRITER_FLAG)?.as_deref() == Some("1"))
 }
 
-/// Fence the store at 24 and set the writer's flag, in the caller's transaction. Never lowers
+/// Fence the store at 26 and set the writer's flag, in the caller's transaction. Never lowers
 /// a later fence.
 fn activate_tx(connection: &Connection) -> Result<()> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -202,7 +202,7 @@ mod tests {
         };
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
-        // Compacted as the version 24 writer leaves it: the count at 1, no candidate or source
+        // Compacted as the version 26 writer leaves it: the count at 1, no candidate or source
         // (the candidate's delete trigger takes the source with it).
         tx.execute("DELETE FROM claim_signature_candidates WHERE claim_id=?1", [&claim.id]).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM claim_signature_sources WHERE claim_id=?1", [&claim.id], |row| row.get::<_, i64>(0)).unwrap(), 0);

@@ -996,7 +996,7 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     for table in [
         "claim_signatures",
         "claim_signature_candidates",
-        // A compacted claim (version 24) has no candidate row whose trigger would drop it.
+        // A compacted claim (version 26) has no candidate row whose trigger would drop it.
         "claim_signature_counts",
         "claim_signature_nonce_uses",
         "claim_signature_judging",
@@ -1937,7 +1937,7 @@ impl Store {
                     queue_affected_by_row_tx(&transaction, &row)?;
                 }
                 // Its verdict is published: a settled small fold keeps no resume state, and
-                // a settled claim keeps only its facade (version 24).
+                // a settled claim keeps only its facade (version 26).
                 judging::discard_settled_tx(&transaction, claim_id)?;
                 if !track_bootstrap {
                     compaction::compact_settled_tx(&transaction, claim_id)?;

@@ -1,4 +1,4 @@
-//! Measure the version 24 compaction writer on a copy of a real member's database: claims
+//! Measure the version 26 compaction writer on a copy of a real member's database: claims
 //! compacted, each writer loan's hold, bytes per table per signed claim before and after, pages
 //! given back, and the replication inventory digest before and after (the compacted tables are
 //! outside it). The settled-judging prune of #6875 runs first, as the release before this one

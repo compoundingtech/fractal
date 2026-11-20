@@ -146,6 +146,9 @@ pub struct Config {
     /// when it differs from the default.
     #[serde(skip_serializing_if = "TrimConfig::is_default")]
     pub trim: TrimConfig,
+    /// How this member keeps its own store. Defaults unless set.
+    #[serde(skip_serializing_if = "StoreConfig::is_default")]
+    pub store: StoreConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -358,6 +361,35 @@ impl CheckpointConfig {
     }
 }
 
+/// `[store]`: `blob_move_after` is how long after this member first runs a build that keeps blob
+/// bytes in their own file it starts moving them there, as a number followed by `s`, `m`, `h` or
+/// `d` (`3d` unless set). Until then a rollback to the previous release finds every byte where it
+/// looks; the first move takes the store to a storage version that release refuses until
+/// `fractal store restore-blob-bytes` copies them back, so lengthen it to keep that rollback open
+/// longer.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_move_after: Option<String>,
+}
+
+impl StoreConfig {
+    pub const DEFAULT_BLOB_MOVE_AFTER_MS: u64 = 3 * 24 * 60 * 60 * 1000;
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// How long after this member first runs the build it starts moving blob bytes.
+    pub fn blob_move_after_ms(&self) -> Result<u64> {
+        self.blob_move_after.as_deref().map_or(
+            Ok(Self::DEFAULT_BLOB_MOVE_AFTER_MS),
+            |value| parse_duration_ms(value, "store.blob_move_after"),
+        )
+    }
+}
+
 /// `[trim]`: `local = true` makes this member trim on its own, without checkpoint agreement. It
 /// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
 /// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
@@ -365,7 +397,14 @@ impl CheckpointConfig {
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
 /// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
-/// that drops more goes on the next day where it stopped.
+/// that drops more goes on the next day where it stopped. With `mail = true`, a member that
+/// trims locally also retires closed agent and daemon graph mail a week after it closes, at its
+/// own paced rate (`daily_claims` does not apply); person threads are always kept. Off unless
+/// set, until the owner decides whether it becomes the default for such members (Factory's
+/// decision of 2026-11-20 replaces its 2026-10-30 "keep all messages forever" for non-person
+/// mail where it is on). `replay_safe_receipts` is how long a replay-safe response receipt (a
+/// lease renewal, which a retry simply repeats) is kept: `1h` unless set, and `0` keeps them for
+/// the seven days every other receipt is kept. It applies to every member, trimming or not.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
@@ -374,6 +413,10 @@ pub struct TrimConfig {
     pub notify: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_claims: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe_receipts: Option<String>,
 }
 
 impl TrimConfig {
@@ -381,7 +424,24 @@ impl TrimConfig {
         self == &Self::default()
     }
 
+    /// Whether this member retires closed graph mail: only one that trims locally and sets
+    /// `mail = true`.
+    pub fn retires_mail(&self) -> bool {
+        self.local && self.mail == Some(true)
+    }
+
+    /// How long replay-safe receipts are kept, in milliseconds; 0 when they are kept as long as
+    /// every other receipt.
+    pub fn replay_safe_receipt_window_ms(&self) -> Result<u64> {
+        match self.replay_safe_receipts.as_deref().map(str::trim) {
+            None => Ok(60 * 60 * 1_000),
+            Some("0") => Ok(0),
+            Some(value) => parse_duration_ms(value, "trim.replay_safe_receipts"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.replay_safe_receipt_window_ms()?;
         anyhow::ensure!(
             self.notify.as_deref().is_none_or(|agent| {
                 agent.starts_with("agent/")
@@ -960,6 +1020,7 @@ impl Default for Config {
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
+            store: StoreConfig::default(),
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
@@ -1291,6 +1352,7 @@ impl Config {
         }
         self.limits.validate()?;
         self.trim.validate()?;
+        self.store.blob_move_after_ms()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -2424,6 +2486,33 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
+    fn replay_safe_receipts_last_an_hour_unless_set_and_zero_keeps_them_a_week() {
+        let config = Config::default();
+        assert_eq!(config.trim.replay_safe_receipt_window_ms().unwrap(), 3_600_000);
+        // The default is not written, so an older build reading this config never meets the key.
+        assert!(!toml::to_string(&config).unwrap().contains("replay_safe_receipts"));
+        let set: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"6h\"\n").unwrap();
+        assert_eq!(set.trim.replay_safe_receipt_window_ms().unwrap(), 6 * 3_600_000);
+        let off: Config = toml::from_str("[trim]\nreplay_safe_receipts = \"0\"\n").unwrap();
+        assert_eq!(off.trim.replay_safe_receipt_window_ms().unwrap(), 0);
+        let bad = TrimConfig { replay_safe_receipts: Some("soon".into()), ..TrimConfig::default() };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn blob_bytes_move_three_days_after_upgrading_unless_set() {
+        let config = Config::default();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 3 * 24 * 60 * 60 * 1000);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[store]"));
+        let config: Config = toml::from_str("[store]\nblob_move_after = \"12h\"\n").unwrap();
+        assert_eq!(config.store.blob_move_after_ms().unwrap(), 12 * 60 * 60 * 1000);
+        assert!(toml::to_string(&config).unwrap().contains("[store]"));
+        let wrong: Config = toml::from_str("[store]\nblob_move_after = \"soon\"\n").unwrap();
+        assert!(wrong.validate().is_err());
+    }
+
+    #[test]
     fn local_trim_is_off_unless_chosen_and_absent_from_a_written_default_config() {
         let config = Config::default();
         assert!(!config.trim.local);
@@ -2435,6 +2524,12 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
         let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
         assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(!config.trim.retires_mail(), "retiring closed mail is off unless set");
+        let retiring: Config = toml::from_str("[trim]\nlocal = true\nmail = true\n").unwrap();
+        assert!(retiring.trim.retires_mail());
+        let kept: Config = toml::from_str("[trim]\nlocal = true\nmail = false\n").unwrap();
+        assert!(!kept.trim.retires_mail());
+        assert!(!TrimConfig { mail: Some(true), ..TrimConfig::default() }.retires_mail(), "only with local");
         assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 

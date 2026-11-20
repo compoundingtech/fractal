@@ -2833,6 +2833,52 @@ fn agent_card_status_cache_has_a_fixed_entry_cap_and_repair_clears_it() {
 }
 
 #[test]
+fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
+    let store = Store::open_memory("node").unwrap();
+    let names = (0..8).map(|n| format!("agent/overflow-{n}")).collect::<BTreeSet<_>>();
+    for name in &names { observe_runtime(&store, name, "running", "one"); }
+    let selected = BTreeSet::from([names.first().unwrap().clone()]);
+    for round in 0..2 {
+        let before = store.index().unwrap();
+        store.agent_card_status_at(Some(&names), before, true).unwrap();
+        store.agent_card_status_for_generic_reads_at(Some(&names), before, false).unwrap();
+        store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Full).unwrap();
+        store.status_for_subject_names_at(names.clone(), before, true, ClaimsReduction::Summary).unwrap();
+        assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
+        store.connection.batched(|transaction| -> Result<()> {
+            for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
+                append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
+                    None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let cut = store.index().unwrap();
+        store.advance_subject_cache(&store.readers.get(), cut).unwrap();
+        {
+            let cache = store.fractal.subject_cache.lock().unwrap();
+            assert_eq!(cache.through, cut, "overflow commits the invalidation frontier");
+            assert!(cache.views.is_empty() && cache.serving_views.is_empty()
+                && cache.statuses.is_empty() && cache.summary_statuses.is_empty()
+                && cache.runtime_statuses.is_empty() && cache.card_statuses.is_empty()
+                && cache.serving_card_statuses.is_empty());
+        }
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
+        let rebuilt = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 1,
+            "even repeated overflowing cycles rebuild only the requested page, not the fleet");
+        assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), 1);
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
+        let hit = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(hit, rebuilt);
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0,
+            "the same backlog must not repeatedly clear freshly rebuilt entries");
+        store.forget_current_views();
+        let cold = serde_json::to_value(store.agent_card_status_at(Some(&selected), cut, true).unwrap()).unwrap();
+        assert_eq!(cold, rebuilt);
+    }
+}
+
+#[test]
 fn status_projection_threads_inherit_cancellation_and_release_their_readers() {
     let store = Store::open_memory("node").unwrap();
     let names = (0..65).map(|n| format!("agent/budget/seat-{n}")).collect::<BTreeSet<_>>();
@@ -4995,7 +5041,8 @@ fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
             "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
             |row| row.get::<_, Vec<u8>>(0),
         ).unwrap();
-        assert_eq!(retried_raw, original_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !original_raw.is_empty());
     }
     assert!(upgraded.replica_records(true).unwrap().is_empty());
     assert_eq!(upgraded.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
@@ -5163,7 +5210,8 @@ fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
         let retried_raw: Vec<u8> = upgraded.readers.get().query_row(
             "SELECT raw FROM replica_records WHERE claim_id=?1",[&claim.id],|row|row.get(0),
         ).unwrap();
-        assert_eq!(raw,retried_raw);
+        // The retry admitted the original bytes; a valid record then keeps none (`record_bytes`).
+        assert!(retried_raw.is_empty() && !raw.is_empty());
         assert!(upgraded.replica_records(true).unwrap().is_empty(), "{kind}");
         assert_eq!(
             upgraded.latest_claim("host/ada", Some("transport.observed")).unwrap().unwrap().id,
@@ -7370,6 +7418,40 @@ fn a_mailbox_stream_seeks_its_seats_newer_local_observations() {
 /// Foreign keys are on, so deleting or rekeying a parent row looks up every child that names
 /// it. A child column without an index made each lookup read the whole child table: deleting
 /// a claim read every operation, and a checkpoint trim held the writer for an hour.
+#[test]
+fn emptying_a_valid_records_bytes_fires_no_trigger() {
+    // `record_bytes` empties `raw` on every valid record of an existing store. A trigger that
+    // fired on that update would queue or rebuild work for every record.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let triggers = connection
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='replica_records'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(!triggers.is_empty());
+    let mut blind = Vec::new();
+    for (name, sql) in triggers {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(event) = sql.split(" ON replica_records").next() else { continue };
+        let Some((_, update)) = event.split_once(" UPDATE") else { continue };
+        let columns = update.trim_start().strip_prefix("OF ").map(|columns| {
+            columns.split(',').map(str::trim).collect::<Vec<_>>()
+        });
+        // The checkpoint capture trigger fires on any update but compares every column but
+        // `raw` in its condition.
+        let compared = sql.contains("OLD.state IS NOT NEW.state") && !sql.contains("OLD.raw");
+        match columns {
+            Some(columns) if columns.contains(&"raw") => blind.push(name),
+            None if !compared => blind.push(name),
+            _ => {}
+        }
+    }
+    assert!(blind.is_empty(), "triggers that fire when only `raw` changes: {blind:?}");
+}
+
 #[test]
 fn every_foreign_key_column_leads_an_index() {
     let store = Store::open_memory("node").unwrap();
