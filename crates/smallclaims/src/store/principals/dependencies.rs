@@ -107,10 +107,13 @@ mod tests {
             let mut connection = Connection::open_in_memory().unwrap();
             connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
             connection.execute_batch(SCHEMA).unwrap();
+            // A requeue page drops links whose claim is gone, so the claims exist.
+            connection.execute_batch("CREATE TABLE claims(id TEXT PRIMARY KEY)").unwrap();
             let tx = connection.transaction().unwrap();
             tx.execute("INSERT INTO claim_verdict_dependency_keys VALUES(1,'root')", []).unwrap();
             for index in 0..total {
                 let claim = format!("claim/{index:08}");
+                tx.execute("INSERT INTO claims(id) VALUES (?1)", [&claim]).unwrap();
                 tx.execute("INSERT INTO claim_verdict_links VALUES('root',?1)", [&claim]).unwrap();
                 tx.execute("INSERT INTO claim_verdict_dependency_edges VALUES(1,?1)", [&claim]).unwrap();
             }
