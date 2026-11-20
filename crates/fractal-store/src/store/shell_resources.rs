@@ -155,11 +155,29 @@ fn give_back_free_list(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// How often the scrub tries its checkpoint before it refuses to open the store, and how long
+/// each try waits for readers: about 30 s in all, so a reader that a replication worker or a
+/// CLI holds at startup ends first, rather than the daemon restarting over and over.
+const CHECKPOINT_TRIES: u32 = 5;
+const CHECKPOINT_WAIT: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(20) } else { std::time::Duration::from_secs(6) };
+
 fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
-    let busy: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    // TRUNCATE waits for readers as long as the busy timeout; give each try its own wait.
+    let previous: u64 = connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+    connection.busy_timeout(CHECKPOINT_WAIT)?;
+    let mut busy = 1;
+    for _ in 0..CHECKPOINT_TRIES {
+        busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))?;
+        if busy == 0 {
+            break;
+        }
+    }
+    connection.busy_timeout(std::time::Duration::from_millis(previous))?;
     anyhow::ensure!(busy == 0, "shell environment scrub checkpoint busy; refusing to open store");
     Ok(())
 }
+
 pub fn submission_digest(command: &Command) -> Result<String> {
     use sha2::Digest as _;
     // Ambient environment values are transport-only, never replay identity or audit data.
@@ -643,6 +661,27 @@ mod tests {
     #[test]
     fn historical_scrub_without_incremental_vacuum_still_erases_with_one_vacuum() {
         scrub_erases_a_freed_secret("NONE");
+    }
+
+    #[test]
+    fn a_reader_that_ends_while_the_scrub_retries_lets_it_finish() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+        create_schema(&writer).unwrap();
+        writer.execute("DELETE FROM shell_environment_scrub_v1", []).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT * FROM shell_resources_v1;").unwrap();
+        // The reader ends after the first try, before the scrub runs out of them.
+        let ending = std::thread::spawn(move || {
+            std::thread::sleep(CHECKPOINT_WAIT / 2);
+            reader.execute_batch("ROLLBACK").unwrap();
+        });
+        scrub_historical_environments(&writer).unwrap();
+        ending.join().unwrap();
+        let complete: bool = writer.query_row("SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0)).unwrap();
+        assert!(complete);
     }
 
     #[test]
