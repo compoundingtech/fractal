@@ -44,6 +44,7 @@ mod projection_gate;
 pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
+pub mod append_census;
 pub mod prepared_envelope;
 mod replica_record;
 mod wire_archive;

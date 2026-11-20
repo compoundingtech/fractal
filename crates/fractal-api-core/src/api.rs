@@ -895,6 +895,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/effects/by-key", get(effects::by_key))
         .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
+        .route("/v1/storage/status", get(operations::storage_status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
@@ -10756,6 +10757,10 @@ mod replication_guard_tests;
 #[cfg(test)]
 #[path = "api/checkpoint_plan_tests.rs"]
 mod checkpoint_plan_tests;
+
+#[cfg(test)]
+#[path = "api/storage_census_tests.rs"]
+mod storage_census_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.

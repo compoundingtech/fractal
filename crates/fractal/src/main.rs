@@ -2606,13 +2606,16 @@ enum TraceCommand {
 #[derive(Args)]
 struct DoctorArgs {
     /// Inspect local source-build tools instead of daemon health; does not compile or contact GitHub.
-    #[arg(long, conflicts_with = "performance")]
+    #[arg(long, conflicts_with_all = ["performance", "storage"])]
     developer: bool,
     #[arg(long)]
     strict: bool,
     /// Show only the slowest requests and queries over the last five minutes.
     #[arg(long)]
     performance: bool,
+    /// Show cached storage write/trim counters and metadata-only SQLite file sizes.
+    #[arg(long, conflicts_with_all = ["developer", "performance"])]
+    storage: bool,
 }
 
 #[derive(Subcommand)]
@@ -7849,6 +7852,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    store.storage_census.checkpoint_enabled.set(config.checkpoint.enabled)
+        .map_err(|_| anyhow::anyhow!("storage checkpoint census already configured"))?;
     if let Some(claims) = config.trim.daily_claims {
         store.trim_locally_at_most(claims);
     }
@@ -13343,6 +13348,11 @@ async fn run_doctor(
         return Ok(());
     }
     let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
+    if args.storage {
+        let report: Value =
+            doctor_request(client, "/v1/storage/status", readiness.as_ref(), json_output).await?;
+        return print_value(&report, true);
+    }
 
     if args.performance {
         let mut report: Value =
