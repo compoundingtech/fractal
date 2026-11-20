@@ -95,6 +95,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install connection-local storage census counters before returning the store; these constructor-only writers neither mutate mission-run records nor make run action decisions",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "repair_operation_projection_drift_from_audit and rebuild_claim_projections are internal projection/replay maintenance",
             counts: [2, 0, 0, 2, 0],
         },
