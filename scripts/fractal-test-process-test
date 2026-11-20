@@ -115,8 +115,11 @@ if __name__ == '__main__':
     def fixture(self, mode, signal_to_test=None, signal_to_fixture=None):
         with tempfile.TemporaryDirectory(prefix="cleanup-proof-") as directory:
             evidence = Path(directory)
+            # These read the fixture's PIDs from this namespace, so its guardian stays here.
+            # NamespaceTests cover the guardian in its own PID namespace.
             env = {**os.environ, "ST3_CLEANUP_FIXTURE": directory,
-                   "ST3_CLEANUP_FIXTURE_MODE": mode, "PYTHONDONTWRITEBYTECODE": "1"}
+                   "ST3_CLEANUP_FIXTURE_MODE": mode, "PYTHONDONTWRITEBYTECODE": "1",
+                   "FRACTAL_TEST_PID_NAMESPACE": "off"}
             # This is the real Rust test process, including supervise_test(),
             # rather than a Python approximation of nextest's kill behavior.
             with (evidence / "rust.log").open("wb") as log:
@@ -207,6 +210,89 @@ if __name__ == '__main__':
             with self.assertRaisesRegex(OSError, "evidence failure"):
                 canary.run(args, node.root, Path("/unused-evidence"))
             stop.assert_called_once()
+
+
+ANCESTRY = """
+import json, os
+def readable(pid):
+    try:
+        open(f"/proc/{pid}/environ", "rb").read(1)
+        return True
+    except OSError:
+        return False
+pid, chain = os.getpid(), []
+while pid > 1:
+    status = dict(line.split(":", 1) for line in open(f"/proc/{pid}/status").read().splitlines() if ":" in line)
+    parent = int(status["PPid"])
+    chain.append([pid, parent, readable(pid)])
+    pid = parent
+print(json.dumps({"namespace": os.readlink("/proc/self/ns/pid"), "chain": chain,
+                  "supervisor": os.environ.get("FRACTAL_TEST_SUPERVISOR")}))
+"""
+
+
+def supervised(command, namespace=True, **env):
+    """Run a command under the guardian from a caller without seat ancestry, asking for a PID
+    namespace as supervise_test does."""
+    environment = {key: value for key, value in os.environ.items() if key not in ("ST_AGENT", "ST3_SUBJECT")}
+    environment.update(env)
+    flags = ["--pid-namespace"] if namespace else []
+    return subprocess.run([sys.executable, str(HERE / "fractal_test_process.py"), *flags, "--", *command],
+                          env=environment, capture_output=True, text=True, timeout=30)
+
+
+class NamespaceTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(HERE))
+        from fractal_test_process import pid_namespace_available
+        if not pid_namespace_available():
+            self.skipTest("unprivileged user and PID namespaces are unavailable here")
+
+    def test_the_walk_from_a_test_ends_at_the_namespace_init_through_readable_ancestors(self):
+        result = supervised([sys.executable, "-c", ANCESTRY])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(result.stdout)
+        self.assertNotEqual(seen["namespace"], os.readlink("/proc/self/ns/pid"))
+        # The guardian is PID 2 under a minimal PID 1, and the caller-ancestry walk can read
+        # every process it climbs; no seat subreaper (systemd --user) is in the chain.
+        self.assertEqual(seen["supervisor"], "2")
+        self.assertEqual(seen["chain"][-1][:2], [2, 1])
+        self.assertTrue(all(readable for _, _, readable in seen["chain"]), seen["chain"])
+
+    def test_a_detached_leftover_ends_with_its_namespace(self):
+        leftover = """
+import os, time
+print(os.readlink("/proc/self/ns/pid"), flush=True)
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        time.sleep(600)
+    os._exit(0)
+"""
+        result = supervised([sys.executable, "-c", leftover])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        namespace = result.stdout.split()[0]
+        from fractal_test_process import namespace_holders
+        # Exiting processes leave /proc a moment after the supervisor reports.
+        wait_for(lambda: not namespace_holders(namespace), f"processes outlived {namespace}", timeout=2)
+
+    def test_the_exit_status_passes_through(self):
+        self.assertEqual(supervised(["sh", "-c", "exit 7"]).returncode, 7)
+
+    def test_without_the_flag_the_guardian_stays_in_this_namespace(self):
+        # Stages and scripts may run cargo, whose host-wide queue judges tickets by PID.
+        result = supervised([sys.executable, "-c", ANCESTRY], namespace=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(result.stdout)
+        self.assertEqual(seen["namespace"], os.readlink("/proc/self/ns/pid"))
+        self.assertNotEqual(seen["supervisor"], "2")
+
+    def test_off_keeps_the_guardian_in_this_namespace(self):
+        result = supervised([sys.executable, "-c", ANCESTRY], FRACTAL_TEST_PID_NAMESPACE="off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(result.stdout)
+        self.assertEqual(seen["namespace"], os.readlink("/proc/self/ns/pid"))
+        self.assertNotEqual(seen["supervisor"], "2")
 
 
 if __name__ == "__main__":

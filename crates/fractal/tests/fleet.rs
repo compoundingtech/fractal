@@ -2959,7 +2959,7 @@ fn supervise_leave_with_diagnostics() -> bool {
         let root = tempfile::tempdir().unwrap();
         let output = Command::new("python3")
             .arg(scripts.join("fractal_test_process.py"))
-            .args(["--owner", &std::process::id().to_string(), "--", "python3"])
+            .args(["--owner", &std::process::id().to_string(), "--pid-namespace", "--", "python3"])
             .arg(scripts.join("fractal_fleet_leave_diagnostics.py"))
             .args(["--seconds", "600", "--root"])
             .arg(root.path())
