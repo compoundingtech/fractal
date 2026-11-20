@@ -89,6 +89,10 @@ fleet_compat() {
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_beside_a_member_that_retires_closed_mail_and_its_rollback 2>&1 | tee "$logs/compat-mail-retire-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-mail-retire-result.log" || return
+  # Work wakes for a seat on this member as stream items beside the release, across rollback and a second upgrade.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback 2>&1 | tee "$logs/compat-work-wakes-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-work-wakes-result.log" || return
   # Blob bytes moved to the blob file on a member upgraded from the release, beside it; the release refuses the moved store and opens it after a restore.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback 2>&1 | tee "$logs/compat-blob-move-result.log" || return

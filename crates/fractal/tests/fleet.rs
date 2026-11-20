@@ -10132,3 +10132,140 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     assert!(thread_kinds(&n1, &agent).await.is_empty(), "rolled back, a retired claim came back");
     assert_eq!(thread_kinds(&n1, &person).await, whole);
 }
+
+/// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
+/// release, which replicates the stream as it already does. Rolled back, the member's release
+/// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
+/// again, this build reads the step's wakes from both stores. Replication stays whole.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    struct PtyCleanup(PathBuf, PathBuf);
+    impl Drop for PtyCleanup {
+        fn drop(&mut self) {
+            let Ok(output) = Command::new(&self.0).args(["list", "--json"]).env("PTY_ROOT", &self.1).output() else {
+                return;
+            };
+            for row in serde_json::from_slice::<Vec<Value>>(&output.stdout).unwrap_or_default() {
+                if let Some(name) = row["name"].as_str() {
+                    let _ = Command::new(&self.0).args(["kill", name]).env("PTY_ROOT", &self.1).output();
+                }
+            }
+        }
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = fractal_daemon::test_support::canonical_tempdir();
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pty = fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+    let node_program = fractal_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
+    let mut a = anchor(root.path(), "a").await;
+    let _cleanup = PtyCleanup(pty.clone(), a.state_dir().join("pty"));
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    // The seat's harness on a is the pi-family stub the boot canaries run, from the runtime
+    // profile's wrapper directory (fractal-drivers managed_launch), under either binary.
+    a.stop();
+    fs::write(a.root.join("bin/pty"), format!("#!/bin/sh\nexec '{}' \"$@\"\n", pty.display())).unwrap();
+    let stub = a.root.join("bin/omp");
+    fs::write(&stub, format!(
+        "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
+        node_program.display(),
+        repo.join("scripts/fractal-boot-canaries/stub-pi-family.mjs").display()
+    )).unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = a.root.join("runtime-profile.json");
+    fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": a.root.join("bin")}}},
+    })).unwrap()).unwrap();
+    a.env.extend([
+        ("AGENT_RUNTIME_PROFILE".to_owned(), profile.display().to_string()),
+        ("AGENT_PERSONA".to_owned(), "generalist".to_owned()),
+    ]);
+    a.start().await;
+    wait_for_stream_peers(&a, &["o"], 90).await;
+
+    let workspace = root.path().join("wake-workspace");
+    fs::create_dir(&workspace).unwrap();
+    let seat = "agent/wake/here";
+    let declaration = root.path().join("wake.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"wake/here\" {{ host \"a\"; workspace {:?}; harness \"omp\" {{}} }}\nmission \"wake/stream\" state=\"ready\" {{\n  concurrent-runs\n  goal \"Wake the seat.\"\n  step \"work\" {{ assigned-to \"{seat}\" }}\n}}\n",
+        workspace
+    )).unwrap();
+    a.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    wait_until("the seat's harness is ready", 120, || async {
+        matches!(a.st_json(&["agents", "show", seat])["value"]["harness_state"].as_str(), Some("ready" | "idle"))
+    })
+    .await;
+    let started = a.st_json(&["missions", "start", "wake/stream", "--id", "wake/first", "--as", PERSON]);
+    let step = started["mission_run"]["steps"][0]["subject"].as_str().unwrap().to_owned();
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+    // The step's wakes on `node`, as (subject, stream item).
+    let wakes = |node: &Node| {
+        let (node, step) = (node.client(), step.clone());
+        async move {
+            let page: Value = node.get(&format!("/v1/messages?to={seat}")).await.unwrap();
+            page.as_array().into_iter().flatten()
+                .filter(|item| item["tags"].as_array().into_iter().flatten()
+                    .any(|tag| tag.as_str().is_some_and(|tag| tag.starts_with(&format!("st3-work:{step}@")))))
+                .map(|item| (item["subject"].as_str().unwrap().to_owned(), item["created_index"].as_u64().unwrap() > base))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // This build wakes its own seat through the stream, delivers the wake, and counts it.
+    wait_until("the seat's harness receives its stream wake", 90, || async {
+        fs::read_to_string(workspace.join("receipts-agent-wake-here.jsonl"))
+            .unwrap_or_default()
+            .contains(&format!("A mission step is ready: {step}"))
+    })
+    .await;
+    let first = wakes(&a).await;
+    assert!(!first.is_empty() && first.iter().all(|(_, stream)| *stream), "{first:?}");
+    for (subject, _) in &first {
+        assert_eq!(held(&a, subject).await, (0, 1), "{subject}");
+    }
+    let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+    assert!(shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1, "{shown}");
+
+    // Rolled back, the release reads wakes from the graph alone: it wakes the seat once more,
+    // through the graph, and the stream wake stays in the member's shard.
+    a.stop();
+    a.binary = old.clone();
+    a.start().await;
+    wait_until("the release wakes the seat again through the graph", 120, || async {
+        wakes(&a).await.iter().any(|(_, stream)| !stream)
+    })
+    .await;
+    for (subject, _) in &first {
+        assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+    }
+
+    // Upgraded again, this build opens the store the release wrote and reads both kinds.
+    a.stop();
+    a.binary = PathBuf::from(st3());
+    a.start().await;
+    wait_until("the upgraded member shows the step's wakes from both stores", 90, || async {
+        let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+        shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1
+            && wakes(&a).await.iter().any(|(_, stream)| *stream)
+            && wakes(&a).await.iter().any(|(_, stream)| !stream)
+    })
+    .await;
+    for node in [&a, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
