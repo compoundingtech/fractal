@@ -9832,6 +9832,84 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
 }
 
 #[tokio::test]
+async fn mission_show_joins_only_the_run_revisions_source_provenance() {
+    use fractal_daemon::SeatsStoreCore as _;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("publisher").unwrap());
+    let source = r#"version 2
+mission "source-bound" state="ready" {
+  provenance {
+    reason "Republished after reviewed merge."
+    source {
+      repository "https://github.com/example/factory"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "graph/demo/mission.ts"
+      renderer "graph-v1"
+    }
+    decision "https://github.com/example/factory/pull/42"
+  }
+  goal "Keep a source-bound schedule."
+  step "hold" { agentless }
+}"#;
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "source-bound-publication").unwrap();
+    let mut run = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "source-bound".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("agent/original-owner".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "source-bound-run".into(),
+    }).unwrap();
+    let created = store.latest_claim(&run.subject, Some("mission-run.created")).unwrap().unwrap();
+    let admitted = created.body["fields"]["admission_publication"].as_str().unwrap().to_owned();
+    let newer = source.replace("Keep a source-bound schedule.", "Newer schedule.")
+        .replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .replace("/pull/42", "/pull/43");
+    let intent = fractal_daemon::parse_intent(&newer, store.origin()).unwrap();
+    store.apply_internal(&intent, "newer-publication").unwrap();
+    let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+    let publication = load_run_publication(&client, &run).await.unwrap().unwrap();
+    assert_eq!(publication.claim_id, admitted);
+    assert_eq!(publication.revision, run.revision);
+    run.provenance = None; // An older daemon omitted the existing sidecar.
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    let provenance = run.provenance.take().unwrap();
+    assert_eq!(provenance.source.commit, "a".repeat(40));
+    assert_eq!(provenance.decision, vec!["https://github.com/example/factory/pull/42"]);
+    assert_eq!(run.requester, "agent/original-owner");
+    run.revision = "0".repeat(64);
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    assert!(run.provenance.is_none());
+    assert!(load_run_publication(&client, &run).await.unwrap().is_none());
+    server.abort();
+}
+
+#[test]
+fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let source = fs::read_to_string(root.join("main.rs")).unwrap();
+    let lookup = source.split_once("async fn load_run_publication(").unwrap().1
+        .split_once("async fn load_run_source_provenance(").unwrap().0;
+    assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
+    assert!(lookup.contains("admission_publication"));
+    assert!(lookup.contains("/v1/claims/by-id/"));
+    assert!(!lookup.contains("mission_publications("));
+    assert!(!lookup.contains("before_index"));
+    let follow = source.split_once("async fn follow_mission_run_to(").unwrap().1
+        .split_once("client.follow_recovered()").unwrap().0;
+    assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
+    assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
+    assert!(!follow.contains("mission_publications("));
+    let show_source = fs::read_to_string(root.join("launch_cli.rs")).unwrap();
+    let show = show_source.split_once("MissionViewCommand::Show(").unwrap().1
+        .split_once("print_mission_tree_continuation").unwrap().0;
+    assert!(show.contains("load_run_publication(client, &run)"));
+    assert!(!show.contains("mission_publications("));
+}
+
+#[tokio::test]
 async fn missions_start_names_a_replaced_or_missing_revision() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("single").unwrap());
@@ -9888,6 +9966,11 @@ async fn missions_start_names_a_replaced_or_missing_revision() {
 
     let publications = mission_publications(&client, "arrival").await.unwrap();
     assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0].actor.as_deref(), Some("person/test"));
+    let publication_note = mission_publication_note(publications.first());
+    assert!(publication_note.starts_with("PUBLISHER person/test · single · "));
+    assert!(publication_note.contains(&format!("\nPUBLICATION {}\n", publications[0].claim_id)));
+    assert!(!publication_note.contains("REQUESTER"));
     assert!(
         started_revision_note("arrival", &second, &publications)
             .ends_with("on single. 1 older revision shares this mission name.")
