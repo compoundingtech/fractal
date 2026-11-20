@@ -696,6 +696,7 @@ fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::Proof
     } else {
         Connection::open(copy)?
     };
+    crate::sqlite::census_files::register(&connection);
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
@@ -1129,7 +1130,7 @@ fn prove(
             for mut diagnostic in diagnostics {
                 diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
                 diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
-                eprintln!("st3: checkpoint reader mismatch {diagnostic}");
+                eprintln!("fractal: checkpoint reader mismatch {diagnostic}");
             }
         }
     }
@@ -1934,6 +1935,7 @@ impl Store {
         } else {
             Connection::open_with_flags(&self.path, flags)?
         };
+        crate::sqlite::census_files::register(&connection);
         connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
         connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
         Ok(StoreCopy::Full)
@@ -1999,6 +2001,7 @@ impl Store {
         } else {
             Connection::open(copy)?
         };
+        crate::sqlite::census_files::register(&cloned);
         cloned.execute_batch("PRAGMA mmap_size = 0;")?;
         cloned.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
         Ok(true)

@@ -62,6 +62,9 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
             let name: String = row.get(0)?;
             let kind: String = row.get(1)?;
             let sql: Option<String> = row.get(2)?;
+            if sql.as_deref().is_some_and(|sql| storage_census::temporary_object_matches(&name, &kind, sql)) {
+                continue;
+            }
             let (expected_kind, expected) = match name.as_str() {
                 "write_clock" => (
                     "table",

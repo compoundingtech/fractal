@@ -176,6 +176,7 @@ pub const AUTHORITY_FEATURE: &str = "mission_authority";
 pub const PROGRAM_FEATURE: &str = "mission_program";
 /// The `daemon.started` feature of a build that reads finite execution resource lanes.
 pub const RESOURCE_LANE_FEATURE: &str = "mission_resource_lane";
+pub const RESOURCE_PROFILE_FEATURE: &str = "resource_profile_keys";
 pub const PER_RUN_MISSIONS_FEATURE: &str = "per_run_missions";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
@@ -188,7 +189,7 @@ struct Barrier {
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 6] = [
+const BARRIERS: [Barrier; 7] = [
     Barrier {
         feature: FEATURE,
         minimum_version: 1,
@@ -223,6 +224,13 @@ const BARRIERS: [Barrier; 6] = [
         code: "mission-resource-lane-unavailable",
         declares: declares_extended_resource_lane,
         later: "declare resource lane classes, disk reservations or IO-heavy admission",
+    },
+    Barrier {
+        feature: RESOURCE_PROFILE_FEATURE,
+        minimum_version: 1,
+        code: "resource-profile-keys-unavailable",
+        declares: declares_profile_key,
+        later: "declare a host-resolved resource profile key",
     },
     Barrier {
         feature: PER_RUN_MISSIONS_FEATURE,
@@ -266,6 +274,17 @@ fn declares_extended_resource_lane(mission: &MissionSpec) -> bool {
             || step.loop_spec.as_ref().is_some_and(|spec| {
                 [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
                     .into_iter().flatten().any(|branch| declares_extended_resource_lane(branch))
+            })
+    })
+}
+
+fn declares_profile_key(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.resource_lane.as_ref().is_some_and(|lane| lane.profile.is_some())
+            || step.nested_mission.as_deref().is_some_and(declares_profile_key)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_profile_key(branch))
             })
     })
 }

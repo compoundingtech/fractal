@@ -1005,6 +1005,13 @@ objective only after every member runs a build that knows it.
 ID` adds, for a declared objective, its subject and revision, the sample counts by class, each open
 sample over target with its age, and its response. `fractal slo chart ID` draws the budget left a
 minute at a time from the local seven-day history, which records declared rows like any other.
+
+`fractal doctor` presents every objective and account budget from the same native SLO
+projection, including declared objectives, as `slo/ID`. It retains the native status, tone,
+current reading, target and window. SLO verdicts describe, they do not gate: every row is
+informational, so a red or quiet objective never fails `fractal doctor --strict`, and no SLO
+row is presented as a successful check. Doctor does not re-evaluate SLO thresholds.
+
 A declaration this build cannot read, as one replicated from a newer build, is the one row `NAME`,
 `no-data`, whose explanation names its revision and why.
 
@@ -1040,6 +1047,8 @@ The native registry admits these system-only claims on `resource-admission/HOST/
 `resource.admission.coverage` uses `resource-admission/HOST` for each acquired source cut.
 Both kinds remain durable replicated evidence, not launch capabilities. Ordinary public
 claim writers cannot publish either kind.
+Evidence retains newer class names and the `recovery-not-allowed` refusal losslessly.
+These facts do not extend the execution host's supported admission classes.
 The daemon subscribes to claim-change notifications and arms one timer for the nearest
 open deadline or 5m/30m/1h/6h/30d accounting boundary. The wake autonomously evaluates
 the full native objective set and existing owner bindings even without an SLO reader.
@@ -1047,7 +1056,14 @@ Timers do not sample membership or manufacture lifecycle facts; an empty source 
 timer. There is no periodic admission-source poll.
 
 Local native coverage is admitted only after this process acquires the host authority and
-completes replay. A persisted marker cannot certify an absent producer after restart.
+completes replay of supported membership classes. Retained unsupported-class custody is
+still replayed as evidence without changing its authoritative bytes or grants, but the
+source cut records `complete: false` and process-local coverage remains unknown. Supported
+work may still acquire capacity under the existing custody and authority fences.
+Unsupported queued rows never enter executable FIFO ordering, and background DSL cleanup
+defers unsupported memberships instead of aborting supported reconciliation. Any held
+custody still counts against capacity until a reader with authority can retire it.
+A persisted marker cannot certify an absent producer after restart.
 Remote evidence remains unknown: replication alone does not certify a remote complete cut.
 Unreadable or uncertain clocks also leave the source unknown, never green. Coverage modes
 remain visible in `coverage_modes`; a logical grant does not claim physical enforcement.

@@ -41,6 +41,15 @@ secret registrations, it is neither a shared projection nor reconstructible from
 claims, and remains outside replication and shared projection digests. Importing
 another host's completion marker would not prove erasure of this database.
 
+`shell_resource_request_cancellations_v1` is host-local resource authority, beside
+`shell_resources_v1` and membership custody. It retains owner-scoped request
+cancellation tombstones for seven days so cancellation before acceptance prevents
+a delayed or retried submission from launching. The authenticated cancellation
+path writes them; shell submission checks and expires them. They are not claims,
+shared projections or rebuildable caches: their authority applies only to the
+runtime owning the request on this host. They stay outside graph replication and
+shared projection digests.
+
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
 pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
@@ -411,7 +420,7 @@ order from the same admitted claims.
 | `glass_heads` | Shared projection | Canonical glass declaration heads derived from admitted claims. |
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
 | `held_keys` | Local | Which principal each key this node holds belongs to, and its delegation chain; the private keys are files in `STATE/keys`. |
-| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry and remain. |
+| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry; cleanup treats them as due and applies the same durable-identity check. |
 | `identity_dirty` | Local cache | Transaction-local naming-fold invalidation marker; excluded from replicated digests and cleared during projection replay. |
 | `identity_heads` | Shared projection | Immutable storage identity, canonical public ID, naming revision and lifecycle availability derived from declaration and naming facts. All columns participate in projection digests and shuffle/restart/checkpoint coverage. |
 | `identity_names` | Shared projection | Reserved historical names and their immutable identity and naming claim. All columns participate in projection digests; replay reconstructs reservations from durable facts. |
