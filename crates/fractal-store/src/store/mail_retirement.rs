@@ -272,6 +272,10 @@ fn warm(connection: &Connection, judged: &[(Option<i64>, String, Judgement)]) {
     }
 }
 
+/// One of a thread's claims as judging reads it: id, operation id, kind, `from`, `to` and when
+/// it was accepted.
+type ThreadClaim = (String, Option<String>, String, Option<String>, Option<String>, String);
+
 /// How many threads deep a chain of mail citing mail is followed; past it the thread stays.
 const CITATION_DEPTH: usize = 8;
 
@@ -294,7 +298,7 @@ fn judge(
     depth: usize,
     kept: &mut BTreeMap<String, bool>,
 ) -> Result<Judgement> {
-    let claims: Vec<(String, Option<String>, String, Option<String>, Option<String>, String)> = connection
+    let claims: Vec<ThreadClaim> = connection
         .prepare_cached(
             "SELECT id, json_extract(body,'$._operation.id'), kind,
                     json_extract(body,'$.fields.from'), json_extract(body,'$.fields.to'), accepted_at_unix_ms
