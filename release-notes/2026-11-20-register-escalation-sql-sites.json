@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register the SQL sites #6733 added in the escalation store in the large-value inventory, so main passes the large-value guard again",
+  "replay": {"status": "none", "detail": "No claim kind or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; only inventory markers and entries."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "none", "detail": "No runtime change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Nothing persisted."}
+}
