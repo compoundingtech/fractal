@@ -101,7 +101,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.arm_restart(&format!("model-return-budget:{}", subject.subject), deadline);
                 }
             },
-            Err(error) if matches!(error.code.as_str(), "model-return-host-busy" | "model-return-stale") => {},
+            Err(error) if matches!(error.code, "model-return-host-busy" | "model-return-stale") => {},
             Err(error) => return Err(error.into()),
         }
         Ok(())

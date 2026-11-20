@@ -43,7 +43,7 @@ test('full and read entrypoints share validators and strict unknown-case trackin
 });
 
 test('strict agent decoders accept optional model drift extension fields without regeneration', async () => {
-    const [, Rich] = await modules;
+    const [{ Schema }, Rich] = await modules;
     const read = await import('./ReadSchema.generated.ts');
     const base = {
         id: 'agent/example/worker', kind: 'agent', revision: 'claim/example',
@@ -65,8 +65,9 @@ test('strict agent decoders accept optional model drift extension fields without
                 state: 'unknown', drift_since: null, drift_age_seconds: null,
                 observed_at: null, fallback_reason: null, return_attempts: null,
             } }]) {
-            assert.equal(decode(wire).id, base.id);
-            assert.equal(decode(wire).live_model, base.live_model);
+            const decoded = decode(wire);
+            assert.equal(decoded.id, base.id);
+            assert.equal(Schema.encodeSync(schema.Agent)(decoded).live_model, base.live_model);
         }
     }
 });
