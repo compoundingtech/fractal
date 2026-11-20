@@ -8117,6 +8117,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.valid_record_bytes", release_valid_record_bytes(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_signatures", sign_own_claims(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
@@ -22503,6 +22504,30 @@ async fn release_valid_record_bytes(store: Arc<Store>) {
     }
     if emptied > 0 || released > 0 {
         stderr_message("fractal", format_args!("emptied {emptied} valid records ({bytes} bytes) and gave {released} free pages back"));
+    }
+}
+
+/// Sign this member's own claims with its member key (`member_signatures`): the claims it held
+/// before this build a page at a time, then each new one within seconds of its append. Signing
+/// happens outside the writer; each page stores in one short write.
+async fn sign_own_claims(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        // Signatures that wait for their claims are settled first: a page of them, then a page
+        // of this member's own claims to sign.
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_signatures", || {
+            page_store.promote_claim_member_signatures()?;
+            page_store.sign_own_claims()
+        })).await;
+        let pause = match result {
+            Ok(Ok(report)) if report.done => Duration::from_secs(5),
+            Ok(Ok(_)) => Duration::from_millis(50),
+            error => {
+                stderr_message("fractal", format_args!("signing own claims failed: {error:?}"));
+                Duration::from_secs(60)
+            }
+        };
+        tokio::time::sleep(pause).await;
     }
 }
 

@@ -49,6 +49,7 @@ fn response(digest: String) -> ReplicationExportResponse {
             signatures: Vec::new(),
             build: None,
             claim_ranges: None,
+            claim_member_signatures: Vec::new(),
         },
     }
 }
