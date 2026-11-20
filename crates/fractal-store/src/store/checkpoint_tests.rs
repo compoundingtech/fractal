@@ -3030,3 +3030,43 @@ fn real_checkpoint_trim_preserves_thread_title_history_and_rename_receipt() {
     );
     assert_eq!(summary(&store, person, subject).unwrap().title, "Current");
 }
+
+#[test]
+fn claim_archives_preserve_latest_witnesses_and_exact_historical_reads() {
+    use smallclaims::claim_archive::{ClaimArchive, HotWindow};
+    let store = Store::open_memory("alder").unwrap();
+    let decision = |at: u128, reason: &str| {
+        store.set_write_clock_at(at).unwrap();
+        let claim = store.append_claim(&input(
+            AGENT, "runtime.reconcile-decision", None,
+            json!({"key":"archive-fixture", "decision":"wait", "reason":reason}),
+            &format!("archive-decision-{at}"),
+        )).unwrap();
+        store.seal_local_batches().unwrap();
+        claim
+    };
+    let historical = decision(100, "first");
+    let latest = decision(200, "latest");
+    let scratch = tempfile::tempdir().unwrap();
+    let cut = 40 * DAY_MS;
+    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
+    for window in [HotWindow::Days14, HotWindow::Days30] {
+        let protected = scratch.path().join(format!("protected-{}", window.milliseconds()));
+        assert!(store.write_claim_archive(&staged, std::slice::from_ref(&latest.id), cut, window, &protected).is_err());
+        assert!(!protected.exists(), "protected witnesses never receive an archive object");
+    }
+    let path = scratch.path().join("historical");
+    let seal = store.write_claim_archive(&staged, std::slice::from_ref(&historical.id), cut, HotWindow::Days30, &path).unwrap();
+    let archive = ClaimArchive::open(&path, &seal).unwrap();
+    let cold_record = archive.evidence(&historical.id).unwrap().record();
+    let expected = serde_json::to_value(&historical).unwrap();
+    assert_eq!(serde_json::to_value(cold_record).unwrap(), expected);
+    assert_eq!(serde_json::to_value(store.claim_by_id_with_archive(&historical.id, &[archive]).unwrap().unwrap()).unwrap(), expected);
+    assert!(store.claim_by_id(&historical.id).unwrap().is_some(), "export never removes hot rows");
+    // Only this empty fixture reader has no hot copy; production retirement is not implemented.
+    let empty = Store::open_memory("birch").unwrap();
+    let archive = ClaimArchive::open(&path, &seal).unwrap();
+    assert_eq!(serde_json::to_value(empty.claim_by_id_with_archive(&historical.id, &[archive]).unwrap().unwrap()).unwrap(), expected);
+    assert!(empty.claim_by_id(&historical.id).unwrap().is_none());
+    assert!(store.claim_by_id(&latest.id).unwrap().is_some());
+}
