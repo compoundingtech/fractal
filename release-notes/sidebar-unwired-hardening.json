@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Harden the optional, unwired Rust sidebar v2 allocator, membership page conversion, edit lifecycle and durable journal directory without activating any client.",
   "replay": {"status": "none", "detail": "No replay or persisted-state migration. Previously staged action IDs and idempotency keys remain reserved across retries and recovery."},
-  "schema": {"status": "none", "detail": "No wire or journal format change. Membership pages now enforce the generated API version, page kind and schema limit of 1 through 200. The existing live-count cap remains post-decode; moving it before allocation requires a decoder change."},
+  "schema": {"status": "none", "detail": "No wire or journal format change. Membership pages now enforce admitted API versions, page kind and schema limit of 1 through 200. The existing live-count cap remains post-decode; moving it before allocation requires a decoder change."},
   "rules": {"status": "none", "detail": "No projection or retention changes. The unwired key allocator refuses more than 4096 keys. An edit retains at most 256 newly staged identities before refusing another attempt as InvalidPlan; existing journals retain their full identity history."},
   "compatibility": {"status": "none", "detail": "No activated client behavior changes. Rust Edits status is read-only through status(); inconsistent Fresh events refuse instead of panicking. Journal persistence tightens existing owned directories to 0700 and refuses foreign-owned or symlink directories."},
   "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
