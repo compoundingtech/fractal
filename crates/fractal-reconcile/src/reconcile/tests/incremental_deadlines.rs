@@ -57,6 +57,24 @@ fn stop(reconciler: &Reconciler<FakeRuntime>, observation: &RuntimeObservation) 
 }
 
 #[test]
+fn idle_resource_admission_without_pending_work_never_arms_maintenance() {
+    let clock = Clock::at(START);
+    let (store, _, reconciler, _) = stopping();
+    assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), None);
+    reconciler.ensure_resource_authority().unwrap();
+    let before = store.index().unwrap();
+    for elapsed in [0, 5_000, 30_000] {
+        smallclaims::store::set_thread_clock(Some(START + elapsed));
+        assert!(!store.has_pending_resource_admission_observations().unwrap());
+        assert_eq!(reconciler.resource_admission_maintenance_deadline().unwrap(), None);
+        reconciler.maintain_resource_admission_observations().unwrap();
+        assert_eq!(reconciler.next_deadline(), None);
+        assert_eq!(store.index().unwrap(), before, "idle maintenance must not publish a new cut");
+    }
+    drop(clock);
+}
+
+#[test]
 fn idle_resource_admission_maintenance_arms_and_drains_without_new_writes() {
     use crate::store::fleet_admission_tests_shared_seats::{admit, append, key, node};
     use crate::store::resource_membership::{Admission, DiskFit, Fit, LaneRequest};

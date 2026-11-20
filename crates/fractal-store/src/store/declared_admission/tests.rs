@@ -109,7 +109,7 @@ fn recovery_observations_require_every_signed_fleet_reader() {
     // No authority restart: withdrawal commits custody but withholds its terminal fact.
     for (index, member) in queued.iter().enumerate() {
         store.withdraw_resource_membership(&member.id, &member.owner, 4).unwrap();
-        if index % 16 == 0 {
+        if index.is_multiple_of(16) {
             // Continuous withheld traffic during repair must not reset or starve
             // previously pending IDs. They remain queued until readers recover.
             assert!(store.replay_resource_admission_observations().unwrap());

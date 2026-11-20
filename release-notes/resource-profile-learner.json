@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Local resource_profile_samples_v1 stores host-local sample rows. Local resource_admission_pending_v1 deduplicates withheld membership evidence for bounded maintenance replay; its CREATE TABLE/INDEX IF NOT EXISTS migration is additive and idempotent, and an older binary can reopen the store while ignoring the extra table. RequestClass gains recovery in wire commands and persisted execution/membership state. General admission registry compatibility comes from E0; client-v0 schema inputs and generated outputs are unchanged."
+    "detail": "Local resource_profile_samples_v1 stores host-local sample rows. Local resource_admission_pending_v1 deduplicates withheld membership evidence for bounded maintenance replay; its CREATE TABLE/INDEX IF NOT EXISTS migration is additive and idempotent, and an older binary can reopen the store while ignoring the extra table. Both tables are classified as host-local state outside the shared projection digest. RequestClass gains recovery in wire commands and persisted execution/membership state. General admission registry compatibility comes from E0; client-v0 schema inputs and generated outputs are unchanged."
   },
   "rules": {
     "status": "changed",
