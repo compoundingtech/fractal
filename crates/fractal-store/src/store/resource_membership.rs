@@ -1342,7 +1342,7 @@ mod tests {
             enforced.coverage = Coverage::Enforced;
             // Queue on every platform, then exercise each state that retains a policy fence.
             assert!(matches!(store.request_resource_membership(&enforced,
-                Fit { outside_bytes: 4096, ..test_fit() }, 1).unwrap(), Admission::Queued { .. } | Admission::Refused { .. }));
+                Fit { outside_bytes: 128 << 30, ..test_fit() }, 1).unwrap(), Admission::Queued { .. } | Admission::Refused { .. }));
             store.connection.write().execute("UPDATE resource_memberships_v1 SET state=?1 WHERE id=?2",
                 rusqlite::params![state,enforced.id]).unwrap();
             let error = store.request_resource_membership(&request("logical"), test_fit(), 2).unwrap_err();
