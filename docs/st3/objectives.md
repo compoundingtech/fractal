@@ -808,6 +808,9 @@ completes replay of supported membership classes. Retained unsupported-class cus
 still replayed as evidence without changing its authoritative bytes or grants, but the
 source cut records `complete: false` and process-local coverage remains unknown. Supported
 work may still acquire capacity under the existing custody and authority fences.
+Unsupported queued rows never enter executable FIFO ordering, and background DSL cleanup
+defers unsupported memberships instead of aborting supported reconciliation. Any held
+custody still counts against capacity until a reader with authority can retire it.
 A persisted marker cannot certify an absent producer after restart.
 Remote evidence remains unknown: replication alone does not certify a remote complete cut.
 Unreadable or uncertain clocks also leave the source unknown, never green. Coverage modes

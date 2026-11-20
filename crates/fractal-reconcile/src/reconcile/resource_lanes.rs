@@ -90,6 +90,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             if record.request.owner.invocation.as_deref().is_none_or(|invocation| !invocation.starts_with("exec/"))
                 || matches!(record.state.as_str(), "retired" | "refused" | "withdrawn")
             { continue; }
+            if let Err(error) = record.request.class.ensure_supported() {
+                tracing::warn!(membership = %record.request.id, %error, "deferring unsupported DSL resource cancellation until upgrade");
+                continue;
+            }
             let retained = desired.iter().filter_map(|subject| subject.member.as_ref())
                 .map(request).collect::<Result<Vec<_>>>()?.into_iter().flatten()
                 .any(|request| request == record.request);
@@ -309,6 +313,59 @@ mod tests {
             learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly, recovery_capable: false,
             source: Some("declared".into()), reason: Some("unit checks".into()), disk: None, io: None,
         }
+    }
+
+    #[test]
+    fn obsolete_unsupported_dsl_custody_does_not_block_supported_cleanup_or_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(directory.path(), None, Path::new("unused-pty")));
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        reconciler.ensure_resource_authority().unwrap();
+        let mut future = profile_request();
+        future.id = "obsolete-future-dsl".into();
+        future.profile = None;
+        future.capacity = Some(fractal_runtime::Capacity { cores: 1, memory: GIB });
+        future.class = fractal_runtime::RequestClass::Agent;
+        future.owner.invocation = Some("exec/obsolete-future".into());
+        let Admission::Admitted(future_grant) = store.request_resource_membership(&future, test_fit(), 1).unwrap()
+            else { panic!("future fixture must first acquire custody"); };
+        store.prepare_resource_membership(&future_grant, "exec/obsolete-future").unwrap();
+        // Model authoritative custody written by a newer binary, without asking this binary
+        // to admit an unsupported class. Preserve the exact persisted body through cleanup.
+        store.connection.write().execute(
+            "UPDATE resource_memberships_v1 SET body=json_set(body,'$.request.class','recovery') WHERE id=?1",
+            [&future.id],
+        ).unwrap();
+        let body = || store.connection.write().query_row(
+            "SELECT body FROM resource_memberships_v1 WHERE id=?1", [&future.id],
+            |row| row.get::<_, String>(0),
+        ).unwrap();
+        let before = body();
+        let mut supported = future.clone();
+        supported.id = "obsolete-supported-dsl".into();
+        supported.owner.invocation = Some("exec/obsolete-supported".into());
+        let Admission::Admitted(supported_grant) = store.request_resource_membership(&supported, test_fit(), 2).unwrap()
+            else { panic!("supported fixture must acquire remaining custody"); };
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 2 * GIB);
+        reconciler.seat_admission.status.lane_wait_class("obsolete-seat",
+            "obsolete seat".into(), true, 1, fractal_runtime::RequestClass::Agent);
+
+        reconciler.cancel_invalid_admissions(&[]).unwrap();
+
+        assert_eq!(body(), before, "unsupported request, roots and custody must remain byte-for-byte unchanged");
+        assert_eq!(store.resource_membership_for_grant(&supported_grant).unwrap().state, "retired");
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), GIB);
+        assert!(reconciler.seat_admission.status.state().lane_waits.is_empty(),
+            "cleanup after the DSL dispatch must still run");
+        // Repeated reconciliation must neither wedge nor release the unsupported member.
+        reconciler.cancel_invalid_admissions(&[]).unwrap();
+        assert_eq!(body(), before);
+        supported.id = "continuing-supported-dsl".into();
+        supported.owner.invocation = Some("exec/continuing-supported".into());
+        assert!(matches!(store.request_resource_membership(&supported, test_fit(), 3).unwrap(), Admission::Admitted(_)),
+            "supported work must still acquire the capacity freed by supported cleanup");
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 2 * GIB);
     }
 
     #[test]

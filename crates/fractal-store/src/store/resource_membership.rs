@@ -636,6 +636,9 @@ impl Store {
             let mut predecessor = None;
             for body in queued {
                 let earlier: Membership = serde_json::from_str(&body?)?;
+                // Preserve unsupported queued records without letting work this binary cannot
+                // execute or withdraw become a permanent FIFO predecessor.
+                if matches!(earlier.request.class, RequestClass::Unknown(_)) { continue; }
                 if earlier.request.id == request.id { break; }
                 let (elapsed, uncertain) = self.resource_admission_elapsed(&earlier.request.id, earlier.queued_at, now_ms);
                 if earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
@@ -996,6 +999,43 @@ mod tests {
         supported.id = "supported-after-recovery".into();
         supported.name = "supported-lane".into();
         assert!(matches!(store.request_resource_membership(&supported, test_fit(), 3).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn unsupported_queued_membership_survives_restart_without_blocking_supported_fifo() {
+        for same_lane in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("graph.db");
+            let queued = request("future-queued");
+            let body;
+            {
+                let store = Store::open(&path, "host-a").unwrap();
+                store.start_resource_authority("host-a", "epoch-a").unwrap();
+                let blocked = Fit { fifo_predecessor: Some("seat/predecessor".into()), ..test_fit() };
+                assert!(matches!(store.request_resource_membership(&queued, blocked, 1).unwrap(), Admission::Queued { .. }));
+                let mut member = store.resource_membership_record(&queued.id, &queued.owner).unwrap();
+                member.request.class = RequestClass::Unknown("future-class".into());
+                // Seed a newer writer's authoritative representation, including whitespace.
+                body = serde_json::to_string_pretty(&member).unwrap();
+                store.connection.write().execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+                    rusqlite::params![queued.id, body]).unwrap();
+            }
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-b").unwrap();
+            assert_eq!(store.recover_resource_memberships("host-a", &runtime(directory.path()), 2).unwrap(), 0);
+            assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+            assert!(store.withdraw_resource_membership(&queued.id, &queued.owner, 3).is_err());
+            let mut supported = request("supported");
+            if !same_lane { supported.name = "executor/supported".into(); }
+            let admitted = grant(&store, &supported, 4);
+            assert_eq!(admitted.authority_epoch, "epoch-b");
+            let retained: (String, String, u64, u64) = store.connection.write().query_row(
+                "SELECT body,state,queued_at,memory FROM resource_memberships_v1 WHERE id=?1",
+                [&queued.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+            assert_eq!(retained, (body, "queued".into(), 1, queued.capacity.unwrap().memory),
+                "unsupported queued bytes and queue metadata must remain intact");
+            assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), supported.capacity.unwrap().memory);
+        }
     }
 
     #[test]
