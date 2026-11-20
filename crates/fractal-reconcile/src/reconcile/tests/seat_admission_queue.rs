@@ -46,7 +46,7 @@ fn recovered_unsupported_queue_rows_never_join_or_retain_executable_waits() {
     let mut body: Value = serde_json::from_str(&body).unwrap();
     body["request"]["class"] = json!("future-class");
     let body = serde_json::to_string_pretty(&body).unwrap();
-    connection.execute("UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
+    connection.execute(/* sqlite-large-value: allow-for-now lv-habd7ccdf313a owner=fractal_reconcile::reconcile::tests::seat_admission_queue TODO=bound-or-reference-values-and-reclamation */ "UPDATE resource_memberships_v1 SET body=?2 WHERE id=?1",
         rusqlite::params![request.id, body]).unwrap();
     let store = Arc::new(Store::open(&path, "node").unwrap());
     store.start_resource_authority("node", "epoch-b").unwrap();
