@@ -39,7 +39,7 @@ pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 /// row, such as those a rolled-back build admitted without the trigger, and an existing shard
 /// gains an index it lacks. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a9e73d4f2c3 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4616bacbf03a owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS stream_lifecycle (
     recorded_at_unix_ms INTEGER NOT NULL,
     PRIMARY KEY (subject, kind, actor)
 );
+-- A native Claude read's proof, found by its reader, session and native message, as the graph
+-- finds one beside its claim (conversation delivery links).
+CREATE INDEX IF NOT EXISTS stream_lifecycle_native_read ON stream_lifecycle(
+    actor,
+    json_extract(fields, '$.native_receipt.session_id'),
+    json_extract(fields, '$.native_receipt.message_id')
+) WHERE kind='message.read';
 INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)
     SELECT subject, COALESCE(json_extract(body, '$.fields.to'), ''),
            COALESCE(json_extract(body, '$.fields.from'), ''), store_index

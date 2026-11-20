@@ -450,3 +450,54 @@ fn native_delivery_binding_survives_reopen_and_stale_fence_adds_nothing() {
         "message/persisted"
     );
 }
+
+/// A stream item read natively, with its proof in the shard's read record.
+fn stream_read(root: &std::path::Path, subject: &str, native: &str) -> std::sync::Arc<Store> {
+    let store = std::sync::Arc::new(Store::open(&root.join("claims.sqlite3"), "node").unwrap());
+    fractal_store::store::messages_shard::open(&store, root).unwrap();
+    fractal_store::store::messages_shard::shard(&store).unwrap().append_claim(&input(subject, "message.sent", "agent/fixture-sender",
+        json!({"status":"sent","from":"agent/fixture-sender","to":OWNER,"content":"Invented fixture"}))).unwrap();
+    let step = |kind: &str, fields: Value| {
+        fractal_store::store::messages_shard::record_lifecycle(
+            &store, subject, kind, Some(OWNER), &serde_json::from_value(fields).unwrap(),
+        ).unwrap()
+    };
+    assert!(step("message.delivered", json!({"status":"delivered"})));
+    assert!(step("message.read", json!({"status":"read","native_receipt":proof(native)})));
+    store
+}
+
+#[test]
+fn a_stream_items_native_read_links_its_entry_as_a_graph_messages_does() {
+    let graph = Store::open_memory("node").unwrap();
+    let (fence, read) = prepared(&graph, "message/one");
+    graph.append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one"))).unwrap();
+    let graph_links = links(&graph, graph.index().unwrap());
+    assert_eq!(graph_links.len(), 1, "{graph_links:?}");
+    let root = tempfile::tempdir().unwrap();
+    let stream = stream_read(root.path(), "message/one", "native-one");
+    assert_eq!(links(&stream, stream.index().unwrap()), graph_links);
+    // Another session's or another reader's proof gives no link.
+    assert!(stream.conversation_delivery_receipts(
+        "session/external-ffffffffffffffffffffffff", OWNER, &BTreeSet::from(["native-one".into()]), stream.index().unwrap(),
+    ).unwrap().is_empty());
+    assert!(stream.conversation_delivery_receipts(
+        SESSION, "agent/eval.other", &BTreeSet::from(["native-one".into()]), stream.index().unwrap(),
+    ).unwrap().is_empty());
+}
+
+#[test]
+fn a_later_stream_receipt_is_a_changed_delivery_between_lifecycle_positions() {
+    let root = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    fractal_store::store::messages_shard::open(&store, root.path()).unwrap();
+    let position = |store: &Store| u64::try_from(fractal_store::store::messages_shard::mailbox_reads::position(store).unwrap().lifecycle).unwrap();
+    let before = position(&store);
+    drop(store);
+    let store = stream_read(root.path(), "message/two", "native-two");
+    let after = position(&store);
+    assert!(after > before);
+    assert!(store.conversation_stream_delivery_changed(OWNER, before, after).unwrap());
+    assert!(!store.conversation_stream_delivery_changed(OWNER, after, after).unwrap());
+    assert!(!store.conversation_stream_delivery_changed("agent/eval.other", before, after).unwrap());
+}
