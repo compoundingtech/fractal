@@ -110,11 +110,15 @@ pub(super) fn observe(tx: &Transaction<'_>, member: &Membership) -> Result<bool>
 
 fn publish(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
     if let Err(error) = member.request.class.ensure_supported() {
-        tracing::warn!(membership = %member.request.id, %error, "skipping unsupported-class admission observation; authoritative custody retained");
+        tracing::warn!(membership = %member.request.id, %error,
+            "withholding unsupported-class admission observation; authoritative custody retained");
         return Ok(false);
     }
-    if let Err(error) = validate_publication(tx, &member.request.host, &member.request.class) {
-        tracing::warn!(membership = %member.request.id, %error, "deferring recovery observation until every active fleet reader supports it");
+    if (member.request.class == fractal_runtime::RequestClass::Recovery
+        || member.refusal_code == Some(super::resource_membership::RefusalCode::RecoveryNotAllowed))
+        && let Err(error) = super::declared_admission::validate_fleet(tx, &member.request.host, &RECOVERY_FEATURE) {
+        tracing::warn!(membership = %member.request.id, %error,
+            "deferring recovery observation until every active fleet reader supports it");
         return Ok(false);
     }
     // Child/inherited contexts never create memberships and therefore never add samples.
@@ -138,15 +142,18 @@ fn publish(tx: &Transaction<'_>, member: &Membership) -> Result<bool> {
     Ok(true)
 }
 
-/// Replay understood membership observations at authority acquisition. Unsupported classes
-/// retain authoritative custody and mark observation coverage incomplete instead of aborting.
+/// Replay only understood, fleet-compatible evidence without granting newer classes authority.
+/// Withheld observations retain custody and leave the local source cut uncertified.
 pub(super) fn recover(tx: &Transaction<'_>, host: &str, epoch: &str) -> Result<bool> {
     let mut statement = tx.prepare("SELECT body FROM resource_memberships_v1 WHERE host=?1 ORDER BY id")?;
     let members = statement.query_map([host], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     let mut complete = true;
-    for body in members { complete &= observe(tx, &serde_json::from_str(&body)?)?; }
+    for body in members {
+        let member: Membership = serde_json::from_str(&body)?;
+        complete &= observe(tx, &member)?;
+    }
     append_claim_tx(tx, host, &format!("resource-admission/{host}"), COVERAGE_KIND, None,
         &json!({"fields": {"host": host, "epoch": epoch, "complete": complete}, "evidence": []}), &[], None)?;
     Ok(complete)
