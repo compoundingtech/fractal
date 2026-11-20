@@ -3605,6 +3605,18 @@ fn overlay_agent_resources_at(
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
             item["observation"] = json!(observation);
+            if let Some(drift) = item.get_mut("model_drift") {
+                let observed_at = drift["observed_at"].as_str().map(snapshot_time_ms);
+                if drift["state"] != "unknown"
+                    && observed_at.is_none_or(|at| at > now || now - at > HARNESS_OBSERVATION_FRESHNESS.as_millis())
+                {
+                    drift["state"] = json!("stale");
+                }
+                drift["drift_age_seconds"] = if drift["state"] == "drifted" {
+                    json!(drift["drift_since"].as_str().map(snapshot_time_ms)
+                        .map(|since| now.saturating_sub(since) / 1000))
+                } else { Value::Null };
+            }
             // A turn can run for hours without a new harness claim, so only a claim that says the
             // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
             if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle")) {
@@ -4307,10 +4319,35 @@ fn client_agent_cards_presented(
             // card's incarnation (never response spend, which includes subagents), or null when it reported none. Hoisted out of the card
             // literal: the literal already nests at the macro recursion limit. A step script
             // reads what a one-shot reviewer actually ran on even after it exits.
-            let live_model: Option<String> = match incarnation_id.as_deref() {
-                Some(incarnation) => store.latest_usage_model(&subject.subject, incarnation)?,
+            let model_observation = match incarnation_id.as_deref() {
+                Some(incarnation) => store.latest_usage_model_observation(&subject.subject, incarnation)?,
                 None => None,
             };
+            let declared_model = subject.desired.as_ref()
+                .and_then(crate::store::model_drift::declared_harness_model);
+            let model_state = crate::store::model_drift::model_drift_state(
+                declared_model, model_observation.as_ref(), client_now_ms(),
+                HARNESS_OBSERVATION_FRESHNESS.as_millis(),
+            );
+            let drift_since = match (incarnation_id.as_deref(), declared_model, model_observation.as_ref()) {
+                (Some(incarnation), Some(declared), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted => {
+                    store.model_drift_since(&subject.subject, incarnation, declared, &observation.model)?
+                }
+                _ => None,
+            };
+            let fallback = match (incarnation_id.as_deref(), model_observation.as_ref()) {
+                (Some(incarnation), Some(observation))
+                    if model_state == crate::store::model_drift::ModelDriftState::Drifted =>
+                {
+                    store.latest_model_fallback(&subject.subject, incarnation)?.filter(|fallback|
+                        observation.observed_at_ms.is_some_and(|at| at >= fallback.observed_at_ms)
+                        && crate::pricing::declared_model_matches(&fallback.to, &observation.model) == Some(true))
+                }
+                _ => None,
+            };
+            let return_attempts = incarnation_id.as_deref().map(|incarnation|
+                store.model_return_attempt_count(&subject.subject, incarnation)).transpose()?;
             let mut value = json!({
                 "id": subject.subject,
                 "kind": "agent",
@@ -4379,7 +4416,16 @@ fn client_agent_cards_presented(
                 "due_at": residency.due_at_unix_ms.map(client_timestamp),
                 "refusal_reason": residency.refusal_reason,
             });
-            value["live_model"] = live_model.map_or(Value::Null, Value::String);
+            value["live_model"] = json!(model_observation.as_ref().map(|observation| &observation.model));
+            value["declared_model"] = json!(declared_model);
+            value["model_drift"] = json!({
+                "state": model_state,
+                "drift_since": drift_since.map(client_timestamp),
+                "drift_age_seconds": drift_since.map(|since| client_now_ms().saturating_sub(since) / 1000),
+                "observed_at": model_observation.as_ref().and_then(|observation| observation.observed_at_ms).map(client_timestamp),
+                "fallback_reason": fallback.as_ref().map(|fallback| &fallback.cause),
+                "return_attempts": return_attempts,
+            });
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
                 value["declared_admission"] = serde_json::to_value(admission)?;
             }

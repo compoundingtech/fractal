@@ -63,6 +63,7 @@ pub mod github_capture;
 pub mod github_plugin_store;
 pub mod plugin_store;
 pub mod idle_nudge;
+mod model_return;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
@@ -3310,6 +3311,54 @@ impl<R: RuntimeControl> Reconciler<R> {
         result
     }
 
+    fn publish_model_drift_metrics(
+        &self,
+        desired: &[DesiredSubject],
+        eligible: &BTreeSet<String>,
+    ) -> Result<()> {
+        if !crate::otel::metrics_enabled() { return Ok(()); }
+        use crate::model_drift::{Reading, State};
+        use crate::store::model_drift::{ModelDriftState, declared_harness_model, model_drift_state};
+        let now = now_ms();
+        let readings = self.store.read_snapshot(|_| {
+            let mut readings = Vec::new();
+            for subject in desired.iter().filter(|subject| subject.kind == "agent"
+                && eligible.contains(&subject.subject)
+                && subject.member.as_ref().is_some_and(|member| member.host == self.host))
+            {
+                let actual = self.store.latest_actual_value(&subject.subject)?;
+                let incarnation = actual.as_ref().and_then(|value| value.pointer("/fields/incarnation_id")
+                    .or_else(|| value.get("incarnation_id"))).and_then(Value::as_str);
+                let observation = incarnation.map(|incarnation|
+                    self.store.latest_usage_model_observation(&subject.subject, incarnation)).transpose()?.flatten();
+                let declared = declared_harness_model(&subject.desired);
+                let state = model_drift_state(declared, observation.as_ref(), now,
+                    fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis());
+                let since = match (state, incarnation, declared, observation.as_ref()) {
+                    (ModelDriftState::Drifted, Some(incarnation), Some(declared), Some(observation)) =>
+                        self.store.model_drift_since(&subject.subject, incarnation, declared, &observation.model)?,
+                    _ => None,
+                };
+                readings.push(Reading {
+                    agent: subject.subject.clone(),
+                    state: match state {
+                        ModelDriftState::AtDeclared => State::AtDeclared,
+                        ModelDriftState::Drifted => State::Drifted,
+                        ModelDriftState::Unknown => State::Unknown,
+                        ModelDriftState::Stale => State::Stale,
+                        ModelDriftState::Uncomparable => State::Uncomparable,
+                    },
+                    observed_at_ms: observation.as_ref().and_then(|reading| reading.observed_at_ms),
+                    drift_since_ms: since,
+                });
+            }
+            Ok(readings)
+        })?;
+        crate::model_drift::replace(
+            &self.store.extension::<crate::model_drift::Metrics>(), readings);
+        Ok(())
+    }
+
     fn prune_stop_state(
         &self,
         gates: &[crate::store::MissionGateRunner],
@@ -3598,6 +3647,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 BTreeSet::new()
             }
         };
+        if let Err(error) = self.publish_model_drift_metrics(&desired, &eligible) {
+            tracing::warn!(%error, "model drift metrics snapshot failed");
+        }
         let eligible = |subject: &DesiredSubject| eligible.contains(&subject.subject);
         // Select members before workspace/authority preparation. Filesystem-only changes are
         // checked by the full member safety pass; failures leave the member unevaluated so
@@ -4991,44 +5043,46 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// declared harness model. A silent provider fallback (omp falling down its model ladder on
     /// a 429) otherwise runs undeclared for hours with zero faults. This raises a non-blocking
     /// operational failure (`harness/model-drift`) on the seat naming declared vs live model
-    /// and since when: it never stops, parks, or crash-loops the seat. The fault's owner is
+    /// and since when. Only the separately gated transient-return policy may request an idle
+    /// restart; quota, auth, and unknown causes remain attention-only. The fault's owner is
     /// the seat's own declaring agent (or run requester via `fault_owner`); a person sees the
     /// drift in one aggregated attention item over every drifting seat they own
     /// (`Store::model_drift_attention_items`), never one item per seat. It resolves
     /// when usage returns to the declared model or the declaration adopts the live model.
     /// Models compare through `pricing::declared_model_matches`: Claude aliases (`sonnet`)
     /// match their family, and a declaration that is no resolvable API ID raises nothing.
-    /// The Codex resume model check (`resume_permission_overrides_applied`) only guards a
-    /// resume handshake; this is the durable observable signal for the same underlying
-    /// concept, kept as a fault rather than a crash loop so the seat keeps working.
+    /// The return policy reuses this incarnation/model-pair-fenced onset, never another
+    /// incarnation's fault clock or stale provider evidence.
     fn reconcile_model_drift(&self, subject: &DesiredSubject, incarnation: &str) -> Result<()> {
         let episode = model_drift_episode(&subject.subject);
-        let Some(declared) = Self::declared_harness_model(&subject.desired) else {
+        let Some(declared) = crate::store::model_drift::declared_harness_model(&subject.desired).map(str::to_owned) else {
             return self.recover_model_drift(&episode, "the seat declares no harness model");
         };
         // Bounded reads only: one indexed newest-first `harness.usage` window for this
         // incarnation, never a full usage fold.
-        let Some(live) = self.store.latest_usage_model(&subject.subject, incarnation)? else {
+        let Some(observation) = self.store.latest_usage_model_observation(&subject.subject, incarnation)? else {
             return self.recover_model_drift(&episode, "the seat has reported no usage model yet");
         };
+        if observation.observed_at_ms.is_none_or(|at| at > now_ms() || now_ms().saturating_sub(at) > 60_000) {
+            return self.recover_model_drift(&episode, "current-incarnation model evidence is stale");
+        }
+        let live = observation.model;
         match fractal_kernel::pricing::declared_model_matches(&declared, &live) {
             Some(true) => return self.recover_model_drift(&episode, "usage returned to the declared model"),
             None => return self.recover_model_drift(&episode, "the declared model is not a comparable model ID"),
             Some(false) => {}
         }
         let open = self.store.operational_failure(&episode)?.filter(|failure| failure.status == "pending");
-        let since_ms = open
-            .as_ref()
-            .and_then(|failure| ModelDrift::parse(&failure.reason))
-            .map_or_else(now_ms, |drift| drift.since_ms);
+        let fenced_since = self.store.model_drift_since(&subject.subject, incarnation, &declared, &live)?;
+        let since_ms = fenced_since.unwrap_or_else(now_ms);
         let reason = ModelDrift { declared, live, since_ms }.reason();
         if let Some(failure) = &open {
-            if failure.reason == reason {
-                return Ok(());
+            if failure.reason == reason && fenced_since.is_some() {
+                return self.reconcile_model_return(subject, incarnation);
             }
             // A pending failure keeps its reason: recording over it is a no-op. The live model
             // moved (or the declaration changed) while drifted, so close this episode and raise
-            // the new one, keeping the first-detected `since`.
+            // the new one with a fresh fenced onset.
             self.store.recover_operational_failure(
                 &episode,
                 "the live or declared model changed while drifted",
@@ -5044,10 +5098,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             severity: "error".into(),
             targets: vec![subject.subject.clone()],
             actor: RECONCILER_ACTOR.into(),
-            idempotency_key: format!("{episode}:attention"),
+            idempotency_key: format!("{episode}:attention:{incarnation}:{since_ms}"),
         }, MODEL_DRIFT_CONDITION)?;
         self.signal_changed();
-        Ok(())
+        self.reconcile_model_return(subject, incarnation)
     }
 
     fn recover_model_drift(&self, episode: &str, reason: &str) -> Result<()> {
@@ -5060,25 +5114,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// The declared harness model of a canonical agent body (`harness` child carrying a
-    /// `model` child with one argument). Mirrors `desired_harness_driver` in
-    /// fractal-api-core without depending on it.
-    fn declared_harness_model(desired: &Value) -> Option<String> {
-        desired
-            .get("children")?
-            .as_array()?
-            .iter()
-            .find(|child| child.get("name").and_then(Value::as_str) == Some("harness"))?
-            .get("children")?
-            .as_array()?
-            .iter()
-            .find(|child| child.get("name").and_then(Value::as_str) == Some("model"))?
-            .get("arguments")?
-            .as_array()?
-            .first()?
-            .as_str()
-            .map(str::to_owned)
-    }
 
     /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
     /// sent a "prepare for restart" message with a deadline; the restart waits until the seat has
@@ -9660,6 +9695,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(false);
         };
+        if self.cancel_stale_model_return(subject, &request, observation)? {
+            return Ok(false);
+        }
         if self.retire_obsolete_failed_restart(subject, now_ms())? {
             return Ok(true);
         }
