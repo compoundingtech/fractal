@@ -1141,6 +1141,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         resource_ignore_terminate: Mutex<bool>,
+        resource_ignore_kill: Mutex<bool>,
         before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
@@ -1570,7 +1571,7 @@ mission "retained-reason" state="ready" {
         use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
         use crate::store::shell_resources::{Command, PayloadResult};
         let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open_memory("node").unwrap());
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
         let runtime = Arc::new(FakeRuntime::default());
         let policy = fractal_runtime::host::FinitePolicy {
             profiles: BTreeMap::from([("check.unit".into(), fractal_runtime::ResourceProfileSeed {
@@ -1662,8 +1663,8 @@ mission "shell-owner" state="ready" {{
         assert_eq!(run.phase, if auto_failure { "cleanup-failed" } else { "cleanup-cancelled" });
         assert!(run.steps.iter().any(|step| step.status == "cancelled"));
 
-        // Even an expired cleanup deadline must not abandon the owned shell.
-        let reconciler = reconciler.with_cleanup_deadline(Duration::ZERO);
+        // Keep the ordinary success path inside its cleanup budget.
+        let reconciler = reconciler.with_cleanup_deadline(Duration::from_secs(60));
         reconciler.reconcile_mission_run_cleanup(&run).unwrap();
         assert!(store.shell_resource("outcome").unwrap().cancel);
         reconciler.reconcile_shell_resources().unwrap();
@@ -1681,6 +1682,7 @@ mission "shell-owner" state="ready" {{
         store.update_shell_resource(&execution).unwrap();
         reconciler.reconcile_shell_resources().unwrap();
         assert_eq!(*runtime.kills.lock().unwrap(), vec!["outcome".to_owned()]);
+        reconciler.reconcile_shell_resources().unwrap();
         assert_one_shell_outcome(&store, "cancelled");
         reconciler.reconcile_mission_run_cleanup(&run).unwrap();
         let run = store.mission_run(&owner.run).unwrap().unwrap();
@@ -1698,6 +1700,80 @@ mission "shell-owner" state="ready" {{
         assert_run_cancellation_stops_owned_shell(true);
     }
 
+
+    #[test]
+    fn shell_cleanup_deadline_retains_custody_for_stuck_process_or_missing_observation() {
+        for missing_observation in [false, true] {
+            let (_root, store, runtime, reconciler) = released_shell_fixture_owned(false, true);
+            let owner = store.shell_resource("outcome").unwrap().command.lane.owner;
+            runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+            *runtime.resource_ignore_terminate.lock().unwrap() = true;
+            *runtime.resource_ignore_kill.lock().unwrap() = true;
+            store.request_mission_run_cancellation(&owner.run, "operator cancelled").unwrap();
+            reconciler.reconcile_shell_resources().unwrap();
+            let mut execution = store.shell_resource("outcome").unwrap();
+            execution.cancellation_started_at = Some(execution.cancellation_started_at.unwrap() - 5_000);
+            store.update_shell_resource(&execution).unwrap();
+            reconciler.reconcile_shell_resources().unwrap();
+            assert_eq!(runtime.kills.lock().unwrap().len(), 1);
+            if missing_observation {
+                runtime.execs.lock().unwrap().remove("outcome");
+                reconciler.reconcile_shell_resources().unwrap();
+            }
+            store.set_mission_run_state(&owner.run, "running", "cleanup-cancelled", None).unwrap();
+            let run = store.mission_run(&owner.run).unwrap().unwrap();
+            let reconciler = reconciler.with_cleanup_deadline(Duration::ZERO);
+            reconciler.reconcile_mission_run_cleanup(&run).unwrap();
+            let terminal = store.mission_run(&owner.run).unwrap().unwrap();
+            assert_eq!(terminal.phase, "terminal");
+            let state = store.latest_claim(&owner.run, Some("mission-run.state")).unwrap().unwrap();
+            assert!(state.body["fields"]["reason"].as_str().unwrap().contains("execution custody unconfirmed: outcome"));
+            let retained = store.shell_resource("outcome").unwrap();
+            assert!(retained.ended_at.is_none());
+            assert!(retained.receipt_subject.is_none());
+            let member = store.resource_membership_record(&retained.command.lane.id, &owner).unwrap();
+            assert!(member.roots.iter().any(|root| root.runtime_id == "outcome" && root.execution_ended_at.is_none()));
+
+            // A later native observation can still retire this terminal run's execution.
+            runtime.execs.lock().unwrap().insert("outcome".into(), RuntimeObservation {
+                runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
+                exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
+            });
+            reconciler.reconcile_shell_resources().unwrap();
+            assert_one_shell_outcome(&store, "cancelled");
+        }
+    }
+
+    #[test]
+    fn shell_cancel_restart_preserves_cancellation_and_finishes_receipt() {
+        let (root, store, runtime, reconciler) = released_shell_fixture_owned(false, true);
+        let owner = store.shell_resource("outcome").unwrap().command.lane.owner;
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        *runtime.resource_ignore_terminate.lock().unwrap() = true;
+        store.request_mission_run_cancellation(&owner.run, "operator cancelled").unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let before = store.shell_resource("outcome").unwrap().cancellation_started_at.unwrap();
+        drop(reconciler);
+        drop(store);
+        let store = Arc::new(Store::open(&root.path().join("shell.db"), "node").unwrap());
+        assert_eq!(store.shell_resource("outcome").unwrap().cancellation_started_at, Some(before));
+        *runtime.resource_ignore_terminate.lock().unwrap() = false;
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(move |store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            assert!(execution.cancel);
+            assert_eq!(execution.cancellation_started_at, Some(before));
+            assert!(execution.result.is_some(), "recovery must preserve evidence before retirement");
+        }));
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        assert_eq!(store.shell_resource("outcome").unwrap().cancellation_started_at, Some(before));
+        recovered.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "cancelled");
+        store.set_mission_run_state(&owner.run, "running", "cleanup-cancelled", None).unwrap();
+        recovered.reconcile_mission_run_cleanup(&store.mission_run(&owner.run).unwrap().unwrap()).unwrap();
+        assert_eq!(store.mission_run(&owner.run).unwrap().unwrap().phase, "terminal");
+    }
 
     #[test]
     fn cancelled_step_runtime_receives_terminate_and_kill_before_cleanup_finishes() {
@@ -1917,14 +1993,12 @@ mission "cancel-driver" state="ready" {
             } else if let Some(wake) = wake { wake(); }
             Ok(())
         }
-        fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
-            let member = store.resource_membership_record(&request.id, &request.owner)?;
-            let root = member.roots.iter().find(|root| root.runtime_id == id).context("fake shell root missing")?;
-            let generation = root.execution.as_ref().context("fake shell generation missing")?;
+        fn kill_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
             let mut execs = self.execs.lock().unwrap();
             let observation = execs.get_mut(id).context("fake shell missing")?;
-            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation.generation_id.as_str()), "fake shell generation changed");
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
             self.kills.lock().unwrap().push(id.into());
+            if *self.resource_ignore_kill.lock().unwrap() { return Ok(()); }
             observation.status = "exited".into();
             Ok(())
         }

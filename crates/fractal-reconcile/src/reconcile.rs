@@ -594,6 +594,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         anyhow::bail!("runtime does not support finite resource retirement")
     }
+    fn retire_shell_resource_lane(&self, store: Arc<Store>, request: &crate::store::resource_membership::LaneRequest,
+        execution: Option<&str>, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<bool> {
+        if execution.is_some() { anyhow::bail!("runtime does not support nested shell retirement"); }
+        self.retire_resource_lane(&store, request)
+    }
     fn recover_resource_lanes(&self, _store: &Store, _host: &str, _now_ms: u64) -> Result<usize> {
         anyhow::bail!("runtime does not support finite resource recovery")
     }
@@ -612,8 +617,9 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_cgroup(&self, _id: &str, _generation: &str) -> Result<crate::store::resource_profile_learner::cgroup::Observation> {
         anyhow::bail!("runtime does not support generation-fenced cgroup observations")
     }
-    fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
-        anyhow::bail!("runtime does not support exact resource execution cancellation")
+    /// Request SIGKILL without waiting for exit or releasing execution custody.
+    fn kill_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support generation-fenced payload killing")
     }
     fn launch_contract(
         &self,
@@ -713,6 +719,7 @@ pub struct NativeRuntime {
     exec: fractal_runtime::ExecRuntime,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
+    shell_retirements: Arc<Mutex<BTreeMap<(String, Option<String>), Option<Result<bool>>>>>,
 }
 
 impl NativeRuntime {
@@ -726,6 +733,7 @@ impl NativeRuntime {
             .with_binary(pty_binary.to_string_lossy()),
             exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
             recorder: None,
+            shell_retirements: Default::default(),
         }
     }
     pub fn with_recorder(mut self, directory: Option<PathBuf>) -> Self {
@@ -1027,6 +1035,44 @@ impl RuntimeControl for NativeRuntime {
             state => anyhow::bail!("unknown resource membership state {state}"),
         }
     }
+    fn retire_shell_resource_lane(&self, store: Arc<Store>, request: &crate::store::resource_membership::LaneRequest,
+        execution: Option<&str>, wake: Arc<dyn Fn() + Send + Sync>) -> Result<bool> {
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        let Some(grant) = record.grant else { return self.retire_resource_lane(&store, request); };
+        let key = (grant.generation.clone(), execution.map(str::to_owned));
+        let root = execution.map(|id| -> Result<_> {
+            let root = record.roots.iter().find(|root| root.runtime_id == id).context("shell root missing")?;
+            Ok((id.to_owned(), root.execution.as_ref().context("shell generation missing")?.generation_id.clone()))
+        }).transpose()?;
+        let mut jobs = self.shell_retirements.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(result) = jobs.get_mut(&key) {
+            let Some(result) = result.take() else { return Ok(false); };
+            jobs.remove(&key);
+            return result;
+        }
+        if matches!(record.state.as_str(), "retired" | "refused" | "withdrawn") { return Ok(true); }
+        jobs.insert(key.clone(), None);
+        let jobs = self.shell_retirements.clone();
+        let runtime = self.exec.clone();
+        let owner = request.owner.clone();
+        std::thread::spawn(move || {
+            let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+            let result = if let Some((id, generation)) = root {
+                runtime.retire_if(&id, &generation).and_then(|_| {
+                    store.end_resource_execution(&grant, &id, now)?;
+                    Ok(true)
+                })
+            } else {
+                store.cancel_resource_membership(&grant, &owner, now)
+                    .and_then(|()| store.retire_resource_membership(&grant, &owner, &runtime, now))
+            };
+            // A pending linked child supplies its own native wake; avoid a busy loop.
+            let changed = !matches!(result, Ok(false));
+            jobs.lock().unwrap_or_else(PoisonError::into_inner).insert(key, Some(result));
+            if changed { wake(); }
+        });
+        Ok(false)
+    }
     fn recover_resource_lanes(&self, store: &Store, host: &str, now_ms: u64) -> Result<usize> {
         store.recover_resource_memberships(host, &self.exec, now_ms)
     }
@@ -1066,12 +1112,8 @@ impl RuntimeControl for NativeRuntime {
         anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
         crate::store::resource_profile_learner::cgroup::read(group)
     }
-    fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
-        let record = store.resource_membership_record(&request.id, &request.owner)?;
-        let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
-        let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
-        self.exec.retire_if(id, &generation.generation_id)?;
-        store.end_resource_execution(record.grant.as_ref().context("resource generation missing")?, id, u64::try_from(now_ms()).unwrap_or(u64::MAX))
+    fn kill_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+        self.exec.signal_if(id, Some(generation), libc::SIGKILL)
     }
     fn launch_contract(
         &self,
@@ -13003,18 +13045,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
         // Shell drivers are durable resource executions, not desired subjects. Their
         // cancellation and receipts are driven by the execution host's shell sweep.
-        // Keep cleanup open until that sweep has confirmed exit and retired custody.
+        // Bound the run's wait, but retain unconfirmed execution custody for later sweeps.
         for owner in &owner_runs {
             smallclaims::touched::note_read(|| format!("shell-resources:{owner}"));
         }
-        let mut shells_live = false;
+        let mut shells_live = Vec::new();
         let mut shells_cancelled = false;
         for execution in self.store.shell_resources(&self.host, true)? {
             let owner = &execution.command.lane.owner;
             if !owner_runs.contains(&owner.run) { continue; }
             let Some(step) = self.store.step_run(&owner.step)? else { continue; };
             if step.run != owner.run || owner.attempt > step.attempt { continue; }
-            shells_live = true;
+            shells_live.push(execution.command.id.clone());
             if !execution.cancel {
                 self.store.cancel_shell_resource(&execution.command.id)?;
                 shells_cancelled = true;
@@ -13105,12 +13147,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .apply_internal(&intent, &format!("cleanup-mission-run:{}", run.generation))?;
             return Ok(response.changed || intake_stopped || shells_cancelled);
         }
-        if shells_live { return Ok(intake_stopped || shells_cancelled); }
         // Cleanup waits for each owned runtime to stop, but not forever. A runtime on a host that
         // never answers, or one that cannot be killed, would otherwise hold the run and its slot.
         // Its stop declaration stays, so stopping continues after the run ends.
         let mut unstopped = None;
-        if !live.is_empty() {
+        if !live.is_empty() || !shells_live.is_empty() {
             let since = self
                 .store
                 .latest_claim(&run.subject, Some("mission-run.state"))?
@@ -13122,7 +13163,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let deadline = since.saturating_add(self.cleanup_deadline.as_millis());
             if now_ms() < deadline {
                 self.arm_restart(&format!("cleanup:{}", run.subject), deadline);
-                return Ok(intake_stopped);
+                return Ok(intake_stopped || shells_cancelled);
             }
             unstopped = Some(format!(
                 "{}: {}",
@@ -13132,13 +13173,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                     "cleanup ended at its deadline with runtimes still live"
                 },
                 live.iter()
-                    .map(|subject| subject.subject.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                    .map(|subject| subject.subject.clone())
+                    .chain(shells_live.iter().map(|id| format!("execution custody unconfirmed: {id}")))
+                    .collect::<Vec<_>>().join(", ")
             ));
             // A superseding run shares this workspace. Expiring cleanup releases
             // neither execution authority nor its runtime-confirmation dependency.
-            if supersession_cleanup {
+            if supersession_cleanup && !live.is_empty() {
                 self.record_fault(
                     &run.subject,
                     "cleanup-runtime-quiescence",
