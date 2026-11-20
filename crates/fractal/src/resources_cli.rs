@@ -281,7 +281,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
         lane.profile_estimate = None;
     }
     let payload_cwd = args.cwd.map(|path| if path.is_absolute() { path } else { cwd.join(path) })
-        .unwrap_or_else(|| if cfg!(target_os = "macos") { PathBuf::new() } else { cwd.clone() });
+        .unwrap_or_else(|| if cfg!(target_os = "macos") { PathBuf::new() } else { cwd });
     let command = shell_resources::Command { id: id.clone(), lane, argv: args.argv, cwd: payload_cwd.to_string_lossy().into_owned(),
         request_id: args.request_id.map(|request_id| request_id.to_string()),
         environment: std::env::vars().collect(), timeout_ms: args.timeout, parent: parent.map(|parent| parent.grant) };
