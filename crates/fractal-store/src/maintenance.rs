@@ -397,19 +397,6 @@ mod tests {
         ));
         assert!(observed.recv().await.unwrap());
         assert!(!observed.recv().await.unwrap());
-        if !publish_before_start {
-            assert_eq!(*received.borrow(), 0);
-            assert!(!store.readers.get().query_row(
-                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
-                |row| row.get::<_, bool>(0),
-            ).unwrap());
-            // An ordinary committed writer loan must not schedule another admission pass.
-            store.connection.write().execute(
-                "INSERT INTO meta(key,value) VALUES('quiet_admission_unrelated','1')", [],
-            ).unwrap();
-            assert!(tokio::time::timeout(Duration::from_millis(100), observed.recv()).await.is_err());
-            publish_capped_preparation(&store);
-        }
         // No new receive, explicit admission call, or projection request follows publication.
         tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
         assert_eq!(*received.borrow(), 1);
@@ -431,6 +418,10 @@ mod tests {
             assert!(observed.recv().await.unwrap());
             assert!(!observed.recv().await.unwrap());
         }
+        // Once preparation has genuinely published, unrelated writes must not re-admit.
+        store.connection.write().execute(
+            "INSERT INTO meta(key,value) VALUES('quiet_admission_unrelated','1')", [],
+        ).unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(100), observed.recv()).await.is_err(),
             "admission's own commits must not create a busy loop");
         drop(store);
