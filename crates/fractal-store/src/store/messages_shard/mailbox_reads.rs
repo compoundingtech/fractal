@@ -173,6 +173,37 @@ pub fn wake_batch(
     Ok((next, changed, full))
 }
 
+/// The shard index this member's stream has reached, and the work wakes sent to any of `names`
+/// after `after` up to it, as (subject, shard index), oldest first. Items are only appended, so
+/// a caller that keeps what it read asks only for those after its last answer.
+pub fn work_wakes_after(
+    graph: &crate::store::Store,
+    names: &[String],
+    after: u64,
+) -> anyhow::Result<(u64, Vec<(String, u64)>)> {
+    let Some(shard) = shard(graph) else {
+        return Ok((after, Vec::new()));
+    };
+    let connection = shard.readers.get();
+    let through: u64 = connection
+        .prepare_cached("SELECT COALESCE(MAX(store_index),0) FROM stream_messages")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-he1c1a6029a98 owner=fractal_store::store::messages_shard::mailbox_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    let wakes = connection
+        .prepare_cached(
+            "SELECT item.subject, item.store_index FROM stream_messages AS item
+             JOIN claims ON claims.store_index=item.store_index
+             WHERE item.recipient IN (SELECT value FROM json_each(?1))
+               AND item.store_index>?2 AND item.store_index<=?3
+               AND (instr(claims.body, 'st3-work:')>0 OR instr(claims.body, 'fractal-work:')>0)
+             ORDER BY item.store_index",
+        )?
+        .query_map(rusqlite::params![serde_json::to_string(names)?, after, through], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((through.max(after), wakes))
+}
+
 /// A stream item's `message.sent` claim, which carries the time it was accepted.
 pub fn sent_claim(graph: &crate::store::Store, subject: &str) -> anyhow::Result<Option<ClaimRecord>> {
     let Some(shard) = shard(graph) else {

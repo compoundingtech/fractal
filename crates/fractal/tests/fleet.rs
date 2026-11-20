@@ -3691,6 +3691,137 @@ async fn previous_release_replicates_with_new_members_and_preserves_history_on_u
     }
 }
 
+/// What `node`'s store holds in valid records' bytes: their count and total length. The
+/// daemon empties them after an upgrade (`record_bytes`).
+fn valid_record_bytes(node: &Node) -> (u64, u64) {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(raw)), 0) FROM replica_records WHERE state='valid'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// Post a note under an idempotency key and return its claim id.
+async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
+    let claim: Value = node
+        .client()
+        .post(
+            "/v1/claims",
+            &ClaimInput {
+                subject: format!("custom/fleet-test/{text}"),
+                kind: NOTE.into(),
+                actor: Some(PERSON.into()),
+                fields: [("text".to_owned(), Value::String(text.into()))].into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+    claim["id"].as_str().unwrap().to_owned()
+}
+
+/// A release member upgrades in place, and this build empties its valid records' bytes while it
+/// keeps replicating with a release peer in both directions. Rolled back over those emptied
+/// records, the release still reads every note, answers a retried request with the same claim,
+/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
+/// again, this build empties the bytes the release wrote meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "5c3e1a7b-9d2f-4b8e-a6c4-1f0e9d8c7b6a";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([9_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    let mut r = Node::new(root.path(), "r");
+    let mut n = Node::new(root.path(), "n");
+    o.binary = old.clone();
+    r.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("r", r.port), ("n", n.port)]);
+    r.legacy_config(fleet_id, &secret, &[("o", o.port), ("n", n.port)]);
+    n.legacy_config(fleet_id, &secret, &[("o", o.port), ("r", r.port)]);
+    for node in [&mut o, &mut r, &mut n] {
+        node.start().await;
+    }
+    let retried = keyed_note(&o, "o-keyed", "o-keyed-note").await;
+    let mut expected = BTreeSet::from(["custom/fleet-test/o-keyed".to_owned()]);
+    for (node, text) in [(&o, "o-0"), (&r, "r-0"), (&n, "n-0")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let (valid, bytes) = valid_record_bytes(&o);
+    assert!(valid > 0 && bytes > 0, "the release keeps each valid record's bytes");
+    assert_eq!(valid_record_bytes(&n).1, 0, "this build keeps none");
+
+    // Upgrade in place: the daemon empties the bytes and keeps every record.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member empties its valid records' bytes", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    assert!(valid_record_bytes(&o).0 >= valid, "no valid record went away");
+    for (node, text) in [(&o, "o-upgraded"), (&r, "r-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+
+    // Roll back over the emptied records.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+    assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
+    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
+        node.note(text).await;
+        expected.insert(format!("custom/fleet-test/{text}"));
+    }
+    for node in [&o, &r, &n] {
+        wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
+    }
+    let digests = || [&o, &r, &n].map(|node| node.st_json(&["replication", "status"]));
+    wait_until("every member holds the same envelopes", 90, || async {
+        let statuses = digests();
+        statuses.iter().all(|status| status["authority_digest"] == statuses[0]["authority_digest"])
+    })
+    .await;
+    for status in digests() {
+        assert_eq!(status["invalid_records"], 0, "{status}");
+        assert_eq!(status["unsigned_envelopes"], 0, "{status}");
+    }
+    // The release stored bytes for what it admitted and wrote; upgraded again, this build
+    // empties those too.
+    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+        valid_record_bytes(&o).1 == 0
+    })
+    .await;
+    wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
+}
+
 fn backup_baseline_graph(old: &Node, directory: &Path) {
     let original = old.state_dir().join("claims.sqlite3");
     let copy = directory.join("baseline-copy.db");
@@ -9322,6 +9453,14 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
+    // No routed message went to the graph instead, which this build counts and the release,
+    // which does not count fallbacks, leaves out of its status.
+    for node in [&a, &b] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", node.name);
+        assert!(node.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
+    }
+    assert!(o.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
 }
 
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
@@ -9862,4 +10001,402 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     assert!(!item_claim_with_head(&poller, "resource.observed", &"d".repeat(40)).await, "no snapshot of head d");
     let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
+}
+
+/// A closed thread written through the release's public routes: sent `from`, then delivered, read
+/// and closed by its reader. Answers its subject.
+async fn closed_graph_thread(node: &Node, from: &str, key: &str) -> String {
+    let receipt: Value = node
+        .client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": key, "from": from, "to": "agent/fleet-reader",
+            "content": format!("graph mail {key}"),
+        }))
+        .await
+        .unwrap();
+    let subject = receipt["subject"].as_str().expect("a send receipt names its message").to_owned();
+    let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+    for lifecycle in ["delivered", "read", "closed"] {
+        let _: Value = node
+            .client()
+            .post(&path, &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("{key}-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    subject
+}
+
+/// The kinds of `node`'s claims about `subject`, sorted.
+async fn thread_kinds(node: &Node, subject: &str) -> Vec<String> {
+    let mut kinds: Vec<String> = node
+        .claims()
+        .await
+        .into_iter()
+        .filter(|claim| claim["subject"] == subject)
+        .filter_map(|claim| claim["kind"].as_str().map(str::to_owned))
+        .collect();
+    kinds.sort();
+    kinds
+}
+
+/// A member upgraded from the release moves its blob bytes to its blob file once the window
+/// passes, beside a release member that keeps its own. Replication and documents read the same.
+/// The release refuses the moved store rather than serve empty bytes, and opens it again after
+/// `store restore-blob-bytes`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7d6e5f-4031-4c2d-9e0f-1a2b3c4d5e6f";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([8_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    n1.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+
+    // The release's own document, replicated to both.
+    let body = "a document whose bytes move\n".repeat(64);
+    let file = root.path().join("blob-document.md");
+    fs::write(&file, &body).unwrap();
+    n1.st_ok(&["documents", "put", file.to_str().unwrap(), "--as", "doc/fleet-test/blob"]);
+    for node in [&o, &n1] {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while node.st(&["documents", "get", "doc/fleet-test/blob"]).stdout != body.as_bytes() {
+            assert!(Instant::now() < deadline, "{}: the document did not replicate", node.name);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    // Upgrade the member in place; past the window its blob bytes move to the blob file.
+    n1.stop();
+    n1.binary = PathBuf::from(st3());
+    n1.start().await;
+    let day_ms = 24 * 60 * 60 * 1000;
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let inside: Value = n1
+        .client()
+        .post("/v1/internal/test/blob-move", &json!({"now_ms": now_ms, "move_after_ms": 3 * day_ms}))
+        .await
+        .unwrap();
+    assert_eq!(inside["waiting"], true, "nothing moves inside the window: {inside}");
+    let moved: Value = n1
+        .client()
+        .post("/v1/internal/test/blob-move", &json!({"now_ms": now_ms + 4 * day_ms, "move_after_ms": 3 * day_ms}))
+        .await
+        .unwrap();
+    assert!(moved["rows"].as_u64().unwrap() >= 1, "{moved}");
+    assert_eq!(n1.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes());
+    assert_eq!(o.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes(), "the release keeps its own");
+
+    // Replication goes on in both directions, with no record refused.
+    o.note("o-after-move").await;
+    n1.note("n1-after-move").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-after-move".to_owned(),
+        "custom/fleet-test/n1-after-move".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The release refuses the moved store instead of serving empty bytes.
+    n1.stop();
+    // Through the node's own command, so the release runs on this node's isolated state.
+    n1.binary = old.clone();
+    let mut refused = n1
+        .command(&["up", "--web-listen", "off"])
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(n1.root.join("refused.log")).unwrap())
+        .stderr(fs::File::create(n1.root.join("refused.stderr.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = refused.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            refused.kill().ok();
+            panic!("the release opened a store whose blob bytes moved");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(!status.success());
+    let stderr = fs::read_to_string(n1.root.join("refused.stderr.log")).unwrap()
+        + &fs::read_to_string(n1.root.join("refused.log")).unwrap();
+    assert!(stderr.contains("schema version 25"), "{stderr}");
+
+    // Restore the bytes with this build, then the release opens the store and reads the same.
+    let store = n1.state_dir().join("claims.sqlite3");
+    n1.binary = PathBuf::from(st3());
+    let restored = n1.st_ok(&["store", "restore-blob-bytes", "--store", store.to_str().unwrap()]);
+    assert!(restored.contains("restored"), "{restored}");
+    n1.binary = old;
+    n1.start().await;
+    assert_eq!(n1.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes());
+    o.note("o-after-rollback").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
+/// Closed agent mail retires a week after it closes on a member that trims locally, which was
+/// upgraded in place from the previous release with that mail in its store. Its person mail
+/// stays. The release beside it keeps its own copies and never sends a retired one back, and
+/// replication stays whole. Rolled back to the release, the member keeps what it retired retired.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    n1.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    // Only a member that trims locally retires mail, and only once it opts in after upgrading:
+    // the release refuses `mail`, an unknown key.
+    let config = n1.root.join("config/st3/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("\n[trim]\nlocal = true\n");
+    fs::write(&config, &text).unwrap();
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+
+    // The release's own mail, closed: an agent's thread and a person's.
+    let agent = closed_graph_thread(&n1, "agent/fleet-sender", "retire-agent").await;
+    let person = closed_graph_thread(&n1, PERSON, "retire-person").await;
+    let whole = ["message.closed", "message.delivered", "message.read", "message.sent"];
+    for node in [&o, &n1] {
+        for subject in [&agent, &person] {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while thread_kinds(node, subject).await != whole {
+                assert!(Instant::now() < deadline, "{}: {subject} did not replicate", node.name);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    // Upgrade the member in place and opt it in; a week later its closed agent thread retires.
+    n1.stop();
+    fs::write(&config, format!("{text}mail = true\n")).unwrap();
+    n1.binary = PathBuf::from(st3());
+    n1.start().await;
+    let week_later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+        + 8 * 24 * 60 * 60 * 1000;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        // Its retired ledger becomes the authority once the member's import finishes.
+        let retired: Value = n1
+            .client()
+            .post("/v1/internal/test/mail-retirement", &json!({"now_ms": week_later}))
+            .await
+            .unwrap();
+        if retired["threads"] == 1 {
+            assert_eq!(retired["claims"], 4, "{retired}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the member never retired its closed mail: {retired}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty());
+    assert_eq!(thread_kinds(&n1, &person).await, whole, "person mail stays");
+    assert_eq!(thread_kinds(&o, &agent).await, whole, "the release keeps its own copies");
+
+    // Replication goes on, and the release sends none of the retired claims back.
+    o.note("o-after-retire").await;
+    n1.note("n1-after-retire").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-after-retire".to_owned(),
+        "custom/fleet-test/n1-after-retire".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty(), "a retired claim came back");
+
+    // Roll the member back in place, without the key the release doesn't know: it reads the
+    // trimmed store and still refuses them.
+    n1.stop();
+    fs::write(&config, &text).unwrap();
+    n1.binary = old;
+    n1.start().await;
+    o.note("o-after-rollback").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+    assert!(thread_kinds(&n1, &agent).await.is_empty(), "rolled back, a retired claim came back");
+    assert_eq!(thread_kinds(&n1, &person).await, whole);
+}
+
+/// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
+/// release, which replicates the stream as it already does. Rolled back, the member's release
+/// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
+/// again, this build reads the step's wakes from both stores. Replication stays whole.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    struct PtyCleanup(PathBuf, PathBuf);
+    impl Drop for PtyCleanup {
+        fn drop(&mut self) {
+            let Ok(output) = Command::new(&self.0).args(["list", "--json"]).env("PTY_ROOT", &self.1).output() else {
+                return;
+            };
+            for row in serde_json::from_slice::<Vec<Value>>(&output.stdout).unwrap_or_default() {
+                if let Some(name) = row["name"].as_str() {
+                    let _ = Command::new(&self.0).args(["kill", name]).env("PTY_ROOT", &self.1).output();
+                }
+            }
+        }
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = fractal_daemon::test_support::canonical_tempdir();
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pty = fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+    let node_program = fractal_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
+    let mut a = anchor(root.path(), "a").await;
+    let _cleanup = PtyCleanup(pty.clone(), a.state_dir().join("pty"));
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    // The seat's harness on a is the pi-family stub the boot canaries run, from the runtime
+    // profile's wrapper directory (fractal-drivers managed_launch), under either binary.
+    a.stop();
+    fs::write(a.root.join("bin/pty"), format!("#!/bin/sh\nexec '{}' \"$@\"\n", pty.display())).unwrap();
+    let stub = a.root.join("bin/omp");
+    fs::write(&stub, format!(
+        "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
+        node_program.display(),
+        repo.join("scripts/fractal-boot-canaries/stub-pi-family.mjs").display()
+    )).unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = a.root.join("runtime-profile.json");
+    fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": a.root.join("bin")}}},
+    })).unwrap()).unwrap();
+    a.env.extend([
+        ("AGENT_RUNTIME_PROFILE".to_owned(), profile.display().to_string()),
+        ("AGENT_PERSONA".to_owned(), "generalist".to_owned()),
+    ]);
+    a.start().await;
+    wait_for_stream_peers(&a, &["o"], 90).await;
+
+    let workspace = root.path().join("wake-workspace");
+    fs::create_dir(&workspace).unwrap();
+    let seat = "agent/wake/here";
+    let declaration = root.path().join("wake.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"wake/here\" {{ host \"a\"; workspace {:?}; harness \"omp\" {{}} }}\nmission \"wake/stream\" state=\"ready\" {{\n  concurrent-runs\n  goal \"Wake the seat.\"\n  step \"work\" {{ assigned-to \"{seat}\" }}\n}}\n",
+        workspace
+    )).unwrap();
+    a.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    wait_until("the seat's harness is ready", 120, || async {
+        matches!(a.st_json(&["agents", "show", seat])["value"]["harness_state"].as_str(), Some("ready" | "idle"))
+    })
+    .await;
+    let started = a.st_json(&["missions", "start", "wake/stream", "--id", "wake/first", "--as", PERSON]);
+    let step = started["mission_run"]["steps"][0]["subject"].as_str().unwrap().to_owned();
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+    // The step's wakes on `node`, as (subject, stream item).
+    let wakes = |node: &Node| {
+        let (node, step) = (node.client(), step.clone());
+        async move {
+            let page: Value = node.get(&format!("/v1/messages?to={seat}")).await.unwrap();
+            page.as_array().into_iter().flatten()
+                .filter(|item| item["tags"].as_array().into_iter().flatten()
+                    .any(|tag| tag.as_str().is_some_and(|tag| tag.starts_with(&format!("st3-work:{step}@")))))
+                .map(|item| (item["subject"].as_str().unwrap().to_owned(), item["created_index"].as_u64().unwrap() > base))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // This build wakes its own seat through the stream, delivers the wake, and counts it.
+    wait_until("the seat's harness receives its stream wake", 90, || async {
+        fs::read_to_string(workspace.join("receipts-agent-wake-here.jsonl"))
+            .unwrap_or_default()
+            .contains(&format!("A mission step is ready: {step}"))
+    })
+    .await;
+    let first = wakes(&a).await;
+    assert!(!first.is_empty() && first.iter().all(|(_, stream)| *stream), "{first:?}");
+    for (subject, _) in &first {
+        assert_eq!(held(&a, subject).await, (0, 1), "{subject}");
+    }
+    let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+    assert!(shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1, "{shown}");
+
+    // Rolled back, the release reads wakes from the graph alone: it wakes the seat once more,
+    // through the graph, and the stream wake stays in the member's shard.
+    a.stop();
+    a.binary = old.clone();
+    a.start().await;
+    wait_until("the release wakes the seat again through the graph", 120, || async {
+        wakes(&a).await.iter().any(|(_, stream)| !stream)
+    })
+    .await;
+    for (subject, _) in &first {
+        assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+    }
+
+    // Upgraded again, this build opens the store the release wrote and reads both kinds.
+    a.stop();
+    a.binary = PathBuf::from(st3());
+    a.start().await;
+    wait_until("the upgraded member shows the step's wakes from both stores", 90, || async {
+        let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+        shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1
+            && wakes(&a).await.iter().any(|(_, stream)| *stream)
+            && wakes(&a).await.iter().any(|(_, stream)| !stream)
+    })
+    .await;
+    for node in [&a, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
 }

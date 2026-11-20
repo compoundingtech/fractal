@@ -459,7 +459,9 @@ impl Runtime for FractalRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        // `blobs` left the projection digest at 2: a member that moved a blob's bytes to its
+        // blob file keeps an empty row, so peers compare it only by the claims naming it.
+        BTreeMap::from([("blobs".into(), 2), ("mission_run_deadlines".into(), 3)])
     }
 
     fn requires_keyed_envelope(&self, kind: &str) -> bool {
@@ -481,6 +483,26 @@ impl Runtime for FractalRuntime {
         claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
+    }
+
+    fn defer_replicated_batch(
+        &self,
+        connection: &Connection,
+        batch: &ReplicaBatch,
+    ) -> Result<bool> {
+        let mut statement = connection.prepare_cached(
+            "SELECT EXISTS(
+                 SELECT 1 FROM meta
+                 WHERE key='preparation_restarts/' || ?1 AND CAST(value AS INTEGER)>=4
+                   AND EXISTS(SELECT 1 FROM local_resource_preparation_deferred WHERE subject=?1)
+             )",
+        )?;
+        for claim in &batch.claims {
+            if statement.query_row(/* sqlite-large-value: allow-for-now lv-ha06e5aaeb4b9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ [&claim.subject], |row| row.get::<_, bool>(0))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn append_claim(
@@ -635,16 +657,17 @@ impl Runtime for FractalRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        use smallclaims::receive_metrics::{Finalizer, finalizer};
         // Replication admission/import, repair and pruning can dirty preparation
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
-        resources::flush_preparation(transaction)?;
+        finalizer(Finalizer::Resources, || resources::flush_preparation(transaction))?;
         // Desired/liveness projections can change after the final claim projector.
         // The connection-local hint keeps unrelated commits SQL-free.
-        custom::flush(transaction)?;
-        completion_state::flush(transaction)?;
-        run_eta::flush(transaction)?;
-        let budget = client_messages::finalize_commit(transaction)?;
+        finalizer(Finalizer::Custom, || custom::flush(transaction))?;
+        finalizer(Finalizer::Completion, || completion_state::flush(transaction))?;
+        finalizer(Finalizer::RunEta, || run_eta::flush(transaction))?;
+        let budget = finalizer(Finalizer::ClientMessages, || client_messages::finalize_commit(transaction))?;
         #[cfg(any(test, feature = "test-support"))]
         {
             *self.client_message_commit_budget.lock().unwrap_or_else(PoisonError::into_inner) = budget;
@@ -1682,5 +1705,125 @@ mod extension_tests {
         assert_eq!(store.extension::<First>().0.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(*store.extension::<Second>().0.lock().unwrap(), vec![7]);
         assert!(Arc::ptr_eq(&store.extension::<First>(), &store.extension::<First>()));
+    }
+}
+
+#[cfg(test)]
+mod preparation_admission_tests {
+    use super::*;
+
+    #[test]
+    fn capped_preparation_holds_whole_envelope_until_drain_without_blocking_other_peers() {
+        smallclaims::sqlite::without_deferred_maintenance_for_test(check_capped_preparation_admission);
+    }
+
+    fn check_capped_preparation_admission() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        const CAPPED: &str = "resource/capped";
+        let source = Store::open_memory("capped-source").unwrap();
+        let other = Store::open_memory("unrelated-source").unwrap();
+        let target = Store::open_memory("admission-target").unwrap();
+        for store in [&source, &other, &target] {
+            store.bind_fleet(FLEET).unwrap();
+        }
+        // The uncapped claim comes first in the same envelope: checking only as claims
+        // are inserted would leak this claim and its batch before reaching the cap.
+        let append = |store: &Store, subjects: &[&str]| {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for subject in subjects {
+                let claim = append_claim_tx(
+                    &tx, &store.origin, subject, "resource.observed", None,
+                    &json!({"fields":{"kind":"vcs.pull-request","facts":{"state":"open"}}}),
+                    &[], batch.as_deref(),
+                ).unwrap();
+                batch = Some(claim.batch_id);
+                ids.push(claim.id);
+            }
+            tx.commit().unwrap();
+            ids
+        };
+        let blocked_ids = append(&source, &["resource/same-envelope", CAPPED]);
+        let unrelated_ids = append(&other, &["resource/unrelated-peer"]);
+        {
+            let mut writer = target.connection.write();
+            let tx = writer.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO local_resource_preparation_deferred(subject) VALUES(?1)",
+                [CAPPED],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO meta(key,value) VALUES('preparation_restarts/' || ?1,'4')",
+                [CAPPED],
+            ).unwrap();
+            tx.commit().unwrap();
+        }
+        let deliver = |source: &Store| {
+            let exchange = source.export_replication_exchange_answering(
+                FLEET,
+                &target.replication_inventory().unwrap(),
+                &target.replication_signature_requests().unwrap(),
+            ).unwrap();
+            target.receive_replication_exchange(&source.origin, FLEET, &exchange).unwrap();
+        };
+        deliver(&source);
+        for _ in 0..3 {
+            let admission = target.validate_replication_backlog().unwrap();
+            assert_eq!(admission.held, 1);
+            assert_eq!(admission.invalid, 0);
+            assert_eq!(admission.valid, 0);
+            assert!(!admission.changed);
+            let reader = target.readers.get();
+            for table in ["claims", "batches", "replica_records"] {
+                let count: usize = reader.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {}=?1",
+                        if table == "replica_records" { "writer" } else { "origin" }),
+                    [&source.origin], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(count, 0, "held envelope partially admitted {table}");
+            }
+            let state: String = reader.query_row(
+                "SELECT receipt_state FROM replica_envelopes WHERE writer=?1",
+                [&source.origin], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(state, "pending");
+        }
+        deliver(&other);
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!(admission.held, 1);
+        assert_eq!(admission.invalid, 0);
+        for id in &unrelated_ids {
+            assert!(target.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        // Use the actual bounded drain, not deletion of the admission marker.
+        {
+            let mut writer = target.connection.write();
+            let tx = writer.transaction().unwrap();
+            while resources::flush_deferred_preparation(&tx, std::time::Duration::from_secs(1)).unwrap() {}
+            tx.commit().unwrap();
+        }
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!(admission.held, 0);
+        assert_eq!(admission.invalid, 0);
+        assert_eq!(admission.valid, blocked_ids.len());
+        for id in &blocked_ids {
+            assert!(target.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [id], |row| row.get::<_, bool>(0),
+            ).unwrap());
+        }
+        let reader = target.readers.get();
+        let state: String = reader.query_row(
+            "SELECT receipt_state FROM replica_envelopes WHERE writer=?1",
+            [&source.origin], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "validated");
+        let quarantined: usize = reader.query_row(
+            "SELECT COUNT(*) FROM replica_restore_quarantine", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(quarantined, 0);
     }
 }
