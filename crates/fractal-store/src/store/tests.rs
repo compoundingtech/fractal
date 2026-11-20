@@ -2847,7 +2847,7 @@ fn subject_cache_overflow_advances_once_and_rebuilds_only_selected_subjects() {
         assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), names.len());
         store.connection.batched(|transaction| -> Result<()> {
             for index in 0..=SUBJECT_CACHE_DELTA_ROWS {
-                append_claim_tx(transaction, &store.origin, "custom/overflow", "custom.example.reading",
+                append_claim_tx(transaction, &store.origin, "custom/example/overflow", "custom.example.reading",
                     None, &json!({"fields":{"round":round,"reading":index}}), &[], None)?;
             }
             Ok(())
