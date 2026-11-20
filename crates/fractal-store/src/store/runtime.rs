@@ -459,7 +459,9 @@ impl Runtime for FractalRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        // `blobs` left the projection digest at 2: a member that moved a blob's bytes to its
+        // blob file keeps an empty row, so peers compare it only by the claims naming it.
+        BTreeMap::from([("blobs".into(), 2), ("mission_run_deadlines".into(), 3)])
     }
 
     fn requires_keyed_envelope(&self, kind: &str) -> bool {

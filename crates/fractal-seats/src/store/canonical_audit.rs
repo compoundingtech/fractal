@@ -17,7 +17,8 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
+    // Where a blob's bytes live is local: compare its hash and size.
+    ("blobs", &["bytes"]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),

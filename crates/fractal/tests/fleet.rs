@@ -9903,6 +9903,123 @@ async fn thread_kinds(node: &Node, subject: &str) -> Vec<String> {
     kinds
 }
 
+/// A member upgraded from the release moves its blob bytes to its blob file once the window
+/// passes, beside a release member that keeps its own. Replication and documents read the same.
+/// The release refuses the moved store rather than serve empty bytes, and opens it again after
+/// `store restore-blob-bytes`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7d6e5f-4031-4c2d-9e0f-1a2b3c4d5e6f";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([8_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let mut n1 = Node::new(root.path(), "n1");
+    n1.binary = old.clone();
+    o.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    n1.legacy_config(fleet_id, &secret, &[("o", o.port)]);
+    for node in [&mut o, &mut n1] {
+        node.start().await;
+    }
+
+    // The release's own document, replicated to both.
+    let body = "a document whose bytes move\n".repeat(64);
+    let file = root.path().join("blob-document.md");
+    fs::write(&file, &body).unwrap();
+    n1.st_ok(&["documents", "put", file.to_str().unwrap(), "--as", "doc/fleet-test/blob"]);
+    for node in [&o, &n1] {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while node.st(&["documents", "get", "doc/fleet-test/blob"]).stdout != body.as_bytes() {
+            assert!(Instant::now() < deadline, "{}: the document did not replicate", node.name);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    // Upgrade the member in place; past the window its blob bytes move to the blob file.
+    n1.stop();
+    n1.binary = PathBuf::from(st3());
+    n1.start().await;
+    let day_ms = 24 * 60 * 60 * 1000;
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let inside: Value = n1
+        .client()
+        .post("/v1/internal/test/blob-move", &json!({"now_ms": now_ms, "move_after_ms": 3 * day_ms}))
+        .await
+        .unwrap();
+    assert_eq!(inside["waiting"], true, "nothing moves inside the window: {inside}");
+    let moved: Value = n1
+        .client()
+        .post("/v1/internal/test/blob-move", &json!({"now_ms": now_ms + 4 * day_ms, "move_after_ms": 3 * day_ms}))
+        .await
+        .unwrap();
+    assert!(moved["rows"].as_u64().unwrap() >= 1, "{moved}");
+    assert_eq!(n1.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes());
+    assert_eq!(o.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes(), "the release keeps its own");
+
+    // Replication goes on in both directions, with no record refused.
+    o.note("o-after-move").await;
+    n1.note("n1-after-move").await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/o-after-move".to_owned(),
+        "custom/fleet-test/n1-after-move".to_owned(),
+    ]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The release refuses the moved store instead of serving empty bytes.
+    n1.stop();
+    let refused = std::process::Command::new(&old)
+        .args(["up", "--web-listen", "off"])
+        .envs(n1.env.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(n1.root.join("refused.log")).unwrap())
+        .stderr(fs::File::create(n1.root.join("refused.stderr.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let mut refused = refused;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = refused.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            refused.kill().ok();
+            panic!("the release opened a store whose blob bytes moved");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(!status.success());
+    let stderr = fs::read_to_string(n1.root.join("refused.stderr.log")).unwrap()
+        + &fs::read_to_string(n1.root.join("refused.log")).unwrap();
+    assert!(stderr.contains("schema version 25"), "{stderr}");
+
+    // Restore the bytes with this build, then the release opens the store and reads the same.
+    let store = n1.state_dir().join("claims.sqlite3");
+    let restored = n1.st_ok(&["store", "restore-blob-bytes", "--store", store.to_str().unwrap()]);
+    assert!(restored.contains("restored"), "{restored}");
+    n1.binary = old;
+    n1.start().await;
+    assert_eq!(n1.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes());
+    o.note("o-after-rollback").await;
+    n1.note("n1-after-rollback").await;
+    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    for node in [&o, &n1] {
+        wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
 /// Closed agent mail retires a week after it closes on a member that trims locally, which was
 /// upgraded in place from the previous release with that mail in its store. Its person mail
 /// stays. The release beside it keeps its own copies and never sends a retired one back, and

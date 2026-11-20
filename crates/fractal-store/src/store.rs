@@ -332,6 +332,8 @@ pub mod mail_retirement;
 #[cfg(test)]
 mod mail_retirement_tests;
 #[cfg(test)]
+mod blob_file_tests;
+#[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
@@ -9778,7 +9780,7 @@ fn validate_documents(
         let (name, hash) = split_document_ref(reference)?;
         let bytes: Option<Vec<u8>> = transaction
             .query_row(
-                "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+                concat!("SELECT ", smallclaims::blob_bytes!("b"), " FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2"),
                 params![name, hash],
                 |row| row.get(0),
             )
@@ -25566,7 +25568,6 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
